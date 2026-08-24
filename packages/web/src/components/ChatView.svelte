@@ -1,0 +1,74 @@
+<script lang="ts">
+  import { getAdapter } from "../lib/rpc-agent-adapter.js";
+  import { store } from "../lib/stores.js";
+  import LitAgentInterface from "./LitAgentInterface.svelte";
+
+  let { agentId, agentName }: { agentId: string; agentName: string } = $props();
+
+  const adapter = $derived(getAdapter(agentId));
+  const runtime = $derived(store.runtimeFor(agentId));
+
+  let busy = $state(false);
+  let error = $state<string | null>(null);
+
+  async function start(): Promise<void> {
+    busy = true;
+    error = null;
+    try {
+      const { api } = await import("../lib/api.js");
+      await api.startAgent(agentId);
+      await store.refreshAgents();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function stop(): Promise<void> {
+    busy = true;
+    try {
+      const { api } = await import("../lib/api.js");
+      await api.stopAgent(agentId);
+      await store.refreshAgents();
+    } finally {
+      busy = false;
+    }
+  }
+</script>
+
+<section class="flex min-h-0 flex-1 flex-col">
+  {#if runtime?.status === "running" || runtime?.status === "starting"}
+    <LitAgentInterface agent={adapter} />
+  {:else}
+    <div class="m-auto grid gap-3 text-center text-muted">
+      <h3 class="m-0 text-fg">{agentName}</h3>
+      <p class="m-0 max-w-2xl">
+        {runtime?.status === "error"
+          ? `errored${runtime.error ? `: ${runtime.error.split("\n")[0]}` : ""}`
+          : "agent is not running"}
+      </p>
+      <div class="flex justify-center gap-2">
+        <button
+          class="cursor-pointer rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
+          disabled={busy}
+          onclick={start}
+        >
+          {busy ? "starting…" : "start agent"}
+        </button>
+        {#if runtime?.status === "error"}
+          <button
+            class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-2 text-fg"
+            disabled={busy}
+            onclick={start}
+          >
+            retry
+          </button>
+        {/if}
+      </div>
+      {#if error}
+        <p class="m-0 max-w-2xl text-err">{error}</p>
+      {/if}
+    </div>
+  {/if}
+</section>

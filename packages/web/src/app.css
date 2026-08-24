@@ -1,18 +1,32 @@
-:root {
-  --gw-bg: #0f1115;
-  --gw-fg: #e6e8ee;
-  --gw-accent: #7aa2f7;
-  --gw-muted: #8b90a0;
-  color-scheme: dark;
+@import "tailwindcss";
+@import "@earendil-works/pi-web-ui/app.css";
+
+@theme {
+  --color-bg: #0f1115;
+  --color-panel: #14161c;
+  --color-panel2: #171a21;
+  --color-edge: #23262f;
+  --color-edge2: #2a2e3a;
+  --color-fg: #e6e8ee;
+  --color-muted: #8b90a0;
+  --color-accent: #7aa2f7;
+  --color-ok: #9ece6a;
+  --color-warn: #e0af68;
+  --color-err: #f7768e;
 }
 
-* {
-  box-sizing: border-box;
-}
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
 
-body {
-  margin: 0;
-  background: var(--gw-bg);
-  color: var(--gw-fg);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  body {
+    @apply bg-bg text-fg;
+    font-family:
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      sans-serif;
+  }
 }
