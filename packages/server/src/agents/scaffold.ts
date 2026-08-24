@@ -1,6 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentRecord } from "@gwarestrin/shared";
+import { mcpSubset } from "@gwarestrin/shared";
+import type { McpRegistryStore } from "../mcp/registry-store.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { buildGeneratedProviders, generatedProvidersPath, writeGeneratedProviders } from "../providers/generate.js";
 import { scoped } from "../util/log.js";
@@ -36,6 +38,7 @@ export async function scaffoldAgent(
   agent: AgentRecord,
   registry: ProviderRegistry,
   extensionsRoot: string,
+  mcpRegistry?: McpRegistryStore,
 ): Promise<AgentDirs> {
   const dirs = dirsFor(stateDir, agent);
   await Promise.all([
@@ -79,6 +82,17 @@ export async function scaffoldAgent(
     },
   };
   await writeFile(agentConfigPath(dirs.home), JSON.stringify(agentConfig, null, 2) + "\n", "utf8");
+
+  // MCP subset for pi-mcp-adapter (reads .mcp.json from cwd = workspace).
+  // hostConfigDiscovery defaults to "off" in the adapter — no ambient config.
+  if (mcpRegistry) {
+    const subset = mcpSubset(mcpRegistry.list(), agent.mcpServers);
+    await writeFile(
+      path.join(dirs.workspace, ".mcp.json"),
+      JSON.stringify({ mcpServers: subset }, null, 2) + "\n",
+      "utf8",
+    );
+  }
 
   // extensions dir marker (loaded explicitly via -e by the manager)
   const extMarker = path.join(extensionsRoot, "README");

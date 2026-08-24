@@ -17,12 +17,36 @@ export const api = {
     const r = await json<{ agents: AgentWithRuntime[] }>(await fetch("/api/agents"));
     return r.agents;
   },
-  async createAgent(input: { name: string; model?: { provider: string; modelId: string } | null }): Promise<AgentWithRuntime> {
+  async createAgent(input: {
+    name: string;
+    model?: { provider: string; modelId: string } | null;
+    mcpServers?: string[];
+  }): Promise<AgentWithRuntime> {
     const r = await json<{ agent: AgentWithRuntime }>(
       await fetch("/api/agents", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(input),
+      }),
+    );
+    return r.agent;
+  },
+  async patchAgent(
+    id: string,
+    patch: Partial<{
+      name: string;
+      model: { provider: string; modelId: string } | null;
+      providers: string[];
+      enabledModels: string[];
+      thinkingLevel: string;
+      mcpServers: string[];
+    }>,
+  ): Promise<AgentWithRuntime> {
+    const r = await json<{ agent: AgentWithRuntime }>(
+      await fetch(`/api/agents/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
       }),
     );
     return r.agent;
@@ -87,5 +111,41 @@ export const filesApi = {
       body: JSON.stringify({ path }),
     });
     await json(res);
+  },
+};
+
+export interface McpServerDef {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  auth?: "oauth" | "bearer" | false;
+  bearerTokenEnv?: string;
+  description?: string;
+  disabled?: boolean;
+}
+
+export const mcpApi = {
+  async list(): Promise<Record<string, McpServerDef>> {
+    const r = await json<{ servers: Record<string, McpServerDef> }>(await fetch("/api/mcp"));
+    return r.servers;
+  },
+  async put(name: string, def: McpServerDef): Promise<Record<string, McpServerDef>> {
+    const r = await json<{ servers: Record<string, McpServerDef> }>(
+      await fetch(`/api/mcp/${encodeURIComponent(name)}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(def),
+      }),
+    );
+    return r.servers;
+  },
+  async remove(name: string): Promise<Record<string, McpServerDef>> {
+    const r = await json<{ servers: Record<string, McpServerDef> }>(
+      await fetch(`/api/mcp/${encodeURIComponent(name)}`, { method: "DELETE" }),
+    );
+    return r.servers;
   },
 };

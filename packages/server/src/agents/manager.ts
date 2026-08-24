@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentRecord, AgentRuntimeSummary, PatchAgentInput } from "@gwarestrin/shared";
 import type { ServerConfig } from "../config.js";
+import type { McpRegistryStore } from "../mcp/registry-store.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { scoped } from "../util/log.js";
 import { RpcAgent } from "./rpc-agent.js";
@@ -40,15 +41,17 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   readonly store: AgentStore;
   private config: ServerConfig;
   private registry: ProviderRegistry;
+  private mcpRegistry: McpRegistryStore | undefined;
   private running = new Map<string, RpcAgent>();
   private restartBudget = new Map<string, number>();
   private extensionsRoot: string;
 
-  constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore) {
+  constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore) {
     super();
     this.config = config;
     this.registry = registry;
     this.store = store;
+    this.mcpRegistry = mcpRegistry;
     this.extensionsRoot = resolveExtensionsRoot();
   }
 
@@ -64,6 +67,19 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       dir = path.dirname(dir);
     }
     throw new Error("cannot locate pi-coding-agent rpc-entry (looked for " + rel + " upward)");
+  }
+
+  /** absolute path to the installed pi-mcp-adapter package dir (pi manifest) */
+  mcpAdapterPath(): string {
+    if (process.env.GWARESTRIN_MCP_ADAPTER_PATH) return process.env.GWARESTRIN_MCP_ADAPTER_PATH;
+    const rel = path.join("node_modules", "pi-mcp-adapter");
+    let dir = path.dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 8; i++) {
+      const candidate = path.join(dir, rel);
+      if (existsSync(path.join(candidate, "package.json"))) return candidate;
+      dir = path.dirname(dir);
+    }
+    throw new Error("cannot locate pi-mcp-adapter package (looked for " + rel + " upward)");
   }
 
   listSummaries(): AgentRuntimeSummary[] {
@@ -84,16 +100,22 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
 
   async createAgent(input: Parameters<AgentStore["create"]>[0]): Promise<AgentRecord> {
     const record = this.store.create(input);
-    await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot);
+    await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry);
     return record;
   }
 
   async patchAgent(id: string, patch: PatchAgentInput): Promise<AgentRecord> {
     const record = this.store.patch(id, patch);
-    await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot);
-    // config-affecting patches require a restart of a running agent
-    if (this.running.has(id)) {
-      log.info(`agent ${id} running during patch; scheduling restart`);
+    await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry);
+    // restart only when spawn-affecting config changes; model/thinkingLevel are
+    // applied live via RPC and picked up from settings on the next start
+    const needsRestart =
+      patch.mcpServers !== undefined ||
+      patch.gondolin !== undefined ||
+      patch.providers !== undefined ||
+      patch.enabledModels !== undefined;
+    if (needsRestart && this.running.has(id)) {
+      log.info(`agent ${id} running during config patch; scheduling restart`);
       await this.restart(id);
     }
     return record;
@@ -120,7 +142,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     }
 
     this.store.setStatus(id, "starting");
-    const dirs = await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot);
+    const dirs = await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry);
 
     const args: string[] = [
       // rpc-entry implies --mode rpc
@@ -131,6 +153,9 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     ];
     if (record.gondolin.enabled !== false) {
       args.push("-e", path.join(this.extensionsRoot, "gondolin-vm", "index.ts"));
+    }
+    if (record.mcpServers.length > 0) {
+      args.push("-e", this.mcpAdapterPath());
     }
     if (record.sessionFile) {
       args.push("--session", record.sessionFile);

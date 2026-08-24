@@ -8,6 +8,7 @@ export interface AgentListItem {
   name: string;
   status: string;
   model: { provider: string; modelId: string } | null;
+  mcpServers: string[];
   unread: number;
 }
 
@@ -69,6 +70,7 @@ class Store {
         name: a.name,
         status: a.runtime?.status ?? a.status,
         model: a.model,
+        mcpServers: a.mcpServers,
         unread: this.agents.find((x) => x.id === a.id)?.unread ?? 0,
       }));
       for (const a of agents) if (a.runtime) this.runtime.set(a.id, a.runtime);

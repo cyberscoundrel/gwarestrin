@@ -51,14 +51,8 @@
     try {
       await adapter.setModel(provider, modelId);
       const { api } = await import("../lib/api.js");
-      const { PatchAgentInput } = await import("@gwarestrin/shared") as never;
-      void PatchAgentInput;
       // persist the choice on the agent record
-      await fetch(`/api/agents/${agentId}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: { provider, modelId } }),
-      });
+      await api.patchAgent(agentId, { model: { provider, modelId } });
       await store.refreshAgents();
       await refresh();
     } catch {

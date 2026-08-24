@@ -7,7 +7,9 @@ import { AgentStore } from "./agents/store.js";
 import { loadConfig } from "./config.js";
 import { registerAgentRoutes } from "./http/agents.js";
 import { registerFileRoutes } from "./http/files.js";
+import { registerMcpRoutes } from "./http/mcp.js";
 import { registerProviderRoutes } from "./http/providers.js";
+import { McpRegistryStore } from "./mcp/registry-store.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { scoped } from "./util/log.js";
 import { registerWs } from "./ws/connection.js";
@@ -30,7 +32,10 @@ async function main(): Promise<void> {
   const store = new AgentStore(config.stateDir);
   await store.load();
 
-  const manager = new AgentManager(config, registry, store);
+  const mcpRegistry = new McpRegistryStore(config.stateDir);
+  await mcpRegistry.load();
+
+  const manager = new AgentManager(config, registry, store, mcpRegistry);
 
   app.get("/api/health", async () => ({
     status: "ok",
@@ -42,6 +47,7 @@ async function main(): Promise<void> {
   await registerProviderRoutes(app, config, registry);
   await registerAgentRoutes(app, config, manager);
   await registerFileRoutes(app, config, manager);
+  await registerMcpRoutes(app, mcpRegistry);
   await registerWs(app, config, manager);
 
   if (existsSync(config.webDistDir)) {

@@ -1,16 +1,28 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { store } from "../lib/stores.js";
+  import { mcpApi, type McpServerDef } from "../lib/api.js";
 
   let { onclose } = $props<{ onclose: () => void }>();
 
   let name = $state("");
   let providerId = $state<string>("");
   let modelId = $state<string>("");
+  let mcpRegistry = $state<Record<string, McpServerDef>>({});
+  let mcpSelected = $state<string[]>([]);
   let busy = $state(false);
   let error = $state<string | null>(null);
 
   const provider = $derived(store.providers.find((p) => p.id === providerId) ?? null);
   const models = $derived(provider?.models ?? []);
+
+  onMount(async () => {
+    try {
+      mcpRegistry = await mcpApi.list();
+    } catch {
+      /* registry optional at create time */
+    }
+  });
 
   $effect(() => {
     if (!providerId && store.providers.length > 0) {
@@ -26,6 +38,10 @@
     }
   });
 
+  function toggleMcp(n: string): void {
+    mcpSelected = mcpSelected.includes(n) ? mcpSelected.filter((x) => x !== n) : [...mcpSelected, n];
+  }
+
   async function create(): Promise<void> {
     if (!name.trim()) {
       error = "name required";
@@ -38,6 +54,7 @@
       const agent = await api.createAgent({
         name: name.trim(),
         model: providerId && modelId ? { provider: providerId, modelId } : null,
+        ...(mcpSelected.length ? { mcpServers: mcpSelected } : {}),
       });
       await store.refreshAgents();
       store.select(agent.id);
@@ -95,6 +112,24 @@
       {/each}
     </select>
   </label>
+
+  {#if Object.keys(mcpRegistry).length > 0}
+    <fieldset class="m-0 grid gap-1 border-0 p-0 text-sm text-muted">
+      <legend class="sr-only">mcp servers</legend>
+      mcp servers
+      <div class="flex flex-wrap gap-2">
+        {#each Object.keys(mcpRegistry) as n (n)}
+          <label
+            class="flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-xs
+              {mcpSelected.includes(n) ? 'border-accent text-accent' : 'border-edge2 text-muted'}"
+          >
+            <input type="checkbox" class="hidden" checked={mcpSelected.includes(n)} onchange={() => toggleMcp(n)} />
+            {n}
+          </label>
+        {/each}
+      </div>
+    </fieldset>
+  {/if}
 
   {#if provider && provider.models.length === 0}
     <p class="m-0 text-sm text-muted">no models configured for this provider</p>

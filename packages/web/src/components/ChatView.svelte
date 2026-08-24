@@ -5,6 +5,7 @@
   import ModelBar from "./ModelBar.svelte";
   import SessionPanel from "./SessionPanel.svelte";
   import FilesPanel from "./FilesPanel.svelte";
+  import McpPanel from "./McpPanel.svelte";
 
   let { agentId, agentName }: { agentId: string; agentName: string } = $props();
 
@@ -13,7 +14,7 @@
 
   let busy = $state(false);
   let error = $state<string | null>(null);
-  let filesOpen = $state(false);
+  let drawer = $state<"closed" | "files" | "mcp">("closed");
 
   async function start(): Promise<void> {
     busy = true;
@@ -39,10 +40,17 @@
       <SessionPanel {agentId} />
       <button
         class="ml-auto rounded border bg-transparent px-2 py-0.5 text-xs hover:text-fg
-          {filesOpen ? 'border-accent text-accent' : 'border-edge2 text-muted'}"
-        onclick={() => (filesOpen = !filesOpen)}
+          {drawer === 'files' ? 'border-accent text-accent' : 'border-edge2 text-muted'}"
+        onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
       >
         files
+      </button>
+      <button
+        class="rounded border bg-transparent px-2 py-0.5 text-xs hover:text-fg
+          {drawer === 'mcp' ? 'border-accent text-accent' : 'border-edge2 text-muted'}"
+        onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
+      >
+        mcp
       </button>
     </div>
 
@@ -50,9 +58,13 @@
       <div class="flex min-w-0 flex-1 flex-col">
         <LitAgentInterface agent={adapter} />
       </div>
-      {#if filesOpen}
+      {#if drawer !== "closed"}
         <div class="w-80 shrink-0 border-l border-edge">
-          <FilesPanel {agentId} />
+          {#if drawer === "files"}
+            <FilesPanel {agentId} />
+          {:else}
+            <McpPanel {agentId} />
+          {/if}
         </div>
       {/if}
     </div>
