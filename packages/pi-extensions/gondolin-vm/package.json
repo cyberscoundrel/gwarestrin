@@ -1,0 +1,10 @@
+{
+  "name": "@gwarestrin/pi-ext-gondolin-vm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "pi extension: route read/write/edit/bash into the agent's gondolin microvm",
+  "dependencies": {
+    "@earendil-works/gondolin": "0.12.0"
+  }
+}

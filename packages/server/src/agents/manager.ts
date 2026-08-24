@@ -115,6 +115,9 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       "--session-dir", dirs.sessions,
       "-e", path.join(this.extensionsRoot, "provider-bridge", "index.js"),
     ];
+    if (record.gondolin.enabled !== false) {
+      args.push("-e", path.join(this.extensionsRoot, "gondolin-vm", "index.ts"));
+    }
     if (record.sessionFile) {
       args.push("--session", record.sessionFile);
     }
@@ -126,13 +129,21 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       cliPath: this.cliPath(),
       args,
       cwd: dirs.workspace,
-      env: piEnvFor(dirs, this.registry),
+      env: piEnvFor(dirs, this.registry, record),
     });
     const agent = new RpcAgent(id, proc);
     this.running.set(id, agent);
 
     agent.on("event", (event) => this.emit("agentEvent", { agentId: id, event }));
-    agent.on("uiRequest", (request) => this.emit("agentUiRequest", { agentId: id, request }));
+    agent.on("uiRequest", (request) => {
+      // gondolin-vm reports lifecycle via setStatus("gondolin", ...)
+      if (request.method === "setStatus" && request.statusKey === "gondolin") {
+        const text = String(request.statusText ?? "");
+        const vmState = text === "running" ? "running" : text === "booting" ? "booting" : text === "error" ? "error" : "stopped";
+        agent.noteVm(vmState);
+      }
+      this.emit("agentUiRequest", { agentId: id, request });
+    });
     agent.on("state", (state) => this.emit("agentState", state));
 
     proc.on("exit", (info) => this.onExit(id, info));

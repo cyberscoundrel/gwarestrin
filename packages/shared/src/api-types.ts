@@ -3,6 +3,8 @@ export type AgentStatus = "stopped" | "starting" | "running" | "error";
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface GondolinConfig {
+  /** false = dev mode: tools run on the host, no sandbox (default true) */
+  enabled?: boolean | undefined;
   image?: string | undefined;
   cpus?: number | undefined;
   memoryMB?: number | undefined;

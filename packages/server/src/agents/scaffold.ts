@@ -3,7 +3,10 @@ import path from "node:path";
 import type { AgentRecord } from "@gwarestrin/shared";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { buildGeneratedProviders, generatedProvidersPath, writeGeneratedProviders } from "../providers/generate.js";
+import { scoped } from "../util/log.js";
 import { agentDir } from "./store.js";
+
+const log = scoped("scaffold");
 
 export interface AgentDirs {
   root: string;
@@ -62,6 +65,21 @@ export async function scaffoldAgent(
   const gen = buildGeneratedProviders(registry, agent.providers);
   await writeGeneratedProviders(generatedProvidersPath(dirs.home), gen);
 
+  // gondolin-vm extension config (no secret values — env-resolved)
+  const agentConfig = {
+    workspaceDir: dirs.workspace,
+    gondolin: {
+      ...(agent.gondolin.enabled !== undefined ? { enabled: agent.gondolin.enabled } : {}),
+      ...(agent.gondolin.image !== undefined ? { image: agent.gondolin.image } : {}),
+      ...(agent.gondolin.cpus !== undefined ? { cpus: agent.gondolin.cpus } : {}),
+      ...(agent.gondolin.memoryMB !== undefined ? { memoryMB: agent.gondolin.memoryMB } : {}),
+      allowedHosts: agent.gondolin.allowedHosts,
+      ...(agent.gondolin.allowedInternalHosts !== undefined ? { allowedInternalHosts: agent.gondolin.allowedInternalHosts } : {}),
+      secrets: agent.gondolin.secrets,
+    },
+  };
+  await writeFile(agentConfigPath(dirs.home), JSON.stringify(agentConfig, null, 2) + "\n", "utf8");
+
   // extensions dir marker (loaded explicitly via -e by the manager)
   const extMarker = path.join(extensionsRoot, "README");
   await mkdir(path.dirname(extMarker), { recursive: true }).catch(() => {});
@@ -69,22 +87,33 @@ export async function scaffoldAgent(
   return dirs;
 }
 
+export function agentConfigPath(agentHomeDir: string): string {
+  return path.join(agentHomeDir, "agent-config.json");
+}
+
 /** Build the env for the pi child process. Secrets only via env vars. */
 export function piEnvFor(
   dirs: AgentDirs,
   registry: ProviderRegistry,
+  agent: AgentRecord,
 ): Record<string, string> {
   const env: Record<string, string> = {
     PI_CODING_AGENT_DIR: dirs.home,
     PI_SKIP_VERSION_CHECK: "1",
     PI_OFFLINE: "1",
     GWARESTRIN_PROVIDERS_GEN: generatedProvidersPath(dirs.home),
+    GWARESTRIN_AGENT_CONFIG: agentConfigPath(dirs.home),
   };
   const gen = buildGeneratedProviders(registry);
   for (const id of Object.keys(gen.providers)) {
     const key = registry.resolveKey(id);
     if (key) env[`GWARESTRIN_KEY_${id.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()}`] = key;
   }
-  // gondolin secret values (M3: read by gondolin-vm extension)
+  // gondolin secret values: extension resolves valueEnv from here
+  for (const [name, def] of Object.entries(agent.gondolin.secrets)) {
+    const value = process.env[def.valueEnv];
+    if (value) env[def.valueEnv] = value;
+    else log.warn(`secret ${name}: env ${def.valueEnv} not set; placeholder will fail at egress`);
+  }
   return env;
 }
