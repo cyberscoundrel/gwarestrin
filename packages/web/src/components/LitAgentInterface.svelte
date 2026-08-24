@@ -9,7 +9,7 @@
   // pi-web-ui elements render into light DOM (createRenderRoot -> this);
   // complex props must be assigned imperatively. Re-runs when `agent` changes.
   $effect(() => {
-    const el = host?.querySelector("pi-agent-interface") as unknown as Record<string, unknown> | null;
+    const el = host?.querySelector("agent-interface") as unknown as Record<string, unknown> | null;
     if (!el) return;
     el.session = agent;
     el.enableAttachments = true;
@@ -20,6 +20,6 @@
   });
 </script>
 
-<div bind:this={host} class="flex min-h-0 flex-1 flex-col overflow-y-auto [&_pi-agent-interface]:flex [&_pi-agent-interface]:min-h-0 [&_pi-agent-interface]:flex-1 [&_pi-agent-interface]:flex-col">
-  <pi-agent-interface></pi-agent-interface>
+<div bind:this={host} class="flex min-h-0 flex-1 flex-col overflow-y-auto [&_agent-interface]:flex [&_agent-interface]:min-h-0 [&_agent-interface]:flex-1 [&_agent-interface]:flex-col">
+  <agent-interface></agent-interface>
 </div>
