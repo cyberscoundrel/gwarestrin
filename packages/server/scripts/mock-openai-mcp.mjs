@@ -5,7 +5,7 @@
 import http from "node:http";
 
 const port = Number(process.argv[2] ?? 0);
-const MCP_CALL = { tool: "echo", args: { text: "hello-from-agent" }, server: "tester" };
+const MCP_CALL = { tool: "tester_echo", args: { text: "hello-from-agent" }, server: "tester" };
 
 function sse(res, chunks) {
   res.writeHead(200, { "content-type": "text/event-stream" });
