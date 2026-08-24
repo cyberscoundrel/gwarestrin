@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store } from "../lib/stores.js";
+  import { store } from "../lib/stores.svelte.js";
   import { ws } from "../lib/ws-client.js";
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
 

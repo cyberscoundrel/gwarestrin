@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, mcpApi, type McpServerDef } from "../lib/api.js";
-  import { store } from "../lib/stores.js";
+  import { store } from "../lib/stores.svelte.js";
   import { ws } from "../lib/ws-client.js";
 
   let { agentId }: { agentId: string } = $props();

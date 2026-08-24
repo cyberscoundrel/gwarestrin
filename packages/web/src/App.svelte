@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { store } from "./lib/stores.js";
+  import { store } from "./lib/stores.svelte.js";
   import { ws } from "./lib/ws-client.js";
   import AgentRail from "./components/AgentRail.svelte";
   import ChatView from "./components/ChatView.svelte";

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
-  import { store } from "../lib/stores.js";
+  import { store } from "../lib/stores.svelte.js";
   import LitAgentInterface from "./LitAgentInterface.svelte";
   import ModelBar from "./ModelBar.svelte";
   import SessionPanel from "./SessionPanel.svelte";

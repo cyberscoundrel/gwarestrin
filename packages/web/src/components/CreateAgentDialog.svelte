@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { store } from "../lib/stores.js";
+  import { store } from "../lib/stores.svelte.js";
   import { mcpApi, type McpServerDef } from "../lib/api.js";
 
   let { onclose } = $props<{ onclose: () => void }>();

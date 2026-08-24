@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { store } from "../lib/stores.js";
+  import { store } from "../lib/stores.svelte.js";
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
   import { ws } from "../lib/ws-client.js";
   import type { ModelInfo } from "../lib/agent-types.js";

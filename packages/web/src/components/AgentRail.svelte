@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { store } from "../lib/stores.js";
+  import { store } from "../lib/stores.svelte.js";
 
   let { oncreate, onnavigate } = $props<{ oncreate?: () => void; onnavigate?: () => void }>();
 
