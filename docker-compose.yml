@@ -5,8 +5,14 @@ services:
     ports:
       - "3000:3000"
 
+    # KVM for gondolin microvms. The container runs as the node user; the
+    # host's kvm group gid is added so /dev/kvm stays accessible:
+    #   KVM_GID=$(getent group kvm | cut -d: -f3)   # put this in .env
+    user: node
     devices:
       - /dev/kvm:/dev/kvm
+    group_add:
+      - "${KVM_GID:-993}"
 
     environment:
       GWARESTRIN_MAX_AGENTS: ${GWARESTRIN_MAX_AGENTS:-4}
@@ -17,10 +23,15 @@ services:
     env_file:
       - .env
 
+    # lets containers reach services on the docker host (e.g. a local
+    # inference box) via http://host.docker.internal:…
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     volumes:
       - gwarestrin-state:/var/lib/gwarestrin
       # guest image assets (~200MB), persistent across rebuilds
-      - gondolin-cache:/root/.cache/gondolin
+      - gondolin-cache:/home/node/.cache/gondolin
       # multi-provider topology (see providers.example.json); copy to
       # ./providers.json next to this file on the deploy host
       - ./providers.json:/etc/gwarestrin/providers.json:ro
