@@ -15,6 +15,10 @@ COPY packages/pi-extensions/gondolin-vm/package.json packages/pi-extensions/gond
 COPY packages/pi-extensions/gondolin-vm/package-lock.json packages/pi-extensions/gondolin-vm/package-lock.json
 RUN npm ci --prefix packages/pi-extensions/gondolin-vm
 
+# pi-mcp-adapter in its own prefix: self-contained dep tree, independent of
+# how npm workspaces happens to nest it in dev checkouts
+RUN npm install --prefix /app/pi-packages --omit=dev pi-mcp-adapter@2.27.0
+
 COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
 COPY packages/server packages/server
@@ -39,10 +43,12 @@ ENV NODE_ENV=production \
     PI_OFFLINE=1 \
     HOME=/home/node \
     GWARESTRIN_STATE=/var/lib/gwarestrin \
-    GWARESTRIN_PROVIDERS_FILE=/etc/gwarestrin/providers.json
+    GWARESTRIN_PROVIDERS_FILE=/etc/gwarestrin/providers.json \
+    GWARESTRIN_MCP_ADAPTER_PATH=/app/pi-packages/node_modules/pi-mcp-adapter
 
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/pi-packages ./pi-packages
 COPY --from=build /app/packages/shared ./packages/shared
 COPY --from=build /app/packages/server/dist ./packages/server/dist
 COPY --from=build /app/packages/web/dist ./packages/web/dist
