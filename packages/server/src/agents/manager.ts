@@ -16,6 +16,20 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 const MAX_RESTARTS = 3;
 
+/**
+ * Locate packages/pi-extensions from either layout:
+ *   dev/tsx:     packages/server/src/agents -> ../../../pi-extensions
+ *   built dist:  packages/server/dist       -> ../../pi-extensions
+ */
+function resolveExtensionsRoot(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  for (const rel of ["../../pi-extensions", "../../../pi-extensions"]) {
+    const candidate = path.resolve(here, rel);
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("cannot locate pi-extensions directory from " + here);
+}
+
 export interface ManagerEvents {
   agentState: [state: AgentRuntimeSummary];
   agentEvent: [data: { agentId: string; event: Record<string, unknown> & { type: string } }];
@@ -35,7 +49,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     this.config = config;
     this.registry = registry;
     this.store = store;
-    this.extensionsRoot = path.resolve(here, "../../../pi-extensions");
+    this.extensionsRoot = resolveExtensionsRoot();
   }
 
   cliPath(): string {
