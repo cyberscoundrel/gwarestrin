@@ -77,6 +77,7 @@ const server = http.createServer((req, res) => {
   res.writeHead(404).end();
 });
 
-server.listen(port, "127.0.0.1", () => {
+const host = process.argv[3] ?? "127.0.0.1";
+server.listen(port, host, () => {
   console.log("mock-openai-tools listening on", server.address().port);
 });

@@ -10,6 +10,7 @@ import WebSocket from "ws";
 const base = process.argv[2] ?? "http://localhost:3100";
 const mockMcp =
   process.argv[3] ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), "mock-mcp.mjs");
+const mcpCommand = process.argv[4] ?? process.execPath;
 const wsUrl = base.replace("http", "ws") + "/ws";
 
 const j = async (p, init) => {
@@ -23,7 +24,7 @@ const j = async (p, init) => {
 await j("/api/mcp/tester", {
   method: "PUT",
   headers: { "content-type": "application/json" },
-  body: JSON.stringify({ command: process.execPath, args: [mockMcp], description: "e2e mock" }),
+  body: JSON.stringify({ command: mcpCommand, args: [mockMcp], description: "e2e mock" }),
 });
 console.log("registry: tester registered ->", mockMcp);
 
