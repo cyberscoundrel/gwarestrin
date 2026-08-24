@@ -7,7 +7,7 @@ dist/
 providers.json
 
 # local state
-state/
+state*/
 workspaces/
 
 # caches

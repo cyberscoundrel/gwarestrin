@@ -26,7 +26,9 @@ export function loadConfig(): ServerConfig {
   return {
     port: intEnv("PORT", 3000),
     host: process.env.GWARESTRIN_HOST ?? "0.0.0.0",
-    stateDir: process.env.GWARESTRIN_STATE ?? path.resolve(here, "../../../state"),
+    // always absolute: paths are handed to child processes whose cwd is the
+    // agent workspace, not the server cwd
+    stateDir: path.resolve(process.env.GWARESTRIN_STATE ?? path.join(here, "../../../state")),
     providersFile: process.env.GWARESTRIN_PROVIDERS_FILE ?? undefined,
     maxAgents: intEnv("GWARESTRIN_MAX_AGENTS", 4),
     webDistDir: process.env.GWARESTRIN_WEB_DIST ?? path.resolve(here, "../../web/dist"),

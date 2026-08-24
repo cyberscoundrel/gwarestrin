@@ -70,10 +70,10 @@ export interface ProviderView {
   id: string;
   type: ProviderApi;
   baseUrl: string;
-  description?: string;
+  description?: string | undefined;
   hasKey: boolean;
   degraded: boolean;
-  degradedReason?: string;
+  degradedReason?: string | undefined;
   autoDiscover: boolean;
   firstParty: boolean;
   models: ModelView[];
