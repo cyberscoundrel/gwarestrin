@@ -1,0 +1,32 @@
+services:
+  gwarestrin:
+    build: .
+
+    ports:
+      - "3000:3000"
+
+    devices:
+      - /dev/kvm:/dev/kvm
+
+    environment:
+      GWARESTRIN_MAX_AGENTS: ${GWARESTRIN_MAX_AGENTS:-4}
+      GWARESTRIN_STATE: /var/lib/gwarestrin
+      GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
+
+    # all provider API keys referenced by providers.json apiKeyEnv live here
+    env_file:
+      - .env
+
+    volumes:
+      - gwarestrin-state:/var/lib/gwarestrin
+      # guest image assets (~200MB), persistent across rebuilds
+      - gondolin-cache:/root/.cache/gondolin
+      # multi-provider topology (see providers.example.json); copy to
+      # ./providers.json next to this file on the deploy host
+      - ./providers.json:/etc/gwarestrin/providers.json:ro
+
+    restart: unless-stopped
+
+volumes:
+  gwarestrin-state:
+  gondolin-cache:

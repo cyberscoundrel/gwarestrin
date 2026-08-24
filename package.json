@@ -1,20 +1,20 @@
 {
   "name": "gwarestrin",
-  "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-agent web console: pi agents sandboxed in gondolin microvms",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev:server": "npm run dev -w @gwarestrin/server",
+    "dev:web": "npm run dev -w @gwarestrin/web",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "devEngines": {
-    "packageManager": {
-      "name": "pnpm",
-      "version": "^11.9.0",
-      "onFail": "download"
-    }
-  },
-  "type": "module"
+  "engines": {
+    "node": ">=22.19.0"
+  }
 }

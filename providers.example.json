@@ -1,0 +1,38 @@
+{
+  "$comment": "Copy to providers.json (gitignored) next to docker-compose.yml. apiKeyEnv names are resolved from .env by the server; key material is never written to generated files or API responses. type must be one of: openai-completions | anthropic-messages | google-generative-ai.",
+  "providers": {
+    "zai-glm": {
+      "type": "openai-completions",
+      "baseUrl": "https://api.z.ai/api/paas/v4",
+      "apiKeyEnv": "ZAI_API_KEY",
+      "description": "Z.ai hosted GLM models",
+      "models": [
+        {
+          "id": "glm-4.7",
+          "name": "GLM 4.7",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 200000,
+          "maxTokens": 32768,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    },
+    "homelab-vllm": {
+      "type": "openai-completions",
+      "baseUrl": "http://100.96.0.11:8000/v1",
+      "apiKey": "dummy",
+      "description": "local inference box (vLLM)",
+      "autoDiscover": { "enabled": true, "path": "/models" }
+    },
+    "rented-cluster": {
+      "type": "openai-completions",
+      "baseUrl": "http://10.1.2.3:8000/v1",
+      "apiKeyEnv": "CLUSTER_API_KEY",
+      "description": "private rented inference cluster",
+      "autoDiscover": { "enabled": true, "path": "/models" }
+    }
+  },
+  "defaultProvider": "zai-glm",
+  "defaultModel": "glm-4.7"
+}
