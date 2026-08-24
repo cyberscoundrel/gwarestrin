@@ -1,6 +1,20 @@
 services:
   gwarestrin:
-    build: .
+    # build with host networking: on WARP hosts the docker bridge's inherited
+    # upstream DNS may be unreachable (isp resolvers refusing non-isp source
+    # IPs); the host stack resolves fine.
+    build:
+      context: .
+      network: host
+
+    ports:
+      - "3000:3000"
+
+    # don't inherit the host's isp resolvers (see above); public resolvers
+    # are reachable through the docker-warp-bypass marked path
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
 
     ports:
       - "3000:3000"
