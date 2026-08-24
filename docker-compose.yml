@@ -16,9 +16,6 @@ services:
       - 1.1.1.1
       - 1.0.0.1
 
-    ports:
-      - "3000:3000"
-
     # KVM for gondolin microvms. The container runs as the node user; the
     # host's kvm group gid is added so /dev/kvm stays accessible:
     #   KVM_GID=$(getent group kvm | cut -d: -f3)   # put this in .env
