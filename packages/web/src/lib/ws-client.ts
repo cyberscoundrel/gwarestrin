@@ -56,6 +56,26 @@ export class WsClient {
     this.ws.send(JSON.stringify(msg));
   }
 
+  /** send as soon as the socket is open (queues through connecting/reconnect) */
+  private sendWhenOpen(msg: WsClientMessage): Promise<void> {
+    return new Promise((resolve) => {
+      const trySend = (): boolean => {
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify(msg));
+          return true;
+        }
+        return false;
+      };
+      if (trySend()) return resolve();
+      const off = this.onStatus((s) => {
+        if (s === "open" && trySend()) {
+          off();
+          resolve();
+        }
+      });
+    });
+  }
+
   /** send an RPC command; resolves with the correlated response event */
   rpc(agentId: string, type: string, payload: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     const id = `b-${this.nextBrowserId++}`;
@@ -75,13 +95,11 @@ export class WsClient {
       };
       const off = () => this.listeners.delete(on);
       this.listeners.add(on);
-      try {
-        this.send({ v: 1, agentId, kind: "cmd", id, type, ...payload } as never);
-      } catch (err) {
+      this.sendWhenOpen({ v: 1, agentId, kind: "cmd", id, type, ...payload } as never).catch((err) => {
         clearTimeout(timeout);
         off();
         reject(err instanceof Error ? err : new Error(String(err)));
-      }
+      });
     });
   }
 

@@ -53,9 +53,11 @@ export class RpcAgentAdapter implements Agent {
 
   private listeners = new Set<(ev: AgentEvent) => void>();
   private offWs: () => void;
+  private offStatus: () => void;
   private partial: AgentMessage | null = null;
   private blocks: ContentBlock[] = [];
   private disposed = false;
+  private bootstrapped = false;
 
   constructor(agentId: string) {
     this.agentId = agentId;
@@ -63,12 +65,17 @@ export class RpcAgentAdapter implements Agent {
       if (msg.agentId !== this.agentId) return;
       this.onServerMessage(msg);
     });
+    // retry bootstrap when the socket (re)connects if it never succeeded
+    this.offStatus = ws.onStatus((s) => {
+      if (s === "open" && !this.bootstrapped && !this.disposed) void this.bootstrap();
+    });
     void this.bootstrap();
   }
 
   dispose(): void {
     this.disposed = true;
     this.offWs();
+    this.offStatus();
     this.listeners.clear();
   }
 
@@ -173,14 +180,17 @@ export class RpcAgentAdapter implements Agent {
         isStreaming: Boolean(s.isStreaming),
         messages,
       };
+      this.bootstrapped = true;
       this.emit({ type: "bootstrap_complete" as never });
     } catch {
-      /* agent likely not running; state stays empty */
+      /* agent likely not running / socket down; retried on start or reconnect */
     }
   }
 
   private onServerMessage(msg: WsServerMessage): void {
     if (msg.kind === "agent_state") {
+      // adapter may have been constructed while the agent was stopped
+      if (msg.state.status === "running" && !this.bootstrapped) void this.bootstrap();
       this.emit({ type: "runtime_state" as never, ...({ runtime: msg.state } as object) });
       return;
     }
