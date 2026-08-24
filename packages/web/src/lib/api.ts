@@ -48,3 +48,44 @@ export const api = {
     return provider.models;
   },
 };
+
+export interface FileEntry {
+  name: string;
+  type: "file" | "dir" | "symlink" | "other";
+  size: number;
+  mtime: string;
+  mode: number;
+}
+
+export const filesApi = {
+  async list(agentId: string, path = ""): Promise<FileEntry[]> {
+    const r = await json<{ entries: FileEntry[] }>(
+      await fetch(`/api/agents/${agentId}/files?path=${encodeURIComponent(path)}`),
+    );
+    return r.entries;
+  },
+  downloadUrl(agentId: string, path: string): string {
+    return `/api/agents/${agentId}/files/download?path=${encodeURIComponent(path)}`;
+  },
+  async upload(agentId: string, dir: string, files: FileList | File[]): Promise<void> {
+    const fd = new FormData();
+    for (const f of files) fd.append("file", f, f.name);
+    const res = await fetch(`/api/agents/${agentId}/files/upload?path=${encodeURIComponent(dir)}`, {
+      method: "POST",
+      body: fd,
+    });
+    await json(res);
+  },
+  async remove(agentId: string, path: string): Promise<void> {
+    const res = await fetch(`/api/agents/${agentId}/files?path=${encodeURIComponent(path)}`, { method: "DELETE" });
+    if (res.status !== 204) await json(res);
+  },
+  async mkdir(agentId: string, path: string): Promise<void> {
+    const res = await fetch(`/api/agents/${agentId}/files/mkdir`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    await json(res);
+  },
+};

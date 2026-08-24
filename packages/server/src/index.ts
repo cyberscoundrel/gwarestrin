@@ -6,6 +6,7 @@ import { AgentManager } from "./agents/manager.js";
 import { AgentStore } from "./agents/store.js";
 import { loadConfig } from "./config.js";
 import { registerAgentRoutes } from "./http/agents.js";
+import { registerFileRoutes } from "./http/files.js";
 import { registerProviderRoutes } from "./http/providers.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { scoped } from "./util/log.js";
@@ -40,6 +41,7 @@ async function main(): Promise<void> {
 
   await registerProviderRoutes(app, config, registry);
   await registerAgentRoutes(app, config, manager);
+  await registerFileRoutes(app, config, manager);
   await registerWs(app, config, manager);
 
   if (existsSync(config.webDistDir)) {

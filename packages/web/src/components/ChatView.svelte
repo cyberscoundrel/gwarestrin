@@ -2,6 +2,9 @@
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
   import { store } from "../lib/stores.js";
   import LitAgentInterface from "./LitAgentInterface.svelte";
+  import ModelBar from "./ModelBar.svelte";
+  import SessionPanel from "./SessionPanel.svelte";
+  import FilesPanel from "./FilesPanel.svelte";
 
   let { agentId, agentName }: { agentId: string; agentName: string } = $props();
 
@@ -10,6 +13,7 @@
 
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let filesOpen = $state(false);
 
   async function start(): Promise<void> {
     busy = true;
@@ -24,22 +28,34 @@
       busy = false;
     }
   }
-
-  async function stop(): Promise<void> {
-    busy = true;
-    try {
-      const { api } = await import("../lib/api.js");
-      await api.stopAgent(agentId);
-      await store.refreshAgents();
-    } finally {
-      busy = false;
-    }
-  }
 </script>
 
 <section class="flex min-h-0 flex-1 flex-col">
   {#if runtime?.status === "running" || runtime?.status === "starting"}
-    <LitAgentInterface agent={adapter} />
+    <div class="relative flex items-center gap-2 border-b border-edge bg-panel px-2">
+      <div class="relative">
+        <ModelBar {agentId} />
+      </div>
+      <SessionPanel {agentId} />
+      <button
+        class="ml-auto rounded border bg-transparent px-2 py-0.5 text-xs hover:text-fg
+          {filesOpen ? 'border-accent text-accent' : 'border-edge2 text-muted'}"
+        onclick={() => (filesOpen = !filesOpen)}
+      >
+        files
+      </button>
+    </div>
+
+    <div class="flex min-h-0 flex-1">
+      <div class="flex min-w-0 flex-1 flex-col">
+        <LitAgentInterface agent={adapter} />
+      </div>
+      {#if filesOpen}
+        <div class="w-80 shrink-0 border-l border-edge">
+          <FilesPanel {agentId} />
+        </div>
+      {/if}
+    </div>
   {:else}
     <div class="m-auto grid gap-3 text-center text-muted">
       <h3 class="m-0 text-fg">{agentName}</h3>

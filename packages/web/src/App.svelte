@@ -5,6 +5,7 @@
   import AgentRail from "./components/AgentRail.svelte";
   import ChatView from "./components/ChatView.svelte";
   import CreateAgentDialog from "./components/CreateAgentDialog.svelte";
+  import ExtensionDialogs from "./components/ExtensionDialogs.svelte";
 
   let drawerOpen = $state(false);
   let showCreate = $state(false);
@@ -98,3 +99,5 @@
 {#if showCreate}
   <CreateAgentDialog onclose={() => (showCreate = false)} />
 {/if}
+
+<ExtensionDialogs />
