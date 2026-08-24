@@ -37,7 +37,11 @@ const server = http.createServer((req, res) => {
       let lastUser = "";
       try {
         const messages = JSON.parse(body).messages ?? [];
-        lastUser = String(messages.filter((m) => m.role === "user").at(-1)?.content ?? "")
+        const raw = messages.filter((m) => m.role === "user").at(-1)?.content;
+        // content may be a plain string or pi-style content blocks
+        lastUser = String(
+          Array.isArray(raw) ? raw.map((b) => (typeof b === "string" ? b : (b?.text ?? ""))).join(" ") : (raw ?? ""),
+        )
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, 80);
