@@ -1,6 +1,24 @@
 {
   "$schema": "https://github.com/Azure/data-api-builder/releases/latest/download/dab.draft.schema.json",
-  "data-source-files": ["dab-config-mydb.json"],
+  "data-source": {
+    "database-type": "mssql",
+    "connection-string": "Server=host.docker.internal,1433;Database=mydb;User Id=myuser;Password=CHANGEME;TrustServerCertificate=True"
+  },
+  "autoentities": {
+    "all-tables": {
+      "patterns": {
+        "include": ["dbo.%"],
+        "name": "{schema}_{object}"
+      },
+      "template": {
+        "mcp": { "dml-tools": true },
+        "rest": { "enabled": false },
+        "graphql": { "enabled": false }
+      },
+      "permissions": [{ "role": "anonymous", "actions": [{ "action": "*" }] }]
+    }
+  },
+  "data-source-files": ["/etc/gwarestrin/dab/dab-config-otherdb.json"],
   "runtime": {
     "rest": { "enabled": false },
     "graphql": { "enabled": false },
