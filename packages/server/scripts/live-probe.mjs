@@ -69,16 +69,18 @@ console.log("prompt accepted; waiting for model…");
 
 await Promise.race([settled, new Promise((r) => setTimeout(() => r(false), 300000))]);
 
-const deadline = Date.now() + 30000;
-while (Date.now() < deadline) {
-  const last = await rpc("get_last_assistant_text");
-  const text = String(last.data?.text ?? "");
-  if (text.trim() && text !== initial) {
-    console.log("REPLY:", text.slice(0, 300));
-    break;
-  }
-  await new Promise((r) => setTimeout(r, 2000));
-  if (Date.now() > deadline) console.log("NO NEW REPLY within deadline");
+const st = await rpc("get_state");
+console.log("errorMessage:", st.data?.errorMessage ?? "(none)");
+
+const msgs = await rpc("get_messages");
+const all = msgs.data?.messages ?? [];
+console.log("total messages:", all.length);
+for (const m of all.slice(-3)) {
+  const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+  console.log(`  [${m.role}] ${content.slice(0, 140)}`);
 }
+
+const last = await rpc("get_last_assistant_text");
+console.log("FINAL REPLY:", String(last.data?.text ?? "(none)").slice(0, 300));
 ws.close();
 process.exit(0);
