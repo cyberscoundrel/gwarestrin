@@ -1,5 +1,5 @@
-@import "tailwindcss";
 @import "@earendil-works/pi-web-ui/app.css";
+@import "tailwindcss";
 
 @theme {
   --color-bg: #0f1115;
