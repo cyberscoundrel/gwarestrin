@@ -51,8 +51,15 @@
     }
   }
 
-  onMount(() => {
+  // re-runs on mount AND when the tab switches (ChatView reuses this
+  // component, so onMount alone would leave the previous agent's stats)
+  $effect(() => {
+    void agentId;
+    stats = null;
     void refreshAll();
+  });
+
+  onMount(() => {
     // keep the context meter live: refresh after each turn + slow poll
     const off = ws.onMessage((msg) => {
       if (msg.agentId !== agentId || msg.kind !== "event") return;

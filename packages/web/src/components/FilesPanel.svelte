@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { filesApi, type FileEntry } from "../lib/api.js";
 
   let { agentId }: { agentId: string } = $props();
@@ -21,7 +20,13 @@
     }
   }
 
-  onMount(() => void refresh());
+  // re-runs on mount AND when the agent tab switches (panel is reused)
+  $effect(() => {
+    void agentId;
+    cwd = "";
+    entries = [];
+    void refresh();
+  });
 
   function navigate(dir: string): void {
     cwd = dir;
