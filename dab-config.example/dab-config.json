@@ -5,7 +5,7 @@
     "connection-string": "Server=host.docker.internal,1433;Database=mydb;User Id=myuser;Password=CHANGEME;TrustServerCertificate=True"
   },
   "autoentities": {
-    "all-tables": {
+    "all-tables-mydb": {
       "patterns": {
         "include": ["dbo.%"],
         "name": "{schema}_{object}"
