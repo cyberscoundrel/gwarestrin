@@ -3,6 +3,7 @@
   import { store } from "../lib/stores.svelte.js";
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
   import { ws } from "../lib/ws-client.js";
+  import { modelDisplayName } from "../lib/format.js";
   import type { ModelInfo } from "../lib/agent-types.js";
 
   let { agentId }: { agentId: string } = $props();
@@ -113,13 +114,14 @@
   const tok = $derived(stats?.context?.tokens ?? null);
 </script>
 
-<div class="flex items-center gap-2 border-b border-edge bg-panel px-3 py-1.5 text-sm">
+<div class="flex items-center gap-2 py-1.5 text-sm">
   <button
-    class="rounded border border-edge2 bg-transparent px-2 py-0.5 text-fg hover:border-accent disabled:opacity-50"
+    class="max-w-64 truncate rounded border border-edge2 bg-transparent px-2 py-0.5 text-fg hover:border-accent disabled:opacity-50"
+    title={currentModel ? `${currentModel.provider}/${currentModel.modelId}` : undefined}
     disabled={busy}
     onclick={() => (openModel = !openModel)}
   >
-    {currentModel ? `${currentModel.provider}/${currentModel.modelId}` : "no model"}
+    {currentModel ? modelDisplayName(currentModel.provider, currentModel.modelId, store.providers) : "no model"}
     <span class="ml-1 text-muted">▾</span>
   </button>
 

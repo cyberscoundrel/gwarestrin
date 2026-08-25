@@ -1,5 +1,6 @@
 <script lang="ts">
   import { store } from "../lib/stores.svelte.js";
+  import { modelDisplayName } from "../lib/format.js";
 
   let { oncreate, onnavigate } = $props<{ oncreate?: () => void; onnavigate?: () => void }>();
 
@@ -47,7 +48,9 @@
             </span>
           {/if}
           {#if a.model}
-            <span class="col-start-2 truncate text-[0.7rem] text-muted">{a.model.modelId}</span>
+            <span class="col-start-2 truncate text-[0.7rem] text-muted" title={a.model.modelId}>
+              {modelDisplayName(a.model.provider, a.model.modelId, store.providers)}
+            </span>
           {/if}
         </button>
       </li>

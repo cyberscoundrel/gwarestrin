@@ -57,8 +57,10 @@ export class WsClient {
   }
 
   /** send as soon as the socket is open (queues through connecting/reconnect) */
-  private sendWhenOpen(msg: WsClientMessage): Promise<void> {
-    return new Promise((resolve) => {
+  private sendWhenOpen(msg: WsClientMessage): { promise: Promise<void>; cancel: () => void } {
+    let settled = false;
+    let off: (() => void) | null = null;
+    const promise = new Promise<void>((resolve, reject) => {
       const trySend = (): boolean => {
         if (this.ws?.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify(msg));
@@ -66,14 +68,26 @@ export class WsClient {
         }
         return false;
       };
-      if (trySend()) return resolve();
-      const off = this.onStatus((s) => {
-        if (s === "open" && trySend()) {
-          off();
+      if (trySend()) {
+        settled = true;
+        return resolve();
+      }
+      off = this.onStatus((s) => {
+        if (s === "open" && !settled && trySend()) {
+          settled = true;
+          off?.();
           resolve();
         }
       });
+      void reject; // settled/cancel driven; nothing else rejects this promise
     });
+    return {
+      promise,
+      cancel: () => {
+        settled = true;
+        off?.();
+      },
+    };
   }
 
   /** send an RPC command; resolves with the correlated response event */
@@ -81,6 +95,7 @@ export class WsClient {
     const id = `b-${this.nextBrowserId++}`;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
+        queued.cancel();
         off();
         reject(new Error(`rpc ${type} timed out`));
       }, 60_000);
@@ -95,7 +110,8 @@ export class WsClient {
       };
       const off = () => this.listeners.delete(on);
       this.listeners.add(on);
-      this.sendWhenOpen({ v: 1, agentId, kind: "cmd", id, type, ...payload } as never).catch((err) => {
+      const queued = this.sendWhenOpen({ v: 1, agentId, kind: "cmd", id, type, ...payload } as never);
+      queued.promise.catch((err) => {
         clearTimeout(timeout);
         off();
         reject(err instanceof Error ? err : new Error(String(err)));

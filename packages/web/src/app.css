@@ -36,4 +36,10 @@
       "Segoe UI",
       sans-serif;
   }
+
+  /* pi-web-ui renders light DOM: keep code blocks contained horizontally */
+  agent-interface pre {
+    overflow-x: auto;
+    max-width: 100%;
+  }
 }

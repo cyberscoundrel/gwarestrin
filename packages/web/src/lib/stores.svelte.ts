@@ -2,6 +2,7 @@ import { getAdapter } from "./rpc-agent-adapter.js";
 import { ws } from "./ws-client.js";
 import type { AgentEvent } from "./agent-types.js";
 import type { AgentRuntimeSummary } from "@gwarestrin/shared";
+import { SvelteMap } from "svelte/reactivity";
 
 export interface AgentListItem {
   id: string;
@@ -19,7 +20,7 @@ class Store {
   providers = $state<import("@gwarestrin/shared").ProviderView[]>([]);
   defaultProvider = $state<string | null>(null);
   defaultModel = $state<string | null>(null);
-  private runtime = new Map<string, AgentRuntimeSummary>();
+  private runtime = new SvelteMap<string, AgentRuntimeSummary>();
   private unreadListeners = new Set<() => void>();
 
   constructor() {
