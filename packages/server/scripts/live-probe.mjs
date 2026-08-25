@@ -44,20 +44,41 @@ const rpc = (type, payload = {}, timeoutMs = 180000) =>
     ws.send(JSON.stringify({ v: 1, agentId: agent.id, kind: "cmd", id, type, ...payload }));
   });
 
+const before = await rpc("get_last_assistant_text");
+const initial = String(before.data?.text ?? "");
+console.log("previous last reply:", initial.slice(0, 80) || "(none)");
+
+const settled = new Promise((resolve) => {
+  const onMsg = (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      if (msg.agentId === agent.id && msg.kind === "event" && msg.event.type === "agent_settled") {
+        ws.off("message", onMsg);
+        resolve(true);
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+  ws.on("message", onMsg);
+});
+
 const prompt = await rpc("prompt", { message: "Reply with exactly: LOCAL_INFERENCE_OK" });
 if (prompt.success !== true) throw new Error("prompt failed: " + JSON.stringify(prompt).slice(0, 200));
 console.log("prompt accepted; waiting for model…");
 
-const deadline = Date.now() + 240000;
+await Promise.race([settled, new Promise((r) => setTimeout(() => r(false), 300000))]);
+
+const deadline = Date.now() + 30000;
 while (Date.now() < deadline) {
   const last = await rpc("get_last_assistant_text");
   const text = String(last.data?.text ?? "");
-  if (text.trim()) {
+  if (text.trim() && text !== initial) {
     console.log("REPLY:", text.slice(0, 300));
     break;
   }
   await new Promise((r) => setTimeout(r, 2000));
-  if (Date.now() > deadline) console.log("NO REPLY within deadline");
+  if (Date.now() > deadline) console.log("NO NEW REPLY within deadline");
 }
 ws.close();
 process.exit(0);
