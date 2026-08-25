@@ -30,12 +30,19 @@ RUN npm run build
 # prune to production dependencies for the runtime stage
 RUN npm prune --omit=dev
 
+# ---- dab stage: Microsoft SQL MCP Server (Data API builder) -----------------
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS dab
+RUN dotnet tool install Microsoft.DataApiBuilder --tool-path /opt/dab
+
+# ---- dotnet runtime for dab --------------------------------------------------
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS dotnet-runtime
+
 # ---- runtime stage ---------------------------------------------------------
 # qemu for the gondolin microvm backend; node 22 pinned (gondolin QEMU HTTP
 # bridge is broken on node >= 24.17, upstream earendil-works/gondolin#134)
 FROM node:22-bookworm-slim
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ca-certificates \
+  && apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ca-certificates libicu72 \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -44,7 +51,11 @@ ENV NODE_ENV=production \
     HOME=/home/node \
     GWARESTRIN_STATE=/var/lib/gwarestrin \
     GWARESTRIN_PROVIDERS_FILE=/etc/gwarestrin/providers.json \
-    GWARESTRIN_MCP_ADAPTER_PATH=/app/pi-packages/node_modules/pi-mcp-adapter
+    GWARESTRIN_MCP_ADAPTER_PATH=/app/pi-packages/node_modules/pi-mcp-adapter \
+    DOTNET_ROOT=/usr/share/dotnet \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_NOLOGO=1 \
+    PATH=/opt/dab:$PATH
 
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/node_modules ./node_modules
@@ -54,6 +65,10 @@ COPY --from=build /app/packages/server/dist ./packages/server/dist
 COPY --from=build /app/packages/web/dist ./packages/web/dist
 # pi extensions loaded explicitly via -e by the agent manager
 COPY --from=build /app/packages/pi-extensions ./packages/pi-extensions
+# dotnet runtime + dab CLI for the SQL MCP Server (config mounted at
+# /etc/gwarestrin/dab; spawned per-agent by the pi-mcp-adapter)
+COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
+COPY --from=dab /opt/dab /opt/dab
 
 # state root + gondolin guest-asset cache, writable by the node user;
 # /dev/kvm access comes from compose `devices` + `group_add` (host kvm gid)

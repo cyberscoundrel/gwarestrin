@@ -58,6 +58,28 @@ the recreate; restart them from the UI (sessions resume).
   url + optional bearer env var). Bearer/env values are read from the pi child
   env, i.e. ultimately from `.env`. Checking a server for an agent rewrites its
   `.mcp.json` and restarts that agent.
+
+## 3a. SQL MCP Server (Data API builder)
+
+The image carries .NET 8 + the DAB CLI (`dab`); agents reach SQL Server through
+Microsoft's SQL MCP Server over stdio. Setup on the deploy host:
+
+```bash
+mkdir -p ~/gwarestrin/dab-config
+cp dab-config.example/dab-config.json dab-config/
+cp dab-config.example/dab-config-mydb.json dab-config/dab-config-<dbname>.json
+# one child file per database; edit connection strings (or generate from dbcreds.json)
+chmod 600 dab-config/*.json   # contains credentials; bind-mounted ro, uid 1000
+```
+
+Register once (server registry): `PUT /api/mcp/mssql` with
+`{"command":"dab","args":["start","--mcp-stdio","--config","/etc/gwarestrin/dab/dab-config.json"],"description":"Microsoft SQL MCP Server (DAB)"}`
+— or `mcp` panel → `+ add` with those values. Then tick `mssql` per agent.
+
+Tools are the DAB DML surface (`describe_entities`, `read_records`,
+`create_record`, `update_record`, `delete_record`, `aggregate_records`,
+`execute_entity`) scoped by `autoentities` patterns and role permissions in the
+child configs. Restrict actions (e.g. drop `delete`) per child config.
 - **Files**: `files` panel — upload/download/delete inside the agent workspace.
   `.pi/` is hidden and `.mcp.json` is read-only through the API (server-generated).
 - **Concurrency**: max 4 running agents (`GWARESTRIN_MAX_AGENTS`). Each running

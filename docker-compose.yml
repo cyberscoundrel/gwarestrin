@@ -46,6 +46,9 @@ services:
       # multi-provider topology (see providers.example.json); copy to
       # ./providers.json next to this file on the deploy host
       - ./providers.json:/etc/gwarestrin/providers.json:ro
+      # SQL MCP Server (DAB) configs; host-generated from dbcreds.json,
+      # contains DB credentials (see dab-config.example/)
+      - ./dab-config:/etc/gwarestrin/dab:ro
 
     restart: unless-stopped
 

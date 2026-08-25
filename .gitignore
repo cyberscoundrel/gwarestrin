@@ -5,6 +5,7 @@ dist/
 # env & secrets
 .env
 providers.json
+dab-config/
 
 # local state
 state*/
