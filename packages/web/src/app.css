@@ -42,16 +42,19 @@
     overflow-x: auto;
     max-width: 100%;
   }
+}
 
-  /* our tailwind emits .bg-muted with our palette; pi-web-ui components
-     (e.g. console header) expect their own --muted from the .dark theme */
-  agent-interface .bg-muted {
-    background-color: var(--muted);
-  }
+/* pi-web-ui overrides — must stay UNLAYERED: their utilities live in
+   @layer utilities, which beats layered base rules regardless of specificity */
 
-  /* wrap giant plain-text blobs (base64/hex dumps) instead of x-scrolling */
-  agent-interface code.hljs.language-text {
-    white-space: pre-wrap;
-    word-break: break-all;
-  }
+/* our tailwind emits .bg-muted with our palette; pi-web-ui components
+   (e.g. console header) expect their own --muted from the .dark theme */
+agent-interface .bg-muted {
+  background-color: var(--muted);
+}
+
+/* wrap giant plain-text blobs (base64/hex dumps) instead of x-scrolling */
+agent-interface code.hljs.language-text {
+  white-space: pre-wrap;
+  word-break: break-all;
 }
