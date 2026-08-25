@@ -32,8 +32,6 @@
 
   async function refresh(): Promise<void> {
     try {
-      models = await adapter.availableModels();
-      thinkingLevels = await adapter.availableThinkingLevels();
       const res = (await ws.rpc(agentId, "get_session_stats")) as {
         data?: { contextUsage?: { tokens?: number | null; percent?: number | null } };
       };
@@ -43,7 +41,29 @@
     }
   }
 
-  onMount(() => void refresh());
+  async function refreshAll(): Promise<void> {
+    void refresh();
+    try {
+      models = await adapter.availableModels();
+      thinkingLevels = await adapter.availableThinkingLevels();
+    } catch {
+      /* agent not running */
+    }
+  }
+
+  onMount(() => {
+    void refreshAll();
+    // keep the context meter live: refresh after each turn + slow poll
+    const off = ws.onMessage((msg) => {
+      if (msg.agentId !== agentId || msg.kind !== "event") return;
+      if (msg.event.type === "agent_settled" || msg.event.type === "turn_end") void refresh();
+    });
+    const timer = setInterval(() => void refresh(), 15_000);
+    return () => {
+      off();
+      clearInterval(timer);
+    };
+  });
 
   async function chooseModel(provider: string, modelId: string): Promise<void> {
     openModel = false;
@@ -83,6 +103,7 @@
   });
 
   const pct = $derived(stats?.context?.percent ?? null);
+  const tok = $derived(stats?.context?.tokens ?? null);
 </script>
 
 <div class="flex items-center gap-2 border-b border-edge bg-panel px-3 py-1.5 text-sm">
@@ -109,9 +130,9 @@
     </select>
   {/if}
 
-  {#if pct !== null}
+  {#if pct !== null && tok !== null}
     <span class="ml-auto text-xs {pct > 80 ? 'text-warn' : 'text-muted'}" title="context window usage">
-      ctx {pct}%
+      ctx {Math.round(pct)}% ({(tok / 1000).toFixed(1)}k)
     </span>
   {:else}
     <span class="ml-auto"></span>
