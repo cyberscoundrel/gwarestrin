@@ -33,7 +33,7 @@
 
 <section class="flex min-h-0 flex-1 flex-col">
   {#if runtime?.status === "running" || runtime?.status === "starting"}
-    <div class="relative flex items-center gap-2 border-b border-edge bg-panel px-2">
+    <div class="relative flex flex-wrap items-center gap-2 border-b border-edge bg-panel px-2">
       <div class="relative">
         <ModelBar {agentId} />
       </div>

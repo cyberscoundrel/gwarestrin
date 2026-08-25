@@ -114,7 +114,7 @@
   const tok = $derived(stats?.context?.tokens ?? null);
 </script>
 
-<div class="flex items-center gap-2 py-1.5 text-sm">
+<div class="flex flex-wrap items-center gap-2 py-1.5 text-sm">
   <button
     class="max-w-64 truncate rounded border border-edge2 bg-transparent px-2 py-0.5 text-fg hover:border-accent disabled:opacity-50"
     title={currentModel ? `${currentModel.provider}/${currentModel.modelId}` : undefined}
@@ -140,7 +140,7 @@
   {/if}
 
   {#if pct !== null && tok !== null}
-    <span class="ml-auto text-xs {pct > 80 ? 'text-warn' : 'text-muted'}" title="context window usage">
+    <span class="ml-auto whitespace-nowrap text-xs {pct > 80 ? 'text-warn' : 'text-muted'}" title="context window usage">
       ctx {Math.round(pct)}% ({(tok / 1000).toFixed(1)}k)
     </span>
   {:else}
