@@ -20,6 +20,6 @@
   });
 </script>
 
-<div bind:this={host} class="flex min-h-0 flex-1 flex-col overflow-y-auto [&_agent-interface]:flex [&_agent-interface]:min-h-0 [&_agent-interface]:flex-1 [&_agent-interface]:flex-col">
+<div bind:this={host} class="flex min-h-0 flex-1 flex-col overflow-hidden [&_agent-interface]:flex [&_agent-interface]:min-h-0 [&_agent-interface]:flex-1 [&_agent-interface]:flex-col">
   <agent-interface></agent-interface>
 </div>

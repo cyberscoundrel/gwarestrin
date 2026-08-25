@@ -29,11 +29,11 @@
 </script>
 
 {#if !mobile}
-  <div class="grid h-screen grid-cols-[240px_1fr]">
-    <aside class="overflow-y-auto border-r border-edge bg-panel">
+  <div class="grid h-screen grid-cols-[240px_1fr] grid-rows-[minmax(0,1fr)] overflow-hidden">
+    <aside class="min-h-0 overflow-y-auto border-r border-edge bg-panel">
       <AgentRail oncreate={() => (showCreate = true)} />
     </aside>
-    <main class="flex min-w-0 flex-col">
+    <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
       {#if store.agents.length === 0}
         <div class="m-auto grid gap-2 text-center text-muted">
           <h2 class="m-0 tracking-widest text-fg">no agents</h2>
@@ -51,7 +51,7 @@
     </main>
   </div>
 {:else}
-  <div class="grid h-screen grid-rows-[48px_1fr]">
+  <div class="grid h-screen grid-rows-[48px_minmax(0,1fr)] overflow-hidden">
     <header class="flex items-center gap-3 border-b border-edge bg-panel px-3">
       <button
         class="cursor-pointer border-none bg-transparent px-2 py-1 text-xl text-fg"
@@ -78,7 +78,7 @@
         />
       </aside>
     {/if}
-    <main class="flex min-w-0 flex-col">
+    <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
       {#if store.agents.length === 0}
         <div class="m-auto grid gap-2 text-center text-muted">
           <h2 class="m-0 tracking-widest text-fg">no agents</h2>

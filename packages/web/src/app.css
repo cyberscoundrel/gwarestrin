@@ -20,6 +20,13 @@
     color-scheme: dark;
   }
 
+  html,
+  body,
+  #app {
+    height: 100%;
+    overflow: hidden;
+  }
+
   body {
     @apply bg-bg text-fg;
     font-family:
