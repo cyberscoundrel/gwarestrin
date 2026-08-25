@@ -104,10 +104,22 @@ export class RpcAgentAdapter implements Agent {
             .map((a) => ({ type: "image" as const, data: a.content!, mimeType: a.mimeType! })),
         );
       }
-      // optimistic local append (message_start will confirm)
-      this.state = { ...this.state, messages: [...this.state.messages, { role: "user", content: message, timestamp: Date.now() }] };
-      this.emit({ type: "message_end", message: { role: "user", content: message, timestamp: Date.now() } });
     }
+
+    // optimistic local append for BOTH input paths (server message_end
+    // replaces the tail duplicate); pi-web-ui renders only from state.messages
+    const withAttachments = input && typeof input === "object";
+    const atts = withAttachments ? (input as { attachments?: Attachment[] }).attachments : undefined;
+    const userMsg = {
+      role: withAttachments && (input as { role?: string }).role === "user-with-attachments"
+        ? "user-with-attachments"
+        : "user",
+      content: message,
+      timestamp: Date.now(),
+      ...(atts?.length ? { attachments: atts } : {}),
+    } as AgentMessage;
+    this.state = { ...this.state, messages: [...this.state.messages, userMsg] };
+    this.emit({ type: "message_end", message: userMsg });
 
     const payload: Record<string, unknown> = { message };
     if (this.state.isStreaming) payload.streamingBehavior = "steer";
@@ -182,6 +194,9 @@ export class RpcAgentAdapter implements Agent {
       };
       this.bootstrapped = true;
       this.emit({ type: "bootstrap_complete" as never });
+      // pi-web-ui re-renders only on its known events; kick it after the
+      // state snapshot lands so history shows without a new prompt
+      this.emit({ type: "turn_start" });
     } catch {
       /* agent likely not running / socket down; retried on start or reconnect */
     }
@@ -290,7 +305,9 @@ export class RpcAgentAdapter implements Agent {
       case "agent_settled":
       case "agent_end":
         this.state = { ...this.state, isStreaming: false };
-        this.emit({ ...ev, type: ev.type } as AgentEvent);
+        this.emit(ev as AgentEvent);
+        // pi-web-ui finalizes the streaming container on agent_end
+        this.emit({ type: "agent_end" });
         break;
       case "queue_update":
         this.emit({ type: "queue_update", steering: ev.steering as string[], followUp: ev.followUp as string[] });
