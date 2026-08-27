@@ -60,7 +60,9 @@ services:
   # Microsoft SQL MCP Server (Data API builder) as an HTTP sidecar.
   # Own image/lifecycle — the base gwarestrin image carries no .NET.
   dab:
-    build: ./dab
+    build:
+      context: ./dab
+      network: host   # same WARP/DNS workaround as the main build
     user: "1000:1000"
     environment:
       HOME: /tmp
