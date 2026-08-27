@@ -67,6 +67,7 @@ services:
     environment:
       HOME: /tmp
       DOTNET_CLI_HOME: /tmp
+      ASPNETCORE_HTTP_PORTS: 5000   # bind 0.0.0.0 (default localhost is unreachable from other containers)
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
