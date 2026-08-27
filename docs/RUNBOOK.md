@@ -61,25 +61,34 @@ the recreate; restart them from the UI (sessions resume).
 
 ## 3a. SQL MCP Server (Data API builder)
 
-The image carries .NET 8 + the DAB CLI (`dab`); agents reach SQL Server through
-Microsoft's SQL MCP Server over stdio. Setup on the deploy host:
+DAB runs as an **HTTP sidecar** (`dab` compose service, own image in `./dab/`)
+serving streamable-HTTP MCP at `http://dab:5000/mcp` on a private backend
+subnet — the base gwarestrin image carries no .NET. Setup on the deploy host:
 
 ```bash
 mkdir -p ~/gwarestrin/dab-config
 cp dab-config.example/dab-config.json dab-config/
 cp dab-config.example/dab-config-mydb.json dab-config/dab-config-<dbname>.json
 # one child file per database; edit connection strings (or generate from dbcreds.json)
-chmod 600 dab-config/*.json   # contains credentials; bind-mounted ro, uid 1000
+chmod 600 dab-config/*.json   # contains credentials; bind-mounted ro
 ```
 
 Register once (server registry): `PUT /api/mcp/mssql` with
-`{"command":"dab","args":["start","--mcp-stdio","--config","/etc/gwarestrin/dab/dab-config.json"],"description":"Microsoft SQL MCP Server (DAB)"}`
-— or `mcp` panel → `+ add` with those values. Then tick `mssql` per agent.
+`{"url":"http://dab:5000/mcp","headers":{"X-MS-API-ROLE":"anonymous"},"auth":false,"description":"Microsoft SQL MCP Server (DAB)"}`
+— or `mcp` panel → `+ add` (http transport) with those values. Then tick
+`mssql` per agent.
 
 Tools are the DAB DML surface (`describe_entities`, `read_records`,
 `create_record`, `update_record`, `delete_record`, `aggregate_records`,
 `execute_entity`) scoped by `autoentities` patterns and role permissions in the
-child configs. Restrict actions (e.g. drop `delete`) per child config.
+child configs. Restrict actions (e.g. drop `delete`) per child config. PK-less
+tables/views are excluded — see `docs/dab-pkless-workaround.md` for the
+designated-key read-only pattern (deferred).
+
+Sidecar ops: `docker compose logs dab`, `docker compose restart dab` after
+config edits; `dab validate --config /etc/dab/dab-config.json` inside the
+container checks configs. If it exits silently, rerun with `--LogLevel Debug` —
+default log level hides the real error.
 - **Files**: `files` panel — upload/download/delete inside the agent workspace.
   `.pi/` is hidden and `.mcp.json` is read-only through the API (server-generated).
 - **Concurrency**: max 4 running agents (`GWARESTRIN_MAX_AGENTS`). Each running

@@ -22,6 +22,10 @@
   "runtime": {
     "rest": { "enabled": false },
     "graphql": { "enabled": false },
+    "host": {
+      "mode": "development",
+      "authentication": { "provider": "Simulator" }
+    },
     "mcp": {
       "description": "Local SQL Server databases via Microsoft SQL MCP Server (Data API builder). Entities are auto-exposed per database; use describe_entities to discover them, then read_records / create_record / update_record / delete_record / aggregate_records."
     }

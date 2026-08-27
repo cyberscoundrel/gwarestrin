@@ -11,7 +11,9 @@ services:
       - "3000:3000"
 
     # don't inherit the host's isp resolvers (see above); public resolvers
-    # are reachable through the docker-warp-bypass marked path
+    # are reachable through the docker-warp-bypass marked path. NOTE: this
+    # bypasses docker's embedded resolver, so the dab sidecar is reached via
+    # a static extra_hosts entry on the shared backend subnet instead.
     dns:
       - 1.1.1.1
       - 1.0.0.1
@@ -38,6 +40,8 @@ services:
     # inference box) via http://host.docker.internal:…
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      # static backend address of the dab sidecar (see networks below)
+      - "dab:172.31.99.10"
 
     volumes:
       - gwarestrin-state:/var/lib/gwarestrin
@@ -46,11 +50,38 @@ services:
       # multi-provider topology (see providers.example.json); copy to
       # ./providers.json next to this file on the deploy host
       - ./providers.json:/etc/gwarestrin/providers.json:ro
-      # SQL MCP Server (DAB) configs; host-generated from dbcreds.json,
-      # contains DB credentials (see dab-config.example/)
-      - ./dab-config:/etc/gwarestrin/dab:ro
+
+    networks:
+      - default   # outbound (WARP-bypass marked bridge)
+      - backend   # sidecar link (container-local subnet)
 
     restart: unless-stopped
+
+  # Microsoft SQL MCP Server (Data API builder) as an HTTP sidecar.
+  # Own image/lifecycle — the base gwarestrin image carries no .NET.
+  dab:
+    build: ./dab
+    user: "1000:1000"
+    environment:
+      HOME: /tmp
+      DOTNET_CLI_HOME: /tmp
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # SQL MCP configs; host-generated from dbcreds.json, contains DB
+      # credentials (see dab-config.example/)
+      - ./dab-config:/etc/dab:ro
+    networks:
+      backend:
+        ipv4_address: 172.31.99.10
+    restart: unless-stopped
+
+networks:
+  backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.99.0/24
 
 volumes:
   gwarestrin-state:
