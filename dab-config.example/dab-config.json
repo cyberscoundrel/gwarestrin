@@ -18,7 +18,7 @@
       "permissions": [{ "role": "anonymous", "actions": [{ "action": "*" }] }]
     }
   },
-  "data-source-files": ["/etc/gwarestrin/dab/dab-config-otherdb.json"],
+  "data-source-files": ["/etc/dab/dab-config-otherdb.json"],
   "runtime": {
     "rest": { "enabled": false },
     "graphql": { "enabled": false },
