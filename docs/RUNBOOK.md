@@ -89,6 +89,38 @@ Sidecar ops: `docker compose logs dab`, `docker compose restart dab` after
 config edits; `dab validate --config /etc/dab/dab-config.json` inside the
 container checks configs. If it exits silently, rerun with `--LogLevel Debug` —
 default log level hides the real error.
+
+## 3b. neo4j + neo4j MCP sidecar
+
+neo4j itself runs from its own compose project in `~/neo4j-compose` (binds the
+pre-existing `~/neo4j/data` store by absolute path; `NEO4J_AUTH=none`,
+`NEO4J_PLUGINS=["apoc"]` — APOC core is required by the MCP schema tool).
+Browser at `http://<host>:7474`, bolt at 7687.
+
+The `neo4j-mcp` compose service (official `mcp/neo4j-cypher` image) serves
+streamable-HTTP MCP at `http://neo4j-mcp:8000/mcp/` on the backend subnet —
+no custom image, env-only config. Registered as:
+
+`PUT /api/mcp/neo4j` with `{"url":"http://neo4j-mcp:8000/mcp/","auth":false,"description":"Official neo4j cypher MCP server"}`
+(note the trailing slash, and `NEO4J_MCP_SERVER_ALLOWED_HOSTS` must include the
+sidecar names/IPs or requests are rejected as DNS-rebinding).
+
+Seed the homelab test graph (idempotent):
+
+```bash
+python3 - <<'EOF'
+import json, urllib.request
+c = open("neo4j/seed-homelab.cypher").read()
+p = json.dumps({"statements": [{"statement": c}]}).encode()
+r = urllib.request.Request("http://localhost:7474/db/neo4j/tx/commit", data=p,
+                           headers={"content-type": "application/json"})
+print(json.load(urllib.request.urlopen(r, timeout=30))["errors"])
+EOF
+```
+
+Tools: `neo4j_get_neo4j_schema` (APOC), `neo4j_read_neo4j_cypher`,
+`neo4j_write_neo4j_cypher` (write enabled by default; set
+`NEO4J_READ_ONLY=true` on the sidecar to lock down).
 - **Files**: `files` panel — upload/download/delete inside the agent workspace.
   `.pi/` is hidden and `.mcp.json` is read-only through the API (server-generated).
 - **Concurrency**: max 4 running agents (`GWARESTRIN_MAX_AGENTS`). Each running
