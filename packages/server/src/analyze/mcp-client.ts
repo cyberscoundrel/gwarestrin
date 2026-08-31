@@ -1,7 +1,11 @@
 /**
  * Minimal MCP streamable-HTTP client — just enough for the analysis agent's
  * single read tool. Handles: initialize (+ optional Mcp-Session-Id header),
- * notifications/initialized, tools/call, JSON and SSE-framed responses.
+ * notifications/initialized, tools/call.
+ *
+ * Streamable-HTTP servers answer SSE-framed responses on a stream that may
+ * stay open — never await full body completion; parse messages incrementally
+ * and resolve on the first payload matching the request id.
  */
 export class McpHttpClient {
   private sessionId: string | null = null;
@@ -10,7 +14,7 @@ export class McpHttpClient {
 
   constructor(private url: string) {}
 
-  private async post(body: Record<string, unknown>, expectJson = true): Promise<Record<string, unknown> | null> {
+  private async post(body: Record<string, unknown>, expectMessage = true): Promise<Record<string, unknown> | null> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
@@ -25,9 +29,51 @@ export class McpHttpClient {
     const sid = res.headers.get("mcp-session-id");
     if (sid) this.sessionId = sid;
     if (!res.ok) throw new Error(`mcp ${this.url} -> ${res.status}`);
-    if (!expectJson) return null;
-    const text = await res.text();
-    return parseMaybeSse(text);
+    if (!expectMessage) {
+      await res.body?.cancel().catch(() => {});
+      return null;
+    }
+    const ct = res.headers.get("content-type") ?? "";
+    if (ct.includes("application/json") && !ct.includes("event-stream")) {
+      return (await res.json()) as Record<string, unknown>;
+    }
+    return this.readSseMessage(res, typeof body.id === "number" ? body.id : undefined);
+  }
+
+  /** read SSE lines until a JSON payload with the wanted id arrives */
+  private async readSseMessage(res: Response, wantedId?: number): Promise<Record<string, unknown> | null> {
+    if (!res.body) return null;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          let msg: Record<string, unknown>;
+          try {
+            msg = JSON.parse(payload) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+          if (wantedId === undefined || msg.id === wantedId) {
+            await reader.cancel().catch(() => {});
+            return msg;
+          }
+        }
+      }
+    } catch (err) {
+      throw new Error(`mcp stream read failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return null;
   }
 
   async initialize(): Promise<void> {
@@ -63,29 +109,4 @@ export class McpHttpClient {
       .join("\n");
     return text;
   }
-}
-
-/** responses may be bare JSON or SSE (`event: message\ndata: {...}`) */
-function parseMaybeSse(text: string): Record<string, unknown> | null {
-  const trimmed = text.trim();
-  if (trimmed.startsWith("{")) {
-    try {
-      return JSON.parse(trimmed) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-  // SSE: collect data: payloads, take the last JSON one
-  let last: Record<string, unknown> | null = null;
-  for (const line of trimmed.split("\n")) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (!payload || payload === "[DONE]") continue;
-    try {
-      last = JSON.parse(payload) as Record<string, unknown>;
-    } catch {
-      /* keep scanning */
-    }
-  }
-  return last;
 }
