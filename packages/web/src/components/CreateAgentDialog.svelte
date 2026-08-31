@@ -1,28 +1,19 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { store } from "../lib/stores.svelte.js";
-  import { mcpApi, type McpServerDef } from "../lib/api.js";
+  import { getAdapter } from "../lib/rpc-agent-adapter.js";
 
   let { onclose } = $props<{ onclose: () => void }>();
 
+  let promptText = $state("");
   let name = $state("");
   let providerId = $state<string>("");
   let modelId = $state<string>("");
-  let mcpRegistry = $state<Record<string, McpServerDef>>({});
-  let mcpSelected = $state<string[]>([]);
-  let busy = $state(false);
+  let phase = $state<"input" | "analyzing">("input");
   let error = $state<string | null>(null);
 
   const provider = $derived(store.providers.find((p) => p.id === providerId) ?? null);
   const models = $derived(provider?.models ?? []);
-
-  onMount(async () => {
-    try {
-      mcpRegistry = await mcpApi.list();
-    } catch {
-      /* registry optional at create time */
-    }
-  });
 
   $effect(() => {
     if (!providerId && store.providers.length > 0) {
@@ -30,7 +21,6 @@
       providerId = def.id;
     }
   });
-
   $effect(() => {
     if (provider && models.length > 0 && !models.some((m) => m.id === modelId)) {
       const def = models.find((m) => m.id === store.defaultModel) ?? models[0]!;
@@ -38,119 +28,99 @@
     }
   });
 
-  function toggleMcp(n: string): void {
-    mcpSelected = mcpSelected.includes(n) ? mcpSelected.filter((x) => x !== n) : [...mcpSelected, n];
+  function deriveName(): string {
+    if (name.trim()) return name.trim();
+    const words = promptText.trim().split(/\s+/).slice(0, 5).join(" ");
+    return (words || "agent").slice(0, 32);
   }
 
-  async function create(): Promise<void> {
-    if (!name.trim()) {
-      error = "name required";
+  async function submit(): Promise<void> {
+    if (!promptText.trim()) {
+      error = "write a first prompt to start from";
       return;
     }
-    busy = true;
+    phase = "analyzing";
     error = null;
     try {
       const { api } = await import("../lib/api.js");
-      const agent = await api.createAgent({
-        name: name.trim(),
+      const res = await api.createAgent({
+        name: deriveName(),
         model: providerId && modelId ? { provider: providerId, modelId } : null,
-        ...(mcpSelected.length ? { mcpServers: mcpSelected } : {}),
+        firstPrompt: promptText.trim(),
       });
       await store.refreshAgents();
-      store.select(agent.id);
+      store.select(res.agent.id);
       onclose();
+      // hand the first prompt to the running agent; adapter queues until ws open
+      void getAdapter(res.agent.id).prompt(promptText.trim()).catch(() => {});
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-    } finally {
-      busy = false;
+      phase = "input";
     }
   }
 </script>
 
-<div class="fixed inset-0 z-50 bg-black/55" role="presentation" onclick={onclose}></div>
+<div class="fixed inset-0 z-50 bg-black/55" role="presentation" onclick={() => phase === "input" && onclose()}></div>
 <div
-  class="fixed top-1/2 left-1/2 z-51 grid min-w-88 -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl
-    border border-edge2 bg-panel2 p-5 pb-4"
+  class="fixed top-1/2 left-1/2 z-51 grid w-[min(560px,92vw)] -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl
+    border border-edge2 bg-panel2 p-5"
   role="dialog"
   aria-modal="true"
 >
   <h3 class="m-0 tracking-wide">new agent</h3>
 
-  <label class="grid gap-1 text-sm text-muted">
-    name
-    <input
-      class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-base text-fg outline-none focus:border-accent"
-      bind:value={name}
-      placeholder="e.g. researcher"
+  {#if phase === "input"}
+    <textarea
+      class="min-h-28 resize-y rounded-md border border-edge2 bg-bg px-3 py-2.5 text-base text-fg outline-none focus:border-accent"
+      placeholder="what should this agent work on first?"
+      bind:value={promptText}
       autofocus
-    />
-  </label>
+      onkeydown={(e) => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
+      }}
+    ></textarea>
 
-  <label class="grid gap-1 text-sm text-muted">
-    provider
-    <select
-      class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-fg"
-      bind:value={providerId}
-    >
-      {#each store.providers as p (p.id)}
-        <option value={p.id}>
-          {p.id}{p.degraded ? " (degraded)" : ""}{p.firstParty ? " ★" : ""}
-        </option>
-      {/each}
-    </select>
-  </label>
+    <div class="grid grid-cols-[1fr_auto] items-end gap-2">
+      <label class="grid gap-1 text-sm text-muted">
+        name <span class="text-xs">(optional)</span>
+        <input
+          class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-base text-fg outline-none focus:border-accent"
+          bind:value={name}
+          placeholder={deriveName()}
+        />
+      </label>
+      <label class="grid gap-1 text-sm text-muted">
+        model
+        <select class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-fg" bind:value={providerId}>
+          {#each store.providers as p (p.id)}
+            <option value={p.id}>{p.id}{p.degraded ? " (degraded)" : ""}</option>
+          {/each}
+        </select>
+      </label>
+    </div>
 
-  <label class="grid gap-1 text-sm text-muted">
-    model
-    <select
-      class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-fg disabled:opacity-60"
-      bind:value={modelId}
-      disabled={!provider || models.length === 0}
-    >
-      {#each models as m (m.id)}
-        <option value={m.id}>{m.name === m.id ? m.id : `${m.name} (${m.id})`}</option>
-      {/each}
-    </select>
-  </label>
+    {#if error}
+      <p class="m-0 text-sm text-err">{error}</p>
+    {/if}
 
-  {#if Object.keys(mcpRegistry).length > 0}
-    <fieldset class="m-0 grid gap-1 border-0 p-0 text-sm text-muted">
-      <legend class="sr-only">mcp servers</legend>
-      mcp servers
-      <div class="flex flex-wrap gap-2">
-        {#each Object.keys(mcpRegistry) as n (n)}
-          <label
-            class="flex cursor-pointer items-center gap-1.5 rounded-md border px-2 py-1 text-xs
-              {mcpSelected.includes(n) ? 'border-accent text-accent' : 'border-edge2 text-muted'}"
-          >
-            <input type="checkbox" class="hidden" checked={mcpSelected.includes(n)} onchange={() => toggleMcp(n)} />
-            {n}
-          </label>
-        {/each}
+    <div class="flex items-center justify-between gap-2">
+      <span class="text-xs text-muted">⌘/ctrl+enter to start</span>
+      <div class="flex gap-2">
+        <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-2 text-fg" onclick={onclose}>cancel</button>
+        <button
+          class="cursor-pointer rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
+          disabled={!promptText.trim()}
+          onclick={() => void submit()}
+        >
+          analyze &amp; start
+        </button>
       </div>
-    </fieldset>
+    </div>
+  {:else}
+    <div class="grid gap-2 py-6 text-center text-muted">
+      <div class="mx-auto h-5 w-5 animate-spin rounded-full border-2 border-edge2 border-t-accent"></div>
+      <p class="m-0">analyzing graph context for your prompt…</p>
+      <p class="m-0 text-xs">(usually a few seconds)</p>
+    </div>
   {/if}
-
-  {#if provider && provider.models.length === 0}
-    <p class="m-0 text-sm text-muted">no models configured for this provider</p>
-  {/if}
-  {#if error}
-    <p class="m-0 text-sm text-err">{error}</p>
-  {/if}
-
-  <div class="flex justify-end gap-2">
-    <button
-      class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-2 text-fg"
-      onclick={onclose}
-    >
-      cancel
-    </button>
-    <button
-      class="cursor-pointer rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
-      disabled={busy}
-      onclick={create}
-    >
-      {busy ? "creating…" : "create"}
-    </button>
-  </div>
 </div>

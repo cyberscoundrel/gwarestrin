@@ -6,6 +6,7 @@ import type { AgentRecord, AgentRuntimeSummary, PatchAgentInput } from "@gwarest
 import type { ServerConfig } from "../config.js";
 import type { McpRegistryStore } from "../mcp/registry-store.js";
 import type { ProviderRegistry } from "../providers/registry.js";
+import { buildGeneratedProviders } from "../providers/generate.js";
 import { scoped } from "../util/log.js";
 import { RpcAgent } from "./rpc-agent.js";
 import { PiProcess } from "./pi-process.js";
@@ -82,6 +83,22 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     throw new Error("cannot locate pi-mcp-adapter package (looked for " + rel + " upward)");
   }
 
+  /** default provider endpoint for server-side LLM calls (analysis agent) */
+  defaultLlmEndpoint(): { url: string; key: string; model: string } | null {
+    const gen = buildGeneratedProviders(this.registry);
+    const id = gen.defaultProvider;
+    const modelId = gen.defaultModel;
+    if (!id || !modelId) return null;
+    const def = gen.providers[id];
+    if (!def) return null;
+    return { url: `${def.baseUrl}/chat/completions`, key: this.registry.resolveKey(id) ?? "", model: modelId };
+  }
+
+  /** streamable-HTTP url of a registered MCP server (e.g. "neo4j") */
+  mcpServerUrl(name: string): string | undefined {
+    return this.mcpRegistry?.get(name)?.url;
+  }
+
   listSummaries(): AgentRuntimeSummary[] {
     return this.store.list().map((r) => this.running.get(r.id)?.summary() ?? { id: r.id, status: r.status });
   }
@@ -150,6 +167,8 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       "--no-context-files",
       "--session-dir", dirs.sessions,
       "-e", path.join(this.extensionsRoot, "provider-bridge", "index.js"),
+      // injects <home>/context-injection.md when present (no-op otherwise)
+      "-e", path.join(this.extensionsRoot, "graph-context", "index.ts"),
     ];
     if (record.gondolin.enabled !== false) {
       args.push("-e", path.join(this.extensionsRoot, "gondolin-vm", "index.ts"));

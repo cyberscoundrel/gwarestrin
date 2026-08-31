@@ -48,6 +48,12 @@ export interface CreateAgentInput {
   thinkingLevel?: ThinkingLevel | undefined;
   mcpServers?: string[];
   gondolin?: Partial<GondolinConfig>;
+  /**
+   * chat-first creation: run pre-session graph analysis on this prompt,
+   * inject the result as standing context, start the agent, and let the UI
+   * send it as the agent's first message
+   */
+  firstPrompt?: string | undefined;
 }
 
 export interface PatchAgentInput extends Partial<Omit<CreateAgentInput, "name">> {

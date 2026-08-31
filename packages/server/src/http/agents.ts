@@ -1,9 +1,17 @@
 import type { FastifyInstance } from "fastify";
+import { createReadStream } from "node:fs";
+import { readdir, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
 import type { CreateAgentInput, PatchAgentInput } from "@gwarestrin/shared";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { AgentManager } from "../agents/manager.js";
+import { dirsFor } from "../agents/scaffold.js";
+import { runAnalysisAgent } from "../analyze/analysis-agent.js";
 import type { ServerConfig } from "../config.js";
+import { scoped } from "../util/log.js";
+
+const log = scoped("agents-http");
 
 const createAgentSchema = Type.Object(
   {
@@ -14,6 +22,7 @@ const createAgentSchema = Type.Object(
     thinkingLevel: Type.Optional(Type.String()),
     mcpServers: Type.Optional(Type.Array(Type.String())),
     gondolin: Type.Optional(Type.Object({})),
+    firstPrompt: Type.Optional(Type.String({ maxLength: 8000 })),
   },
   { additionalProperties: false },
 );
@@ -35,8 +44,37 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
     if (!Value.Check(createAgentSchema, req.body)) {
       return reply.code(400).send({ error: "invalid create payload" });
     }
+    const input = req.body as CreateAgentInput;
     try {
-      const record = await manager.createAgent(req.body as CreateAgentInput);
+      const record = await manager.createAgent(input);
+
+      // chat-first creation: pre-session graph analysis → context injection → start
+      let analysis: "skipped" | "ok" | "failed" = "skipped";
+      if (input.firstPrompt) {
+        const llm = manager.defaultLlmEndpoint();
+        const mcpUrl = manager.mcpServerUrl("neo4j") ?? process.env.GWARESTRIN_NEO4J_MCP_URL ?? "http://neo4j-mcp:8000/mcp/";
+        if (llm) {
+          log.info(`running pre-session analysis for ${record.name}`);
+          const block = await runAnalysisAgent(input.firstPrompt, {
+            llmUrl: llm.url,
+            llmKey: llm.key,
+            model: llm.model,
+            mcpUrl,
+            timeoutMs: 90_000,
+          });
+          if (block) {
+            const dirs = dirsFor(config.stateDir, record);
+            await writeFile(path.join(dirs.home, "context-injection.md"), block + "\n", "utf8");
+            analysis = "ok";
+            log.info(`analysis injected for ${record.name} (${block.length} chars)`);
+          } else {
+            analysis = "failed";
+          }
+        }
+        const runtime = await manager.start(record.id);
+        return reply.code(201).send({ agent: record, runtime, analysis });
+      }
+
       return reply.code(201).send({ agent: record });
     } catch (err) {
       return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
@@ -117,5 +155,32 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
     if (!agent) return reply.code(409).send({ error: "agent not running" });
     const res = await agent.send("get_session_stats");
     return res;
+  });
+
+  /** download the agent's conversation trace (newest session jsonl) */
+  app.get("/api/agents/:id/export", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const record = manager.store.get(id);
+    if (!record) return reply.code(404).send({ error: "not found" });
+    const dirs = dirsFor(config.stateDir, record);
+    let file: string | null = record.sessionFile ?? null;
+    if (!file) {
+      // fall back to the newest session jsonl on disk
+      const entries = await readdir(dirs.sessions).catch(() => [] as string[]);
+      const jsonls = entries.filter((f) => f.endsWith(".jsonl"));
+      if (jsonls.length > 0) {
+        const withMtime = await Promise.all(
+          jsonls.map(async (f) => ({ f, m: (await stat(path.join(dirs.sessions, f))).mtimeMs })),
+        );
+        withMtime.sort((a, b) => b.m - a.m);
+        file = path.join(dirs.sessions, withMtime[0]!.f);
+      }
+    }
+    if (!file) return reply.code(404).send({ error: "no session trace yet" });
+    const safe = record.name.replace(/[^a-zA-Z0-9._-]+/g, "_");
+    return reply
+      .header("content-type", "application/jsonl")
+      .header("content-disposition", `attachment; filename="${safe}-trace.jsonl"`)
+      .send(createReadStream(file));
   });
 }

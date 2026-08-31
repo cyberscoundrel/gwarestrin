@@ -21,15 +21,18 @@ export const api = {
     name: string;
     model?: { provider: string; modelId: string } | null;
     mcpServers?: string[];
-  }): Promise<AgentWithRuntime> {
-    const r = await json<{ agent: AgentWithRuntime }>(
+    firstPrompt?: string;
+  }): Promise<{ agent: AgentWithRuntime; runtime?: AgentRuntimeSummary; analysis?: string }> {
+    return json(
       await fetch("/api/agents", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(input),
       }),
     );
-    return r.agent;
+  },
+  exportUrl(id: string): string {
+    return `/api/agents/${id}/export`;
   },
   async patchAgent(
     id: string,
