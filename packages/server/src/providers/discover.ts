@@ -39,7 +39,10 @@ function getBody(
 
 /** Probe an OpenAI-style GET /models endpoint. */
 export async function discoverModels(opts: DiscoverOptions): Promise<ModelView[]> {
-  const url = new URL(opts.path, opts.baseUrl.endsWith("/") ? opts.baseUrl : opts.baseUrl + "/").toString();
+  // append (NOT URL-resolve): a "/models" path against "https://host/api/v1"
+  // must yield "https://host/api/v1/models" — URL resolution would discard
+  // the /api/v1 base path and hit the site root instead.
+  const url = opts.baseUrl.replace(/\/+$/, "") + (opts.path.startsWith("/") ? opts.path : "/" + opts.path);
   const headers: Record<string, string> = { ...(opts.headers ?? {}) };
   if (opts.apiKey) headers.authorization = `Bearer ${opts.apiKey}`;
   const { status, body } = await getBody(url, headers, opts.timeoutMs ?? 10_000);
