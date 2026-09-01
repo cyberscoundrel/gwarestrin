@@ -20,6 +20,8 @@ class Store {
   providers = $state<import("@gwarestrin/shared").ProviderView[]>([]);
   defaultProvider = $state<string | null>(null);
   defaultModel = $state<string | null>(null);
+  /** last pi-mcp-adapter status payload per agent (replayed on ws connect) */
+  mcpStatus = new SvelteMap<string, Record<string, { status?: string; toolCount?: number; error?: string }>>();
   private runtime = new SvelteMap<string, AgentRuntimeSummary>();
   private unreadListeners = new Set<() => void>();
 
@@ -29,6 +31,11 @@ class Store {
       if (msg.kind === "agent_state") {
         this.runtime.set(msg.state.id, msg.state);
         this.syncAgentStatus(msg.state.id);
+      }
+      if (msg.kind === "event" && msg.event.type === "pi-mcp-adapter/status/v1") {
+        const servers = (msg.event as { servers?: Record<string, { status?: string; toolCount?: number; error?: string }> })
+          .servers;
+        if (servers && typeof servers === "object") this.mcpStatus.set(msg.agentId, servers);
       }
       if (msg.kind === "event" && msg.event.type !== "response") {
         this.bumpUnread(msg.agentId);

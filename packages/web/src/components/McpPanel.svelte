@@ -2,18 +2,17 @@
   import { onMount } from "svelte";
   import { api, mcpApi, type McpServerDef } from "../lib/api.js";
   import { store } from "../lib/stores.svelte.js";
-  import { ws } from "../lib/ws-client.js";
 
   let { agentId }: { agentId: string } = $props();
 
   const record = $derived(store.agents.find((a) => a.id === agentId));
+  // live per-server status comes via the store (ws replay + live events),
+  // so a freshly opened panel still shows dots for a long-running agent
+  const liveStatus = $derived(store.mcpStatus.get(agentId) ?? {});
 
   let registry = $state<Record<string, McpServerDef>>({});
   let error = $state<string | null>(null);
   let busy = $state(false);
-
-  // per-server live status from adapter events: name -> {status, toolCount}
-  let liveStatus = $state<Record<string, { status?: string; toolCount?: number; error?: string }>>({});
 
   // add/edit form state
   let editing = $state<string | null>(null); // name being edited, "" = new
@@ -36,13 +35,6 @@
 
   onMount(() => {
     void refresh();
-    return ws.onMessage((msg) => {
-      if (msg.kind !== "event" || msg.agentId !== agentId) return;
-      if (msg.event.type !== "pi-mcp-adapter/status/v1") return;
-      const servers = (msg.event as { servers?: Record<string, { status?: string; toolCount?: number; error?: string }> })
-        .servers;
-      if (servers && typeof servers === "object") liveStatus = servers;
-    });
   });
 
   function isEnabled(name: string): boolean {
