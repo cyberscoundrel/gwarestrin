@@ -127,7 +127,8 @@ Tools: `neo4j_get_neo4j_schema` (APOC), `neo4j_read_neo4j_cypher`,
 One OpenAI-compatible endpoint (chat + embeddings) in front of the local
 llama.cpp box and hosted providers. Runs as the `litellm` compose service
 (`ghcr.io/berriai/litellm:main-stable`), backend subnet `172.31.99.12`,
-published on `:4000` (LAN reach: `http://<host>:4000/v1`, key required).
+published as `4100:4000` (host :4000 is taken; LAN reach:
+`http://<host>:4100/v1`, key required; containers use `http://litellm:4000/v1`).
 
 Key convention: `LITELLM_MASTER_KEY` is **the same value as
 `LOCAL_INFERENCE_API_KEY`** (compose maps it directly). Existing clients keep

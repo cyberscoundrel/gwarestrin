@@ -114,7 +114,8 @@ services:
     image: ghcr.io/berriai/litellm:main-stable
     command: ["--config", "/app/config/litellm-config.yaml", "--port", "4000"]
     ports:
-      - "4000:4000"
+      # host 4000 is taken by an existing host service; gateway publishes on 4100
+      - "4100:4000"
     # public resolvers past WARP's DNS interception (openrouter.ai), same as gwarestrin
     dns:
       - 1.1.1.1
