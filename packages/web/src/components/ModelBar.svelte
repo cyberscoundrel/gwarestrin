@@ -153,7 +153,6 @@
     onclick={() => (openModel = !openModel)}
   >
     {effectiveModel ? modelDisplayName(effectiveModel.provider, effectiveModel.modelId, store.providers) : "no model"}
-    <span class="ml-1 text-muted">▾</span>
   </button>
 
   {#if thinkingLevels.length > 1 || currentThinking !== "off"}

@@ -58,7 +58,7 @@
       if (open) void loadForkable();
     }}
   >
-    session ▾
+    session
   </button>
 
   {#if open}

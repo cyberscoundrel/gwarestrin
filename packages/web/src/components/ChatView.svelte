@@ -39,13 +39,13 @@
       </div>
       <SessionPanel {agentId} />
       <button
-        class="select-compact {drawer === 'files' ? '!border-accent !text-accent' : ''}"
+        class="select-compact bg-none pr-2 {drawer === 'files' ? '!border-accent !text-accent' : ''}"
         onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
       >
         files
       </button>
       <button
-        class="select-compact {drawer === 'mcp' ? '!border-accent !text-accent' : ''}"
+        class="select-compact bg-none pr-2 {drawer === 'mcp' ? '!border-accent !text-accent' : ''}"
         onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
       >
         mcp
