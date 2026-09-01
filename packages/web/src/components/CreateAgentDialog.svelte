@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { store } from "../lib/stores.svelte.js";
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
+  import { modelDisplayName } from "../lib/format.js";
   import Dropdown from "./Dropdown.svelte";
 
   let { onclose } = $props<{ onclose: () => void }>();
@@ -103,15 +104,16 @@
       }}
     ></textarea>
 
-    <div class="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
-      <label class="grid gap-1 text-sm text-muted">
-        name <span class="text-xs">(optional)</span>
-        <input
-          class="w-full rounded-md border border-edge2 bg-bg px-2.5 py-2 text-base text-fg outline-none focus:border-accent"
-          bind:value={name}
-          placeholder={deriveName()}
-        />
-      </label>
+    <label class="grid gap-1 text-sm text-muted">
+      name <span class="text-xs">(optional)</span>
+      <input
+        class="w-full rounded-md border border-edge2 bg-bg px-2.5 py-2 text-base text-fg outline-none focus:border-accent"
+        bind:value={name}
+        placeholder={deriveName()}
+      />
+    </label>
+
+    <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
       <div class="grid gap-1 text-sm text-muted">
         provider
         <Dropdown
@@ -119,6 +121,16 @@
           options={store.providers.map((p) => ({ value: p.id, label: p.degraded ? `${p.id} (degraded)` : p.id }))}
           onchange={(id) => (providerId = id)}
         />
+      </div>
+      <div class="grid gap-1 text-sm text-muted">
+        model
+        <div class="[&_button]:w-full">
+          <Dropdown
+            value={modelId}
+            options={models.map((m) => ({ value: m.id, label: modelDisplayName(providerId, m.id, store.providers) }))}
+            onchange={(id) => (modelId = id)}
+          />
+        </div>
       </div>
     </div>
 

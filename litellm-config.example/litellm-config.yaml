@@ -19,14 +19,9 @@ model_list:
       api_base: http://100.96.0.9:8080/v1
       api_key: os.environ/LITELLM_MASTER_KEY
 
-  # friendly alias for manual/API use, same backend
-  - model_name: qwen3.8-27b
-    litellm_params:
-      model: openai/Qwen3.8-27B-UD-Q8_K_XL.gguf
-      api_base: http://100.96.0.9:8080/v1
-      api_key: os.environ/LITELLM_MASTER_KEY
-
-  # hosted embeddings via OpenRouter (sentence-transformers/all-MiniLM-L6-v2, 384-dim)
+  # hosted embeddings via OpenRouter. CONVENTION: embedding models MUST be
+  # aliased `embed-*` — gwarestrin's autoDiscover filters `embed-*` out of
+  # chat model pickers (LiteLLM's /models carries no modality metadata).
   - model_name: embed-minilm
     litellm_params:
       model: openrouter/sentence-transformers/all-minilm-l6-v2

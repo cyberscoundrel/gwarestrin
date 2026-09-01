@@ -138,8 +138,14 @@ carry the same value. `OPENROUTER_API_KEY` must also be in `.env` (used by
 
 Config: `~/gwarestrin/litellm-config/litellm-config.yaml` (host-generated from
 `litellm-config.example/`, 600 perms, gitignored). Model aliases so far:
-- `/media/cyber/.../Qwen3.8-27B-UD-Q8_K_XL.gguf` + `qwen3.8-27b` → llama.cpp
+- `/media/cyber/.../Qwen3.8-27B-UD-Q8_K_XL.gguf` → llama.cpp
 - `embed-minilm` → `openrouter/sentence-transformers/all-minilm-l6-v2` (384-dim)
+
+Naming conventions the server relies on:
+- **Embedding models must be aliased `embed-*`** — LiteLLM's `/models` carries
+  no modality metadata, so autoDiscover filters `embed-*` out of every chat
+  model picker (create modal, ModelBar). Chat aliases should NOT start with
+  `embed-` or they'll vanish from selection.
 
 `providers.json` `local-inference.baseUrl` = `http://litellm:4000/v1`
 (resolved via the `litellm:172.31.99.12` extra_hosts entry — the container's
@@ -161,7 +167,9 @@ curl -s http://172.31.99.12:4000/v1/embeddings -H "Authorization: Bearer $K" \
 
 Adding a model = one `model_list` entry in the config (`docker compose restart
 litellm` to apply; config is volume-mounted, no rebuild) + optional
-`providers.json` entry for agent-visible models.
+`providers.json` entry for agent-visible models. Chat models appear in the
+create modal + ModelBar automatically on the next agent start (autoDiscover);
+prefix embedding models `embed-` per the convention above.
 
 - **Files**: `files` panel — upload/download/delete inside the agent workspace.
   `.pi/` is hidden and `.mcp.json` is read-only through the API (server-generated).
