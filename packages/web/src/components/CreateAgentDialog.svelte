@@ -93,7 +93,7 @@
 
   {#if phase === "input"}
     <textarea
-      class="min-h-28 resize-y rounded-md border border-edge2 bg-bg px-3 py-2.5 text-base text-fg outline-none focus:border-accent"
+      class="min-h-28 w-full resize-y rounded-md border border-edge2 bg-bg px-3 py-2.5 text-base text-fg outline-none focus:border-accent"
       placeholder="what should this agent work on first?"
       bind:value={promptText}
       autofocus
@@ -102,18 +102,18 @@
       }}
     ></textarea>
 
-    <div class="grid grid-cols-[1fr_auto] items-end gap-2">
+    <div class="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
       <label class="grid gap-1 text-sm text-muted">
         name <span class="text-xs">(optional)</span>
         <input
-          class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-base text-fg outline-none focus:border-accent"
+          class="w-full rounded-md border border-edge2 bg-bg px-2.5 py-2 text-base text-fg outline-none focus:border-accent"
           bind:value={name}
           placeholder={deriveName()}
         />
       </label>
       <label class="grid gap-1 text-sm text-muted">
         provider
-        <select class="select" bind:value={providerId}>
+        <select class="select w-full sm:w-auto" bind:value={providerId}>
           {#each store.providers as p (p.id)}
             <option value={p.id}>{p.id}{p.degraded ? " (degraded)" : ""}</option>
           {/each}
