@@ -11,26 +11,54 @@
           "id": "glm-4.7",
           "name": "GLM 4.7",
           "reasoning": true,
-          "input": ["text", "image"],
+          "input": [
+            "text",
+            "image"
+          ],
           "contextWindow": 200000,
           "maxTokens": 32768,
-          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          }
         }
-      ]
+      ],
+      "tier": "cloud"
     },
     "homelab-vllm": {
       "type": "openai-completions",
       "baseUrl": "http://100.96.0.11:8000/v1",
       "apiKey": "dummy",
       "description": "local inference box (vLLM)",
-      "autoDiscover": { "enabled": true, "path": "/models" }
+      "autoDiscover": {
+        "enabled": true,
+        "path": "/models"
+      },
+      "tier": "local"
     },
     "rented-cluster": {
       "type": "openai-completions",
       "baseUrl": "http://10.1.2.3:8000/v1",
       "apiKeyEnv": "CLUSTER_API_KEY",
       "description": "private rented inference cluster",
-      "autoDiscover": { "enabled": true, "path": "/models" }
+      "autoDiscover": {
+        "enabled": true,
+        "path": "/models"
+      },
+      "tier": "cloud"
+    },
+    "openrouter": {
+      "type": "openai-completions",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "autoDiscover": {
+        "enabled": true,
+        "path": "/models"
+      },
+      "tier": "cloud",
+      "description": "OpenRouter hosted catalog"
     }
   },
   "defaultProvider": "zai-glm",

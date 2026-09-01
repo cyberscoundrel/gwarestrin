@@ -29,9 +29,10 @@ export async function discoverModels(opts: DiscoverOptions): Promise<ModelView[]
     if (!Array.isArray(body.data)) throw new Error("response missing data[]");
     return body.data
       .filter((m) => typeof m.id === "string" && m.id.length > 0)
-      // gateway convention: embedding models are aliased `embed-*` and are not
-      // chat-selectable (LiteLLM's /models can't mark modes, so filter by name)
-      .filter((m) => !/^embed-/i.test(m.id))
+      // gateway/catalog convention: embedding models are never chat-selectable.
+      // LiteLLM aliases use the `embed-*` prefix; hosted catalogs (openrouter)
+      // carry "embedding"/"embed" in the id itself.
+      .filter((m) => !/embed/i.test(m.id))
       .map((m) => ({
         id: m.id,
         name: m.id,

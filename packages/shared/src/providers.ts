@@ -48,6 +48,8 @@ export const providerDefSchema = Type.Object(
     autoDiscover: Type.Optional(autoDiscoverSchema),
     description: Type.Optional(Type.String()),
     isDefault: Type.Optional(Type.Boolean()),
+    /** presentation grouping: "local" (self-hosted) vs "cloud" (hosted api); default cloud */
+    tier: Type.Optional(Type.Union([Type.Literal("local"), Type.Literal("cloud")])),
   },
   { additionalProperties: false },
 );
@@ -76,6 +78,8 @@ export interface ProviderView {
   degradedReason?: string | undefined;
   autoDiscover: boolean;
   firstParty: boolean;
+  /** "local" (self-hosted) vs "cloud" (hosted api); defaults to cloud */
+  tier: "local" | "cloud";
   models: ModelView[];
 }
 

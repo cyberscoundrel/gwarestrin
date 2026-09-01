@@ -9,6 +9,7 @@
 
   let promptText = $state("");
   let name = $state("");
+  let tier = $state<"local" | "cloud">("local");
   let providerId = $state<string>("");
   let modelId = $state<string>("");
   let phase = $state<"input" | "analyzing">("input");
@@ -16,6 +17,9 @@
 
   const provider = $derived(store.providers.find((p) => p.id === providerId) ?? null);
   const models = $derived(provider?.models ?? []);
+  const tiers = $derived(
+    [...new Set(store.providers.map((p) => p.tier))].sort((a, b) => (a === "local" ? -1 : b === "local" ? 1 : 0)),
+  );
 
   $effect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -27,8 +31,11 @@
 
   $effect(() => {
     if (!providerId && store.providers.length > 0) {
-      const def = store.providers.find((p) => p.id === store.defaultProvider) ?? store.providers[0]!;
+      // prefer the default provider within the selected tier
+      const inTier = store.providers.filter((p) => p.tier === tier);
+      const def = inTier.find((p) => p.id === store.defaultProvider) ?? inTier[0] ?? store.providers[0]!;
       providerId = def.id;
+      tier = def.tier;
     }
   });
   $effect(() => {
@@ -113,12 +120,26 @@
       />
     </label>
 
-    <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+    <div class="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      <div class="grid gap-1 text-sm text-muted">
+        models
+        <Dropdown
+          value={tier}
+          options={tiers.map((t) => ({ value: t, label: t }))}
+          onchange={(t) => {
+            tier = t as "local" | "cloud";
+            const first = store.providers.find((p) => p.tier === tier);
+            if (first) providerId = first.id;
+          }}
+        />
+      </div>
       <div class="grid gap-1 text-sm text-muted">
         provider
         <Dropdown
           value={providerId}
-          options={store.providers.map((p) => ({ value: p.id, label: p.degraded ? `${p.id} (degraded)` : p.id }))}
+          options={store.providers
+            .filter((p) => p.tier === tier)
+            .map((p) => ({ value: p.id, label: p.degraded ? `${p.id} (degraded)` : p.id }))}
           onchange={(id) => (providerId = id)}
         />
       </div>

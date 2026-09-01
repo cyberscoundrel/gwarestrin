@@ -146,6 +146,7 @@ export class ProviderRegistry {
         degraded: false,
         autoDiscover: def.autoDiscover?.enabled === true,
         firstParty: Object.hasOwn(FIRST_PARTY, id) && !file?.providers[id],
+        tier: def.tier ?? "cloud",
         models: Object.hasOwn(FIRST_PARTY_MODELS, id) && this.defs.get(id)?.apiKeyEnv === FIRST_PARTY[id]?.keyEnv
           ? FIRST_PARTY_MODELS[id]!
           : staticToView(def.models),

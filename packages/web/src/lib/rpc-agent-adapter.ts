@@ -140,14 +140,17 @@ export class RpcAgentAdapter implements Agent {
   async setModel(provider: string, modelId: string): Promise<void> {
     const res = (await ws.rpc(this.agentId, "set_model", { provider, modelId })) as {
       success?: boolean;
-      data?: { model?: ModelInfo };
+      data?: { model?: ModelInfo } | ModelInfo;
       error?: string;
     };
-    if (res.success && res.data?.model) {
-      this.state = { ...this.state, model: res.data.model };
+    if (!res.success) throw new Error(res.error ?? "set_model failed");
+    // pi nests the model either under data.model or directly on data depending
+    // on command shape — accept both, and stamp the requested provider (pi's
+    // response omits it for custom-registered providers)
+    const raw = res.data && "model" in res.data ? (res.data.model as ModelInfo) : (res.data as ModelInfo | undefined);
+    if (raw?.id) {
+      this.state = { ...this.state, model: { ...raw, provider } };
       this.emit({ type: "model_changed" as never });
-    } else if (!res.success) {
-      throw new Error(res.error ?? "set_model failed");
     }
   }
 

@@ -18,12 +18,12 @@
   let currentThinking = $state<string>("off");
   let openModel = $state(false);
   let busy = $state(false);
+  let error = $state<string | null>(null);
   let stats = $state<{ context?: { tokens?: number | null; percent?: number | null } } | null>(null);
 
   // the adapter's state is not reactive (plain class field), so we mirror the
   // bits we display into local state on adapter events
   function syncFromAdapter(): void {
-    console.debug("[mbar] syncFromAdapter", JSON.stringify(adapter.state.model)?.slice(0, 80));
     if (adapter.state.model) {
       currentModel = { provider: adapter.state.model.provider, modelId: adapter.state.model.id };
     }
@@ -32,7 +32,6 @@
 
   $effect(() => {
     // record is the declared model; don't clobber a live adapter-provided one
-    console.debug("[mbar] effectA record=", JSON.stringify(record?.model)?.slice(0, 80), "adapterState=", JSON.stringify(adapter.state.model)?.slice(0, 60));
     if (!adapter.state.model) currentModel = record?.model ?? null;
   });
 
@@ -62,7 +61,6 @@
   $effect(() => {
     void agentId;
     stats = null;
-    console.debug("[mbar] perAgentEffect record=", JSON.stringify(record?.model)?.slice(0, 80));
     currentModel = record?.model ?? null;
     currentThinking = "off";
     void refreshAll();
@@ -104,6 +102,7 @@
   async function chooseModel(provider: string, modelId: string): Promise<void> {
     openModel = false;
     busy = true;
+    error = null;
     try {
       await adapter.setModel(provider, modelId);
       const { api } = await import("../lib/api.js");
@@ -111,8 +110,8 @@
       await api.patchAgent(agentId, { model: { provider, modelId } });
       await store.refreshAgents();
       await refresh();
-    } catch {
-      /* surfaced via agent error state */
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;
     }
@@ -129,13 +128,17 @@
   }
 
   const grouped = $derived.by(() => {
-    const byProvider = new Map<string, ModelInfo[]>();
+    // tier grouping (local first) — cloud providers collapse into one group
+    const tierOf = (providerId: string): "local" | "cloud" =>
+      store.providers.find((p) => p.id === providerId)?.tier ?? "cloud";
+    const byTier = new Map<string, ModelInfo[]>();
     for (const m of models) {
-      const list = byProvider.get(m.provider) ?? [];
+      const tier = tierOf(m.provider);
+      const list = byTier.get(tier) ?? [];
       list.push(m);
-      byProvider.set(m.provider, list);
+      byTier.set(tier, list);
     }
-    return [...byProvider.entries()];
+    return [...byTier.entries()].sort(([a], [b]) => (a === "local" ? -1 : b === "local" ? 1 : 0));
   });
 
   const pct = $derived(stats?.context?.percent ?? null);
@@ -169,6 +172,10 @@
     />
   {/if}
 
+  {#if error}
+    <span class="max-w-48 truncate text-xs text-err" title={error}>{error}</span>
+  {/if}
+
   {#if pct !== null && tok !== null}
     <span class="ml-auto whitespace-nowrap text-xs {pct > 80 ? 'text-warn' : 'text-muted'}" title="context window usage">
       ctx {Math.round(pct)}% ({(tok / 1000).toFixed(1)}k)
@@ -183,8 +190,8 @@
     {#if models.length === 0}
       <p class="px-3 py-2 text-sm text-muted">no models (agent not running?)</p>
     {:else}
-      {#each grouped as [provider, list]}
-        <div class="px-3 pt-2 text-xs font-semibold tracking-wide text-muted">{provider}</div>
+      {#each grouped as [tier, list]}
+        <div class="px-3 pt-2 text-xs font-semibold tracking-wide text-muted">{tier === "local" ? "local" : "cloud"}</div>
         {#each list as m (m.id)}
           <button
             class="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-[#1a1d26]
