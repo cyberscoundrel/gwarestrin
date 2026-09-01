@@ -9,6 +9,7 @@ export interface RpcAgentEvents {
   event: [event: Record<string, unknown> & { type: string }];
   uiRequest: [request: Record<string, unknown> & { type: string }];
   state: [state: AgentRuntimeSummary];
+  sessionFile: [file: string];
   closed: [];
 }
 
@@ -75,8 +76,20 @@ export class RpcAgent extends EventEmitter<RpcAgentEvents> {
     return this.proc.lastStderr;
   }
 
-  send(type: string, payload: Record<string, unknown> = {}, timeoutMs?: number): Promise<RpcResponse> {
-    return this.proc.send(type, payload, timeoutMs);
+  async send(type: string, payload: Record<string, unknown> = {}, timeoutMs?: number): Promise<RpcResponse> {
+    const res = await this.proc.send(type, payload, timeoutMs);
+    // session-replacing commands move the transcript to a new file; re-pull so
+    // the manager persists it and the next restart resumes the right session
+    if (res.success && (type === "new_session" || type === "fork" || type === "clone")) {
+      try {
+        const st = await this.proc.send("get_state", {}, 10_000);
+        const file = (st.data as { sessionFile?: string } | undefined)?.sessionFile;
+        if (file) this.emit("sessionFile", file);
+      } catch {
+        /* best-effort */
+      }
+    }
+    return res;
   }
 
   /** browser-originated ui_response goes straight to stdin */

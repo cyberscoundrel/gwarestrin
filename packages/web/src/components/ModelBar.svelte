@@ -5,6 +5,7 @@
   import { ws } from "../lib/ws-client.js";
   import { modelDisplayName } from "../lib/format.js";
   import type { ModelInfo } from "../lib/agent-types.js";
+  import Dropdown from "./Dropdown.svelte";
 
   let { agentId }: { agentId: string } = $props();
 
@@ -145,7 +146,7 @@
   );
 </script>
 
-<div class="flex flex-wrap items-center gap-2 py-1.5 text-sm modelbar-root">
+<div class="modelbar-root flex flex-1 flex-wrap items-center gap-2 py-1.5 text-sm">
   <button
     class="select-compact max-w-64 truncate"
     title={effectiveModel ? `${effectiveModel.provider}/${effectiveModel.modelId}` : undefined}
@@ -156,17 +157,13 @@
   </button>
 
   {#if thinkingLevels.length > 1 || currentThinking !== "off"}
-    <select
-      class="select-compact"
-      disabled={busy}
+    <Dropdown
+      compact
       value={currentThinking}
-      onchange={(e) => void chooseThinking(e.currentTarget.value)}
-      title="thinking level"
-    >
-      {#each thinkingLevels as l}
-        <option value={l}>{l === "off" ? "no thinking" : `think ${l}`}</option>
-      {/each}
-    </select>
+      options={thinkingLevels.map((l) => ({ value: l, label: l === "off" ? "no thinking" : `think ${l}` }))}
+      onchange={(l) => void chooseThinking(l)}
+      disabled={busy}
+    />
   {/if}
 
   {#if pct !== null && tok !== null}

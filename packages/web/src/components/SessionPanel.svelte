@@ -34,6 +34,10 @@
       const res = (await ws.rpc(agentId, type, payload)) as { success?: boolean; error?: string };
       if (res.success === false) throw new Error(res.error ?? `${type} failed`);
       open = false;
+      // session-replacing commands: re-pull state so the cleared transcript shows
+      if (type === "new_session" || type === "fork" || type === "clone") {
+        await getAdapter(agentId).refreshSession();
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -43,8 +47,6 @@
 
   async function fork(entryId: string): Promise<void> {
     await run("fork", { entryId });
-    // adapter bootstraps fresh session state after fork via its own events
-    void getAdapter(agentId);
     await store.refreshAgents();
   }
 </script>

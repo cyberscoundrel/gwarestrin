@@ -171,6 +171,15 @@ export class RpcAgentAdapter implements Agent {
     return res.data?.levels ?? ["off"];
   }
 
+  /** re-pull state+messages after the session was replaced server-side
+   *  (new_session / fork / clone) — pi does not announce this over events */
+  async refreshSession(): Promise<void> {
+    this.partial = null;
+    this.blocks = [];
+    this.state = { ...emptyState(), messages: [] };
+    await this.bootstrap();
+  }
+
   private async bootstrap(): Promise<void> {
     try {
       const results = (await Promise.all([

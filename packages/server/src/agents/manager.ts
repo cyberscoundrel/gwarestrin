@@ -213,6 +213,10 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     this.running.set(id, agent);
 
     agent.on("event", (event) => this.emit("agentEvent", { agentId: id, event }));
+    agent.on("sessionFile", (file) => {
+      this.store.setSessionFile(id, file);
+      log.info(`agent ${record.name} session file -> ${path.basename(file)}`);
+    });
     agent.on("uiRequest", (request) => {
       // gondolin-vm reports lifecycle via setStatus("gondolin", ...)
       if (request.method === "setStatus" && request.statusKey === "gondolin") {

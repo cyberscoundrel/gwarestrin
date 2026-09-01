@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { store } from "../lib/stores.svelte.js";
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
+  import Dropdown from "./Dropdown.svelte";
 
   let { onclose } = $props<{ onclose: () => void }>();
 
@@ -111,14 +112,14 @@
           placeholder={deriveName()}
         />
       </label>
-      <label class="grid gap-1 text-sm text-muted">
+      <div class="grid gap-1 text-sm text-muted">
         provider
-        <select class="select w-full sm:w-auto" bind:value={providerId}>
-          {#each store.providers as p (p.id)}
-            <option value={p.id}>{p.id}{p.degraded ? " (degraded)" : ""}</option>
-          {/each}
-        </select>
-      </label>
+        <Dropdown
+          value={providerId}
+          options={store.providers.map((p) => ({ value: p.id, label: p.degraded ? `${p.id} (degraded)` : p.id }))}
+          onchange={(id) => (providerId = id)}
+        />
+      </div>
     </div>
 
     {#if error}

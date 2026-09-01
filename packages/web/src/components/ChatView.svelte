@@ -34,22 +34,26 @@
 <section class="flex min-h-0 flex-1 flex-col">
   {#if runtime?.status === "running" || runtime?.status === "starting"}
     <div class="relative flex flex-wrap items-center gap-2 border-b border-edge bg-panel px-2">
-      <div class="relative">
-        <ModelBar {agentId} />
+      <div class="flex min-w-0 flex-1 items-center">
+        <div class="relative">
+          <ModelBar {agentId} />
+        </div>
       </div>
-      <SessionPanel {agentId} />
-      <button
-        class="select-compact bg-none pr-2 {drawer === 'files' ? '!border-accent !text-accent' : ''}"
-        onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
-      >
-        files
-      </button>
-      <button
-        class="select-compact bg-none pr-2 {drawer === 'mcp' ? '!border-accent !text-accent' : ''}"
-        onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
-      >
-        mcp
-      </button>
+      <div class="flex flex-wrap items-center gap-2">
+        <SessionPanel {agentId} />
+        <button
+          class="select-compact bg-none pr-2 {drawer === 'files' ? '!border-accent !text-accent' : ''}"
+          onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
+        >
+          files
+        </button>
+        <button
+          class="select-compact bg-none pr-2 {drawer === 'mcp' ? '!border-accent !text-accent' : ''}"
+          onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
+        >
+          mcp
+        </button>
+      </div>
     </div>
 
     <div class="flex min-h-0 flex-1">
