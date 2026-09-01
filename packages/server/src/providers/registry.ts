@@ -160,14 +160,23 @@ export class ProviderRegistry {
 
     await this.discoverAll();
 
-    // WARP routing may still be settling in the first minutes after boot
-    // (nft assert timer re-applies each minute); re-probe so autoDiscover
-    // providers recover without a manual restart. discoverAll is idempotent
-    // (discovered ids are merged, not duplicated).
-    for (const delay of [45_000, 120_000, 300_000]) {
-      const t = setTimeout(() => void this.discoverAll(), delay);
-      t.unref?.();
-    }
+    // WARP routing may take several minutes to settle after boot (nft assert
+    // timer re-applies each minute); re-probe degraded autoDiscover providers
+    // periodically until they recover. discoverAll is idempotent (discovered
+    // ids are merged, not duplicated).
+    this.scheduleRediscovery();
+  }
+
+  /** re-probe every 90s (up to ~12min) while an autoDiscover provider is degraded */
+  private scheduleRediscovery(attemptsLeft = 8): void {
+    if (attemptsLeft <= 0) return;
+    const t = setTimeout(() => {
+      const pending = this.list().filter((p) => p.autoDiscover && p.degraded);
+      if (pending.length === 0) return;
+      log.info(`re-probing degraded autoDiscover providers: ${pending.map((p) => p.id).join(", ")}`);
+      void this.discoverAll().then(() => this.scheduleRediscovery(attemptsLeft - 1));
+    }, 90_000);
+    t.unref?.();
   }
 
   /** probe autoDiscover endpoints; merge over static (static wins on id) */
