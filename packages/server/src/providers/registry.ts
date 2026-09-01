@@ -167,23 +167,33 @@ export class ProviderRegistry {
     await Promise.all(
       targets.map(async (p) => {
         const def = this.defs.get(p.id)!;
-        try {
-          const models = await discoverModels({
-            baseUrl: def.baseUrl,
-            path: def.autoDiscover?.path ?? "/models",
-            ...(this.resolveKey(p.id) !== undefined ? { apiKey: this.resolveKey(p.id) } : {}),
-            ...(def.headers !== undefined ? { headers: def.headers } : {}),
-          });
-          const staticIds = new Set(p.models.map((m) => m.id));
-          const discovered = models.filter((m) => !staticIds.has(m.id));
-          p.models = [...p.models, ...discovered];
-          p.degraded = false;
-          delete p.degradedReason;
-          log.info(`discovered ${discovered.length} models on ${p.id} (total ${p.models.length})`);
-        } catch (err) {
-          p.degraded = true;
-          p.degradedReason = err instanceof Error ? err.message : String(err);
-          log.warn(`discovery failed for ${p.id}: ${p.degradedReason}`);
+        const attempts = 3;
+        for (let i = 0; i < attempts; i++) {
+          try {
+            const models = await discoverModels({
+              baseUrl: def.baseUrl,
+              path: def.autoDiscover?.path ?? "/models",
+              ...(this.resolveKey(p.id) !== undefined ? { apiKey: this.resolveKey(p.id) } : {}),
+              ...(def.headers !== undefined ? { headers: def.headers } : {}),
+            });
+            const staticIds = new Set(p.models.map((m) => m.id));
+            const discovered = models.filter((m) => !staticIds.has(m.id));
+            p.models = [...p.models, ...discovered];
+            p.degraded = false;
+            delete p.degradedReason;
+            log.info(`discovered ${discovered.length} models on ${p.id} (total ${p.models.length})`);
+            return;
+          } catch (err) {
+            // transient network/WARP flaps at boot are common; retry before degrading
+            if (i < attempts - 1) {
+              log.warn(`discovery failed for ${p.id} (attempt ${i + 1}/${attempts}): ${String(err)}; retrying`);
+              await new Promise((r) => setTimeout(r, 3000));
+              continue;
+            }
+            p.degraded = true;
+            p.degradedReason = err instanceof Error ? err.message : String(err);
+            log.warn(`discovery failed for ${p.id}: ${p.degradedReason}`);
+          }
         }
       }),
     );
