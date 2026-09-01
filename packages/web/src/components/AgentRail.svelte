@@ -46,7 +46,7 @@
           <span class="h-2 w-2 rounded-full {statusColor(a.status)}"></span>
           <span class="truncate pr-4">{a.name}</span>
           {#if a.unread > 0 && a.id !== store.selectedId}
-            <span class="rounded-full bg-accent px-1.5 text-[0.7rem] font-bold text-[#0b0c10]">
+            <span class="rounded-full bg-accent px-1.5 text-[0.7rem] font-bold text-[#0b0c10] group-hover:hidden">
               {a.unread > 99 ? "99+" : a.unread}
             </span>
           {/if}

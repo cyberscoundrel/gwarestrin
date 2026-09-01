@@ -16,6 +16,14 @@
   const models = $derived(provider?.models ?? []);
 
   $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && phase === "input") onclose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
+
+  $effect(() => {
     if (!providerId && store.providers.length > 0) {
       const def = store.providers.find((p) => p.id === store.defaultProvider) ?? store.providers[0]!;
       providerId = def.id;
@@ -30,8 +38,17 @@
 
   function deriveName(): string {
     if (name.trim()) return name.trim();
-    const words = promptText.trim().split(/\s+/).slice(0, 5).join(" ");
-    return (words || "agent").slice(0, 32);
+    // first few words, cut at a word boundary rather than mid-word
+    const parts = promptText.trim().split(/\s+/).filter(Boolean);
+    const out: string[] = [];
+    let len = 0;
+    for (const w of parts) {
+      const add = w.length + (out.length ? 1 : 0);
+      if (len + add > 32) break;
+      out.push(w);
+      len += add;
+    }
+    return out.join(" ") || "agent";
   }
 
   async function submit(): Promise<void> {
@@ -54,7 +71,12 @@
       // hand the first prompt to the running agent; adapter queues until ws open
       void getAdapter(res.agent.id).prompt(promptText.trim()).catch(() => {});
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error =
+        e instanceof TypeError && /fetch/i.test(e.message)
+          ? "couldn't reach the server — check the connection and try again"
+          : e instanceof Error
+            ? e.message
+            : String(e);
       phase = "input";
     }
   }
@@ -90,7 +112,7 @@
         />
       </label>
       <label class="grid gap-1 text-sm text-muted">
-        model
+        provider
         <select class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-fg" bind:value={providerId}>
           {#each store.providers as p (p.id)}
             <option value={p.id}>{p.id}{p.degraded ? " (degraded)" : ""}</option>
@@ -117,10 +139,10 @@
       </div>
     </div>
   {:else}
-    <div class="grid gap-2 py-6 text-center text-muted">
-      <div class="mx-auto h-5 w-5 animate-spin rounded-full border-2 border-edge2 border-t-accent"></div>
+    <div class="grid gap-3 py-6 text-center text-muted">
+      <div class="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-edge2 border-t-accent"></div>
       <p class="m-0">analyzing graph context for your prompt…</p>
-      <p class="m-0 text-xs">(usually a few seconds)</p>
+      <p class="m-0 text-xs">(queries the homelab knowledge graph — can take up to a minute)</p>
     </div>
   {/if}
 </div>

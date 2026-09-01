@@ -104,7 +104,8 @@ describe("integration: pi agent over mock provider", { timeout: 120_000 }, () =>
 
   it("boots pi, registers mock provider, drives a prompt to completion", async () => {
     const record = await manager.createAgent({ name: "integration" });
-    expect(record.model).toBeNull();
+    // unset model now defaults to the registry default provider/model
+    expect(record.model).toEqual({ provider: "mock", modelId: "mock-1" });
 
     const summary = await manager.start(record.id);
     expect(summary.status).toBe("running");

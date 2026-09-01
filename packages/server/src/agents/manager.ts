@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentRecord, AgentRuntimeSummary, PatchAgentInput } from "@gwarestrin/shared";
+import type { AgentRecord, AgentRuntimeSummary, CreateAgentInput, PatchAgentInput } from "@gwarestrin/shared";
 import type { ServerConfig } from "../config.js";
 import type { McpRegistryStore } from "../mcp/registry-store.js";
 import type { ProviderRegistry } from "../providers/registry.js";
@@ -45,6 +45,8 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   private mcpRegistry: McpRegistryStore | undefined;
   private running = new Map<string, RpcAgent>();
   private restartBudget = new Map<string, number>();
+  /** last pi-mcp-adapter status event per agent, replayed to new ws clients */
+  private mcpStatus = new Map<string, Record<string, unknown> & { type: string }>();
   private extensionsRoot: string;
 
   constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore) {
@@ -99,6 +101,23 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     return this.mcpRegistry?.get(name)?.url;
   }
 
+  /** default model for new agents (server default provider/model) */
+  defaultModel(): { provider: string; modelId: string } | null {
+    const gen = buildGeneratedProviders(this.registry);
+    if (!gen.defaultProvider || !gen.defaultModel) return null;
+    return { provider: gen.defaultProvider, modelId: gen.defaultModel };
+  }
+
+  /** registry server names — default MCP enablement for new agents */
+  defaultMcpServers(): string[] {
+    return this.mcpRegistry ? Object.keys(this.mcpRegistry.list()) : [];
+  }
+
+  /** last-known pi-mcp-adapter status events, for replay to new ws clients */
+  mcpStatusSnapshots(): Array<{ agentId: string; event: Record<string, unknown> & { type: string } }> {
+    return [...this.mcpStatus].map(([agentId, event]) => ({ agentId, event }));
+  }
+
   listSummaries(): AgentRuntimeSummary[] {
     return this.store.list().map((r) => this.running.get(r.id)?.summary() ?? { id: r.id, status: r.status });
   }
@@ -116,7 +135,15 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   }
 
   async createAgent(input: Parameters<AgentStore["create"]>[0]): Promise<AgentRecord> {
-    const record = this.store.create(input);
+    // fill unset fields from server defaults so UI/API-created agents are
+    // consistent with scripted ones (model, MCP enablement)
+    const defaults: CreateAgentInput = { ...input };
+    if (!defaults.model) {
+      const m = this.defaultModel();
+      if (m) defaults.model = m;
+    }
+    if (!defaults.mcpServers?.length) defaults.mcpServers = this.defaultMcpServers();
+    const record = this.store.create(defaults);
     await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry);
     return record;
   }
@@ -192,7 +219,10 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const agent = new RpcAgent(id, proc);
     this.running.set(id, agent);
 
-    agent.on("event", (event) => this.emit("agentEvent", { agentId: id, event }));
+    agent.on("event", (event) => {
+      if (event.type === "pi-mcp-adapter/status/v1") this.mcpStatus.set(id, event);
+      this.emit("agentEvent", { agentId: id, event });
+    });
     agent.on("uiRequest", (request) => {
       // gondolin-vm reports lifecycle via setStatus("gondolin", ...)
       if (request.method === "setStatus" && request.statusKey === "gondolin") {
@@ -235,6 +265,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       await agent.waitIdle().catch(() => {});
     } finally {
       this.running.delete(id);
+      this.mcpStatus.delete(id);
       agent.kill("SIGTERM");
       this.store.setStatus(id, "stopped");
       log.info(`agent ${id} stopped`);

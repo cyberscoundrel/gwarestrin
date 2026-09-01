@@ -32,7 +32,7 @@
 
 <div class="fixed inset-0 z-50 bg-black/55" role="presentation" onclick={onclose}></div>
 <div
-  class="fixed top-1/2 left-1/2 z-51 grid min-w-88 max-w-md -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl
+  class="fixed top-1/2 left-1/2 z-51 grid w-[min(28rem,92vw)] -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl
     border border-edge2 bg-panel2 p-5"
   role="alertdialog"
   aria-modal="true"

@@ -75,7 +75,11 @@ class Store {
         unread: this.agents.find((x) => x.id === a.id)?.unread ?? 0,
       }));
       for (const a of agents) if (a.runtime) this.runtime.set(a.id, a.runtime);
-      if (!this.selectedId && this.agents.length > 0) this.selectedId = this.agents[0]!.id;
+      if (!this.selectedId && this.agents.length > 0) {
+        // land on a live conversation when possible instead of a stopped agent
+        const live = this.agents.find((a) => ["running", "streaming", "starting"].includes(a.status));
+        this.selectedId = (live ?? this.agents[0]!).id;
+      }
       for (const l of this.unreadListeners) l();
     } catch {
       /* server unreachable; ws will reconnect */

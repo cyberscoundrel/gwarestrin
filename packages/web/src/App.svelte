@@ -19,6 +19,15 @@
     return () => mq.removeEventListener("change", update);
   });
 
+  $effect(() => {
+    if (!drawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") drawerOpen = false;
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
+
   onMount(() => {
     ws.connect();
     void store.refreshAgents();
@@ -68,7 +77,16 @@
     </header>
     {#if drawerOpen}
       <div class="fixed inset-0 z-39 bg-black/50" onclick={() => (drawerOpen = false)} role="presentation"></div>
-      <aside class="fixed top-0 bottom-0 left-0 z-40 w-[min(280px,80vw)] overflow-y-auto border-r border-edge bg-panel transition-transform duration-200 -translate-x-full translate-x-0">
+      <aside class="fixed top-0 bottom-0 left-0 z-40 w-[min(280px,80vw)] overflow-y-auto border-r border-edge bg-panel">
+        <div class="flex justify-end px-3 pt-2">
+          <button
+            class="cursor-pointer rounded border-none bg-transparent px-1.5 text-muted hover:text-fg"
+            aria-label="close menu"
+            onclick={() => (drawerOpen = false)}
+          >
+            ✕
+          </button>
+        </div>
         <AgentRail
           oncreate={() => {
             showCreate = true;

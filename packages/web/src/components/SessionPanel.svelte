@@ -51,7 +51,7 @@
 
 <div class="relative">
   <button
-    class="rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg disabled:opacity-50"
+    class="relative z-30 rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg disabled:opacity-50"
     disabled={busy}
     onclick={() => {
       open = !open;
@@ -62,6 +62,7 @@
   </button>
 
   {#if open}
+    <div class="fixed inset-0 z-29" role="presentation" onclick={() => (open = false)}></div>
     <div class="absolute right-0 z-30 mt-1 w-72 rounded-lg border border-edge2 bg-panel2 shadow-xl">
       <div class="flex flex-col gap-0.5 p-1.5">
         <button class="rounded px-2 py-1.5 text-left text-sm hover:bg-[#1a1d26]" onclick={() => void run("new_session")}>new session</button>

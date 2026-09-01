@@ -19,16 +19,18 @@
   let busy = $state(false);
   let stats = $state<{ context?: { tokens?: number | null; percent?: number | null } } | null>(null);
 
-  $effect(() => {
-    currentModel = record?.model ?? null;
-  });
-
-  $effect(() => {
-    // sync from adapter state after bootstrap/stream
+  // the adapter's state is not reactive (plain class field), so we mirror the
+  // bits we display into local state on adapter events
+  function syncFromAdapter(): void {
     if (adapter.state.model) {
       currentModel = { provider: adapter.state.model.provider, modelId: adapter.state.model.id };
     }
     currentThinking = adapter.state.thinkingLevel;
+  }
+
+  $effect(() => {
+    // record is the declared model; don't clobber a live adapter-provided one
+    if (!adapter.state.model) currentModel = record?.model ?? null;
   });
 
   async function refresh(): Promise<void> {
@@ -57,7 +59,29 @@
   $effect(() => {
     void agentId;
     stats = null;
+    currentModel = record?.model ?? null;
+    currentThinking = "off";
     void refreshAll();
+    const off = adapter.subscribe(() => syncFromAdapter());
+    syncFromAdapter();
+    return off;
+  });
+
+  // close the model dropdown on outside click / escape
+  $effect(() => {
+    if (!openModel) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") openModel = false;
+    };
+    const onClick = (e: MouseEvent) => {
+      if (!(e.target instanceof Element) || !e.target.closest("main .modelbar-root")) openModel = false;
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onClick);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onClick);
+    };
   });
 
   onMount(() => {
@@ -112,16 +136,23 @@
 
   const pct = $derived(stats?.context?.percent ?? null);
   const tok = $derived(stats?.context?.tokens ?? null);
+  // display chain: live adapter model → declared record model → server default
+  const effectiveModel = $derived(
+    currentModel ??
+      (store.defaultProvider && store.defaultModel
+        ? { provider: store.defaultProvider, modelId: store.defaultModel }
+        : null),
+  );
 </script>
 
-<div class="flex flex-wrap items-center gap-2 py-1.5 text-sm">
+<div class="flex flex-wrap items-center gap-2 py-1.5 text-sm modelbar-root">
   <button
     class="max-w-64 truncate rounded border border-edge2 bg-transparent px-2 py-0.5 text-fg hover:border-accent disabled:opacity-50"
-    title={currentModel ? `${currentModel.provider}/${currentModel.modelId}` : undefined}
+    title={effectiveModel ? `${effectiveModel.provider}/${effectiveModel.modelId}` : undefined}
     disabled={busy}
     onclick={() => (openModel = !openModel)}
   >
-    {currentModel ? modelDisplayName(currentModel.provider, currentModel.modelId, store.providers) : "no model"}
+    {effectiveModel ? modelDisplayName(effectiveModel.provider, effectiveModel.modelId, store.providers) : "no model"}
     <span class="ml-1 text-muted">▾</span>
   </button>
 
@@ -149,7 +180,7 @@
 </div>
 
 {#if openModel}
-  <div class="absolute z-30 mt-1 max-h-96 w-80 overflow-y-auto rounded-lg border border-edge2 bg-panel2 shadow-xl">
+  <div class="modelbar-root absolute z-30 mt-1 max-h-96 w-80 overflow-y-auto rounded-lg border border-edge2 bg-panel2 shadow-xl">
     {#if models.length === 0}
       <p class="px-3 py-2 text-sm text-muted">no models (agent not running?)</p>
     {:else}
@@ -158,7 +189,7 @@
         {#each list as m (m.id)}
           <button
             class="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-[#1a1d26]
-              {currentModel?.provider === m.provider && currentModel?.modelId === m.id ? 'text-accent' : 'text-fg'}"
+              {effectiveModel?.provider === m.provider && effectiveModel?.modelId === m.id ? 'text-accent' : 'text-fg'}"
             onclick={() => void chooseModel(m.provider, m.id)}
           >
             {m.name === m.id ? m.id : m.name}

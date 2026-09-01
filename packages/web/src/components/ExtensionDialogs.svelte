@@ -118,7 +118,8 @@
         onkeydown={(e) => e.key === "Enter" && answer(d, { value: inputValue })}
       />
       <div class="flex justify-end gap-2">
-        <button class="rounded-md bg-accent px-4 py-1.5 font-semibold text-[#0b0c10]" onclick={() => answer(d, { value: inputValue })}>ok</button>
+        <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { cancelled: true })}>cancel</button>
+        <button class="cursor-pointer rounded-md bg-accent px-4 py-1.5 font-semibold text-[#0b0c10]" onclick={() => answer(d, { value: inputValue })}>ok</button>
       </div>
     {:else if d!.method === "editor"}
       <textarea
@@ -127,7 +128,8 @@
         autofocus
       ></textarea>
       <div class="flex justify-end gap-2">
-        <button class="rounded-md bg-accent px-4 py-1.5 font-semibold text-[#0b0c10]" onclick={() => answer(d, { value: editorValue })}>done</button>
+        <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { cancelled: true })}>cancel</button>
+        <button class="cursor-pointer rounded-md bg-accent px-4 py-1.5 font-semibold text-[#0b0c10]" onclick={() => answer(d, { value: editorValue })}>done</button>
       </div>
     {/if}
 
