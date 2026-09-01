@@ -164,7 +164,7 @@ export class ProviderRegistry {
     // (nft assert timer re-applies each minute); re-probe so autoDiscover
     // providers recover without a manual restart. discoverAll is idempotent
     // (discovered ids are merged, not duplicated).
-    for (const delay of [45_000, 120_000]) {
+    for (const delay of [45_000, 120_000, 300_000]) {
       const t = setTimeout(() => void this.discoverAll(), delay);
       t.unref?.();
     }
