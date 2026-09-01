@@ -45,8 +45,6 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   private mcpRegistry: McpRegistryStore | undefined;
   private running = new Map<string, RpcAgent>();
   private restartBudget = new Map<string, number>();
-  /** last pi-mcp-adapter status event per agent, replayed to new ws clients */
-  private mcpStatus = new Map<string, Record<string, unknown> & { type: string }>();
   private extensionsRoot: string;
 
   constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore) {
@@ -111,11 +109,6 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   /** registry server names — default MCP enablement for new agents */
   defaultMcpServers(): string[] {
     return this.mcpRegistry ? Object.keys(this.mcpRegistry.list()) : [];
-  }
-
-  /** last-known pi-mcp-adapter status events, for replay to new ws clients */
-  mcpStatusSnapshots(): Array<{ agentId: string; event: Record<string, unknown> & { type: string } }> {
-    return [...this.mcpStatus].map(([agentId, event]) => ({ agentId, event }));
   }
 
   listSummaries(): AgentRuntimeSummary[] {
@@ -219,10 +212,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const agent = new RpcAgent(id, proc);
     this.running.set(id, agent);
 
-    agent.on("event", (event) => {
-      if (event.type === "pi-mcp-adapter/status/v1") this.mcpStatus.set(id, event);
-      this.emit("agentEvent", { agentId: id, event });
-    });
+    agent.on("event", (event) => this.emit("agentEvent", { agentId: id, event }));
     agent.on("uiRequest", (request) => {
       // gondolin-vm reports lifecycle via setStatus("gondolin", ...)
       if (request.method === "setStatus" && request.statusKey === "gondolin") {
@@ -265,7 +255,6 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       await agent.waitIdle().catch(() => {});
     } finally {
       this.running.delete(id);
-      this.mcpStatus.delete(id);
       agent.kill("SIGTERM");
       this.store.setStatus(id, "stopped");
       log.info(`agent ${id} stopped`);

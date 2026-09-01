@@ -135,6 +135,13 @@ export const mcpApi = {
     const r = await json<{ servers: Record<string, McpServerDef> }>(await fetch("/api/mcp"));
     return r.servers;
   },
+  /** liveness probe per registry server (server-side, so container-network urls work) */
+  async status(): Promise<Record<string, { reachable: boolean | null; httpStatus?: number; ms?: number }>> {
+    const r = await json<{ servers: Array<{ name: string; reachable: boolean | null; httpStatus?: number; ms?: number }> }>(
+      await fetch("/api/mcp/status"),
+    );
+    return Object.fromEntries(r.servers.map((s) => [s.name, s]));
+  },
   async put(name: string, def: McpServerDef): Promise<Record<string, McpServerDef>> {
     const r = await json<{ servers: Record<string, McpServerDef> }>(
       await fetch(`/api/mcp/${encodeURIComponent(name)}`, {

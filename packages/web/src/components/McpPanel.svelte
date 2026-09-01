@@ -6,13 +6,14 @@
   let { agentId }: { agentId: string } = $props();
 
   const record = $derived(store.agents.find((a) => a.id === agentId));
-  // live per-server status comes via the store (ws replay + live events),
-  // so a freshly opened panel still shows dots for a long-running agent
-  const liveStatus = $derived(store.mcpStatus.get(agentId) ?? {});
 
   let registry = $state<Record<string, McpServerDef>>({});
   let error = $state<string | null>(null);
   let busy = $state(false);
+
+  // liveness per registry server, probed server-side (the browser cannot
+  // reach container-network urls); refreshed while the panel is open
+  let probes = $state<Record<string, { reachable: boolean | null; httpStatus?: number; ms?: number }>>({});
 
   // add/edit form state
   let editing = $state<string | null>(null); // name being edited, "" = new
@@ -28,6 +29,7 @@
     error = null;
     try {
       registry = await mcpApi.list();
+      probes = await mcpApi.status();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -35,6 +37,8 @@
 
   onMount(() => {
     void refresh();
+    const timer = setInterval(() => void refresh(), 30_000);
+    return () => clearInterval(timer);
   });
 
   function isEnabled(name: string): boolean {
@@ -117,11 +121,11 @@
   }
 
   function statusDot(name: string): { color: string; title: string } {
-    const s = liveStatus[name];
-    if (!s) return { color: "text-muted", title: "no live status (agent not running with this server?)" };
-    if (s.error) return { color: "text-err", title: s.error };
-    if (s.status === "connected") return { color: "text-ok", title: `connected${s.toolCount != null ? ` · ${s.toolCount} tools` : ""}` };
-    return { color: "text-warn", title: s.status ?? "unknown" };
+    if (!isEnabled(name)) return { color: "text-muted", title: "not enabled for this agent" };
+    const p = probes[name];
+    if (!p || p.reachable === null) return { color: "text-muted", title: "no http probe (stdio server)" };
+    if (p.reachable) return { color: "text-ok", title: `reachable${p.ms != null ? ` · ${p.ms}ms` : ""}` };
+    return { color: "text-err", title: "unreachable" };
   }
 </script>
 

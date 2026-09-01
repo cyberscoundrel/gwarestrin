@@ -84,8 +84,6 @@ export class WsConnection {
 
     // initial snapshot of all agents
     for (const s of this.manager.listSummaries()) onState(s);
-    // replay last-known MCP status so freshly opened panels show live dots
-    for (const snap of this.manager.mcpStatusSnapshots()) onEvent(snap);
   }
 
   private onMessage(raw: unknown): void {
