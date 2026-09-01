@@ -65,6 +65,8 @@ services:
       context: ./dab
       network: host   # same WARP/DNS workaround as the main build
     user: "1000:1000"
+    # hot-reload watcher resolves dab-config.json relative to cwd
+    working_dir: /etc/dab
     environment:
       HOME: /tmp
       DOTNET_CLI_HOME: /tmp
