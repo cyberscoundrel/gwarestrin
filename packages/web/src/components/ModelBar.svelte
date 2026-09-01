@@ -19,6 +19,7 @@
   let openModel = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let streaming = $state(false);
   let stats = $state<{ context?: { tokens?: number | null; percent?: number | null } } | null>(null);
 
   // the adapter's state is not reactive (plain class field), so we mirror the
@@ -28,6 +29,12 @@
       currentModel = { provider: adapter.state.model.provider, modelId: adapter.state.model.id };
     }
     currentThinking = adapter.state.thinkingLevel;
+    streaming = Boolean(adapter.state.isStreaming);
+  }
+
+  function stopAgent(): void {
+    streaming = false;
+    adapter.abort();
   }
 
   $effect(() => {
@@ -182,6 +189,16 @@
     </span>
   {:else}
     <span class="ml-auto"></span>
+  {/if}
+
+  {#if streaming}
+    <button
+      class="select-compact bg-none pr-2 !border-err !text-err animate-pulse"
+      title="interrupt the agent"
+      onclick={stopAgent}
+    >
+      stop
+    </button>
   {/if}
 </div>
 
