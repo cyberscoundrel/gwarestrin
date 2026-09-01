@@ -39,15 +39,13 @@
       </div>
       <SessionPanel {agentId} />
       <button
-        class="ml-auto rounded border bg-transparent px-2 py-0.5 text-xs hover:text-fg
-          {drawer === 'files' ? 'border-accent text-accent' : 'border-edge2 text-muted'}"
+        class="select-compact {drawer === 'files' ? '!border-accent !text-accent' : ''}"
         onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
       >
         files
       </button>
       <button
-        class="rounded border bg-transparent px-2 py-0.5 text-xs hover:text-fg
-          {drawer === 'mcp' ? 'border-accent text-accent' : 'border-edge2 text-muted'}"
+        class="select-compact {drawer === 'mcp' ? '!border-accent !text-accent' : ''}"
         onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
       >
         mcp

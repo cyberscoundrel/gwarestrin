@@ -147,7 +147,7 @@
 
 <div class="flex flex-wrap items-center gap-2 py-1.5 text-sm modelbar-root">
   <button
-    class="max-w-64 truncate rounded border border-edge2 bg-transparent px-2 py-0.5 text-fg hover:border-accent disabled:opacity-50"
+    class="select-compact max-w-64 truncate"
     title={effectiveModel ? `${effectiveModel.provider}/${effectiveModel.modelId}` : undefined}
     disabled={busy}
     onclick={() => (openModel = !openModel)}
@@ -158,7 +158,7 @@
 
   {#if thinkingLevels.length > 1 || currentThinking !== "off"}
     <select
-      class="rounded border border-edge2 bg-bg px-1.5 py-0.5 text-xs text-muted hover:text-fg disabled:opacity-50"
+      class="select-compact"
       disabled={busy}
       value={currentThinking}
       onchange={(e) => void chooseThinking(e.currentTarget.value)}

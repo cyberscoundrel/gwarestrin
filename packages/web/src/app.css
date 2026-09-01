@@ -44,6 +44,18 @@
   }
 }
 
+@layer components {
+  /* shared dropdown look: native selects and fake dropdown toggles all use
+     the same radius/border/bg so controls match across bars and modals */
+  .select {
+    @apply cursor-pointer rounded-md border border-edge2 bg-bg px-2.5 py-2 text-base text-fg outline-none hover:border-accent focus:border-accent disabled:cursor-default disabled:opacity-50;
+  }
+
+  .select-compact {
+    @apply cursor-pointer rounded-md border border-edge2 bg-bg px-2 py-1 text-xs text-fg outline-none hover:border-accent focus:border-accent disabled:cursor-default disabled:opacity-50;
+  }
+}
+
 /* pi-web-ui overrides — must stay UNLAYERED: their utilities live in
    @layer utilities, which beats layered base rules regardless of specificity */
 

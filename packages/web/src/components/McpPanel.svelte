@@ -148,7 +148,7 @@
     {#if editing !== null}
       <div class="grid gap-2 border-b border-edge px-3 py-2">
         <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="name" bind:value={formName} disabled={editing !== ""} />
-        <select class="rounded border border-edge2 bg-bg px-2 py-1 text-fg" bind:value={formTransport}>
+        <select class="select-compact" bind:value={formTransport}>
           <option value="stdio">stdio (command)</option>
           <option value="http">http (url)</option>
         </select>

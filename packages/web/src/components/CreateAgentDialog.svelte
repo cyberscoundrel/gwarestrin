@@ -113,7 +113,7 @@
       </label>
       <label class="grid gap-1 text-sm text-muted">
         provider
-        <select class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-fg" bind:value={providerId}>
+        <select class="select" bind:value={providerId}>
           {#each store.providers as p (p.id)}
             <option value={p.id}>{p.id}{p.degraded ? " (degraded)" : ""}</option>
           {/each}

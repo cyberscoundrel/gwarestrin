@@ -51,7 +51,7 @@
 
 <div class="relative">
   <button
-    class="relative z-30 rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg disabled:opacity-50"
+    class="select-compact relative z-30"
     disabled={busy}
     onclick={() => {
       open = !open;
