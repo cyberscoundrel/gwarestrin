@@ -43,6 +43,7 @@ services:
       # static backend addresses of the sidecars (see networks below)
       - "dab:172.31.99.10"
       - "neo4j-mcp:172.31.99.11"
+      - "litellm:172.31.99.12"
 
     volumes:
       - gwarestrin-state:/var/lib/gwarestrin
@@ -102,6 +103,37 @@ services:
     networks:
       backend:
         ipv4_address: 172.31.99.11
+    restart: unless-stopped
+
+  # LiteLLM gateway — one OpenAI-compatible endpoint (chat + embeddings) in
+  # front of the local llama.cpp box and hosted providers (OpenRouter).
+  # Config is host-generated from litellm-config.example/ (gitignored).
+  # Master key convention: same value as LOCAL_INFERENCE_API_KEY, so existing
+  # clients pass the key check unchanged and llama.cpp accepts upstream calls.
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/config/litellm-config.yaml", "--port", "4000"]
+    ports:
+      - "4000:4000"
+    # public resolvers past WARP's DNS interception (openrouter.ai), same as gwarestrin
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    environment:
+      LITELLM_MASTER_KEY: ${LOCAL_INFERENCE_API_KEY:?set LOCAL_INFERENCE_API_KEY in .env}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in .env}
+    volumes:
+      - ./litellm-config:/app/config:ro
+    healthcheck:
+      # image has no bash; python is guaranteed
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 4000), 2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      backend:
+        ipv4_address: 172.31.99.12
     restart: unless-stopped
 
 networks:

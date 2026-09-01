@@ -121,6 +121,47 @@ EOF
 Tools: `neo4j_get_neo4j_schema` (APOC), `neo4j_read_neo4j_cypher`,
 `neo4j_write_neo4j_cypher` (write enabled by default; set
 `NEO4J_READ_ONLY=true` on the sidecar to lock down).
+
+## 3c. LiteLLM gateway
+
+One OpenAI-compatible endpoint (chat + embeddings) in front of the local
+llama.cpp box and hosted providers. Runs as the `litellm` compose service
+(`ghcr.io/berriai/litellm:main-stable`), backend subnet `172.31.99.12`,
+published on `:4000` (LAN reach: `http://<host>:4000/v1`, key required).
+
+Key convention: `LITELLM_MASTER_KEY` is **the same value as
+`LOCAL_INFERENCE_API_KEY`** (compose maps it directly). Existing clients keep
+sending the llama.cpp key and pass LiteLLM's check; upstream llama.cpp calls
+carry the same value. `OPENROUTER_API_KEY` must also be in `.env` (used by
+`openrouter/*` models).
+
+Config: `~/gwarestrin/litellm-config/litellm-config.yaml` (host-generated from
+`litellm-config.example/`, 600 perms, gitignored). Model aliases so far:
+- `/media/cyber/.../Qwen3.8-27B-UD-Q8_K_XL.gguf` + `qwen3.8-27b` → llama.cpp
+- `embed-minilm` → `openrouter/sentence-transformers/all-minilm-l6-v2` (384-dim)
+
+`providers.json` `local-inference.baseUrl` = `http://litellm:4000/v1`
+(resolved via the `litellm:172.31.99.12` extra_hosts entry — the container's
+DNS override bypasses docker's resolver, hence static hosts entries).
+
+Verify:
+
+```bash
+K=$(grep -oP 'LOCAL_INFERENCE_API_KEY=\K.*' ~/gwarestrin/.env)
+curl -s http://172.31.99.12:4000/health/liveliness
+curl -s http://172.31.99.12:4000/v1/models -H "Authorization: Bearer $K" | head -c 300
+curl -s http://172.31.99.12:4000/v1/chat/completions -H "Authorization: Bearer $K" \
+  -H content-type:application/json \
+  -d '{"model":"qwen3.8-27b","messages":[{"role":"user","content":"say ok"}],"max_tokens":10}'
+curl -s http://172.31.99.12:4000/v1/embeddings -H "Authorization: Bearer $K" \
+  -H content-type:application/json \
+  -d '{"model":"embed-minilm","input":["hello"]}' | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['data'][0]['embedding']))"
+```
+
+Adding a model = one `model_list` entry in the config (`docker compose restart
+litellm` to apply; config is volume-mounted, no rebuild) + optional
+`providers.json` entry for agent-visible models.
+
 - **Files**: `files` panel — upload/download/delete inside the agent workspace.
   `.pi/` is hidden and `.mcp.json` is read-only through the API (server-generated).
 - **Concurrency**: max 4 running agents (`GWARESTRIN_MAX_AGENTS`). Each running
