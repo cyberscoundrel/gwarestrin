@@ -12,7 +12,9 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     PATH=/opt/dab:$PATH
 
 EXPOSE 5000
-HEALTHCHECK --interval=30s --timeout=10s --start-period=45s \
-  CMD ["dab", "validate", "--config", "/etc/dab/dab-config.json"]
+# liveness only (dab validate runs full DB discovery — far beyond a
+# healthcheck timeout)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
+  CMD ["bash", "-c", "echo > /dev/tcp/127.0.0.1/5000 || exit 1"]
 
 CMD ["dab", "start", "--config", "/etc/dab/dab-config.json", "--no-https-redirect"]
