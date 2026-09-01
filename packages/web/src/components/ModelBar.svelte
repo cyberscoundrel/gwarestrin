@@ -23,6 +23,7 @@
   // the adapter's state is not reactive (plain class field), so we mirror the
   // bits we display into local state on adapter events
   function syncFromAdapter(): void {
+    console.debug("[mbar] syncFromAdapter", JSON.stringify(adapter.state.model)?.slice(0, 80));
     if (adapter.state.model) {
       currentModel = { provider: adapter.state.model.provider, modelId: adapter.state.model.id };
     }
@@ -31,6 +32,7 @@
 
   $effect(() => {
     // record is the declared model; don't clobber a live adapter-provided one
+    console.debug("[mbar] effectA record=", JSON.stringify(record?.model)?.slice(0, 80), "adapterState=", JSON.stringify(adapter.state.model)?.slice(0, 60));
     if (!adapter.state.model) currentModel = record?.model ?? null;
   });
 
@@ -60,6 +62,7 @@
   $effect(() => {
     void agentId;
     stats = null;
+    console.debug("[mbar] perAgentEffect record=", JSON.stringify(record?.model)?.slice(0, 80));
     currentModel = record?.model ?? null;
     currentThinking = "off";
     void refreshAll();
