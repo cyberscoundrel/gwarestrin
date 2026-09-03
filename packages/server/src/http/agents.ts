@@ -53,6 +53,7 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
       if (input.firstPrompt) {
         const llm = manager.defaultLlmEndpoint();
         const mcpUrl = manager.mcpServerUrl("neo4j") ?? process.env.GWARESTRIN_NEO4J_MCP_URL ?? "http://neo4j-mcp:8000/mcp/";
+        const ragUrl = manager.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_RAG_URL;
         if (llm) {
           log.info(`running pre-session analysis for ${record.name}`);
           const block = await runAnalysisAgent(input.firstPrompt, {
@@ -60,6 +61,7 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
             llmKey: llm.key,
             model: llm.model,
             mcpUrl,
+            ...(ragUrl ? { ragUrl } : {}),
             timeoutMs: 90_000,
           });
           if (block) {

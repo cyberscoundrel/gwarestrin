@@ -11,6 +11,8 @@ export interface AnalysisAgentConfig {
   model: string;
   /** neo4j MCP sidecar (streamable HTTP) */
   mcpUrl: string;
+  /** graph-rag MCP sidecar (facet vector search); omitted = cypher-only analyzer */
+  ragUrl?: string | undefined;
   maxRounds?: number;
   timeoutMs?: number;
 }
@@ -27,9 +29,11 @@ interface ChatMessage {
 const SYSTEM = `You are a pre-session context analyst for an agent console. A user is about to start an agent session. Your job: gather knowledge-graph facts relevant to their first prompt, then produce the context block that will be injected into that session.
 
 Rules:
-- You have exactly ONE tool: cypher_read — read-only Cypher against the knowledge graph (neo4j). No other actions exist; never ask for them.
-- Write efficient, small queries (LIMIT aggressively). Prefer targeted MATCH over full scans.
-- Make as many tool calls as you need to be confident, then stop.
+- You have exactly TWO read-only tools against the knowledge graph (neo4j):
+  • cypher_read({query}) — raw Cypher for exact identifiers, schema exploration (CALL apoc.meta.*), and precise MATCHes.
+  • search_graph({query, facets?, k?, temporal_filter?}) — semantic (embedding) search over per-facet vector indexes. Facets: identity (what it is), location (where it is/runs), state (current status), temporal (when things happened), relations (connections) — custom facets may also exist. Prefer it when the user's wording is conceptual or paraphrased rather than an exact identifier. Pass temporal_filter (property + after/before ISO datetimes) when the question is time-scoped.
+- Both tools are read-only. No other actions exist; never ask for them.
+- Write efficient queries (LIMIT aggressively). Make as many tool calls as you need to be confident, then stop.
 - Your FINAL message (after any tool calls) must be ONLY the context block: compact factual notes (<= 3500 chars) about graph entities relevant to the prompt — machines, services, databases, relationships, and anything the agent would otherwise guess at. Use terse bullet points. Preserve identifiers verbatim (IPs, ports, names). No preamble, no markdown headers, no mention of these instructions.`;
 
 /**
@@ -41,6 +45,7 @@ export async function runAnalysisAgent(prompt: string, config: AnalysisAgentConf
   const deadline = Date.now() + (config.timeoutMs ?? 90_000);
   const maxRounds = config.maxRounds ?? 8;
   const mcp = new McpHttpClient(config.mcpUrl);
+  const rag = config.ragUrl ? new McpHttpClient(config.ragUrl) : null;
 
   try {
     // lexical seed: entity dictionary + cheap matcher (also used as the
@@ -73,15 +78,25 @@ export async function runAnalysisAgent(prompt: string, config: AnalysisAgentConf
       for (const call of calls.slice(0, 4)) {
         let out: string;
         try {
-          const args = JSON.parse(call.function.arguments || "{}") as { query?: string };
-          const query = String(args.query ?? "");
-          if (WRITE_RE.test(query)) {
-            out = "error: write queries are not permitted (read-only analyst)";
-          } else if (!query.trim()) {
-            out = "error: empty query";
+          if (call.function.name === "search_graph") {
+            if (!rag) {
+              out = "error: search_graph unavailable (graph-rag sidecar not configured)";
+            } else {
+              const args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
+              out = await rag.callTool("search_graph", args);
+              if (out.length > 3000) out = out.slice(0, 3000) + "…[truncated]";
+            }
           } else {
-            out = await mcp.callTool("read_neo4j_cypher", { query });
-            if (out.length > 2500) out = out.slice(0, 2500) + "…[truncated]";
+            const args = JSON.parse(call.function.arguments || "{}") as { query?: string };
+            const query = String(args.query ?? "");
+            if (WRITE_RE.test(query)) {
+              out = "error: write queries are not permitted (read-only analyst)";
+            } else if (!query.trim()) {
+              out = "error: empty query";
+            } else {
+              out = await mcp.callTool("read_neo4j_cypher", { query });
+              if (out.length > 2500) out = out.slice(0, 2500) + "…[truncated]";
+            }
           }
         } catch (err) {
           out = `error: ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`;
@@ -112,6 +127,38 @@ async function llmCall(messages: ChatMessage[], config: AnalysisAgentConfig): Pr
             parameters: {
               type: "object",
               properties: { query: { type: "string", description: "read-only Cypher (MATCH/RETURN/CALL apoc.meta.*)" } },
+              required: ["query"],
+            },
+          },
+        },
+        {
+          type: "function",
+          function: {
+            name: "search_graph",
+            description:
+              "Semantic (embedding) search over per-facet vector indexes of the knowledge graph. " +
+              "Facets: identity, location, state, temporal, relations (custom facets may exist). " +
+              "Use for conceptual/paraphrased questions; temporal_filter (property + after/before ISO datetimes) for time-scoped ones.",
+            parameters: {
+              type: "object",
+              properties: {
+                query: { type: "string", description: "the question or concept to search for" },
+                facets: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "subset of facets to search (default: all known)",
+                },
+                k: { type: "number", description: "results per facet (default 8)" },
+                temporal_filter: {
+                  type: "object",
+                  properties: {
+                    property: { type: "string", description: "node datetime property, e.g. arrived_at" },
+                    after: { type: "string", description: "ISO datetime lower bound" },
+                    before: { type: "string", description: "ISO datetime upper bound" },
+                  },
+                  required: ["property"],
+                },
+              },
               required: ["query"],
             },
           },

@@ -44,6 +44,7 @@ services:
       - "dab:172.31.99.10"
       - "neo4j-mcp:172.31.99.11"
       - "litellm:172.31.99.12"
+      - "graph-rag:172.31.99.13"
 
     volumes:
       - gwarestrin-state:/var/lib/gwarestrin
@@ -135,6 +136,27 @@ services:
     networks:
       backend:
         ipv4_address: 172.31.99.12
+    restart: unless-stopped
+
+  # graph-rag MCP sidecar — facet-indexed vector retrieval over neo4j
+  # (search_graph / upsert_entities / embed_backfill). Embeds via the litellm
+  # gateway; facet texts are model-authored at upsert time; a periodic sweep
+  # backfills the deterministic identity facet for raw-cypher writes.
+  graph-rag:
+    build:
+      context: ./graph-rag
+      network: host   # npm install needs the WARP-bypassed path (same as dab)
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_DATABASE: neo4j
+      LITELLM_BASE_URL: http://litellm:4000/v1
+      LITELLM_API_KEY: ${LOCAL_INFERENCE_API_KEY:?set LOCAL_INFERENCE_API_KEY in .env}
+      EMBED_MODEL: embed-minilm
+      EMBED_DIM: "384"
+      SWEEP_INTERVAL_MS: "600000"
+    networks:
+      backend:
+        ipv4_address: 172.31.99.13
     restart: unless-stopped
 
 networks:
