@@ -39,7 +39,7 @@ const FACETS = {
   relations: "how it connects to other entities",
 };
 
-const driver = neo4j.driver(NEO4J_URI, neo4j.auth.none, { disableLosslessIntegers: true });
+const driver = neo4j.driver(NEO4J_URI, neo4j.auth.none(), { disableLosslessIntegers: true });
 const session = () => driver.session({ database: NEO4J_DATABASE });
 
 /** facets we know an index exists for (advertised at boot + lazily created) */
