@@ -147,7 +147,9 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
              RETURN node, score ORDER BY score DESC LIMIT $k`,
             { index: `entity_${facet}`, k: int(k), vec: embedding, tprop, tafter, tbefore },
           );
-          vectorWorked = vectorWorked || res.records.length > 0;
+          // the query itself ran — a filtered-empty result is authoritative
+          // (falling back to lexical here would ignore temporal_filter)
+          vectorWorked = true;
           for (const rec of res.records) {
             const node = rec.get("node");
             const score = rec.get("score");
@@ -168,8 +170,9 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
 
   let results = [...byNode.values()].sort((a, b) => b.score - a.score);
 
-  // lexical fallback when embeddings are unavailable or the index is empty
-  if (!vectorWorked) {
+  // lexical fallback when embeddings are unavailable or the index is empty —
+  // never when a temporal_filter is set (lexical matching can't honor it)
+  if (!vectorWorked && !temporal_filter) {
     const terms = query.split(/\s+/).filter((t) => t.length > 2).slice(0, 6);
     if (terms.length > 0) {
       const s = session();
