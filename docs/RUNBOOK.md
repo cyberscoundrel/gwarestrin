@@ -176,6 +176,39 @@ prefix embedding models `embed-` per the convention above.
 - **Concurrency**: max 4 running agents (`GWARESTRIN_MAX_AGENTS`). Each running
   agent = 1 pi child + 1 QEMU microvm (default 512MB).
 
+## 3d. graph-rag MCP sidecar (facet vector retrieval)
+
+Semantic retrieval over the knowledge graph. The `graph-rag` compose service
+(backend `172.31.99.13`, `http://graph-rag:8000/mcp`) exposes:
+
+- `search_graph({query, facets?, k?, temporal_filter?})` — embeds the query via
+  the litellm gateway (`embed-minilm`, 384-dim) and fans out over per-facet
+  neo4j vector indexes, merging best-score-per-node + 1-hop relationships.
+  `temporal_filter: {property, after?, before?}` narrows by node datetime
+  property (ISO strings). Lexical fallback when the embedding backend fails.
+- `upsert_entities({entities: [{name, labels?, properties?, facets?}]})` —
+  MERGE by name; facet texts are **model-authored at call time** and embedded
+  into per-facet indexes (`n.embed_<facet>`, `n.text_<facet>`). Unknown facet
+  names are allowed — indexes are created lazily (e.g. "procurement").
+- `embed_backfill({limit?})` — embeds the deterministic identity facet
+  (labels + name + props) for nodes written via raw cypher.
+
+Advertised facets: `identity`, `location`, `state`, `temporal`, `relations`.
+
+A periodic sweep (every 10 min, `SWEEP_INTERVAL_MS`) runs the identity backfill
+automatically — raw-cypher writes become identity-searchable without manual
+steps; model-authored facets are never synthesized server-side.
+
+Registered in the MCP registry → included in `defaultMcpServers` for NEW
+agents; existing agents opt in via the MCP panel. The pre-session analysis
+agent uses it as its 2nd read-only tool (`search_graph` next to `cypher_read`).
+
+Verify with `node scripts/embed-probe.mjs` (8 checks: embeddings, facets,
+temporal filter hit/exclude, backfill).
+
+Changing `EMBED_MODEL`/`EMBED_DIM` = drop all `entity_*` indexes and re-embed
+(sweep covers identity only; other facets need upsert re-runs).
+
 ## 4. Troubleshooting
 
 | Symptom | Check |
