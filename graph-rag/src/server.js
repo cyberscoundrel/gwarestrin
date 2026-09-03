@@ -40,6 +40,7 @@ const FACETS = {
 };
 
 const driver = neo4j.driver(NEO4J_URI, neo4j.auth.none(), { disableLosslessIntegers: true });
+const int = neo4j.int; // LIMIT params must pack as integers, not floats
 const session = () => driver.session({ database: NEO4J_DATABASE });
 
 /** facets we know an index exists for (advertised at boot + lazily created) */
@@ -144,7 +145,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
                AND ($tbefore IS NULL OR datetime(toString(node[$tprop])) <= datetime($tbefore))
              )
              RETURN node, score ORDER BY score DESC LIMIT $k`,
-            { index: `entity_${facet}`, k, vec: embedding, tprop, tafter, tbefore },
+            { index: `entity_${facet}`, k: int(k), vec: embedding, tprop, tafter, tbefore },
           );
           vectorWorked = vectorWorked || res.records.length > 0;
           for (const rec of res.records) {
@@ -178,7 +179,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
            WHERE any(t IN $terms WHERE n.name CONTAINS t OR (
              n.text_identity IS NOT NULL AND n.text_identity CONTAINS t))
            RETURN n LIMIT $k`,
-          { terms, k },
+          { terms, k: int(k) },
         );
         results = res.records.map((rec) => nodeOut(rec.get("n"), { score: null, facets: ["lexical"] }));
       } finally {
@@ -287,7 +288,7 @@ async function backfillIdentity(limit = 64) {
     const res = await s.run(
       `MATCH (n:${ENTITY_LABEL}) WHERE n.embed_identity IS NULL
        RETURN n LIMIT $limit`,
-      { limit },
+      { limit: int(limit) },
     );
     nodes = res.records.map((rec) => rec.get("n"));
   } finally {
