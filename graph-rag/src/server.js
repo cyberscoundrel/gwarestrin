@@ -109,6 +109,7 @@ function identityText(node) {
 /** ---- tool implementations ---- */
 
 async function searchGraph({ query, facets, k = 8, temporal_filter }) {
+  console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter })}`);
   const facetList = (facets?.length ? facets : Object.keys(FACETS)).map(sanitizeFacet);
   for (const f of facetList) {
     // advertised facets get their index ensured on demand; custom facets are
