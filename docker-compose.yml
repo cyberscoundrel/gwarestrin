@@ -166,7 +166,7 @@ services:
   # rag profile). Backend-network name resolves via docker's embedded DNS —
   # no static IP or extra_hosts needed.
   arcadedb:
-    image: arcadedata/arcadedb:26.5.1
+    image: arcadedata/arcadedb:latest
     mem_limit: 2g
     environment:
       # root password via JVM settings; defaultDatabases creates an empty
