@@ -165,18 +165,22 @@ services:
   # no static IP or extra_hosts needed.
   arcadedb:
     image: arcadedata/arcadedb:26.5.1
+    mem_limit: 2g
     environment:
-      ARCADEDB_ROOT_PASSWORD: ${ARCADEDB_ROOT_PASSWORD:?set ARCADEDB_ROOT_PASSWORD in .env}
+      # root password via JVM settings; defaultDatabases creates an empty
+      # `gwarestrin` database at boot
+      ARCADEDB_SETTINGS: "-Darcadedb.server.rootPassword=${ARCADEDB_ROOT_PASSWORD:?set ARCADEDB_ROOT_PASSWORD in .env} -Darcadedb.server.defaultDatabases=gwarestrin[root]"
     volumes:
-      - arcadedb-data:/var/opt/arcadedb/databases
-      # MCP server config (rag profile, bearer/basic auth); host-generated
-      - ./arcadedb-config/mcp-config.json:/var/opt/arcadedb/config/mcp-config.json:ro
+      - arcadedb-data:/home/arcadedb/databases
+      # MCP server config (rag profile, auth policy); host-generated from
+      # arcadedb-config.example/
+      - ./arcadedb-config/mcp-config.json:/home/arcadedb/config/mcp-config.json:ro
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/2480'"]
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 60s
+      start_period: 90s
     networks:
       - backend
     restart: unless-stopped
