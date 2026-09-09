@@ -9,10 +9,8 @@ export interface AnalysisAgentConfig {
   llmUrl: string;
   llmKey: string;
   model: string;
-  /** neo4j MCP sidecar (streamable HTTP) */
+  /** graph MCP sidecar (streamable HTTP): query_graph / search_graph / schema_graph */
   mcpUrl: string;
-  /** graph-rag MCP sidecar (facet vector search); omitted = cypher-only analyzer */
-  ragUrl?: string | undefined;
   maxRounds?: number;
   timeoutMs?: number;
 }
@@ -29,10 +27,11 @@ interface ChatMessage {
 const SYSTEM = `You are a pre-session context analyst for an agent console. A user is about to start an agent session. Your job: gather knowledge-graph facts relevant to their first prompt, then produce the context block that will be injected into that session.
 
 Rules:
-- You have exactly TWO read-only tools against the knowledge graph (neo4j):
-  • cypher_read({query}) — raw Cypher for exact identifiers, schema exploration (CALL apoc.meta.*), and precise MATCHes.
+- You have exactly TWO read-only tools against the knowledge graph:
+  • query_graph({query, language?}) — raw openCypher (or SQL) for exact identifiers, structure, and schema exploration. Read-only.
   • search_graph({query, facets?, k?, temporal_filter?}) — semantic (embedding) search over per-facet vector indexes. Facets: identity (what it is), location (where it is/runs), state (current status), temporal (when things happened), relations (connections) — custom facets may also exist. Prefer it when the user's wording is conceptual or paraphrased rather than an exact identifier. Pass temporal_filter (property + after/before ISO datetimes) when the question is time-scoped.
 - Both tools are read-only. No other actions exist; never ask for them.
+- schema_graph lists the types and indexes if you need an overview.
 - Write efficient queries (LIMIT aggressively). Make as many tool calls as you need to be confident, then stop.
 - Your FINAL message (after any tool calls) must be ONLY the context block: compact factual notes (<= 3500 chars) about graph entities relevant to the prompt — machines, services, databases, relationships, and anything the agent would otherwise guess at. Use terse bullet points. Preserve identifiers verbatim (IPs, ports, names). No preamble, no markdown headers, no mention of these instructions.`;
 
@@ -45,7 +44,6 @@ export async function runAnalysisAgent(prompt: string, config: AnalysisAgentConf
   const deadline = Date.now() + (config.timeoutMs ?? 90_000);
   const maxRounds = config.maxRounds ?? 8;
   const mcp = new McpHttpClient(config.mcpUrl);
-  const rag = config.ragUrl ? new McpHttpClient(config.ragUrl) : null;
 
   try {
     // lexical seed: entity dictionary + cheap matcher (also used as the
@@ -79,13 +77,9 @@ export async function runAnalysisAgent(prompt: string, config: AnalysisAgentConf
         let out: string;
         try {
           if (call.function.name === "search_graph") {
-            if (!rag) {
-              out = "error: search_graph unavailable (graph-rag sidecar not configured)";
-            } else {
-              const args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
-              out = await rag.callTool("search_graph", args);
-              if (out.length > 3000) out = out.slice(0, 3000) + "…[truncated]";
-            }
+            const args = JSON.parse(call.function.arguments || "{}") as Record<string, unknown>;
+            out = await mcp.callTool("search_graph", args);
+            if (out.length > 3000) out = out.slice(0, 3000) + "…[truncated]";
           } else {
             const args = JSON.parse(call.function.arguments || "{}") as { query?: string };
             const query = String(args.query ?? "");
@@ -94,7 +88,7 @@ export async function runAnalysisAgent(prompt: string, config: AnalysisAgentConf
             } else if (!query.trim()) {
               out = "error: empty query";
             } else {
-              out = await mcp.callTool("read_neo4j_cypher", { query });
+              out = await mcp.callTool("query_graph", { query, language: "cypher" });
               if (out.length > 2500) out = out.slice(0, 2500) + "…[truncated]";
             }
           }
@@ -122,11 +116,14 @@ async function llmCall(messages: ChatMessage[], config: AnalysisAgentConfig): Pr
         {
           type: "function",
           function: {
-            name: "cypher_read",
-            description: "Run a read-only Cypher query against the knowledge graph. Returns JSON rows.",
+            name: "query_graph",
+            description: "Run a read-only openCypher query against the knowledge graph. Returns JSON rows.",
             parameters: {
               type: "object",
-              properties: { query: { type: "string", description: "read-only Cypher (MATCH/RETURN/CALL apoc.meta.*)" } },
+              properties: {
+                query: { type: "string", description: "read-only openCypher (MATCH/RETURN/WITH)" },
+                language: { type: "string", enum: ["cypher", "sql"], description: "default cypher" },
+              },
               required: ["query"],
             },
           },

@@ -147,8 +147,10 @@ services:
       context: ./graph-rag
       network: host   # npm install needs the WARP-bypassed path (same as dab)
     environment:
-      NEO4J_URI: bolt://neo4j:7687
-      NEO4J_DATABASE: neo4j
+      ARCADEDB_URL: http://arcadedb:2480
+      ARCADEDB_DB: gwarestrin
+      ARCADEDB_USER: root
+      ARCADEDB_PASSWORD: ${ARCADEDB_ROOT_PASSWORD:?set ARCADEDB_ROOT_PASSWORD in .env}
       LITELLM_BASE_URL: http://litellm:4000/v1
       LITELLM_API_KEY: ${LOCAL_INFERENCE_API_KEY:?set LOCAL_INFERENCE_API_KEY in .env}
       EMBED_MODEL: embed-minilm

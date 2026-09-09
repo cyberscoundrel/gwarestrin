@@ -44,7 +44,11 @@ async function rpc(method, params, id = 1) {
 await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "0" } });
 const tools = await rpc("tools/list", {}, 2);
 const names = tools.result?.tools?.map((t) => t.name) ?? [];
-check("tools/list", ["search_graph", "upsert_entities", "embed_backfill"].every((t) => names.includes(t)), names.join(","));
+check(
+  "tools/list",
+  ["search_graph", "upsert_entities", "embed_backfill", "query_graph", "execute_graph", "schema_graph"].every((t) => names.includes(t)),
+  names.join(","),
+);
 
 async function callTool(name, args) {
   const r = await rpc("tools/call", { name, arguments: args }, Math.floor(Math.random() * 1e6));
@@ -101,16 +105,13 @@ check("temporal filter excludes", !s4.results?.some((r) => r.name === "__probe__
 const bf = await callTool("embed_backfill", { limit: 10 });
 check("embed_backfill runs", typeof bf.backfilled === "number", JSON.stringify(bf).slice(0, 80));
 
-// 8) cleanup via raw cypher through the neo4j-mcp sidecar
+// 8) cleanup via execute_graph
 {
-  const NEO4J_MCP = process.env.NEO4J_MCP ?? "http://172.31.99.11:8000/mcp/";
-  const r = await fetch(NEO4J_MCP, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "neo4j_write_neo4j_cypher", arguments: { query: "MATCH (n:Entity {name: '__probe__wrench'}) DETACH DELETE n" } } }),
+  const del = await callTool("execute_graph", {
+    command: "MATCH (n:Entity {name: '__probe__wrench'}) DETACH DELETE n",
+    language: "cypher",
   });
-  const text = await r.text();
-  check("cleanup", r.ok, text.slice(0, 60));
+  check("cleanup", typeof del.result !== "undefined", JSON.stringify(del).slice(0, 80));
 }
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILURES`);

@@ -1,22 +1,28 @@
 /**
- * graph-rag MCP sidecar — facet-indexed vector retrieval over the neo4j graph.
+ * graph-rag MCP sidecar — facet-indexed vector retrieval over ArcadeDB.
  *
  * Each node facet (identity, location, state, temporal, relations, + any
- * custom name) gets its own vector index over `n.embed_<facet>`; facet texts
+ * custom name) gets an LSM_VECTOR index over `n.embed_<facet>`; facet texts
  * are authored by the calling model via upsert_entities. search_graph embeds
- * the query and fans out over facet indexes, merging best-score-per-node.
+ * the query and fans out over facet indexes, merging nearest-per-node.
  * A periodic sweep backfills the deterministic identity facet for nodes that
- * were written via raw cypher (model-authored facets are never synthesized).
+ * were written via raw queries (model-authored facets are never synthesized).
+ *
+ * Storage: ArcadeDB (HTTP JSON API, basic auth). Also exposes query_graph /
+ * execute_graph / schema_graph pass-throughs so agents keep raw read/write
+ * access without needing credentials (ArcadeDB's own MCP requires auth,
+ * which pi-mcp-adapter cannot send).
  */
 import express from "express";
-import neo4j from "neo4j-driver";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 
 const {
-  NEO4J_URI = "bolt://neo4j:7687",
-  NEO4J_DATABASE = "neo4j",
+  ARCADEDB_URL = "http://arcadedb:2480",
+  ARCADEDB_DB = "gwarestrin",
+  ARCADEDB_USER = "root",
+  ARCADEDB_PASSWORD = "",
   LITELLM_BASE_URL = "http://litellm:4000/v1",
   LITELLM_API_KEY = "",
   EMBED_MODEL = "embed-minilm",
@@ -28,7 +34,7 @@ const {
 const EMBED_DIM_N = Number(EMBED_DIM);
 const ENTITY_LABEL = "Entity";
 const FACET_RE = /^[a-z][a-z0-9_-]*$/i;
-const LABEL_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const PROP_RE = /^[a-z][a-z0-9_]*$/i;
 
 /** advertised facets — upsert may add custom ones (lazily indexed) */
 const FACETS = {
@@ -39,26 +45,66 @@ const FACETS = {
   relations: "how it connects to other entities",
 };
 
-const driver = neo4j.driver(NEO4J_URI, neo4j.auth.none(), { disableLosslessIntegers: true });
-const int = neo4j.int; // LIMIT params must pack as integers, not floats
-const session = () => driver.session({ database: NEO4J_DATABASE });
-
-/** facets we know an index exists for (advertised at boot + lazily created) */
 const knownIndexes = new Set();
+const BASIC = "Basic " + Buffer.from(`${ARCADEDB_USER}:${ARCADEDB_PASSWORD}`).toString("base64");
 
-function sanitizeFacet(name) {
-  if (typeof name !== "string" || !FACET_RE.test(name)) throw new Error(`invalid facet name: ${String(name)}`);
-  return name.toLowerCase();
+/** ArcadeDB HTTP JSON API */
+async function adb(endpoint, body) {
+  const res = await fetch(`${ARCADEDB_URL.replace(/\/+$/, "")}/api/v1/${endpoint}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: BASIC },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`arcadedb ${res.status}: ${text.slice(0, 200)}`);
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`arcadedb non-JSON: ${text.slice(0, 120)}`);
+  }
 }
+
+/** read query (sql or cypher) */
+async function adbQueryLang(query, language = "sql") {
+  const j = await adb(`query/${ARCADEDB_DB}`, { language, query });
+  return j.result ?? j.records ?? [];
+}
+
+/** read query (sql) */
+async function adbQuery(sql) {
+  return adbQueryLang(sql, "sql");
+}
+
+/** write command (sql or cypher) */
+async function adbCommand(command, language = "sql") {
+  const j = await adb(`command/${ARCADEDB_DB}`, { language, command });
+  return j.result ?? [];
+}
+
+/** escape a string literal for embedding in sql/cypher */
+const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 
 async function ensureIndex(facet) {
   if (knownIndexes.has(facet)) return;
-  await session().run(
-    `CREATE VECTOR INDEX entity_${facet} IF NOT EXISTS
-     FOR (n:${ENTITY_LABEL}) ON (n.embed_${facet})
-     OPTIONS {indexConfig: {\`vector.dimensions\`: ${EMBED_DIM_N}, \`vector.similarity_function\`: 'cosine'}}`,
+  const prop = `embed_${facet}`;
+  try {
+    await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} LIST OF FLOAT`);
+  } catch {
+    /* property may already exist */
+  }
+  await adbCommand(
+    `CREATE INDEX ON ${ENTITY_LABEL} (${prop}) LSM_VECTOR METADATA ` +
+      `{dimensions: ${EMBED_DIM_N}, similarity: 'COSINE', quantization: 'INT8', buildGraphNow: false}`,
   );
   knownIndexes.add(facet);
+}
+
+async function ensureFullText() {
+  try {
+    await adbCommand(`CREATE INDEX ON ${ENTITY_LABEL} (text_identity) FULL_TEXT`);
+  } catch {
+    /* exists */
+  }
 }
 
 async function embedBatch(texts) {
@@ -76,7 +122,7 @@ async function embedBatch(texts) {
   return vecs;
 }
 
-/** strip vector props from node output (they would flood the LLM context) */
+/** strip vector props; keep human-readable facet texts */
 function publicProps(props) {
   const out = {};
   for (const [k, v] of Object.entries(props ?? {})) {
@@ -86,42 +132,42 @@ function publicProps(props) {
   return out;
 }
 
-function nodeOut(node, extra = {}) {
-  return {
-    name: node.properties.name,
-    labels: node.labels.filter((l) => l !== ENTITY_LABEL),
-    properties: publicProps(node.properties),
-    ...extra,
-  };
-}
-
 /** deterministic identity text for the sweep/backfill */
-function identityText(node) {
-  const labels = node.labels.filter((l) => l !== ENTITY_LABEL).join(",");
-  const props = Object.entries(publicProps(node.properties))
+function identityText(name, labels, props) {
+  const l = labels.filter((x) => x !== ENTITY_LABEL).join(",");
+  const kv = Object.entries(props)
     .filter(([k]) => k !== "updated_at")
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
     .join("; ");
-  return `${labels ? `[${labels}] ` : ""}${node.properties.name}${props ? " — " + props : ""}`;
+  return `${l ? `[${l}] ` : ""}${name}${kv ? " — " + kv : ""}`;
 }
 
 /** ---- tool implementations ---- */
 
 async function searchGraph({ query, facets, k = 8, temporal_filter }) {
   console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter })}`);
-  const facetList = (facets?.length ? facets : Object.keys(FACETS)).map(sanitizeFacet);
+  const facetList = (facets?.length ? facets : Object.keys(FACETS)).map((f) => {
+    if (typeof f !== "string" || !FACET_RE.test(f)) throw new Error(`invalid facet: ${f}`);
+    return f.toLowerCase();
+  });
   for (const f of facetList) {
     // advertised facets get their index ensured on demand; custom facets are
     // only searchable if an upsert already created one
     if (!knownIndexes.has(f) && FACETS[f]) await ensureIndex(f);
   }
 
-  const tprop = temporal_filter?.property ?? null;
-  const tafter = temporal_filter?.after ?? null;
-  const tbefore = temporal_filter?.before ?? null;
+  let where = "";
+  if (temporal_filter) {
+    const p = temporal_filter.property;
+    if (!PROP_RE.test(p)) throw new Error(`invalid temporal property: ${p}`);
+    const conds = [`${p} IS NOT NULL`];
+    if (temporal_filter.after) conds.push(`${p} >= '${esc(temporal_filter.after)}'`);
+    if (temporal_filter.before) conds.push(`${p} <= '${esc(temporal_filter.before)}'`);
+    where = " WHERE " + conds.join(" AND ");
+  }
 
-  const byNode = new Map();
+  const byName = new Map();
   let vectorWorked = false;
   let embedFailed = false;
 
@@ -133,90 +179,58 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
   }
 
   if (embedding) {
-    const s = session();
-    try {
-      for (const facet of facetList) {
-        try {
-          const res = await s.run(
-            `CALL db.index.vector.queryNodes($index, $k, $vec)
-             YIELD node, score
-             WHERE $tprop IS NULL OR (
-               node[$tprop] IS NOT NULL
-               AND ($tafter IS NULL OR datetime(toString(node[$tprop])) >= datetime($tafter))
-               AND ($tbefore IS NULL OR datetime(toString(node[$tprop])) <= datetime($tbefore))
-             )
-             RETURN node, score ORDER BY score DESC LIMIT $k`,
-            { index: `entity_${facet}`, k: int(k), vec: embedding, tprop, tafter, tbefore },
-          );
-          // the query itself ran — a filtered-empty result is authoritative
-          // (falling back to lexical here would ignore temporal_filter)
-          vectorWorked = true;
-          for (const rec of res.records) {
-            const node = rec.get("node");
-            const score = rec.get("score");
-            const key = node.properties.name;
-            const entry = byNode.get(key) ?? nodeOut(node, { score: -1, facets: [] });
-            if (score > entry.score) entry.score = score;
-            if (!entry.facets.includes(facet)) entry.facets.push(facet);
-            byNode.set(key, entry);
-          }
-        } catch {
-          /* no index for this facet yet — nothing embedded under it */
+    const vec = "[" + embedding.join(",") + "]";
+    const innerK = temporal_filter ? Math.min(k * 3, 96) : k;
+    for (const facet of facetList) {
+      if (!knownIndexes.has(facet)) continue; // nothing ever embedded under it
+      try {
+        // filtered-empty results are authoritative; do not fall back
+        const rows = await adbQuery(
+          `SELECT FROM (SELECT expand(vector.neighbors('${ENTITY_LABEL}[embed_${facet}]', ${vec}, ${innerK})))${where}`,
+        );
+        vectorWorked = true;
+        for (const row of rows) {
+          const name = row.name;
+          if (!name) continue;
+          const entry = byName.get(name) ?? { name, labels: row[`${ENTITY_LABEL}_label`] ?? undefined, properties: publicProps(row), distance: Number.MAX_VALUE, facets: [] };
+          if (row.distance < entry.distance) entry.distance = row.distance;
+          if (!entry.facets.includes(facet)) entry.facets.push(facet);
+          byName.set(name, entry);
         }
+      } catch {
+        /* index not ready for this facet */
       }
-    } finally {
-      s.close();
     }
   }
 
-  let results = [...byNode.values()].sort((a, b) => b.score - a.score);
+  let results = [...byName.values()].sort((a, b) => a.distance - b.distance);
 
   // lexical fallback when embeddings are unavailable or the index is empty —
   // never when a temporal_filter is set (lexical matching can't honor it)
   if (!vectorWorked && !temporal_filter) {
     const terms = query.split(/\s+/).filter((t) => t.length > 2).slice(0, 6);
     if (terms.length > 0) {
-      const s = session();
-      try {
-        const res = await s.run(
-          `MATCH (n:${ENTITY_LABEL})
-           WHERE any(t IN $terms WHERE n.name CONTAINS t OR (
-             n.text_identity IS NOT NULL AND n.text_identity CONTAINS t))
-           RETURN n LIMIT $k`,
-          { terms, k: int(k) },
-        );
-        results = res.records.map((rec) => nodeOut(rec.get("n"), { score: null, facets: ["lexical"] }));
-      } finally {
-        s.close();
-      }
+      const conds = terms.map((t) => `(name CONTAINS '${esc(t)}' OR text_identity CONTAINS '${esc(t)}')`);
+      const rows = await adbQuery(
+        `SELECT FROM ${ENTITY_LABEL} WHERE (${conds.join(" OR ")}) LIMIT ${k}`,
+      );
+      results = rows.map((row) => ({ name: row.name, properties: publicProps(row), score: null, facets: ["lexical"] }));
     }
   }
 
   // 1-hop relationships for the top results
   let relationships = [];
   if (results.length > 0) {
-    const s = session();
+    const names = results.slice(0, 12).map((r) => `'${esc(r.name)}'`).join(",");
     try {
-      const names = results.slice(0, 12).map((r) => r.name);
-      const res = await s.run(
-        `MATCH (n:${ENTITY_LABEL})-[r]-(m)
-         WHERE n.name IN $names
-         RETURN n.name AS src, type(r) AS rel,
-                (CASE WHEN startNode(r) = n THEN '->' ELSE '<-' END) AS dir,
-                coalesce(m.name, '') AS dst,
-                [l IN labels(m) WHERE l <> $entityLabel] AS dstLabels
-         LIMIT 100`,
-        { names, entityLabel: ENTITY_LABEL },
+      const rows = await adbQueryLang(
+        `MATCH (n:${ENTITY_LABEL})-[r]-(m) WHERE n.name IN [${names}] ` +
+          `RETURN n.name AS src, type(r) AS rel, m.name AS dst LIMIT 50`,
+        "cypher",
       );
-      relationships = res.records.map((rec) => ({
-        from: rec.get("src"),
-        rel: rec.get("rel"),
-        dir: rec.get("dir"),
-        to: rec.get("dst"),
-        toLabels: rec.get("dstLabels"),
-      }));
-    } finally {
-      s.close();
+      relationships = rows.map((r) => ({ from: r.src, rel: r.rel, to: r.dst }));
+    } catch {
+      /* traversal is best-effort */
     }
   }
 
@@ -234,51 +248,43 @@ async function upsertEntities({ entities }) {
 
   let merged = 0;
   const jobs = []; // {name, facet, text}
-  const s = session();
-  try {
-    for (const e of entities) {
-      if (!e?.name || typeof e.name !== "string") throw new Error("entity.name required");
-      const labels = (e.labels ?? []).map(String).filter((l) => LABEL_RE.test(l) && l !== ENTITY_LABEL);
-      const props = {};
-      for (const [k, v] of Object.entries(e.properties ?? {})) {
-        if (!/^[a-z][a-z0-9_]*$/i.test(k)) throw new Error(`invalid property name: ${k}`);
-        if (["string", "number", "boolean"].includes(typeof v)) props[k] = v;
-      }
-      const labelClause = labels.map((l) => `SET n:\`${l}\``).join(" ");
-      await s.run(
-        `MERGE (n:${ENTITY_LABEL} {name: $name})
-         SET n += $props, n.updated_at = datetime() ${labelClause}`,
-        { name: e.name, props },
-      );
-      merged++;
-      for (const [facet, text] of Object.entries(e.facets ?? {})) {
-        const f = sanitizeFacet(facet);
-        if (typeof text !== "string" || !text.trim()) continue;
-        await ensureIndex(f);
-        jobs.push({ name: e.name, facet: f, text: text.slice(0, 4000) });
-      }
+  for (const e of entities) {
+    if (!e?.name || typeof e.name !== "string") throw new Error("entity.name required");
+    const labels = (e.labels ?? []).map(String).filter((l) => l !== ENTITY_LABEL && /^[A-Za-z_][A-Za-z0-9_]*$/.test(l));
+    const props = {};
+    for (const [k, v] of Object.entries(e.properties ?? {})) {
+      if (!PROP_RE.test(k)) throw new Error(`invalid property name: ${k}`);
+      if (["string", "number", "boolean"].includes(typeof v)) props[k] = v;
     }
-  } finally {
-    s.close();
+    const propSql = Object.entries(props)
+      .map(([k, v]) => `n.${k} = ${typeof v === "string" ? `'${esc(v)}'` : v}`)
+      .join(", ");
+    const labelClause = labels.map((l) => `SET n:\`${l}\``).join(" ");
+    await adbCommand(
+      `MERGE (n:${ENTITY_LABEL} {name: '${esc(e.name)}'}) ` +
+        `SET n.updated_at = sysdate() ${propSql ? ", " + propSql : ""} ${labelClause}`,
+      "cypher",
+    );
+    merged++;
+    for (const [facet, text] of Object.entries(e.facets ?? {})) {
+      const f = sanitizeFacet(facet);
+      if (typeof text !== "string" || !text.trim()) continue;
+      await ensureIndex(f);
+      jobs.push({ name: e.name, facet: f, text: text.slice(0, 4000) });
+    }
   }
 
   // one batched embeddings call for all facet texts
   let embedded = 0;
   if (jobs.length > 0) {
     const vecs = await embedBatch(jobs.map((j) => j.text));
-    const s2 = session();
-    try {
-      for (let i = 0; i < jobs.length; i++) {
-        const { name, facet, text } = jobs[i];
-        await s2.run(
-          `MERGE (n:${ENTITY_LABEL} {name: $name})
-           SET n.embed_${facet} = $vec, n.text_${facet} = $text`,
-          { name, vec: vecs[i], text },
-        );
-        embedded++;
-      }
-    } finally {
-      s2.close();
+    for (let i = 0; i < jobs.length; i++) {
+      const { name, facet, text } = jobs[i];
+      await adbCommand(
+        `UPDATE (SELECT FROM ${ENTITY_LABEL} WHERE name = '${esc(name)}') ` +
+          `SET embed_${facet} = [${vecs[i].join(",")}], text_${facet} = '${esc(text)}'`,
+      );
+      embedded++;
     }
   }
 
@@ -286,35 +292,66 @@ async function upsertEntities({ entities }) {
 }
 
 async function backfillIdentity(limit = 64) {
-  const s = session();
-  let nodes;
-  try {
-    const res = await s.run(
-      `MATCH (n:${ENTITY_LABEL}) WHERE n.embed_identity IS NULL
-       RETURN n LIMIT $limit`,
-      { limit: int(limit) },
-    );
-    nodes = res.records.map((rec) => rec.get("n"));
-  } finally {
-    s.close();
-  }
+  const lim = Math.max(1, Math.min(256, Number(limit) || 64));
+  const nodes = await adbQuery(
+    `SELECT FROM ${ENTITY_LABEL} WHERE embed_identity IS NULL LIMIT ${lim}`,
+  );
   if (nodes.length === 0) return { backfilled: 0 };
 
-  const texts = nodes.map((n) => identityText(n));
-  const vecs = await embedBatch(texts);
-  const s2 = session();
-  try {
-    for (let i = 0; i < nodes.length; i++) {
-      await s2.run(
-        `MATCH (n:${ENTITY_LABEL} {name: $name})
-         SET n.embed_identity = $vec, n.text_identity = $text`,
-        { name: nodes[i].properties.name, vec: vecs[i], text: texts[i] },
-      );
-    }
-  } finally {
-    s2.close();
+  const texts = [];
+  const names = [];
+  for (const n of nodes) {
+    const props = publicProps(n);
+    const labels = Object.keys(n).filter((k) => k.startsWith(ENTITY_LABEL) === false && k.startsWith("@") === false && k === k.toLowerCase() === false);
+    // ArcadeDB rows expose the type via @type; keep labels implicit
+    void labels;
+    texts.push(identityText(n.name, n["@type"] ? [n["@type"]] : [], props));
+    names.push(n.name);
   }
-  return { backfilled: nodes.length, ...(nodes.length === limit ? { note: "more may remain; run again" } : {}) };
+  const vecs = await embedBatch(texts);
+  for (let i = 0; i < names.length; i++) {
+    await adbCommand(
+      `UPDATE (SELECT FROM ${ENTITY_LABEL} WHERE name = '${esc(names[i])}') ` +
+        `SET embed_identity = [${vecs[i].join(",")}], text_identity = '${esc(texts[i])}'`,
+    );
+  }
+  await ensureFullText();
+  return { backfilled: names.length, ...(nodes.length === lim ? { note: "more may remain; run again" } : {}) };
+}
+
+/** ---- pass-through: raw graph access for agents (credentials stay here) ---- */
+
+async function queryGraph({ query, language = "cypher" }) {
+  if (!["cypher", "sql"].includes(language)) throw new Error("language must be cypher or sql");
+  if (typeof query !== "string" || !query.trim()) throw new Error("query required");
+  // defense in depth: ArcadeDB's /query endpoint already rejects writes
+  if (/^\s*(CREATE|MERGE|DELETE|SET|DROP|REMOVE|DETACH|INSERT|UPDATE)\b/i.test(query)) {
+    throw new Error("query_graph is read-only; use execute_graph for writes");
+  }
+  const rows = await adbQueryLang(query, language);
+  return { rows };
+}
+
+async function executeGraph({ command, language = "cypher" }) {
+  if (!["cypher", "sql"].includes(language)) throw new Error("language must be cypher or sql");
+  if (typeof command !== "string" || !command.trim()) throw new Error("command required");
+  if (/^\s*(DROP DATABASE|DROP TYPE|TRUNCATE)/i.test(command)) {
+    throw new Error("destructive schema/database operations are not permitted");
+  }
+  const result = await adbCommand(command, language);
+  return { result };
+}
+
+async function schemaGraph() {
+  const types = await adbQuery("SELECT FROM schema:types").catch(() => []);
+  if (types.length > 0) return { types };
+  const indexes = await adbQuery("SELECT FROM schema:indexes").catch(() => []);
+  return { types: [], indexes };
+}
+
+function sanitizeFacet(name) {
+  if (typeof name !== "string" || !FACET_RE.test(name)) throw new Error(`invalid facet name: ${String(name)}`);
+  return name.toLowerCase();
 }
 
 /** ---- MCP server (fresh instance per request: stateless) ---- */
@@ -323,7 +360,7 @@ const facetDoc = Object.entries(FACETS)
   .join("\n");
 
 function createServer() {
-  const server = new McpServer({ name: "graph-rag", version: "0.1.0" });
+  const server = new McpServer({ name: "graph-rag", version: "0.2.0" });
 
   server.tool(
     "search_graph",
@@ -333,8 +370,8 @@ ${facetDoc}
 Custom facets created via upsert_entities are also searchable. Use facets to narrow the
 kind of question: e.g. "what tools were ordered recently" -> facets ["temporal","state"];
 "where is the hammer" -> ["location"]. temporal_filter narrows by a datetime property on
-the node (after/before are ISO datetimes). Falls back to lexical matching if the
-embedding backend is unavailable.`,
+the node (after/before are ISO datetimes, property compared as string dates). Falls back
+to lexical matching if the embedding backend is unavailable.`,
     {
       query: z.string().min(1),
       facets: z.array(z.string()).optional(),
@@ -376,9 +413,36 @@ ${facetDoc}`,
 
   server.tool(
     "embed_backfill",
-    "Embed the identity facet for graph nodes written via raw cypher without embeddings (deterministic labels+name+properties text). Run after bulk writes.",
+    "Embed the identity facet for graph nodes written via raw queries without embeddings (deterministic labels+name+properties text). Run after bulk writes.",
     { limit: z.number().int().min(1).max(256).optional() },
     async (args) => ({ content: [{ type: "text", text: JSON.stringify(await backfillIdentity(args?.limit ?? 64)) }] }),
+  );
+
+  server.tool(
+    "query_graph",
+    "Run a READ-ONLY query against the knowledge graph (openCypher or SQL). Use for exact identifiers, structure, and schema exploration (schema_graph for the type list). Returns JSON rows.",
+    {
+      query: z.string().min(1),
+      language: z.enum(["cypher", "sql"]).optional(),
+    },
+    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await queryGraph(args)) }] }),
+  );
+
+  server.tool(
+    "execute_graph",
+    "Execute a WRITE command against the knowledge graph (openCypher or SQL): create/update vertices and edges, set properties. Destructive schema operations are rejected.",
+    {
+      command: z.string().min(1),
+      language: z.enum(["cypher", "sql"]).optional(),
+    },
+    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await executeGraph(args)) }] }),
+  );
+
+  server.tool(
+    "schema_graph",
+    "List the knowledge-graph types and indexes (vertex/edge types, properties, vector and full-text indexes).",
+    {},
+    async () => ({ content: [{ type: "text", text: JSON.stringify(await schemaGraph()) }] }),
   );
 
   return server;
