@@ -168,7 +168,9 @@ services:
     mem_limit: 2g
     environment:
       # root password via JVM settings; defaultDatabases creates an empty
-      # `gwarestrin` database at boot
+      # `gwarestrin` database at boot. The image pins a 2G heap by default —
+      # size it explicitly so it fits inside the container limit.
+      ARCADEDB_OPTS_MEMORY: "-Xms512m -Xmx1g"
       ARCADEDB_SETTINGS: "-Darcadedb.server.rootPassword=${ARCADEDB_ROOT_PASSWORD:?set ARCADEDB_ROOT_PASSWORD in .env} -Darcadedb.server.defaultDatabases=gwarestrin[root]"
     volumes:
       - arcadedb-data:/home/arcadedb/databases
