@@ -3,11 +3,11 @@
 // Idempotent on natural keys (upsert clears + recreates; run on empty db).
 // Types extend Entity so facet vector indexes on Entity cover every node.
 
-CREATE VERTEX TYPE Machine EXTENDS Entity
-CREATE VERTEX TYPE Network EXTENDS Entity
-CREATE VERTEX TYPE Service EXTENDS Entity
-CREATE VERTEX TYPE Database EXTENDS Entity
-CREATE VERTEX TYPE Agent EXTENDS Entity
+CREATE VERTEX TYPE Machine EXTENDS Entity;
+CREATE VERTEX TYPE Network EXTENDS Entity;
+CREATE VERTEX TYPE Service EXTENDS Entity;
+CREATE VERTEX TYPE Database EXTENDS Entity;
+CREATE VERTEX TYPE Agent EXTENDS Entity;
 
 CREATE (thinkcentre:Machine {name: "thinkcentre"})
   SET thinkcentre.ip = "100.96.0.10", thinkcentre.os = "Ubuntu 24.04",
