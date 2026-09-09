@@ -32,7 +32,9 @@ const statements = raw
 
 let ok = 0;
 for (const [i, stmt] of statements.entries()) {
-  const r = await rpc("tools/call", { name: "execute_graph", arguments: { command: stmt, language: "cypher" } }, i + 1);
+  // DDL is SQL in ArcadeDB; data manipulation is openCypher
+  const language = /^(CREATE|DROP|ALTER)\b/i.test(stmt) ? "sql" : "cypher";
+  const r = await rpc("tools/call", { name: "execute_graph", arguments: { command: stmt, language } }, i + 1);
   if (r.error || r.result?.isError) {
     console.error(`FAIL statement ${i + 1}: ${stmt.split("\n")[0].slice(0, 80)}`);
     console.error("  ", (r.error?.message ?? r.result?.content?.[0]?.text ?? "").slice(0, 200));
