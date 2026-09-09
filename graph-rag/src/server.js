@@ -104,7 +104,9 @@ async function ensureIndex(facet) {
   await adbCommand(
     `CREATE INDEX ON ${ENTITY_LABEL} (${prop}) LSM_VECTOR METADATA ` +
       `{dimensions: ${EMBED_DIM_N}, similarity: 'COSINE', quantization: 'INT8', buildGraphNow: false}`,
-  );
+  ).catch((e) => {
+    if (!/already exists/i.test(String(e))) throw e;
+  });
   knownIndexes.add(facet);
 }
 
