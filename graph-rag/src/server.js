@@ -133,6 +133,32 @@ async function embedBatch(texts) {
   return vecs;
 }
 
+/** call ArcadeDB's built-in MCP server (basic auth held here) */
+async function arcMcpCall(tool, args) {
+  const res = await fetch(`${ARCADEDB_URL.replace(/\/+$/, "")}/api/v1/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: BASIC },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: Math.floor(Math.random() * 1e6),
+      method: "tools/call",
+      params: { name: tool, arguments: args },
+    }),
+  });
+  const text = await res.text();
+  let j;
+  try {
+    j = JSON.parse(text);
+  } catch {
+    const line = text.split("\n").find((l) => l.startsWith("data:"));
+    j = JSON.parse((line ?? text).replace(/^data:\s*/, ""));
+  }
+  if (j.error) throw new Error(`arcadedb mcp ${tool}: ${JSON.stringify(j.error).slice(0, 160)}`);
+  if (j.result?.isError) throw new Error(`arcadedb mcp ${tool}: ${(j.result?.content?.[0]?.text ?? "").slice(0, 160)}`);
+  const content = j.result?.content?.[0]?.text;
+  return content ? JSON.parse(content) : (j.result ?? {});
+}
+
 /** strip vector props; keep human-readable facet texts */
 function publicProps(props) {
   const out = {};
@@ -190,21 +216,34 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
   }
 
   if (embedding) {
-    const vec = "[" + embedding.join(",") + "]";
     const innerK = temporal_filter ? Math.min(k * 3, 96) : k;
     for (const facet of facetList) {
       if (!knownIndexes.has(facet)) continue; // nothing ever embedded under it
       try {
-        // filtered-empty results are authoritative; do not fall back
-        const rows = await adbQuery(
-          `SELECT FROM (SELECT expand(vector.neighbors('${ENTITY_LABEL}[embed_${facet}]', ${vec}, ${innerK})))${where}`,
-        );
+        // native vector_search applies the temporal predicate over a bounded
+        // candidate set; filtered-empty results are authoritative
+        const out = await arcMcpCall("vector_search", {
+          database: ARCADEDB_DB,
+          indexName: `${ENTITY_LABEL}[embed_${facet}]`,
+          queryVector: embedding,
+          k: innerK,
+          ...(where ? { filter: where } : {}),
+        });
         vectorWorked = true;
-        for (const row of rows) {
-          const name = row.name;
+        for (const r of out.results ?? []) {
+          const name = r.properties?.name;
           if (!name) continue;
-          const entry = byName.get(name) ?? { name, labels: row[`${ENTITY_LABEL}_label`] ?? undefined, properties: publicProps(row), distance: Number.MAX_VALUE, facets: [] };
-          if (row.distance < entry.distance) entry.distance = row.distance;
+          const entry =
+            byName.get(name) ??
+            {
+              name,
+              labels: r.type ? [r.type] : [],
+              properties: publicProps(r.properties),
+              distance: Number.MAX_VALUE,
+              facets: [],
+            };
+          const dist = typeof r.distance === "number" ? r.distance : Number.MAX_VALUE;
+          if (dist < entry.distance) entry.distance = dist;
           if (!entry.facets.includes(facet)) entry.facets.push(facet);
           byName.set(name, entry);
         }
