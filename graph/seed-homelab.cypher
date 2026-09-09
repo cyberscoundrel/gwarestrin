@@ -3,6 +3,7 @@
 // One statement per line, semicolon-terminated. MERGE = idempotent.
 // Types extend Entity so the facet vector indexes on Entity cover every node.
 
+CREATE VERTEX TYPE Entity;
 CREATE VERTEX TYPE Machine EXTENDS Entity;
 CREATE VERTEX TYPE Network EXTENDS Entity;
 CREATE VERTEX TYPE Service EXTENDS Entity;
