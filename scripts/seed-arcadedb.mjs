@@ -35,9 +35,13 @@ for (const [i, stmt] of statements.entries()) {
   // ArcadeDB DDL (types/properties/indexes) is SQL; node/edge data is openCypher
   const language = /^(CREATE\s+(VERTEX\s+TYPE|EDGE\s+TYPE|PROPERTY|INDEX)|DROP|ALTER)\b/i.test(stmt) ? "sql" : "cypher";
   const r = await rpc("tools/call", { name: "execute_graph", arguments: { command: stmt, language } }, i + 1);
+  const errText = (r.error?.message ?? r.result?.content?.[0]?.text ?? "").slice(0, 200);
   if (r.error || r.result?.isError) {
+    if (/already exists/i.test(errText)) {
+      continue; // idempotent DDL
+    }
     console.error(`FAIL statement ${i + 1}: ${stmt.split("\n")[0].slice(0, 80)}`);
-    console.error("  ", (r.error?.message ?? r.result?.content?.[0]?.text ?? "").slice(0, 200));
+    console.error("  ", errText);
     process.exit(1);
   }
   ok++;
