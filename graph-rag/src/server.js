@@ -312,7 +312,7 @@ async function upsertEntities({ entities }) {
     const labelClause = labels.map((l) => `SET n:\`${l}\``).join(" ");
     await adbCommand(
       `MERGE (n:${ENTITY_LABEL} {name: '${esc(e.name)}'}) ` +
-        `SET n.updated_at = sysdate() ${propSql ? ", " + propSql : ""} ${labelClause}`,
+        `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""} ${labelClause}`,
       "cypher",
     );
     merged++;
