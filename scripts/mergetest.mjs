@@ -33,3 +33,11 @@ const t5 = await call("MERGE (n:Machine {name: '__mt__e'}) SET n.ip = '1.2.3.5'"
 console.log("merge typed+set:", t5);
 const t6 = await call("MATCH (n:Entity) WHERE n.name STARTS WITH '__mt__' DETACH DELETE n", "cypher");
 console.log("cleanup:", t6);
+const v6 = await call("MERGE (n:Entity {name: '__mt__f'}) SET n.a = '1', n.b = '2'", "cypher");
+console.log("merge multi-set comma:", v6);
+const v7 = await call("MERGE (n:Entity {name: '__mt__g'}) SET n.a = '1' SET n.b = '2'", "cypher");
+console.log("merge multi-set chained:", v7);
+const v8 = await call("MERGE (n:Entity {name: '__mt__h'}) SET n += {a: '1', b: '2'}", "cypher");
+console.log("merge set map:", v8);
+const v9 = await call("MERGE (n:Machine {name: '__mt__i'}) SET n.ip = '1.2.3.9', n.role = 'tester', n.deep = 'x y z'", "cypher");
+console.log("merge typed multi-set:", v9);
