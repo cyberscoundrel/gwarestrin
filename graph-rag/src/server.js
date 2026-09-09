@@ -88,6 +88,11 @@ async function ensureIndex(facet) {
   if (knownIndexes.has(facet)) return;
   const prop = `embed_${facet}`;
   try {
+    await adbCommand("CREATE VERTEX TYPE Entity IF NOT EXISTS");
+  } catch {
+    /* exists */
+  }
+  try {
     await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} LIST OF FLOAT`);
   } catch {
     /* property may already exist */
