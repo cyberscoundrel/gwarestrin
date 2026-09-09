@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "profile": "rag",
+  "allowReads": true,
+  "allowInsert": true,
+  "allowUpdate": true,
+  "allowDelete": false,
+  "allowSchemaChange": false,
+  "allowAdmin": false,
+  "allowedUsers": ["*"]
+}

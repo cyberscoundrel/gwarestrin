@@ -159,6 +159,28 @@ services:
         ipv4_address: 172.31.99.13
     restart: unless-stopped
 
+  # ArcadeDB — multi-model graph store (Apache-2.0) replacing neo4j. Serves
+  # the knowledge graph over HTTP JSON + built-in MCP server (/api/v1/mcp,
+  # rag profile). Backend-network name resolves via docker's embedded DNS —
+  # no static IP or extra_hosts needed.
+  arcadedb:
+    image: arcadedata/arcadedb:26.5.1
+    environment:
+      ARCADEDB_ROOT_PASSWORD: ${ARCADEDB_ROOT_PASSWORD:?set ARCADEDB_ROOT_PASSWORD in .env}
+    volumes:
+      - arcadedb-data:/var/opt/arcadedb/databases
+      # MCP server config (rag profile, bearer/basic auth); host-generated
+      - ./arcadedb-config/mcp-config.json:/var/opt/arcadedb/config/mcp-config.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/2480'"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - backend
+    restart: unless-stopped
+
 networks:
   backend:
     driver: bridge
@@ -169,3 +191,4 @@ networks:
 volumes:
   gwarestrin-state:
   gondolin-cache:
+  arcadedb-data:
