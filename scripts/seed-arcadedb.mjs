@@ -32,8 +32,8 @@ const statements = raw
 
 let ok = 0;
 for (const [i, stmt] of statements.entries()) {
-  // DDL is SQL in ArcadeDB; data manipulation is openCypher
-  const language = /^(CREATE|DROP|ALTER)\b/i.test(stmt) ? "sql" : "cypher";
+  // ArcadeDB DDL (types/properties/indexes) is SQL; node/edge data is openCypher
+  const language = /^(CREATE\s+(VERTEX\s+TYPE|EDGE\s+TYPE|PROPERTY|INDEX)|DROP|ALTER)\b/i.test(stmt) ? "sql" : "cypher";
   const r = await rpc("tools/call", { name: "execute_graph", arguments: { command: stmt, language } }, i + 1);
   if (r.error || r.result?.isError) {
     console.error(`FAIL statement ${i + 1}: ${stmt.split("\n")[0].slice(0, 80)}`);
