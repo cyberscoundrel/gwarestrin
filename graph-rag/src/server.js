@@ -64,20 +64,24 @@ async function adb(endpoint, body) {
   }
 }
 
-/** read query (sql or cypher) */
-async function adbQueryLang(query, language = "sql") {
-  const j = await adb(`query/${ARCADEDB_DB}`, { language, query });
+/** read query (sql or cypher); params use :name markers */
+async function adbQueryLang(query, language = "sql", params) {
+  const body = { language, command: query };
+  if (params) body.params = params;
+  const j = await adb(`query/${ARCADEDB_DB}`, body);
   return j.result ?? j.records ?? [];
 }
 
 /** read query (sql) */
-async function adbQuery(sql) {
-  return adbQueryLang(sql, "sql");
+async function adbQuery(sql, params) {
+  return adbQueryLang(sql, "sql", params);
 }
 
 /** write command (sql or cypher) */
-async function adbCommand(command, language = "sql") {
-  const j = await adb(`command/${ARCADEDB_DB}`, { language, command });
+async function adbCommand(command, language = "sql", params) {
+  const body = { language, command };
+  if (params) body.params = params;
+  const j = await adb(`command/${ARCADEDB_DB}`, body);
   return j.result ?? [];
 }
 
