@@ -207,6 +207,38 @@ temporal filter hit/exclude, backfill).
 Changing `EMBED_MODEL`/`EMBED_DIM` = drop all `Entity[embed_*]` indexes and
 re-embed (sweep covers identity only; other facets need upsert re-runs).
 
+## 3e. Adding an MCP sidecar (labeled auto-discovery)
+
+The gwarestrin server watches the docker cluster through a read-only
+socket-proxy (`docker-proxy` service, `CONTAINERS=1` only) and auto-registers
+any container labeled as an MCP sidecar. Onboarding:
+
+```yaml
+  whatever-mcp:
+    image: whatever/mcp:latest
+    labels:
+      gwarestrin.mcp.enable: "true"
+      gwarestrin.mcp.port: "8000"
+      gwarestrin.mcp.path: "/mcp"
+      gwarestrin.mcp.description: "whatever tools"
+      # optional: registry key (default = compose service name)
+      gwarestrin.mcp.name: "whatever"
+      # optional auth (token value must exist in the server env, e.g. .env)
+      gwarestrin.mcp.auth: "bearer"
+      gwarestrin.mcp.bearer-env: "WHATEVER_TOKEN"
+    networks:
+      - backend
+```
+
+`docker compose up -d whatever-mcp` — registered within ~30s, included for
+new agents automatically. Backend service names resolve natively (docker
+embedded DNS) — no static IPs or extra_hosts. Non-MCP sidecars can carry
+`gwarestrin.net: "true"` for documentation.
+
+Behavior: adopts hand-registered entries whose url points at the same service;
+never clobbers entries resolving elsewhere; keeps (but degrades) entries whose
+container disappears. Poll every 30s; disable by unsetting `DOCKER_PROXY_URL`.
+
 ## 4. Troubleshooting
 
 | Symptom | Check |
