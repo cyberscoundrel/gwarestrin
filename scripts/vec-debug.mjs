@@ -43,6 +43,15 @@ const t = await r.text();
 const j = JSON.parse((t.split("\n").find((l) => l.startsWith("data:")) ?? t).replace(/^data:\s*/, ""));
 console.log("vector_search:", (j.result?.content?.[0]?.text ?? JSON.stringify(j)).slice(0, 400));
 
+// rebuild the facet index (crash lost the unbuilt HNSW graph)
+const rb = await fetch(`http://${ip}:2480/api/v1/command/gwarestrin`, {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: auth },
+  body: JSON.stringify({ language: "sql", command: "REBUILD INDEX Entity[embed_identity]" }),
+});
+console.log("rebuild:", (await rb.text()).slice(0, 150));
+await new Promise((r) => setTimeout(r, 1500));
+
 // vector.neighbors SQL form
 const qn = await fetch(`http://${ip}:2480/api/v1/query/gwarestrin`, {
   method: "POST",
