@@ -43,6 +43,18 @@ const t = await r.text();
 const j = JSON.parse((t.split("\n").find((l) => l.startsWith("data:")) ?? t).replace(/^data:\s*/, ""));
 console.log("vector_search:", (j.result?.content?.[0]?.text ?? JSON.stringify(j)).slice(0, 400));
 
+// vector.neighbors SQL form
+const qn = await fetch(`http://${ip}:2480/api/v1/query/gwarestrin`, {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: auth },
+  body: JSON.stringify({
+    language: "sql",
+    command: "SELECT name, distance FROM (SELECT expand(vector.neighbors('Entity[embed_identity]', :vec, 3)))",
+    params: { vec },
+  }),
+});
+console.log("neighbors SQL:", (await qn.text()).slice(0, 300));
+
 // index stats
 const q = await fetch(`http://${ip}:2480/api/v1/query/gwarestrin`, {
   method: "POST",
