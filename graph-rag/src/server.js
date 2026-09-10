@@ -133,32 +133,6 @@ async function embedBatch(texts) {
   return vecs;
 }
 
-/** call ArcadeDB's built-in MCP server (basic auth held here) */
-async function arcMcpCall(tool, args) {
-  const res = await fetch(`${ARCADEDB_URL.replace(/\/+$/, "")}/api/v1/mcp`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: BASIC },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: Math.floor(Math.random() * 1e6),
-      method: "tools/call",
-      params: { name: tool, arguments: args },
-    }),
-  });
-  const text = await res.text();
-  let j;
-  try {
-    j = JSON.parse(text);
-  } catch {
-    const line = text.split("\n").find((l) => l.startsWith("data:"));
-    j = JSON.parse((line ?? text).replace(/^data:\s*/, ""));
-  }
-  if (j.error) throw new Error(`arcadedb mcp ${tool}: ${JSON.stringify(j.error).slice(0, 160)}`);
-  if (j.result?.isError) throw new Error(`arcadedb mcp ${tool}: ${(j.result?.content?.[0]?.text ?? "").slice(0, 160)}`);
-  const content = j.result?.content?.[0]?.text;
-  return content ? JSON.parse(content) : (j.result ?? {});
-}
-
 /** strip vector props; keep human-readable facet texts */
 function publicProps(props) {
   const out = {};
@@ -216,44 +190,52 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
   }
 
   if (embedding) {
+    // brute-force cosine over persisted facet vectors — homelab scale makes
+    // this free, and it sidesteps version-dependent HNSW query APIs. The
+    // temporal predicate rides in SQL so filtered-empty stays authoritative.
     const innerK = temporal_filter ? Math.min(k * 3, 96) : k;
     for (const facet of facetList) {
       if (!knownIndexes.has(facet)) continue; // nothing ever embedded under it
+      let rows;
       try {
-        // native vector_search applies the temporal predicate over a bounded
-        // candidate set; filtered-empty results are authoritative
-        const out = await arcMcpCall("vector_search", {
-          database: ARCADEDB_DB,
-          indexName: `${ENTITY_LABEL}[embed_${facet}]`,
-          queryVector: embedding,
-          k: innerK,
-          ...(where ? { filter: where } : {}),
-        });
-        vectorWorked = true;
-        for (const r of out.results ?? []) {
-          const name = r.properties?.name;
-          if (!name) continue;
-          const entry =
-            byName.get(name) ??
-            {
-              name,
-              labels: r.type ? [r.type] : [],
-              properties: publicProps(r.properties),
-              distance: Number.MAX_VALUE,
-              facets: [],
-            };
-          const dist = typeof r.distance === "number" ? r.distance : Number.MAX_VALUE;
-          if (dist < entry.distance) entry.distance = dist;
-          if (!entry.facets.includes(facet)) entry.facets.push(facet);
-          byName.set(name, entry);
-        }
+        rows = await adbQuery(
+          `SELECT FROM ${ENTITY_LABEL} WHERE embed_${facet} IS NOT NULL${where} LIMIT ${innerK * 8}`,
+        );
       } catch {
-        /* index not ready for this facet */
+        continue; // facet property not in schema yet
+      }
+      for (const row of rows) {
+        const vec = row[`embed_${facet}`];
+        if (!Array.isArray(vec) || vec.length !== embedding.length) continue;
+        let dot = 0;
+        let na = 0;
+        let nb = 0;
+        for (let i = 0; i < vec.length; i++) {
+          dot += vec[i] * embedding[i];
+          na += vec[i] * vec[i];
+          nb += embedding[i] * embedding[i];
+        }
+        const denom = Math.sqrt(na) * Math.sqrt(nb);
+        const score = denom === 0 ? 0 : dot / denom;
+        const name = row.name;
+        if (!name) continue;
+        const entry =
+          byName.get(name) ??
+          {
+            name,
+            labels: row["@type"] ? [row["@type"]] : [],
+            properties: publicProps(row),
+            score: -2,
+            facets: [],
+          };
+        if (score > entry.score) entry.score = score;
+        if (!entry.facets.includes(facet)) entry.facets.push(facet);
+        byName.set(name, entry);
       }
     }
   }
 
-  let results = [...byName.values()].sort((a, b) => a.distance - b.distance);
+  let results = [...byName.values()].sort((a, b) => b.score - a.score);
 
   // lexical fallback when embeddings are unavailable or the index is empty —
   // never when a temporal_filter is set (lexical matching can't honor it)
