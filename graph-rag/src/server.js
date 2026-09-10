@@ -289,10 +289,16 @@ async function upsertEntities({ entities }) {
       if (!PROP_RE.test(k)) throw new Error(`invalid property name: ${k}`);
       if (["string", "number", "boolean"].includes(typeof v)) props[k] = v;
     }
-    const propSql = Object.entries(props)
-      .map(([k, v]) => `n.${k} = ${typeof v === "string" ? `'${esc(v)}'` : v}`)
-      .join(", ");
-    const labelClause = labels.map((l) => `SET n:\`${l}\``).join(" ");
+      const propSql = Object.entries(props)
+        .map(([k, v]) => `n.${k} = ${typeof v === "string" ? `'${esc(v)}'` : v}`)
+        .join(", ");
+      // declare properties in the schema first — undeclared properties are
+      // writable but invisible to SQL WHERE clauses (e.g. temporal filters)
+      for (const k of Object.keys(props)) {
+        const type = typeof props[k] === "string" ? "STRING" : typeof props[k] === "boolean" ? "BOOLEAN" : "DOUBLE";
+        await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${k} IF NOT EXISTS ${type}`).catch(() => {});
+      }
+      const labelClause = labels.map((l) => `SET n:\`${l}\``).join(" ");
     await adbCommand(
       `MERGE (n:${ENTITY_LABEL} {name: '${esc(e.name)}'}) ` +
         `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""} ${labelClause}`,
