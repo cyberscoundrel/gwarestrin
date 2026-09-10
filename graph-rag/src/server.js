@@ -201,11 +201,10 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
         rows = await adbQuery(
           `SELECT FROM ${ENTITY_LABEL} WHERE embed_${facet} IS NOT NULL${where} LIMIT ${innerK * 8}`,
         );
-        console.log(`[graph-rag] dbg facet=${facet} rows=${rows.length} embedFailed=${embedFailed}`);
-      } catch (e) {
-        console.log(`[graph-rag] dbg facet=${facet} FETCH FAIL ${String(e).slice(0, 120)}`);
+      } catch {
         continue; // facet property not in schema yet
       }
+      vectorWorked = true; // authoritative: cosine over what exists (temporal included)
       for (const row of rows) {
         const vec = row[`embed_${facet}`];
         if (!Array.isArray(vec) || vec.length !== embedding.length) continue;
@@ -237,7 +236,6 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
     }
   }
 
-  console.log(`[graph-rag] dbg byName=${byName.size}`);
   let results = [...byName.values()].sort((a, b) => b.score - a.score);
 
   // lexical fallback when embeddings are unavailable or the index is empty —
@@ -269,7 +267,6 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
     }
   }
 
-  console.log(`[graph-rag] dbg RETURN results=${results.length} rels=${relationships.length}`);
   return {
     query,
     results: results.slice(0, 12),
