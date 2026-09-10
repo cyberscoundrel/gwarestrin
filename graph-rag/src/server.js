@@ -201,7 +201,9 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
         rows = await adbQuery(
           `SELECT FROM ${ENTITY_LABEL} WHERE embed_${facet} IS NOT NULL${where} LIMIT ${innerK * 8}`,
         );
-      } catch {
+        console.log(`[graph-rag] dbg facet=${facet} rows=${rows.length} embedFailed=${embedFailed}`);
+      } catch (e) {
+        console.log(`[graph-rag] dbg facet=${facet} FETCH FAIL ${String(e).slice(0, 120)}`);
         continue; // facet property not in schema yet
       }
       for (const row of rows) {
