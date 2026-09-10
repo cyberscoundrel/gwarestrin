@@ -6,10 +6,13 @@
  * (upsert_entities incl. a custom facet, search_graph per facet,
  * temporal_filter, embed_backfill), then cleans up the test entity.
  */
+import { readFileSync } from "node:fs";
+
 const HOST = process.argv[2] ?? "172.31.99.13";
 const MCP = `http://${HOST}:8000/mcp`;
 const LITELLM = process.env.LITELLM_URL ?? "http://172.31.99.12:4000/v1";
-const KEY = process.env.LITELLM_KEY ?? "";
+const envText = readFileSync("/home/cyber/gwarestrin/.env", "utf8");
+const KEY = envText.match(/^LOCAL_INFERENCE_API_KEY=(.*)$/m)?.[1] ?? "";
 
 let fails = 0;
 const check = (name, ok, detail = "") => {
