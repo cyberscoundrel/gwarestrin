@@ -237,6 +237,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
     }
   }
 
+  console.log(`[graph-rag] dbg byName=${byName.size}`);
   let results = [...byName.values()].sort((a, b) => b.score - a.score);
 
   // lexical fallback when embeddings are unavailable or the index is empty —
