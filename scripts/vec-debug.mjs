@@ -10,6 +10,19 @@ const env = readFileSync("/home/cyber/gwarestrin/.env", "utf8");
 const pw = env.match(/ARCADEDB_ROOT_PASSWORD=(.*)/)[1].trim();
 const key = env.match(/LOCAL_INFERENCE_API_KEY=(.*)/)[1].trim();
 const auth = "Basic " + Buffer.from(`root:${pw}`).toString("base64");
+async function adbQuery(sql) {
+  const r = await fetch(`http://${ip}:2480/api/v1/query/gwarestrin`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: auth },
+    body: JSON.stringify({ language: "sql", command: sql }),
+  });
+  const t = await r.text();
+  try {
+    return JSON.parse(t).result ?? [];
+  } catch {
+    throw new Error(t.slice(0, 160));
+  }
+}
 
 const e = await fetch("http://172.31.99.12:4000/v1/embeddings", {
   method: "POST",
