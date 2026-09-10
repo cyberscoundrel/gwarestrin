@@ -16,8 +16,15 @@ async function mcpTool(tool, args) {
   return JSON.parse(j.result?.content?.[0]?.text ?? JSON.stringify(j));
 }
 
-const s1 = await mcpTool("search_graph", { query: "test wrench for facet indexing", facets: ["identity"], k: 3 });
-console.log("identity results:", s1.results?.length ?? "none");
+const s1raw = await (await fetch("http://172.31.99.13:8000/mcp", {
+  method: "POST",
+  headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+  body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "search_graph", arguments: { query: "test wrench for facet indexing", facets: ["identity"], k: 3 } } }),
+})).text();
+console.log("RAW body:", s1raw.slice(0, 700));
+const s1 = JSON.parse((s1raw.split("\n").find((l) => l.startsWith("data:")) ?? s1raw).replace(/^data:\s*/, ""));
+const parsed = JSON.parse(s1.result?.content?.[0]?.text ?? "{}");
+console.log("identity results:", parsed.results?.length ?? "none");
 console.log("top:", JSON.stringify(s1.results?.slice(0, 3).map((r) => ({ n: r.name, s: Number(r.score?.toFixed?.(3) ?? r.score) }))));
 console.log("wrench present:", s1.results?.some((r) => r.name === "__probe__wrench"));
 
