@@ -175,7 +175,8 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
     const conds = [`${p} IS NOT NULL`];
     if (temporal_filter.after) conds.push(`${p} >= '${esc(temporal_filter.after)}'`);
     if (temporal_filter.before) conds.push(`${p} <= '${esc(temporal_filter.before)}'`);
-    where = " WHERE " + conds.join(" AND ");
+    // appended to a query that already has WHERE embed_<facet> IS NOT NULL
+    where = " AND " + conds.join(" AND ");
   }
 
   const byName = new Map();
