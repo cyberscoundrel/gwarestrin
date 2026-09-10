@@ -32,8 +32,9 @@ function readEnv(path) {
   return out;
 }
 
-const count = async (sql) => (await q(sql))[0]?.count ?? (await q(sql))[0]?.COUNT ?? "?";
-console.log("entities:", await count("SELECT count(*) FROM Entity"));
-console.log("embedded(identity):", await count("SELECT count(*) FROM Entity WHERE embed_identity IS NOT NULL"));
+const rows = await q("SELECT count(*) AS c FROM Entity");
+console.log("entities:", JSON.stringify(rows[0] ?? {}));
+const emb = await q("SELECT count(*) AS c FROM Entity WHERE embed_identity IS NOT NULL");
+console.log("embedded(identity):", JSON.stringify(emb[0] ?? {}));
 const indexes = await q("SELECT FROM schema:indexes");
 console.log("indexes:", indexes.map((i) => i.name).join(", ") || "(none)");
