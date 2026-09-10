@@ -53,7 +53,10 @@ export async function syncSidecars(containers: ContainerSummary[], registry: Mcp
     const net = labels[NET_LABEL] === "true";
     if (!mcp && !net) continue;
 
-    const name = (c.Names?.[0] ?? "").replace(/^\//, "");
+    // compose containers: prefer the service label over the runtime name
+    // (which carries project prefixes and scale suffixes)
+    const rawName = (c.Names?.[0] ?? "").replace(/^\//, "");
+    const name = labels["com.docker.compose.service"] ?? rawName.replace(/-\d+$/, "");
     if (!name) continue;
     const ip = Object.values(c.NetworkSettings?.Networks ?? {})
       .map((n) => n.IPAddress)
@@ -64,15 +67,12 @@ export async function syncSidecars(containers: ContainerSummary[], registry: Mcp
     const def = sidecarDefFromLabels(name, labels);
     if (!def) continue;
 
-    const existing = registry.get(def.key);
-    // adopt entries that already point at this container; never touch
-    // hand-registered entries that resolve elsewhere
-    if (existing && !existing.url?.includes(`//${name}:`)) {
-      log.debug(`skipping ${def.key}: hand-registered elsewhere (${existing.url})`);
-      continue;
-    }
-    await registry.put(def.key, def);
-    log.info(`registered ${def.key} -> ${def.url} (managed)`);
+    // adopt a hand-registered entry that already points at this service
+    let key = def.key;
+    const adopted = Object.entries(registry.list()).find(([, d]) => d.url?.includes(`//${name}:`));
+    if (adopted) key = adopted[0];
+    await registry.put(key, def);
+    log.info(`registered ${key} -> ${def.url} (managed)`);
   }
 }
 
