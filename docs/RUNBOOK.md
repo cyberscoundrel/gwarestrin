@@ -90,37 +90,32 @@ config edits; `dab validate --config /etc/dab/dab-config.json` inside the
 container checks configs. If it exits silently, rerun with `--LogLevel Debug` —
 default log level hides the real error.
 
-## 3b. neo4j + neo4j MCP sidecar
+## 3b. ArcadeDB knowledge graph (replaced neo4j 2026-09)
 
-neo4j itself runs from its own compose project in `~/neo4j-compose` (binds the
-pre-existing `~/neo4j/data` store by absolute path; `NEO4J_AUTH=none`,
-`NEO4J_PLUGINS=["apoc"]` — APOC core is required by the MCP schema tool).
-Browser at `http://<host>:7474`, bolt at 7687.
+ArcadeDB (Apache-2.0, multi-model: graph + document + vector + full-text)
+replaced neo4j + the neo4j-mcp sidecar. Runs as the `arcadedb` compose service
+(image `arcadedata/arcadedb:latest`, backend subnet, data volume
+`arcadedb-data`, HTTP 2480 — Studio reachable from the host via the container
+IP; no published LAN port). Root password: `ARCADEDB_ROOT_PASSWORD` in `.env`
+(passed as a JVM setting; the image prompts interactively if unset).
 
-The `neo4j-mcp` compose service (official `mcp/neo4j-cypher` image) serves
-streamable-HTTP MCP at `http://neo4j-mcp:8000/mcp/` on the backend subnet —
-no custom image, env-only config. Registered as:
+MCP: ArcadeDB ships a built-in MCP server at `POST /api/v1/mcp` (Basic auth;
+config `arcadedb-config/mcp-config.json` — rag profile, reads/inserts/updates
+on). NOTE: pi-mcp-adapter cannot send auth headers, so agents do NOT talk to
+it directly — the `graph-rag` sidecar holds credentials and fronts it (§3d).
 
-`PUT /api/mcp/neo4j` with `{"url":"http://neo4j-mcp:8000/mcp/","auth":false,"description":"Official neo4j cypher MCP server"}`
-(note the trailing slash, and `NEO4J_MCP_SERVER_ALLOWED_HOSTS` must include the
-sidecar names/IPs or requests are rejected as DNS-rebinding).
+Agents' graph tools (via graph-rag): `query_graph` (read cypher/sql),
+`execute_graph` (writes), `schema_graph`, `search_graph`, `upsert_entities`,
+`embed_backfill`. Cypher is openCypher TCK v9 ~98%: no APOC (use
+`schema_graph` / `get_schema`), identifiers case-insensitive, string literals
+single-quoted, `datetime()` (not `sysdate()`), `LIMIT` needs integer params.
+Undeclared properties are writable but invisible to SQL WHERE — upsert
+declares them automatically.
 
-Seed the homelab test graph (idempotent):
-
-```bash
-python3 - <<'EOF'
-import json, urllib.request
-c = open("neo4j/seed-homelab.cypher").read()
-p = json.dumps({"statements": [{"statement": c}]}).encode()
-r = urllib.request.Request("http://localhost:7474/db/neo4j/tx/commit", data=p,
-                           headers={"content-type": "application/json"})
-print(json.load(urllib.request.urlopen(r, timeout=30))["errors"])
-EOF
-```
-
-Tools: `neo4j_get_neo4j_schema` (APOC), `neo4j_read_neo4j_cypher`,
-`neo4j_write_neo4j_cypher` (write enabled by default; set
-`NEO4J_READ_ONLY=true` on the sidecar to lock down).
+Neo4j containers/volumes are retired (stopped, kept on disk):
+`~/neo4j-compose`, the `neo4j` container, and the old
+`neo4j/seed-homelab.cypher` (successor: `graph/seed-homelab.cypher`, applied
+with `node scripts/seed-arcadedb.mjs`).
 
 ## 3c. LiteLLM gateway
 
