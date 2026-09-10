@@ -202,9 +202,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
         rows = await adbQuery(
           `SELECT FROM ${ENTITY_LABEL} WHERE embed_${facet} IS NOT NULL${where} LIMIT ${innerK * 8}`,
         );
-        if (temporal_filter) console.log(`[graph-rag] dbg temporal rows=${rows.length}`);
-      } catch (e) {
-        if (temporal_filter) console.log(`[graph-rag] dbg temporal FETCH ERR ${String(e).slice(0, 200)}`);
+      } catch {
         continue; // facet property not in schema yet
       }
       vectorWorked = true; // authoritative: cosine over what exists (temporal included)
