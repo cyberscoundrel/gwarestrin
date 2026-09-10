@@ -1,6 +1,6 @@
 /** temp: identity search dump + temporal error detail */
 import { readFileSync } from "node:fs";
-const ip = process.argv[2];
+const ip = process.argv[2] ?? "172.31.99.4";
 const env = readFileSync("/home/cyber/gwarestrin/.env", "utf8");
 const pw = env.match(/ARCADEDB_ROOT_PASSWORD=(.*)/)[1].trim();
 const auth = "Basic " + Buffer.from(`root:${pw}`).toString("base64");
