@@ -179,12 +179,8 @@ services:
       # MCP server config (rag profile, auth policy); host-generated from
       # arcadedb-config.example/
       - ./arcadedb-config/mcp-config.json:/home/arcadedb/config/mcp-config.json:ro
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/2480'"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 90s
+    # no in-container healthcheck (image ships no shell tools); /api/v1/ready
+    # is the external probe endpoint
     networks:
       - backend
     restart: unless-stopped
