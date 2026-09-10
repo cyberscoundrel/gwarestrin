@@ -47,10 +47,17 @@ console.log("vector_search:", (j.result?.content?.[0]?.text ?? JSON.stringify(j)
 const rb = await fetch(`http://${ip}:2480/api/v1/command/gwarestrin`, {
   method: "POST",
   headers: { "content-type": "application/json", authorization: auth },
-  body: JSON.stringify({ language: "sql", command: "REBUILD INDEX Entity[embed_identity]" }),
+  body: JSON.stringify({ language: "sql", command: "REBUILD INDEX `Entity[embed_identity]`" }),
 });
 console.log("rebuild:", (await rb.text()).slice(0, 150));
 await new Promise((r) => setTimeout(r, 1500));
+const idx = await adbQuery("SELECT FROM schema:indexes");
+const embedIdx = idx.filter((i) => String(i.name ?? "").includes("embed"));
+console.log(
+  "embed indexes:",
+  JSON.stringify(embedIdx.map((i) => ({ name: i.name, def: i.definition ?? i.indexDefinition ?? null })).map((x) => ({ name: x.name }))[0] ?? "(none)"),
+);
+console.log("total indexes:", idx.length);
 
 // vector.neighbors SQL form
 const qn = await fetch(`http://${ip}:2480/api/v1/query/gwarestrin`, {
