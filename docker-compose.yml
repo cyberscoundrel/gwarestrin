@@ -31,6 +31,8 @@ services:
       GWARESTRIN_MAX_AGENTS: ${GWARESTRIN_MAX_AGENTS:-4}
       GWARESTRIN_STATE: /var/lib/gwarestrin
       GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
+      # labeled-sidecar discovery (empty = disabled)
+      DOCKER_PROXY_URL: ${DOCKER_PROXY_URL:-http://docker-proxy:2375}
 
     # all provider API keys referenced by providers.json apiKeyEnv live here
     env_file:
@@ -40,11 +42,6 @@ services:
     # inference box) via http://host.docker.internal:…
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      # static backend addresses of the sidecars (see networks below)
-      - "dab:172.31.99.10"
-      - "neo4j-mcp:172.31.99.11"
-      - "litellm:172.31.99.12"
-      - "graph-rag:172.31.99.13"
 
     volumes:
       - gwarestrin-state:/var/lib/gwarestrin
@@ -79,31 +76,14 @@ services:
       # SQL MCP configs; host-generated from dbcreds.json, contains DB
       # credentials (see dab-config.example/)
       - ./dab-config:/etc/dab:ro
+    labels:
+      gwarestrin.mcp.enable: "true"
+      gwarestrin.mcp.name: "mssql"
+      gwarestrin.mcp.port: "5000"
+      gwarestrin.mcp.path: "/mcp"
+      gwarestrin.mcp.description: "Microsoft SQL MCP Server (Data API builder)"
     networks:
-      backend:
-        ipv4_address: 172.31.99.10
-    restart: unless-stopped
-
-  # Official neo4j MCP server (cypher) as an HTTP sidecar — same pattern as dab.
-  # Reaches the neo4j container via the host's published bolt port.
-  neo4j-mcp:
-    image: mcp/neo4j-cypher:latest
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      NEO4J_URI: bolt://neo4j:7687   # shared backend network (docker DNS); host.docker.internal hits docker-proxy DNAT + cross-bridge isolation
-      NEO4J_USERNAME: neo4j
-      NEO4J_PASSWORD: none           # neo4j runs with auth disabled (LAN-trust)
-      NEO4J_DATABASE: neo4j
-      NEO4J_TRANSPORT: http
-      NEO4J_MCP_SERVER_HOST: 0.0.0.0
-      NEO4J_MCP_SERVER_PORT: 8000
-      NEO4J_MCP_SERVER_PATH: /mcp/
-      # DNS-rebinding guard: allow how gwarestrin addresses us
-      NEO4J_MCP_SERVER_ALLOWED_HOSTS: neo4j-mcp,172.31.99.11,localhost,127.0.0.1
-    networks:
-      backend:
-        ipv4_address: 172.31.99.11
+      - backend
     restart: unless-stopped
 
   # LiteLLM gateway — one OpenAI-compatible endpoint (chat + embeddings) in
@@ -133,9 +113,10 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
+    labels:
+      gwarestrin.net: "true"
     networks:
-      backend:
-        ipv4_address: 172.31.99.12
+      - backend
     restart: unless-stopped
 
   # graph-rag MCP sidecar — facet-indexed vector retrieval over neo4j
@@ -156,9 +137,13 @@ services:
       EMBED_MODEL: embed-minilm
       EMBED_DIM: "384"
       SWEEP_INTERVAL_MS: "600000"
+    labels:
+      gwarestrin.mcp.enable: "true"
+      gwarestrin.mcp.port: "8000"
+      gwarestrin.mcp.path: "/mcp"
+      gwarestrin.mcp.description: "facet-indexed vector retrieval + graph MCP"
     networks:
-      backend:
-        ipv4_address: 172.31.99.13
+      - backend
     restart: unless-stopped
 
   # ArcadeDB — multi-model graph store (Apache-2.0) replacing neo4j. Serves
@@ -181,6 +166,20 @@ services:
       - ./arcadedb-config/mcp-config.json:/home/arcadedb/config/mcp-config.json:ro
     # no in-container healthcheck (image ships no shell tools); /api/v1/ready
     # is the external probe endpoint
+    labels:
+      gwarestrin.net: "true"
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # read-only Docker API proxy — gwarestrin's sidecar discovery reads
+  # labeled containers through it (least privilege; no socket mount)
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy
+    environment:
+      - CONTAINERS=1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - backend
     restart: unless-stopped

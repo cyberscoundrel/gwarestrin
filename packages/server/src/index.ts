@@ -13,6 +13,7 @@ import { McpRegistryStore } from "./mcp/registry-store.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { scoped } from "./util/log.js";
 import { registerWs } from "./ws/connection.js";
+import { startSidecarDiscovery } from "./discovery/sidecars.js";
 
 const log = scoped("server");
 
@@ -49,6 +50,7 @@ async function main(): Promise<void> {
   await registerFileRoutes(app, config, manager);
   await registerMcpRoutes(app, mcpRegistry);
   await registerWs(app, config, manager);
+  startSidecarDiscovery(process.env.DOCKER_PROXY_URL, mcpRegistry);
 
   if (existsSync(config.webDistDir)) {
     await app.register(fastifyStatic, {
