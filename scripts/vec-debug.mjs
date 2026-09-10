@@ -72,6 +72,18 @@ console.log(
 );
 console.log("total indexes:", idx.length);
 
+// brute-force SQL cosine similarity
+const sim = await fetch(`http://${ip}:2480/api/v1/query/gwarestrin`, {
+  method: "POST",
+  headers: { "content-type": "application/json", authorization: auth },
+  body: JSON.stringify({
+    language: "sql",
+    command: "SELECT name, vector.similarity('COSINE', embed_identity, :vec) AS score FROM Entity WHERE embed_identity IS NOT NULL ORDER BY score DESC LIMIT 3",
+    params: { vec },
+  }),
+});
+console.log("similarity SQL:", (await sim.text()).slice(0, 300));
+
 // vector.neighbors SQL form
 const qn = await fetch(`http://${ip}:2480/api/v1/query/gwarestrin`, {
   method: "POST",
