@@ -173,14 +173,17 @@ prefix embedding models `embed-` per the convention above.
 
 ## 3d. graph-rag MCP sidecar (facet vector retrieval)
 
-Semantic retrieval over the knowledge graph. The `graph-rag` compose service
-(backend `172.31.99.13`, `http://graph-rag:8000/mcp`) exposes:
+Semantic retrieval over the knowledge graph, backed by ArcadeDB (§3b). The
+`graph-rag` compose service (backend `172.31.99.13`, `http://graph-rag:8000/mcp`)
+exposes:
 
 - `search_graph({query, facets?, k?, temporal_filter?})` — embeds the query via
-  the litellm gateway (`embed-minilm`, 384-dim) and fans out over per-facet
-  neo4j vector indexes, merging best-score-per-node + 1-hop relationships.
-  `temporal_filter: {property, after?, before?}` narrows by node datetime
-  property (ISO strings). Lexical fallback when the embedding backend fails.
+  the litellm gateway (`embed-minilm`, 384-dim) and scores every node's facet
+  vectors client-side (brute-force cosine — version-proof; this ArcadeDB build's
+  HNSW query API (`vector.neighbors`/`vector_search`) lags the docs), merging
+  best-score-per-node + 1-hop relationships. `temporal_filter:
+  {property, after?, before?}` rides in the SQL WHERE (string-date comparison).
+  Lexical fallback when the embedding backend fails.
 - `upsert_entities({entities: [{name, labels?, properties?, facets?}]})` —
   MERGE by name; facet texts are **model-authored at call time** and embedded
   into per-facet indexes (`n.embed_<facet>`, `n.text_<facet>`). Unknown facet
@@ -201,8 +204,8 @@ agent uses it as its 2nd read-only tool (`search_graph` next to `cypher_read`).
 Verify with `node scripts/embed-probe.mjs` (8 checks: embeddings, facets,
 temporal filter hit/exclude, backfill).
 
-Changing `EMBED_MODEL`/`EMBED_DIM` = drop all `entity_*` indexes and re-embed
-(sweep covers identity only; other facets need upsert re-runs).
+Changing `EMBED_MODEL`/`EMBED_DIM` = drop all `Entity[embed_*]` indexes and
+re-embed (sweep covers identity only; other facets need upsert re-runs).
 
 ## 4. Troubleshooting
 
