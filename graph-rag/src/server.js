@@ -269,6 +269,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
     }
   }
 
+  console.log(`[graph-rag] dbg RETURN results=${results.length} rels=${relationships.length}`);
   return {
     query,
     results: results.slice(0, 12),
