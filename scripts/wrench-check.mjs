@@ -17,5 +17,11 @@ console.log("count total:", JSON.stringify(await q("SELECT count(*) FROM Entity"
 console.log("count wrench cypher:", JSON.stringify(await q("MATCH (n:Entity) WHERE n.name = '__probe__wrench' RETURN count(n) AS c", "cypher")));
 console.log("count wrench sql:", JSON.stringify(await q("SELECT count(*) FROM Entity WHERE name = '__probe__wrench'", "sql")));
 console.log("wrench row sql:", JSON.stringify(await q("SELECT name, arrived_at FROM Entity WHERE name = '__probe__wrench'", "sql")));
-const all = await q("SELECT name FROM Entity LIMIT 20", "sql");
-console.log("all names:", JSON.stringify(all.map((r) => r.name)));
+const clauses = [
+  "SELECT count(*) AS c FROM Entity WHERE embed_temporal IS NOT NULL",
+  "SELECT count(*) AS c FROM Entity WHERE arrived_at IS NOT NULL",
+  "SELECT count(*) AS c FROM Entity WHERE arrived_at >= '2026-08-01'",
+  "SELECT count(*) AS c FROM Entity WHERE embed_temporal IS NOT NULL AND arrived_at IS NOT NULL",
+  "SELECT count(*) AS c FROM Entity WHERE embed_temporal IS NOT NULL AND arrived_at IS NOT NULL AND arrived_at >= '2026-08-01' AND arrived_at <= '2026-08-31'",
+];
+for (const c of clauses) console.log("clause:", JSON.stringify(await q(c, "sql")));
