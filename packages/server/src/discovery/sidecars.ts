@@ -71,6 +71,12 @@ export async function syncSidecars(containers: ContainerSummary[], registry: Mcp
     let key = def.key;
     const adopted = Object.entries(registry.list()).find(([, d]) => d.url?.includes(`//${name}:`));
     if (adopted) key = adopted[0];
+    // never clobber an entry under the target key that resolves elsewhere
+    const existing = registry.get(key);
+    if (existing && !existing.url?.includes(`//${name}:`)) {
+      log.debug(`skipping ${key}: entry resolves elsewhere (${existing.url})`);
+      continue;
+    }
     await registry.put(key, def);
     log.info(`registered ${key} -> ${def.url} (managed)`);
   }
