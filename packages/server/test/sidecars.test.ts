@@ -6,6 +6,7 @@ function stubRegistry(existing: Record<string, { url?: string }> = {}) {
   const store = { ...existing };
   return {
     get: (name: string) => store[name],
+    list: () => store,
     put: async (name: string, def: { url: string }) => {
       store[name] = def;
     },
