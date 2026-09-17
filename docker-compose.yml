@@ -166,9 +166,9 @@ services:
       ARCADEDB_SETTINGS: "-Darcadedb.server.rootPasswordPath=/run/secrets/adb-root-pw -Darcadedb.server.defaultDatabases=gwarestrin[root]"
     volumes:
       - arcadedb-data:/home/arcadedb/databases
-      # MCP server config (rag profile, auth policy); host-generated from
-      # arcadedb-config.example/; root-pw is host-generated from .env (600)
-      - ./arcadedb-config:/home/arcadedb/config:ro
+      # single-file mounts only — the config dir itself must stay writable
+      # (setting the root password persists server-users.jsonl into it)
+      - ./arcadedb-config/mcp-config.json:/home/arcadedb/config/mcp-config.json:ro
       - ./arcadedb-config/root-pw:/run/secrets/adb-root-pw:ro
     networks:
       - backend
