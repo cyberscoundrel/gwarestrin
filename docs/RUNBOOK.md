@@ -95,9 +95,18 @@ default log level hides the real error.
 ArcadeDB (Apache-2.0, multi-model: graph + document + vector + full-text)
 replaced neo4j + the neo4j-mcp sidecar. Runs as the `arcadedb` compose service
 (image `arcadedata/arcadedb:latest`, backend subnet, data volume
-`arcadedb-data`, HTTP 2480 — Studio reachable from the host via the container
-IP; no published LAN port). Root password: `ARCADEDB_ROOT_PASSWORD` in `.env`
-(passed as a JVM setting; the image prompts interactively if unset).
+`arcadedb-data`, Studio + HTTP API published at **`http://<host>:2480`** —
+login root / `ARCADEDB_ROOT_PASSWORD` from `.env`).
+
+Root password delivery: secret FILE (`arcadedb-config/root-pw`, 600,
+host-generated from `.env` — regenerate after rotating the password) mounted
+to `/run/secrets/adb-root-pw` and passed as
+`-Darcadedb.server.rootPasswordPath=...`. NEVER pass it as a `-D` setting
+(plaintext in process args) and never mount the whole config dir read-only
+(setting the password persists `server-users.jsonl` into it — the dir must
+stay writable). Studio note: writes from Studio bypass graph-rag facet
+conventions; run `embed_backfill` (or wait for the identity sweep) after
+manual graph edits.
 
 MCP: ArcadeDB ships a built-in MCP server at `POST /api/v1/mcp` (Basic auth;
 config `arcadedb-config/mcp-config.json` — rag profile, reads/inserts/updates
