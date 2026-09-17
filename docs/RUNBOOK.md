@@ -150,12 +150,12 @@ Verify:
 
 ```bash
 K=$(grep -oP 'LOCAL_INFERENCE_API_KEY=\K.*' ~/gwarestrin/.env)
-curl -s http://172.31.99.12:4000/health/liveliness
-curl -s http://172.31.99.12:4000/v1/models -H "Authorization: Bearer $K" | head -c 300
-curl -s http://172.31.99.12:4000/v1/chat/completions -H "Authorization: Bearer $K" \
+curl -s http://localhost:4100/health/liveliness
+curl -s http://localhost:4100/v1/models -H "Authorization: Bearer $K" | head -c 300
+curl -s http://localhost:4100/v1/chat/completions -H "Authorization: Bearer $K" \
   -H content-type:application/json \
   -d '{"model":"qwen3.8-27b","messages":[{"role":"user","content":"say ok"}],"max_tokens":10}'
-curl -s http://172.31.99.12:4000/v1/embeddings -H "Authorization: Bearer $K" \
+curl -s http://localhost:4100/v1/embeddings -H "Authorization: Bearer $K" \
   -H content-type:application/json \
   -d '{"model":"embed-minilm","input":["hello"]}' | python3 -c "import json,sys; d=json.load(sys.stdin); print(len(d['data'][0]['embedding']))"
 ```

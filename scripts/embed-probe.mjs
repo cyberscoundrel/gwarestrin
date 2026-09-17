@@ -7,10 +7,17 @@
  * temporal_filter, embed_backfill), then cleans up the test entity.
  */
 import { readFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 
-const HOST = process.argv[2] ?? "172.31.99.13";
+/** backend IPs are dynamic (no static IPs since the discovery rework) */
+const ipOf = (container) =>
+  execSync(`docker inspect ${container} --format "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}"`)
+    .toString()
+    .trim();
+
+const HOST = process.argv[2] ?? ipOf("gwarestrin-graph-rag-1");
 const MCP = `http://${HOST}:8000/mcp`;
-const LITELLM = process.env.LITELLM_URL ?? "http://172.31.99.12:4000/v1";
+const LITELLM = process.env.LITELLM_URL ?? `http://${ipOf("gwarestrin-litellm-1")}:4000/v1`;
 const envText = readFileSync("/home/cyber/gwarestrin/.env", "utf8");
 const KEY = envText.match(/^LOCAL_INFERENCE_API_KEY=(.*)$/m)?.[1] ?? "";
 
