@@ -3,14 +3,17 @@
 # group membership so only the owner reaches their instance.
 version: 1
 entries:
-  - model: authentik_core.group
+  - id: group-gw-admin
+    model: authentik_core.group
     identifiers:
       name: gw-admin
-  - model: authentik_core.group
+  - id: group-gw-user
+    model: authentik_core.group
     identifiers:
       name: gw-user
 
-  - model: authentik_core.user
+  - id: user-admin
+    model: authentik_core.user
     identifiers:
       username: admin
     attrs:
@@ -21,7 +24,8 @@ entries:
         - gw-user
       password: "admin-pass-1"
 
-  - model: authentik_core.user
+  - id: user-alice
+    model: authentik_core.user
     identifiers:
       username: alice
     attrs:
@@ -31,7 +35,8 @@ entries:
         - gw-user
       password: "alice-pass-1"
 
-  - model: authentik_core.user
+  - id: user-bob
+    model: authentik_core.user
     identifiers:
       username: bob
     attrs:
@@ -42,7 +47,8 @@ entries:
       password: "bob-pass-1"
 
   # ---- proxy providers (forward auth, embedded outpost) ----
-  - model: authentik_providers_proxy.proxyprovider
+  - id: provider-gw-admin
+    model: authentik_providers_proxy.proxyprovider
     identifiers:
       name: gw-admin-provider
     attrs:
@@ -51,7 +57,8 @@ entries:
       mode: forward_single
       access_policy_expression: '"gw-admin" in request.user.group_attributes("name") or request.user.is_superuser'
 
-  - model: authentik_providers_proxy.proxyprovider
+  - id: provider-gw-alice
+    model: authentik_providers_proxy.proxyprovider
     identifiers:
       name: gw-alice-provider
     attrs:
@@ -60,7 +67,8 @@ entries:
       mode: forward_single
       access_policy_expression: '"gw-user" in request.user.group_attributes("name") or "gw-admin" in request.user.group_attributes("name") or request.user.is_superuser'
 
-  - model: authentik_providers_proxy.proxyprovider
+  - id: provider-gw-bob
+    model: authentik_providers_proxy.proxyprovider
     identifiers:
       name: gw-bob-provider
     attrs:
@@ -69,7 +77,8 @@ entries:
       mode: forward_single
       access_policy_expression: '"gw-user" in request.user.group_attributes("name") or "gw-admin" in request.user.group_attributes("name") or request.user.is_superuser'
 
-  - model: authentik_core.application
+  - id: application-gw-admin
+    model: authentik_core.application
     identifiers:
       slug: gw-admin
     attrs:
@@ -77,7 +86,8 @@ entries:
       provider: !KeyOf gw-admin-provider
       policy_engine_mode: any
 
-  - model: authentik_core.application
+  - id: application-gw-alice
+    model: authentik_core.application
     identifiers:
       slug: gw-alice
     attrs:
@@ -85,7 +95,8 @@ entries:
       provider: !KeyOf gw-alice-provider
       policy_engine_mode: any
 
-  - model: authentik_core.application
+  - id: application-gw-bob
+    model: authentik_core.application
     identifiers:
       slug: gw-bob
     attrs:

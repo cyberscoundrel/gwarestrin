@@ -1,12 +1,15 @@
 version: 1
 entries:
-  - model: authentik_core.group
+  - id: group-gw-admin
+    model: authentik_core.group
     identifiers:
       name: gw-admin
-  - model: authentik_core.group
+  - id: group-gw-user
+    model: authentik_core.group
     identifiers:
       name: gw-user
-  - model: authentik_core.user
+  - id: user-alice
+    model: authentik_core.user
     identifiers:
       username: alice
     attrs:
