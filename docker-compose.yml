@@ -3,6 +3,7 @@ services:
     # build with host networking: on WARP hosts the docker bridge's inherited
     # upstream DNS may be unreachable (isp resolvers refusing non-isp source
     # IPs); the host stack resolves fine.
+    image: gwarestrin:local
     build:
       context: .
       network: host
@@ -193,8 +194,148 @@ services:
       - backend
     restart: unless-stopped
 
+  # ---- per-user instances (identity-tier test identities) ----
+  # alice: graph read + writes queued for review
+  gw-alice:
+    image: gwarestrin:local
+    environment:
+      GWARESTRIN_MAX_AGENTS: "2"
+      GWARESTRIN_STATE: /var/lib/gwarestrin
+      GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
+      GWARESTRIN_INSTANCE_METADATA: /etc/gwarestrin/instance.json
+    volumes:
+      - gwarestrin-state-alice:/var/lib/gwarestrin
+      - gondolin-cache-alice:/home/node/.cache/gondolin
+      - ./providers.json:/etc/gwarestrin/providers.json:ro
+      - ./instances/alice.json:/etc/gwarestrin/instance.json:ro
+    devices:
+      - /dev/kvm:/dev/kvm
+    group_add:
+      - "${KVM_GID:-993}"
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - backend
+    restart: unless-stopped
+
+  # bob: read-only graph (writes denied)
+  gw-bob:
+    image: gwarestrin:local
+    environment:
+      GWARESTRIN_MAX_AGENTS: "2"
+      GWARESTRIN_STATE: /var/lib/gwarestrin
+      GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
+      GWARESTRIN_INSTANCE_METADATA: /etc/gwarestrin/instance.json
+    volumes:
+      - gwarestrin-state-bob:/var/lib/gwarestrin
+      - gondolin-cache-bob:/home/node/.cache/gondolin
+      - ./providers.json:/etc/gwarestrin/providers.json:ro
+      - ./instances/bob.json:/etc/gwarestrin/instance.json:ro
+    devices:
+      - /dev/kvm:/dev/kvm
+    group_add:
+      - "${KVM_GID:-993}"
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - backend
+    restart: unless-stopped
+
+  # ---- identity tier (first implementation; swappable) ----
+  authentik-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: \${AUTHENTIK_PG_PASSWORD}
+      POSTGRES_USER: authentik
+      POSTGRES_DB: authentik
+    volumes:
+      - authentik-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authentik"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  authentik-redis:
+    image: redis:alpine
+    restart: unless-stopped
+
+  authentik-server:
+    image: ghcr.io/goauthentik/server:2026.8
+    command: server
+    environment:
+      AUTHENTIK_SECRET_KEY: \${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: \${AUTHENTIK_PG_PASSWORD}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_BOOTSTRAP_PASSWORD: \${AUTHENTIK_BOOTSTRAP_PASSWORD}
+      AUTHENTIK_BOOTSTRAP__EMAIL: admin@gw.home
+    volumes:
+      - ./authentik/blueprints:/blueprints:ro
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_started
+    networks:
+      - default
+      - backend
+    restart: unless-stopped
+
+  authentik-worker:
+    image: ghcr.io/goauthentik/server:2026.8
+    command: worker
+    environment:
+      AUTHENTIK_SECRET_KEY: \${AUTHENTIK_SECRET_KEY}
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgres
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: \${AUTHENTIK_PG_PASSWORD}
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_BOOTSTRAP_PASSWORD: \${AUTHENTIK_BOOTSTRAP_PASSWORD}
+    user: root
+    volumes:
+      - ./authentik/blueprints:/blueprints:ro
+    depends_on:
+      authentik-postgres:
+        condition: service_healthy
+      authentik-redis:
+        condition: service_started
+    networks:
+      - default
+      - backend
+    restart: unless-stopped
+
+  # ---- edge reverse proxy (tailnet-only, plain HTTP) ----
+  traefik:
+    image: traefik:v3.3
+    command:
+      - --entrypoints.web.address=:80
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --log.level=INFO
+    ports:
+      - "80:80"
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/dynamic/dynamic.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - backend
+    restart: unless-stopped
+
 networks:
-  backend:
     driver: bridge
     ipam:
       config:
@@ -204,3 +345,8 @@ volumes:
   gwarestrin-state:
   gondolin-cache:
   arcadedb-data:
+  gwarestrin-state-alice:
+  gondolin-cache-alice:
+  gwarestrin-state-bob:
+  gondolin-cache-bob:
+  authentik-pg:

@@ -1,0 +1,94 @@
+# gwarestrin identity bootstrap — auto-applied by the authentik worker.
+# Groups map to instance capability tiers; per-subdomain applications bind
+# group membership so only the owner reaches their instance.
+version: 1
+entries:
+  - model: authentik_core.group
+    identifiers:
+      name: gw-admin
+  - model: authentik_core.group
+    identifiers:
+      name: gw-user
+
+  - model: authentik_core.user
+    identifiers:
+      username: admin
+    attrs:
+      name: admin
+      email: admin@gw.home
+      groups:
+        - gw-admin
+        - gw-user
+      password: "admin-pass-1"
+
+  - model: authentik_core.user
+    identifiers:
+      username: alice
+    attrs:
+      name: Alice
+      email: alice@gw.home
+      groups:
+        - gw-user
+      password: "alice-pass-1"
+
+  - model: authentik_core.user
+    identifiers:
+      username: bob
+    attrs:
+      name: Bob
+      email: bob@gw.home
+      groups:
+        - gw-user
+      password: "bob-pass-1"
+
+  # ---- proxy providers (forward auth, embedded outpost) ----
+  - model: authentik_providers_proxy.proxyprovider
+    identifiers:
+      name: gw-admin-provider
+    attrs:
+      external_host: http://admin.gw.home
+      internal_host: http://gwarestrin:3000
+      mode: forward_single
+      access_policy_expression: '"gw-admin" in request.user.group_attributes("name") or request.user.is_superuser'
+
+  - model: authentik_providers_proxy.proxyprovider
+    identifiers:
+      name: gw-alice-provider
+    attrs:
+      external_host: http://alice.gw.home
+      internal_host: http://gw-alice:3000
+      mode: forward_single
+      access_policy_expression: '"gw-user" in request.user.group_attributes("name") or "gw-admin" in request.user.group_attributes("name") or request.user.is_superuser'
+
+  - model: authentik_providers_proxy.proxyprovider
+    identifiers:
+      name: gw-bob-provider
+    attrs:
+      external_host: http://bob.gw.home
+      internal_host: http://gw-bob:3000
+      mode: forward_single
+      access_policy_expression: '"gw-user" in request.user.group_attributes("name") or "gw-admin" in request.user.group_attributes("name") or request.user.is_superuser'
+
+  - model: authentik_core.application
+    identifiers:
+      slug: gw-admin
+    attrs:
+      name: gw-admin
+      provider: !KeyOf gw-admin-provider
+      policy_engine_mode: any
+
+  - model: authentik_core.application
+    identifiers:
+      slug: gw-alice
+    attrs:
+      name: gw-alice
+      provider: !KeyOf gw-alice-provider
+      policy_engine_mode: any
+
+  - model: authentik_core.application
+    identifiers:
+      slug: gw-bob
+    attrs:
+      name: gw-bob
+      provider: !KeyOf gw-bob-provider
+      policy_engine_mode: any
