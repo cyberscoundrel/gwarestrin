@@ -54,7 +54,7 @@ check("read (schema_graph)", Array.isArray(schema.types), `${schema.types?.lengt
 
 // 2) write attempt -> queued
 const w1 = await call("execute_graph", {
-  command: "INSERT INTO Entity SET name = '__qtest__', note = 'queued write one'",
+  command: "CREATE (n:Entity {name: '__qtest__', note: 'queued write one'})",
   language: "cypher",
 });
 check("write queued (not executed)", w1.queued === true, JSON.stringify(w1).slice(0, 120));
@@ -83,7 +83,7 @@ check("node exists after approval", (probe.rows ?? []).length === 1);
 
 // 6) second write -> reject
 const w2 = await call("execute_graph", {
-  command: "INSERT INTO Entity SET name = '__qtest2__', note = 'queued write two'",
+  command: "CREATE (n:Entity {name: '__qtest2__', note: 'queued write two'})",
   language: "cypher",
 });
 check("second write queued", w2.queued === true);
@@ -101,6 +101,8 @@ check("rejected node absent", (probe2.rows ?? []).length === 0);
 
 // 8) cleanup approved test node
 await call("execute_graph", { command: "DELETE FROM Entity WHERE name = '__qtest__'", language: "cypher" });
+// clean leftovers from earlier broken runs (no id property)
+await call("execute_graph", { command: "DELETE FROM PendingWrite WHERE id IS NULL", language: "sql" });
 console.log("cleanup done");
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILURES`);
