@@ -20,8 +20,7 @@ entries:
       name: admin
       email: admin@gw.home
       groups:
-        - gw-admin
-        - gw-user
+        - !KeyOf group-gw-admin
       password: "admin-pass-1"
 
   - id: user-alice
@@ -32,7 +31,7 @@ entries:
       name: Alice
       email: alice@gw.home
       groups:
-        - gw-user
+        - !KeyOf group-gw-user
       password: "alice-pass-1"
 
   - id: user-bob
@@ -43,7 +42,7 @@ entries:
       name: Bob
       email: bob@gw.home
       groups:
-        - gw-user
+        - !KeyOf group-gw-user
       password: "bob-pass-1"
 
   # ---- proxy providers (forward auth, embedded outpost) ----
@@ -65,7 +64,7 @@ entries:
       external_host: http://alice.gw.home
       internal_host: http://gw-alice:3000
       mode: forward_single
-      access_policy_expression: '"gw-user" in request.user.group_attributes("name") or "gw-admin" in request.user.group_attributes("name") or request.user.is_superuser'
+      access_policy_expression: '"gw-user" in request.user.group_attributes("name") or request.user.is_superuser'
 
   - id: provider-gw-bob
     model: authentik_providers_proxy.proxyprovider
@@ -75,7 +74,7 @@ entries:
       external_host: http://bob.gw.home
       internal_host: http://gw-bob:3000
       mode: forward_single
-      access_policy_expression: '"gw-user" in request.user.group_attributes("name") or "gw-admin" in request.user.group_attributes("name") or request.user.is_superuser'
+      access_policy_expression: '"gw-user" in request.user.group_attributes("name") or request.user.is_superuser'
 
   - id: application-gw-admin
     model: authentik_core.application
@@ -83,7 +82,7 @@ entries:
       slug: gw-admin
     attrs:
       name: gw-admin
-      provider: !KeyOf gw-admin-provider
+      provider: !KeyOf provider-gw-admin
       policy_engine_mode: any
 
   - id: application-gw-alice
@@ -92,7 +91,7 @@ entries:
       slug: gw-alice
     attrs:
       name: gw-alice
-      provider: !KeyOf gw-alice-provider
+      provider: !KeyOf provider-gw-alice
       policy_engine_mode: any
 
   - id: application-gw-bob
@@ -101,5 +100,5 @@ entries:
       slug: gw-bob
     attrs:
       name: gw-bob
-      provider: !KeyOf gw-bob-provider
+      provider: !KeyOf provider-gw-bob
       policy_engine_mode: any

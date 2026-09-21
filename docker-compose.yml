@@ -283,7 +283,6 @@ services:
       AUTHENTIK_BOOTSTRAP__EMAIL: admin@gw.home
     volumes:
       - ./authentik/blueprints/gw.yaml:/blueprints/gw.yaml:ro
-      - ./authentik/blueprints/gw-min.yaml:/blueprints/gw-min.yaml:ro
     depends_on:
       authentik-postgres:
         condition: service_healthy
@@ -308,8 +307,6 @@ services:
     user: root
     volumes:
       - ./authentik/blueprints/gw.yaml:/blueprints/gw.yaml:ro
-      - ./authentik/blueprints/gw-min.yaml:/blueprints/gw-min.yaml:ro
-      - ./authentik/blueprints/gw-min.yaml:/blueprints/gw-min.yaml:ro
     depends_on:
       authentik-postgres:
         condition: service_healthy
