@@ -20,6 +20,15 @@ const MCP = `http://${HOST}:8000/mcp`;
 const LITELLM = process.env.LITELLM_URL ?? `http://${ipOf("gwarestrin-litellm-1")}:4000/v1`;
 const envText = readFileSync("/home/cyber/gwarestrin/.env", "utf8");
 const KEY = envText.match(/^LOCAL_INFERENCE_API_KEY=(.*)$/m)?.[1] ?? "";
+const GRAPH_TOKEN = envText.match(/^ARCADEDB_ROOT_PASSWORD=/m) ? undefined : undefined;
+const GRAPH_TOKEN_VALUE = (() => {
+  try {
+    const j = JSON.parse(readFileSync("/home/cyber/gwarestrin/instance.json", "utf8"));
+    return j.values?.graph?.token ?? "";
+  } catch {
+    return "";
+  }
+})();
 
 let fails = 0;
 const check = (name, ok, detail = "") => {
@@ -42,7 +51,7 @@ const check = (name, ok, detail = "") => {
 async function rpc(method, params, id = 1) {
   const r = await fetch(MCP, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${GRAPH_TOKEN_VALUE}` },
     body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
   });
   const text = await r.text();
