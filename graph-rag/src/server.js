@@ -460,9 +460,9 @@ async function schemaGraph() {
 /** ---- pending-write queue (audited writes for low-capability identities) ---- */
 
 async function ensurePendingSchema() {
-  await adbCommand("CREATE DOCUMENT TYPE IF NOT EXISTS PendingWrite");
+  await adbCommand("CREATE DOCUMENT TYPE PendingWrite").catch(() => {});
   for (const prop of ["kind", "payload", "language", "requested_by", "created_at", "status", "executed_at"]) {
-    await adbCommand(`CREATE PROPERTY PendingWrite.${prop} IF NOT EXISTS STRING`).catch(() => {});
+    await adbCommand(`CREATE PROPERTY PendingWrite.${prop} STRING`).catch(() => {});
   }
 }
 
