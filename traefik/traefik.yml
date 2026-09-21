@@ -46,5 +46,5 @@ http:
   middlewares:
     gw-forward-auth:
       forwardAuth:
-        address: "http://authentik-server:9300/outpost.goauthentik.io/auth/simple"
+        address: "http://authentik-server:9300/outpost.goauthentik.io/auth/traefik"
         trustForwardHeader: true
