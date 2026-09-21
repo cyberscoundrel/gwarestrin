@@ -325,7 +325,7 @@ services:
     command:
       - --entrypoints.web.address=:80
       - --providers.file.directory=/etc/traefik/dynamic
-      - --log.level=INFO
+      - --log.level=DEBUG
     ports:
       # host :80 is taken (pihole web); edge listens on 8880
       - "8880:80"
