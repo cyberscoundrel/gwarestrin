@@ -108,3 +108,14 @@ entries:
       name: gw-bob
       provider: !KeyOf provider-gw-bob
       policy_engine_mode: any
+
+  - id: outpost-embedded
+    model: authentik_outposts.outpost
+    identifiers:
+      name: authentik Embedded Outpost
+    attrs:
+      type: proxy
+      providers:
+        - !KeyOf provider-gw-admin
+        - !KeyOf provider-gw-alice
+        - !KeyOf provider-gw-bob
