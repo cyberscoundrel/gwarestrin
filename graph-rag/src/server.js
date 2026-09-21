@@ -499,11 +499,16 @@ async function approvePending(id, approver) {
   const rec = rows[0];
   if (!rec) throw new Error(`no pending write ${id}`);
   const result = await adbCommand(rec.payload, rec.language ?? "sql");
-  await adbCommand(
-    "UPDATE PendingWrite SET status = 'approved', executed_at = :now, approved_by = :by WHERE id = :id",
-    "sql",
-    { now: new Date().toISOString(), by: approver, id },
-  );
+  try {
+    await adbCommand(
+      "UPDATE PendingWrite SET status = 'approved', executed_at = :now, approved_by = :by WHERE id = :id",
+      "sql",
+      { now: new Date().toISOString(), by: approver, id },
+    );
+    console.log(`[graph-rag] write ${id} approved by ${approver}`);
+  } catch (e) {
+    console.warn(`[graph-rag] approve status update failed for ${id}: ${String(e).slice(0, 300)}`);
+  }
   console.log(`[graph-rag] write ${id} approved by ${approver}`);
   return { approved: true, result };
 }
