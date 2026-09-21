@@ -282,7 +282,7 @@ services:
       AUTHENTIK_BOOTSTRAP_PASSWORD: \${AUTHENTIK_BOOTSTRAP_PASSWORD}
       AUTHENTIK_BOOTSTRAP__EMAIL: admin@gw.home
     volumes:
-      - ./authentik/blueprints:/blueprints:ro
+      - ./authentik/blueprints/gw.yaml:/blueprints/gw.yaml:ro
     depends_on:
       authentik-postgres:
         condition: service_healthy
@@ -306,7 +306,7 @@ services:
       AUTHENTIK_BOOTSTRAP_PASSWORD: \${AUTHENTIK_BOOTSTRAP_PASSWORD}
     user: root
     volumes:
-      - ./authentik/blueprints:/blueprints:ro
+      - ./authentik/blueprints/gw.yaml:/blueprints/gw.yaml:ro
     depends_on:
       authentik-postgres:
         condition: service_healthy
