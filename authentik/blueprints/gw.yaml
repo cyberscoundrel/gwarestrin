@@ -54,6 +54,8 @@ entries:
       external_host: http://admin.gw.home
       internal_host: http://gwarestrin:3000
       mode: forward_single
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
       access_policy_expression: '"gw-admin" in request.user.group_attributes("name") or request.user.is_superuser'
 
   - id: provider-gw-alice
@@ -64,6 +66,8 @@ entries:
       external_host: http://alice.gw.home
       internal_host: http://gw-alice:3000
       mode: forward_single
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
       access_policy_expression: '"gw-user" in request.user.group_attributes("name") or request.user.is_superuser'
 
   - id: provider-gw-bob
@@ -74,6 +78,8 @@ entries:
       external_host: http://bob.gw.home
       internal_host: http://gw-bob:3000
       mode: forward_single
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
       access_policy_expression: '"gw-user" in request.user.group_attributes("name") or request.user.is_superuser'
 
   - id: application-gw-admin
