@@ -325,7 +325,8 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --log.level=INFO
     ports:
-      - "80:80"
+      # host :80 is taken (pihole web); edge listens on 8880
+      - "8880:80"
     volumes:
       - ./traefik/traefik.yml:/etc/traefik/dynamic/dynamic.yml:ro
     extra_hosts:
