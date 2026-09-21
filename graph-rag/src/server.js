@@ -516,9 +516,7 @@ async function approvePending(id, approver) {
 async function rejectPending(id, rejector) {
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
   await adbCommand(
-    "UPDATE PendingWrite SET status = 'rejected', executed_at = :now, approved_by = :by WHERE id = :id",
-    "sql",
-    { now: new Date().toISOString(), by: rejector, id },
+    `UPDATE PendingWrite SET status = 'rejected', executed_at = '${esc(new Date().toISOString())}', approved_by = '${esc(rejector)}' WHERE id = '${esc(id)}'`,
   );
   return { rejected: true };
 }
