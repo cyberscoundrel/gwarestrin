@@ -3,9 +3,12 @@ import os
 import urllib.request
 
 secret = os.environ["AUTHENTIK_SECRET_KEY"]
+bootstrap_pw = os.environ["AUTHENTIK_BOOTSTRAP_PASSWORD"]
 
 def api(path, body=None):
-    headers = {"authorization": f"Bearer {secret}", "accept": "application/json"}
+    import base64
+    headers = {"authorization": "Basic " + base64.b64encode(f"akadmin:{bootstrap_pw}".encode()).decode(),
+               "accept": "application/json"}
     data = None
     if body is not None:
         headers["content-type"] = "application/json"
