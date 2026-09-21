@@ -62,10 +62,15 @@ const pid1 = w1.pendingId;
 
 // 3) pending list shows it
 const list = await call("list_pending_writes", {});
-const entryRow = (list.pending ?? []).find((p) => p["@rid"] === pid1);
+const entryRow = (list.pending ?? []).find((p) => p.id === pid1);
 check("pending list", Boolean(entryRow), `${list.pending?.length ?? 0} pending`);
 
-// 4) approve -> executes
+// 4) approve -> executes (probe the fetch SQL inline first)
+const dbg = await call("query_graph", {
+  query: "SELECT FROM PendingWrite WHERE id = '" + pid1 + "' AND status = 'pending'",
+  language: "sql",
+});
+console.log("approve-fetch probe:", JSON.stringify(dbg).slice(0, 250));
 const ap = await call("approve_write", { id: pid1 });
 check("approve executes", ap.approved === true, JSON.stringify(ap).slice(0, 120));
 
