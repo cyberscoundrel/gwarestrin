@@ -115,6 +115,7 @@ entries:
       name: authentik Embedded Outpost
     attrs:
       type: proxy
+      authentik_host: http://auth.gw.home:8880
       providers:
         - !KeyOf provider-gw-admin
         - !KeyOf provider-gw-alice
