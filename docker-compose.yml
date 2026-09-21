@@ -140,6 +140,10 @@ services:
       EMBED_MODEL: embed-minilm
       EMBED_DIM: "384"
       SWEEP_INTERVAL_MS: "600000"
+      # identity capability map (infra-authored; hot-reloaded)
+      TOKEN_MAP_PATH: /app/token-map.json
+    volumes:
+      - ./graph-rag-config/token-map.json:/app/token-map.json:ro
     labels:
       gwarestrin.mcp.enable: "true"
       gwarestrin.mcp.port: "8000"
