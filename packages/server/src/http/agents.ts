@@ -8,6 +8,7 @@ import { Value } from "typebox/value";
 import type { AgentManager } from "../agents/manager.js";
 import { dirsFor } from "../agents/scaffold.js";
 import { runAnalysisAgent } from "../analyze/analysis-agent.js";
+import { getInstanceMetadata } from "../instance/metadata.js";
 import type { ServerConfig } from "../config.js";
 import { scoped } from "../util/log.js";
 
@@ -53,6 +54,8 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
       if (input.firstPrompt) {
         const llm = manager.defaultLlmEndpoint();
         const mcpUrl = manager.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL ?? "http://graph-rag:8000/mcp";
+        const values = getInstanceMetadata()?.values as Record<string, { token?: string }> | undefined;
+        const graphToken = values?.graph?.token;
         if (llm) {
           log.info(`running pre-session analysis for ${record.name}`);
           const block = await runAnalysisAgent(input.firstPrompt, {
@@ -60,6 +63,7 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
             llmKey: llm.key,
             model: llm.model,
             mcpUrl,
+            ...(graphToken ? { graphToken } : {}),
             timeoutMs: 90_000,
           });
           if (block) {

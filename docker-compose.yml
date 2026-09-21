@@ -33,6 +33,8 @@ services:
       GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
       # labeled-sidecar discovery (empty = disabled)
       DOCKER_PROXY_URL: ${DOCKER_PROXY_URL:-http://docker-proxy:2375}
+      # instance metadata (infra-authored; hot-reloaded; absent = open mode)
+      GWARESTRIN_INSTANCE_METADATA: /etc/gwarestrin/instance.json
 
     # all provider API keys referenced by providers.json apiKeyEnv live here
     env_file:
@@ -50,6 +52,7 @@ services:
       # multi-provider topology (see providers.example.json); copy to
       # ./providers.json next to this file on the deploy host
       - ./providers.json:/etc/gwarestrin/providers.json:ro
+      - ./instance.json:/etc/gwarestrin/instance.json:ro
 
     networks:
       - default   # outbound (WARP-bypass marked bridge)

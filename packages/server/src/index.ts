@@ -7,6 +7,7 @@ import { AgentStore } from "./agents/store.js";
 import { loadConfig } from "./config.js";
 import { registerAgentRoutes } from "./http/agents.js";
 import { registerFileRoutes } from "./http/files.js";
+import { registerGraphQueueRoutes } from "./http/graph-queue.js";
 import { registerMcpRoutes } from "./http/mcp.js";
 import { registerProviderRoutes } from "./http/providers.js";
 import { McpRegistryStore } from "./mcp/registry-store.js";
@@ -14,6 +15,7 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { scoped } from "./util/log.js";
 import { registerWs } from "./ws/connection.js";
 import { startSidecarDiscovery } from "./discovery/sidecars.js";
+import { startInstanceMetadata } from "./instance/metadata.js";
 
 const log = scoped("server");
 
@@ -48,9 +50,14 @@ async function main(): Promise<void> {
   await registerProviderRoutes(app, config, registry);
   await registerAgentRoutes(app, config, manager);
   await registerFileRoutes(app, config, manager);
+  await registerGraphQueueRoutes(app);
   await registerMcpRoutes(app, mcpRegistry);
   await registerWs(app, config, manager);
   startSidecarDiscovery(process.env.DOCKER_PROXY_URL, mcpRegistry);
+    startInstanceMetadata({
+    ...(process.env.GWARESTRIN_INSTANCE_METADATA ? { metadataPath: process.env.GWARESTRIN_INSTANCE_METADATA } : {}),
+    stateDir: config.stateDir,
+  });
 
   if (existsSync(config.webDistDir)) {
     await app.register(fastifyStatic, {

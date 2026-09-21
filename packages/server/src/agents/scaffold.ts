@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentRecord } from "@gwarestrin/shared";
 import { mcpSubset } from "@gwarestrin/shared";
+import { applyInstanceSubstitution, getInstanceMetadata } from "../instance/metadata.js";
 import type { McpRegistryStore } from "../mcp/registry-store.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { buildGeneratedProviders, generatedProvidersPath, writeGeneratedProviders } from "../providers/generate.js";
@@ -87,9 +88,20 @@ export async function scaffoldAgent(
   // hostConfigDiscovery defaults to "off" in the adapter — no ambient config.
   if (mcpRegistry) {
     const subset = mcpSubset(mcpRegistry.list(), agent.mcpServers);
+    const resolved: Record<string, Omit<(typeof subset)[string], "description">> = {};
+    for (const [name, def] of Object.entries(subset)) {
+      // instance metadata substitutes ${values.*} credential references;
+      // unresolvable defs are omitted (fail-closed)
+      const applied = applyInstanceSubstitution(def, getInstanceMetadata());
+      if (!applied) {
+        log.warn(`mcp server ${name} omitted for ${agent.name}: unresolvable instance references`);
+        continue;
+      }
+      resolved[name] = applied;
+    }
     await writeFile(
       path.join(dirs.workspace, ".mcp.json"),
-      JSON.stringify({ mcpServers: subset }, null, 2) + "\n",
+      JSON.stringify({ mcpServers: resolved }, null, 2) + "\n",
       "utf8",
     );
   }

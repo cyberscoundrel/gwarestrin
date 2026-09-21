@@ -11,6 +11,8 @@ export interface AnalysisAgentConfig {
   model: string;
   /** graph MCP sidecar (streamable HTTP): query_graph / search_graph / schema_graph */
   mcpUrl: string;
+  /** identity token presented to the graph MCP (may be undefined in open mode) */
+  graphToken?: string | undefined;
   maxRounds?: number;
   timeoutMs?: number;
 }
@@ -43,7 +45,7 @@ Rules:
 export async function runAnalysisAgent(prompt: string, config: AnalysisAgentConfig): Promise<string | null> {
   const deadline = Date.now() + (config.timeoutMs ?? 90_000);
   const maxRounds = config.maxRounds ?? 8;
-  const mcp = new McpHttpClient(config.mcpUrl);
+  const mcp = new McpHttpClient(config.mcpUrl, config.graphToken);
 
   try {
     // lexical seed: entity dictionary + cheap matcher (also used as the

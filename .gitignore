@@ -8,6 +8,7 @@ providers.json
 dab-config/
 litellm-config/
 arcadedb-config/
+instance.json
 
 # local state
 state*/

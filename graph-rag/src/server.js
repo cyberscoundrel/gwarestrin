@@ -14,6 +14,7 @@
  * which pi-mcp-adapter cannot send).
  */
 import express from "express";
+import { readFileSync, watchFile } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -29,7 +30,64 @@ const {
   EMBED_DIM = "384",
   SWEEP_INTERVAL_MS = "600000",
   PORT = "8000",
+  TOKEN_MAP_PATH = "",
 } = process.env;
+
+/**
+ * Identity model: callers present a bearer token (issued by the surrounding
+ * infrastructure); the token map (infra-authored JSON) resolves it to
+ * capabilities. No token map configured = open mode (full caps, anonymous) —
+ * keeps standalone deployments friction-free.
+ */
+
+const OPEN_CAPS = { read: true, write: "direct", approve: true };
+let tokenMap = null; // null = open mode
+
+function loadTokenMap() {
+  if (!TOKEN_MAP_PATH) {
+    tokenMap = null;
+    return;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(TOKEN_MAP_PATH, "utf8"));
+    const entries = Array.isArray(parsed.tokens) ? parsed.tokens : [];
+    const byToken = new Map(entries.map((e) => [e.token, e]));
+    tokenMap = byToken;
+    console.log(`[graph-rag] token map loaded: ${byToken.size} token(s)`);
+  } catch (err) {
+    console.warn(`[graph-rag] token map load failed: ${String(err).slice(0, 160)}`);
+  }
+}
+
+/** resolve an Authorization header to capabilities; null = unauthenticated */
+function resolveIdentity(authorization) {
+  if (!tokenMap) return { user: "anonymous", caps: { ...OPEN_CAPS } };
+  const token = typeof authorization === "string" && authorization.startsWith("Bearer ")
+    ? authorization.slice(7).trim()
+    : null;
+  if (!token) return null;
+  const entry = tokenMap.get(token);
+  if (!entry) return null;
+  return {
+    user: entry.user ?? "unknown",
+    caps: {
+      read: entry.caps?.read === true,
+      write: entry.caps?.write ?? "deny",
+      approve: entry.caps?.approve === true,
+    },
+  };
+}
+
+function requireCap(caps, cap) {
+  if (cap === "read" && caps.read !== true) throw new Error("requires read capability");
+  if (cap === "write") {
+    if (caps.write === "deny") throw new Error("graph writes are denied for this identity");
+    if (caps.write !== "direct" && caps.write !== "queued") {
+      throw new Error("write capability misconfigured (expected direct|queued|deny)");
+    }
+  }
+  if (cap === "approve" && caps.approve !== true) throw new Error("requires approve capability");
+}
 
 const EMBED_DIM_N = Number(EMBED_DIM);
 const ENTITY_LABEL = "Entity";
@@ -372,14 +430,24 @@ async function queryGraph({ query, language = "cypher" }) {
   return { rows };
 }
 
-async function executeGraph({ command, language = "cypher" }) {
+async function executeGraph({ command, language = "cypher" }, identity) {
   if (!["cypher", "sql"].includes(language)) throw new Error("language must be cypher or sql");
   if (typeof command !== "string" || !command.trim()) throw new Error("command required");
   if (/^\s*(DROP DATABASE|DROP TYPE|TRUNCATE)/i.test(command)) {
     throw new Error("destructive schema/database operations are not permitted");
   }
+  if (identity.caps.write === "queued") {
+    return queueWrite({ command, language, user: identity.user });
+  }
   const result = await adbCommand(command, language);
   return { result };
+}
+
+/** execute a queued write (admin approval path) */
+async function executePending(rec) {
+  if (rec.kind === "upsert") return upsertEntities(JSON.parse(rec.payload));
+  if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
+  return adbCommand(rec.payload, rec.language ?? "sql");
 }
 
 async function schemaGraph() {
@@ -387,6 +455,59 @@ async function schemaGraph() {
   if (types.length > 0) return { types };
   const indexes = await adbQuery("SELECT FROM schema:indexes").catch(() => []);
   return { types: [], indexes };
+}
+
+/** ---- pending-write queue (audited writes for low-capability identities) ---- */
+
+async function ensurePendingSchema() {
+  await adbCommand("CREATE DOCUMENT TYPE IF NOT EXISTS PendingWrite");
+  for (const prop of ["kind", "payload", "language", "requested_by", "created_at", "status", "executed_at"]) {
+    await adbCommand(`CREATE PROPERTY PendingWrite.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  }
+}
+
+const RID_RE = /^#\d+:\d+$/;
+
+async function queueWrite({ command, language, user }) {
+  const created = new Date().toISOString();
+  const res = await adbCommand(
+    "INSERT INTO PendingWrite SET kind = 'command', payload = :cmd, language = :lang, " +
+      "requested_by = :user, created_at = :created, status = 'pending'",
+    "sql",
+    { cmd: command, lang: language, user, created },
+  );
+  const rid = res?.[0]?.["@rid"] ?? null;
+  console.log(`[graph-rag] write queued by ${user}: ${String(command).slice(0, 80)} (${rid})`);
+  return { queued: true, pendingId: rid };
+}
+
+async function listPending() {
+  return adbQuery("SELECT FROM PendingWrite WHERE status = 'pending' ORDER BY created_at DESC LIMIT 100");
+}
+
+async function approvePending(rid, approver) {
+  if (!RID_RE.test(rid)) throw new Error("invalid pending id");
+  const rows = await adbQuery(`SELECT FROM PendingWrite WHERE @rid = '${rid}' AND status = 'pending'`);
+  const rec = rows[0];
+  if (!rec) throw new Error(`no pending write ${rid}`);
+  const result = await adbCommand(rec.payload, rec.language ?? "sql");
+  await adbCommand(
+    "UPDATE PendingWrite SET status = 'approved', executed_at = :now, approved_by = :by WHERE @rid = :rid",
+    "sql",
+    { now: new Date().toISOString(), by: approver, rid },
+  );
+  console.log(`[graph-rag] write ${rid} approved by ${approver}`);
+  return { approved: true, result };
+}
+
+async function rejectPending(rid, rejector) {
+  if (!RID_RE.test(rid)) throw new Error("invalid pending id");
+  await adbCommand(
+    "UPDATE PendingWrite SET status = 'rejected', executed_at = :now, approved_by = :by WHERE @rid = :rid",
+    "sql",
+    { now: new Date().toISOString(), by: rejector, rid },
+  );
+  return { rejected: true };
 }
 
 function sanitizeFacet(name) {
@@ -399,19 +520,31 @@ const facetDoc = Object.entries(FACETS)
   .map(([f, d]) => `- ${f}: ${d}`)
   .join("\n");
 
-function createServer() {
-  const server = new McpServer({ name: "graph-rag", version: "0.2.0" });
+function createServer(identity) {
+  const caps = identity.caps;
+  const need = (cap) => requireCap(caps, cap);
+  const server = new McpServer({ name: "graph-rag", version: "0.3.0" });
+
+  server.tool(
+    "query_graph",
+    `Run a READ-ONLY query against the knowledge graph (openCypher or SQL). Use for exact identifiers, structure, and schema exploration. Returns JSON rows.`,
+    {
+      query: z.string().min(1),
+      language: z.enum(["cypher", "sql"]).optional(),
+    },
+    async (args) => {
+      need("read");
+      return { content: [{ type: "text", text: JSON.stringify(await queryGraph(args)) }] };
+    },
+  );
 
   server.tool(
     "search_graph",
-    `Semantic (embedding) search over the knowledge graph. The query is embedded and matched
-against per-facet vector indexes. Advertised facets:
+    `Semantic (embedding) search over per-facet vector indexes of the knowledge graph. Facets:
 ${facetDoc}
-Custom facets created via upsert_entities are also searchable. Use facets to narrow the
-kind of question: e.g. "what tools were ordered recently" -> facets ["temporal","state"];
-"where is the hammer" -> ["location"]. temporal_filter narrows by a datetime property on
-the node (after/before are ISO datetimes, property compared as string dates). Falls back
-to lexical matching if the embedding backend is unavailable.`,
+Custom facets created via upsert_entities are also searchable. Use for conceptual or
+paraphrased questions; temporal_filter (property + after/before ISO datetimes) narrows by
+a datetime property. Falls back to lexical matching if embeddings are unavailable.`,
     {
       query: z.string().min(1),
       facets: z.array(z.string()).optional(),
@@ -424,17 +557,29 @@ to lexical matching if the embedding backend is unavailable.`,
         })
         .optional(),
     },
-    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await searchGraph(args)) }] }),
+    async (args) => {
+      need("read");
+      return { content: [{ type: "text", text: JSON.stringify(await searchGraph(args)) }] };
+    },
+  );
+
+  server.tool(
+    "schema_graph",
+    "List the knowledge-graph types and indexes.",
+    {},
+    async () => {
+      need("read");
+      return { content: [{ type: "text", text: JSON.stringify(await schemaGraph()) }] };
+    },
   );
 
   server.tool(
     "upsert_entities",
     `Create or update graph entities with per-facet semantic indexes. For each entity provide
-facet texts — a concise natural-language sentence per facet capturing that aspect of the
-entity (facet list below). Provide only facets you have information for; each becomes
-searchable via search_graph. Unknown facet names are allowed and indexed lazily (e.g.
-"procurement", "compliance"). Include datetime facts BOTH as properties (e.g. ordered_at:
-"2026-01-15") so temporal_filter can use them, and inside facet texts.
+facet texts — a concise natural-language sentence per facet capturing that aspect (facet
+list below). Provide only facets you have information for. Unknown facet names are allowed
+and indexed lazily. Include datetime facts BOTH as properties (for temporal_filter) and
+inside facet texts.
 ${facetDoc}`,
     {
       entities: z
@@ -448,41 +593,71 @@ ${facetDoc}`,
         )
         .max(64),
     },
-    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await upsertEntities(args)) }] }),
-  );
-
-  server.tool(
-    "embed_backfill",
-    "Embed the identity facet for graph nodes written via raw queries without embeddings (deterministic labels+name+properties text). Run after bulk writes.",
-    { limit: z.number().int().min(1).max(256).optional() },
-    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await backfillIdentity(args?.limit ?? 64)) }] }),
-  );
-
-  server.tool(
-    "query_graph",
-    "Run a READ-ONLY query against the knowledge graph (openCypher or SQL). Use for exact identifiers, structure, and schema exploration (schema_graph for the type list). Returns JSON rows.",
-    {
-      query: z.string().min(1),
-      language: z.enum(["cypher", "sql"]).optional(),
+    async (args) => {
+      need("write");
+      if (caps.write === "queued") {
+        const pending = await queueWrite({ kind: "upsert", payload: JSON.stringify(args), user: identity.user });
+        return { content: [{ type: "text", text: JSON.stringify(pending) }] };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(await upsertEntities(args)) }] };
     },
-    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await queryGraph(args)) }] }),
   );
 
   server.tool(
     "execute_graph",
-    "Execute a WRITE command against the knowledge graph (openCypher or SQL): create/update vertices and edges, set properties. Destructive schema operations are rejected.",
+    "Execute a WRITE command against the knowledge graph (openCypher or SQL). Depending on your identity capabilities this executes immediately or is queued for review.",
     {
       command: z.string().min(1),
       language: z.enum(["cypher", "sql"]).optional(),
     },
-    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await executeGraph(args)) }] }),
+    async (args) => {
+      need("write");
+      return { content: [{ type: "text", text: JSON.stringify(await executeGraph(args, identity)) }] };
+    },
   );
 
   server.tool(
-    "schema_graph",
-    "List the knowledge-graph types and indexes (vertex/edge types, properties, vector and full-text indexes).",
+    "embed_backfill",
+    "Embed the identity facet for graph nodes written without embeddings. Requires write capability; queued-mode identities store it for approval.",
+    { limit: z.number().int().min(1).max(256).optional() },
+    async (args) => {
+      need("write");
+      if (caps.write === "queued") {
+        const pending = await queueWrite({ kind: "backfill", payload: JSON.stringify({ limit: args?.limit ?? 64 }), user: identity.user });
+        return { content: [{ type: "text", text: JSON.stringify(pending) }] };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(await backfillIdentity(args?.limit ?? 64)) }] };
+    },
+  );
+
+  server.tool(
+    "list_pending_writes",
+    "List queued graph writes awaiting approval (requires approve capability).",
     {},
-    async () => ({ content: [{ type: "text", text: JSON.stringify(await schemaGraph()) }] }),
+    async () => {
+      need("approve");
+      return { content: [{ type: "text", text: JSON.stringify({ pending: await listPending() }) }] };
+    },
+  );
+
+  server.tool(
+    "approve_write",
+    "Approve and execute a queued graph write.",
+    { id: z.string().min(1) },
+    async (args) => {
+      need("approve");
+      return { content: [{ type: "text", text: JSON.stringify(await approvePending(args.id, identity.user)) }] };
+    },
+  );
+
+  server.tool(
+    "reject_write",
+    "Reject a queued graph write without executing it.",
+    { id: z.string().min(1) },
+    async (args) => {
+      need("approve");
+      return { content: [{ type: "text", text: JSON.stringify(await rejectPending(args.id, identity.user)) }] };
+    },
   );
 
   return server;
@@ -493,13 +668,18 @@ const app = express();
 app.use(express.json({ limit: "2mb" }));
 
 app.post("/mcp", async (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) {
+    res.status(401).json({ jsonrpc: "2.0", error: { code: -32001, message: "unauthenticated" }, id: null });
+    return;
+  }
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless: each POST is self-contained
     enableJsonResponse: true,
   });
   res.on("close", () => transport.close());
   try {
-    await createServer().connect(transport);
+    await createServer(identity).connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
     if (!res.headersSent) {
@@ -511,9 +691,45 @@ app.post("/mcp", async (req, res) => {
 app.get("/mcp", (_req, res) => res.status(405).json({ error: "POST only (stateless)" }));
 app.get("/health", (_req, res) => res.json({ ok: true, facets_indexed: [...knownIndexes] }));
 
+/** write-approval queue HTTP (for review UIs); approve-capability required */
+function queueIdentity(req) {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity || identity.caps.approve !== true) return null;
+  return identity;
+}
+app.get("/api/queue", (req, res) => {
+  const identity = queueIdentity(req);
+  if (!identity) return res.status(403).json({ error: "requires approve capability" });
+  void listPending().then((pending) => res.json({ pending }));
+});
+app.post("/api/queue/:id/approve", (req, res) => {
+  const identity = queueIdentity(req);
+  if (!identity) return res.status(403).json({ error: "requires approve capability" });
+  void approvePending(req.params.id, identity.user).then(
+    (result) => res.json({ result }),
+    (err) => res.status(400).json({ error: String(err).slice(0, 200) }),
+  );
+});
+app.post("/api/queue/:id/reject", (req, res) => {
+  const identity = queueIdentity(req);
+  if (!identity) return res.status(403).json({ error: "requires approve capability" });
+  void rejectPending(req.params.id, identity.user).then(
+    (result) => res.json({ result }),
+    (err) => res.status(400).json({ error: String(err).slice(0, 200) }),
+  );
+});
+
 /** boot: ensure advertised indexes + periodic identity sweep */
 async function boot() {
+  loadTokenMap();
+  if (TOKEN_MAP_PATH) {
+    watchFile(TOKEN_MAP_PATH, { interval: 5000 }, () => {
+      console.log("[graph-rag] token map changed; reloading");
+      loadTokenMap();
+    });
+  }
   for (const facet of Object.keys(FACETS)) await ensureIndex(facet);
+  await ensurePendingSchema();
   console.log(`[graph-rag] indexes ready: ${[...knownIndexes].join(", ")}`);
   const sweep = async () => {
     try {

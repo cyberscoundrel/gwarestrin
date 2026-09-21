@@ -12,13 +12,17 @@ export class McpHttpClient {
   private nextId = 1;
   private initialized = false;
 
-  constructor(private url: string) {}
+  constructor(
+    private url: string,
+    private bearerToken?: string | undefined,
+  ) {}
 
   private async post(body: Record<string, unknown>, expectMessage = true): Promise<Record<string, unknown> | null> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
     };
+    if (this.bearerToken) headers.authorization = `Bearer ${this.bearerToken}`;
     if (this.sessionId) headers["mcp-session-id"] = this.sessionId;
     const res = await fetch(this.url, {
       method: "POST",

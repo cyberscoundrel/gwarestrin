@@ -2,10 +2,12 @@
   import { store } from "../lib/stores.svelte.js";
   import { modelDisplayName } from "../lib/format.js";
   import DeleteAgentModal from "./DeleteAgentModal.svelte";
+  import GraphQueuePanel from "./GraphQueuePanel.svelte";
 
   let { oncreate, onnavigate } = $props<{ oncreate?: () => void; onnavigate?: () => void }>();
 
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
+  let showReview = $state(false);
 
   function statusColor(status: string): string {
     switch (status) {
@@ -72,14 +74,26 @@
     {/each}
   </ul>
 
-  <button
-    class="cursor-pointer rounded-md border border-dashed border-[#333845] bg-transparent px-4 py-2 text-muted
-      hover:border-accent hover:text-fg"
-    onclick={() => oncreate?.()}
-  >
-    + new agent
-  </button>
+  <div class="flex flex-col gap-1">
+    <button
+      class="cursor-pointer rounded-md border border-dashed border-[#333845] bg-transparent px-4 py-2 text-muted
+        hover:border-accent hover:text-fg"
+      onclick={() => oncreate?.()}
+    >
+      + new agent
+    </button>
+    <button
+      class="cursor-pointer rounded-md border-none bg-transparent px-4 py-1 text-xs text-muted hover:text-fg"
+      onclick={() => (showReview = true)}
+    >
+      graph review
+    </button>
+  </div>
 </nav>
+
+{#if showReview}
+  <GraphQueuePanel onclose={() => (showReview = false)} />
+{/if}
 
 {#if deleteTarget}
   <DeleteAgentModal
