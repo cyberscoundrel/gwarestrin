@@ -13,5 +13,5 @@ bps = get("/managed/blueprints/")
 for b in bps.get("results", []):
     print("blueprint:", b["path"], "status:", b["status"])
     uuid = b["uuid"]
-    detail = get(f"/managed/blueprints/{uuid}/")
+    detail = get(f"/api/v3/managed/blueprints/{uuid}/")
     print(json.dumps(detail, indent=1, default=str)[:1500])
