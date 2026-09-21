@@ -15,6 +15,7 @@
  */
 import express from "express";
 import { readFileSync, watchFile } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -104,6 +105,7 @@ const FACETS = {
 };
 
 const knownIndexes = new Set();
+const log = { warn: (...a) => console.warn("[graph-rag]", ...a), info: (...a) => console.log("[graph-rag]", ...a) };
 const BASIC = "Basic " + Buffer.from(`${ARCADEDB_USER}:${ARCADEDB_PASSWORD}`).toString("base64");
 
 /** ArcadeDB HTTP JSON API */
@@ -437,7 +439,7 @@ async function executeGraph({ command, language = "cypher" }, identity) {
     throw new Error("destructive schema/database operations are not permitted");
   }
   if (identity.caps.write === "queued") {
-    return queueWrite({ command, language, user: identity.user });
+    return queueWrite({ kind: "command", command, language, user: identity.user });
   }
   const result = await adbCommand(command, language);
   return { result };
@@ -461,51 +463,57 @@ async function schemaGraph() {
 
 async function ensurePendingSchema() {
   await adbCommand("CREATE DOCUMENT TYPE PendingWrite").catch(() => {});
-  for (const prop of ["kind", "payload", "language", "requested_by", "created_at", "status", "executed_at"]) {
-    await adbCommand(`CREATE PROPERTY PendingWrite.${prop} STRING`).catch(() => {});
+  for (const prop of ["id", "kind", "payload", "language", "requested_by", "created_at", "status", "executed_at", "approved_by"]) {
+    await adbCommand(`CREATE PROPERTY PendingWrite.${prop} IF NOT EXISTS STRING`).catch(() => {});
   }
 }
 
 const RID_RE = /^#\d+:\d+$/;
+const PENDING_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-async function queueWrite({ command, language, user }) {
+function queueWrite(entry) {
+  const id = randomUUID();
   const created = new Date().toISOString();
-  const res = await adbCommand(
-    "INSERT INTO PendingWrite SET kind = 'command', payload = :cmd, language = :lang, " +
+  const payload = entry.payload ?? entry.command ?? "";
+  const language = entry.language ?? "sql";
+  adbCommand(
+    "INSERT INTO PendingWrite SET id = :id, kind = :kind, payload = :payload, language = :lang, " +
       "requested_by = :user, created_at = :created, status = 'pending'",
     "sql",
-    { cmd: command, lang: language, user, created },
-  );
-  const rid = res?.[0]?.["@rid"] ?? null;
-  console.log(`[graph-rag] write queued by ${user}: ${String(command).slice(0, 80)} (${rid})`);
-  return { queued: true, pendingId: rid };
+    { id, kind: entry.kind, payload, lang: language, user: entry.user, created },
+  ).catch((e) => log.warn(`pending write insert failed: ${String(e).slice(0, 120)}`));
+  console.log(`[graph-rag] write queued by ${entry.user}: ${String(payload).slice(0, 80)} (${id})`);
+  return { queued: true, pendingId: id };
 }
 
 async function listPending() {
   return adbQuery("SELECT FROM PendingWrite WHERE status = 'pending' ORDER BY created_at DESC LIMIT 100");
 }
 
-async function approvePending(rid, approver) {
-  if (!RID_RE.test(rid)) throw new Error("invalid pending id");
-  const rows = await adbQuery(`SELECT FROM PendingWrite WHERE @rid = '${rid}' AND status = 'pending'`);
+async function approvePending(id, approver) {
+  if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
+  const rows = await adbQuery(
+    "SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'",
+    { id },
+  );
   const rec = rows[0];
-  if (!rec) throw new Error(`no pending write ${rid}`);
+  if (!rec) throw new Error(`no pending write ${id}`);
   const result = await adbCommand(rec.payload, rec.language ?? "sql");
   await adbCommand(
-    "UPDATE PendingWrite SET status = 'approved', executed_at = :now, approved_by = :by WHERE @rid = :rid",
+    "UPDATE PendingWrite SET status = 'approved', executed_at = :now, approved_by = :by WHERE id = :id",
     "sql",
-    { now: new Date().toISOString(), by: approver, rid },
+    { now: new Date().toISOString(), by: approver, id },
   );
-  console.log(`[graph-rag] write ${rid} approved by ${approver}`);
+  console.log(`[graph-rag] write ${id} approved by ${approver}`);
   return { approved: true, result };
 }
 
-async function rejectPending(rid, rejector) {
-  if (!RID_RE.test(rid)) throw new Error("invalid pending id");
+async function rejectPending(id, rejector) {
+  if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
   await adbCommand(
-    "UPDATE PendingWrite SET status = 'rejected', executed_at = :now, approved_by = :by WHERE @rid = :rid",
+    "UPDATE PendingWrite SET status = 'rejected', executed_at = :now, approved_by = :by WHERE id = :id",
     "sql",
-    { now: new Date().toISOString(), by: rejector, rid },
+    { now: new Date().toISOString(), by: rejector, id },
   );
   return { rejected: true };
 }
