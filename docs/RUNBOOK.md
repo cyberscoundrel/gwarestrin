@@ -216,6 +216,33 @@ temporal filter hit/exclude, backfill).
 Changing `EMBED_MODEL`/`EMBED_DIM` = drop all `Entity[embed_*]` indexes and
 re-embed (sweep covers identity only; other facets need upsert re-runs).
 
+## 3d-2. Identity + capability gating (graph-rag)
+
+Identity tokens are issued by the surrounding infrastructure and mapped to
+capabilities in `graph-rag-config/token-map.json` (600, infra-authored,
+hot-reloaded every 5s):
+
+```json
+{"tokens": [{"token": "<secret>", "user": "alice",
+  "caps": {"read": true, "write": "queued", "approve": false}}]}
+```
+
+- `read`: query_graph / search_graph / schema_graph
+- `write`: `direct` (execute) | `queued` (store as PendingWrite for review) | `deny`
+- `approve`: list_pending_writes / approve_write / reject_write + the
+  /api/queue HTTP surface (review UIs)
+
+No token map configured = open mode (full caps, anonymous) — standalone
+deployments. gwarestrin instances receive their token via instance metadata
+(`values.graph.token`); it is injected into the graph MCP def headers at agent
+spawn and used server-side for the analysis agent. The review panel in the web
+UI appears when instance metadata carries `presentation.queue` and proxies to
+graph-rag's /api/queue via the server (tokens never reach the browser).
+
+Queued-write verification: `node scripts/queue-verify.mjs` (requires a
+queued-cap token). Write attempts with a queued-cap identity are stored, not
+executed; approve_write executes the stored cypher; reject discards.
+
 ## 3e. Adding an MCP sidecar (labeled auto-discovery)
 
 The gwarestrin server watches the docker cluster through a read-only
