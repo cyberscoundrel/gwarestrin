@@ -34,11 +34,11 @@ async function api(path, method = "GET", body) {
 }
 
 console.log("== basic auth sanity ==");
-const sanity = await api("GET", "/core/groups/");
+const sanity = await api("/core/groups/", "GET");
 console.log("groups GET:", sanity.status, (sanity.j?.results ?? []).length, "groups");
 
 console.log("== blueprints ==");
-const bps = await api("GET", "/managed/blueprints/");
+const bps = await api("/managed/blueprints/", "GET");
 for (const b of bps.j?.results ?? []) {
   console.log(`- ${b.path}: ${b.status}`);
   if (b.status === "error") {
@@ -49,19 +49,19 @@ for (const b of bps.j?.results ?? []) {
 }
 
 console.log("== users ==");
-const users = await api("GET", "/core/users/");
+const users = await api("/core/users/", "GET");
 console.log((users.j?.results ?? []).map((u) => u.username).join(",") || "none");
 
 console.log("== groups ==");
-const groups = await api("GET", "/core/groups/");
+const groups = await api("/core/groups/", "GET");
 console.log((groups.j?.results ?? []).map((g) => g.name).join(",") || "none");
 
 console.log("== providers ==");
-const providers = await api("GET", "/providers/proxy/");
+const providers = await api("/providers/proxy/", "GET");
 console.log((providers.j?.results ?? []).map((p) => `${p.name} -> ${p.external_host}`).join(",") || "none");
 
 console.log("== applications ==");
-const apps = await api("GET", "/core/applications/");
+const apps = await api("/core/applications/", "GET");
 console.log((apps.j?.results ?? []).map((a) => a.slug).join(",") || "none");
 
 // outpost auth endpoints per subdomain (direct at authentik, bypassing traefik)
