@@ -4,13 +4,8 @@ import urllib.request
 def bearer(tok):
     return {"authorization": f"Bearer {tok}", "accept": "application/json"}
 
-env = {}
-for line in open("/home/cyber/gwarestrin/.env"):
-    if "=" in line:
-        k, v = line.strip().split("=", 1)
-        env[k] = v
-
-secret = env["AUTHENTIK_SECRET_KEY"]
+import os
+secret = os.environ["AUTHENTIK_SECRET_KEY"]
 req = urllib.request.Request(
     "http://localhost:9000/api/v3/managed/blueprints/",
     headers=bearer(secret),
