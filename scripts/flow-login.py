@@ -81,7 +81,10 @@ def drive_login(username, password):
         return "no executor url"
 
     status, headers, body = req(op, executor)
-    print(f"  executor GET -> {status} {body[:400]}")
+    print(f"  executor GET -> {status} {body[:120]}")
+    print(f"  cookies now: {[c.name for c in jar]}")
+    for c in jar:
+        print(f"    {c.name}={c.value[:12]}... domain={c.domain} path={c.path} secure={c.secure}")
 
     tok = csrf_token(jar)
     print(f"  csrf: {tok}")
