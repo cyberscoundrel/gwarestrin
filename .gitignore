@@ -26,3 +26,4 @@ coverage/
 # ux tests
 ux-tests/node_modules/
 ux-tests/artifacts/
+instances/
