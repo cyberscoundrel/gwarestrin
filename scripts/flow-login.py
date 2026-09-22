@@ -27,7 +27,10 @@ def build_opener():
 
 
 def get(op, url, headers=None):
-    req = urllib.request.Request(url, headers=headers or {"Host": "admin.gw.home"})
+    p = urllib.parse.urlparse(url)
+    host = headers.get("Host") if headers and "Host" in headers else p.netloc
+    p = p._replace(netloc="localhost:8880")
+    req = urllib.request.Request(p.geturl(), headers={"Host": host, **(headers or {})})
     try:
         resp = op.open(req, timeout=15)
         return resp.status, dict(resp.headers), resp.read()
@@ -37,9 +40,12 @@ def get(op, url, headers=None):
 
 def post_json(op, url, payload, headers=None):
     body = json.dumps(payload).encode()
-    h = {"Host": "admin.gw.home", "content-type": "application/json"}
+    p = urllib.parse.urlparse(url)
+    host = (headers or {}).get("Host", p.netloc)
+    p = p._replace(netloc="localhost:8880")
+    h = {"Host": host, "content-type": "application/json"}
     h.update(headers or {})
-    req = urllib.request.Request(url, data=body, headers=h)
+    req = urllib.request.Request(p.geturl(), data=body, headers=h)
     try:
         resp = op.open(req, timeout=15)
         return resp.status, resp.read()
