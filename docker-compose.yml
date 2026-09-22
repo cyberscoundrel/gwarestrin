@@ -338,6 +338,22 @@ services:
       - backend
     restart: unless-stopped
 
+  # ---- headless browser for ux tests (on demand: --profile ux) ----
+  ux-test:
+    build: ./ux-tests
+    profiles: ["ux"]
+    command: ["sleep", "infinity"]
+    volumes:
+      - ./ux-tests:/tests
+    extra_hosts:
+      - "admin.gw.home:host-gateway"
+      - "alice.gw.home:host-gateway"
+      - "bob.gw.home:host-gateway"
+      - "auth.gw.home:host-gateway"
+    networks:
+      - default
+      - backend
+
 networks:
   backend:
     driver: bridge

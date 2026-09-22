@@ -22,3 +22,7 @@ coverage/
 # editors / os
 .DS_Store
 *.log
+
+# ux tests
+ux-tests/node_modules/
+ux-tests/artifacts/

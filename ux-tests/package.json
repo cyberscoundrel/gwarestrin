@@ -1,0 +1,11 @@
+{
+  "name": "gwarestrin-ux-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node id-flow-test.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.55.0"
+  }
+}
