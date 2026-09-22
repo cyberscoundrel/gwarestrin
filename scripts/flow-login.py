@@ -28,7 +28,7 @@ def build_opener():
 
 def get(op, url, headers=None):
     p = urllib.parse.urlparse(url)
-    host = headers.get("Host") if headers and "Host" in headers else p.netloc
+    host = (headers or {}).get("Host", "admin.gw.home")
     p = p._replace(netloc="localhost:8880")
     req = urllib.request.Request(p.geturl(), headers={"Host": host, **(headers or {})})
     try:
