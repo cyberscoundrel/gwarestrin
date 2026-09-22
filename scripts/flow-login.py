@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""Walk the authentik OAuth login flow via curl-style HTTP (no browser).
+"""Walk the authentik OAuth login flow server-side (no browser).
 
-Flow: traefik (Host: admin.gw.home) -> 302 authentik authorize -> login
-form API (identification + password stages) -> back to the app session.
-Verifies admin CAN log in and alice CANNOT reach admin.gw.home.
+DNS for *.gw.home is mapped to 127.0.0.1 so real URLs (and cookies) work
+against the local Traefik. Verifies admin CAN log in to admin.gw.home.
 """
 import json
 import re
-import sys
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
 from http.cookiejar import CookieJar
 
-BASE = "http://localhost:8880"
+_orig_getaddrinfo = socket.getaddrinfo
+
+
+def _resolver(host, *args, **kwargs):
+    if isinstance(host, str) and host.endswith("gw.home"):
+        host = "127.0.0.1"
+    return _orig_getaddrinfo(host, *args, **kwargs)
+
+
+socket.getaddrinfo = _resolver
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -23,98 +31,88 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def build_opener():
     jar = CookieJar()
-    return urllib.request.build_opener(NoRedirect, urllib.request.HTTPCookieProcessor(jar)), jar
+    op = urllib.request.build_opener(NoRedirect, urllib.request.HTTPCookieProcessor(jar))
+    return op, jar
 
 
-def get(op, url, headers=None):
-    p = urllib.parse.urlparse(url)
-    host = (headers or {}).get("Host", "admin.gw.home")
-    p = p._replace(netloc="localhost:8880")
-    req = urllib.request.Request(p.geturl(), headers={"Host": host, **(headers or {})})
+def req(op, url, payload=None, csrf=None, referer=None):
+    headers = {}
+    if payload is not None:
+        headers["content-type"] = "application/json"
+        if csrf:
+            headers["X-CSRFToken"] = csrf
+            headers["Referer"] = referer or "http://auth.gw.home:8880/"
+    data = json.dumps(payload).encode() if payload is not None else None
+    r = urllib.request.Request(url, data=data, headers=headers)
     try:
-        resp = op.open(req, timeout=15)
+        resp = op.open(r, timeout=15)
         return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
 
 
-def post_json(op, url, payload, headers=None):
-    body = json.dumps(payload).encode()
-    p = urllib.parse.urlparse(url)
-    host = (headers or {}).get("Host", p.netloc)
-    p = p._replace(netloc="localhost:8880")
-    h = {"Host": host, "content-type": "application/json"}
-    h.update(headers or {})
-    req = urllib.request.Request(p.geturl(), data=body, headers=h)
-    try:
-        resp = op.open(req, timeout=15)
-        return resp.status, resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
+def csrf_token(jar):
+    for c in jar:
+        if c.name == "authentik_csrf":
+            return c.value
+    return None
 
 
 def drive_login(username, password):
-    op, _jar = build_opener()
-    # 1. hit the app through traefik; capture the 302 to the authorize URL
-    status, headers, _ = get(op, f"{BASE}/")
+    op, jar = build_opener()
+    status, headers, _ = req(op, "http://admin.gw.home:8880/")
     loc = headers.get("Location", "")
     print(f"  app -> {status} {loc[:80]}")
     if status != 302 or "/authorize/" not in loc:
         return f"expected 302 authorize, got {status}"
 
-    auth_host = urllib.parse.urlparse(loc).netloc or "auth.gw.home:8880"
-    # 2. follow the authorize redirect chain until we get the flow executor
     url = loc
-    executor_url = None
+    executor = None
     for _ in range(8):
-        status, headers, body = get(op, url, headers={"Host": auth_host})
+        status, headers, body = req(op, url)
         if status == 302:
-            url = headers.get("Location", "")
-            if not url.startswith("http"):
-                url = f"http://{auth_host}{url}"
+            url = urllib.parse.urljoin(url, headers.get("Location", ""))
             continue
         if status == 200:
-            # the SPA would now call the executor API; find the flow slug
-            slug = re.search(r'default-authentication-flow|flow_slug["\s:=]+([a-z0-9-]+)', body.decode(errors="replace"))
-            executor_url = f"http://{auth_host}/api/v3/flows/executor/default-authentication-flow/"
+            executor = "http://auth.gw.home:8880/api/v3/flows/executor/default-authentication-flow/"
             break
         return f"authorize chain stopped at {status} {url[:90]}"
-    if not executor_url:
+    if not executor:
         return "no executor url"
 
-    # 3. prime the flow session, then identification stage
-    status, headers, body = get(op, executor_url, headers={"Host": auth_host})
-    print(f"  executor GET -> {status} {body[:100]}")
-    status, body = post_json(op, executor_url, {"uid_field": username}, headers={"Host": auth_host})
-    print(f"  identification -> {status} {body[:100]}")
-    data = json.loads(body or b"{}")
-    # 4. password stage
-    status, body = post_json(op, executor_url, {"password": password}, headers={"Host": auth_host})
-    print(f"  password -> {status} {body[:120]}")
-    data = json.loads(body or b"{}")
-    if data.get("type") != "RedirectChallenge" and "redirect" not in json.dumps(data):
-        return f"login did not complete: {data.get('type')}"
-    redir = (data.get("to") or data.get("payload", {}).get("to") or data.get("redirect") or "")
-    print(f"  flow complete -> {redir[:90]}")
+    status, headers, body = req(op, executor)
+    print(f"  executor GET -> {status} {body[:70]}")
 
-    # 5. follow the redirect chain back through the outpost callback to the app
-    url = redir if redir.startswith("http") else f"http://{auth_host}{redir}"
+    tok = csrf_token(jar)
+    status, headers, body = req(op, executor, {"uid_field": username}, csrf=tok)
+    print(f"  identification -> {status} {body[:90]}")
+    if status != 200:
+        return f"identification failed: {status}"
+
+    tok = csrf_token(jar)
+    status, headers, body = req(op, executor, {"password": password}, csrf=tok)
+    print(f"  password -> {status} {body[:140]}")
+    if status != 200:
+        return f"password stage failed: {status}"
+    data = json.loads(body or b"{}")
+    if data.get("type") != "RedirectChallenge":
+        return f"unexpected stage: {data.get('type')}"
+
+    url = data.get("to", "")
+    final_status, final_body = 0, b""
     for _ in range(8):
-        status, headers, body = get(op, url, headers={"Host": auth_host if "auth.gw" in url else "admin.gw.home"})
+        status, headers, b = req(op, url)
         if status == 302:
-            url = headers.get("Location", "")
-            if not url.startswith("http"):
-                url = f"http://{urllib.parse.urlparse(url).netloc or 'admin.gw.home'}{url}"
+            url = urllib.parse.urljoin(url, headers.get("Location", ""))
             continue
+        final_status, final_body = status, b
         break
-    final = url if status != 302 else url
-    print(f"  landed -> {status} {final[:80]}")
-    if "admin.gw.home" in final and status == 200:
+    print(f"  landed -> {final_status} {url[:80]}")
+    if "admin.gw.home" in url and final_status == 200 and b"scripts" in final_body:
         return "OK"
-    if status == 200 and b"gwarestrin" in body:
-        return "OK"
-    return f"unexpected landing: {status} {final[:80]}"
+    return f"unexpected landing: {final_status} {url[:80]}"
 
 
-print("== admin (expect OK):")
-print("  RESULT:", drive_login("admin", "admin-pass-1"))
+if __name__ == "__main__":
+    print("== admin (expect OK):")
+    print("  RESULT:", drive_login("admin", "admin-pass-1"))
