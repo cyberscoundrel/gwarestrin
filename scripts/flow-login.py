@@ -8,8 +8,10 @@ Verifies admin CAN log in and alice CANNOT reach admin.gw.home.
 import json
 import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
+from http.cookiejar import CookieJar
 
 BASE = "http://localhost:8880"
 
@@ -20,7 +22,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def build_opener():
-    jar = urllib.request.CookieJar()
+    jar = CookieJar()
     return urllib.request.build_opener(NoRedirect, urllib.request.HTTPCookieProcessor(jar)), jar
 
 
