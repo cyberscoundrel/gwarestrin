@@ -51,7 +51,7 @@ entries:
     identifiers:
       name: gw-admin-provider
     attrs:
-      external_host: http://admin.gw.home:8880
+      external_host: http://admin.gw.home
       internal_host: http://gwarestrin:3000
       mode: forward_single
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
@@ -63,7 +63,7 @@ entries:
     identifiers:
       name: gw-alice-provider
     attrs:
-      external_host: http://alice.gw.home:8880
+      external_host: http://alice.gw.home
       internal_host: http://gw-alice:3000
       mode: forward_single
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
@@ -75,7 +75,7 @@ entries:
     identifiers:
       name: gw-bob-provider
     attrs:
-      external_host: http://bob.gw.home:8880
+      external_host: http://bob.gw.home
       internal_host: http://gw-bob:3000
       mode: forward_single
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
@@ -116,7 +116,7 @@ entries:
     attrs:
       type: proxy
       config:
-        authentik_host: http://auth.gw.home:8880
+        authentik_host: http://auth.gw.home
       providers:
         - !KeyOf provider-gw-admin
         - !KeyOf provider-gw-alice
