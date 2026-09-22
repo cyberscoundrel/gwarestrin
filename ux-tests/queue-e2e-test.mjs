@@ -12,7 +12,7 @@ const ADMIN = "http://admin.gw.home";
 async function call(token, method, args) {
   const res = await fetch(`${GRAPH}/mcp`, {
     method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}` },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: method, arguments: args } }),
   });
   return res.json();
@@ -50,17 +50,19 @@ await page.waitForTimeout(4000);
 const sessionCookies = await page.context().cookies("http://admin.gw.home");
 const cookieHeader = sessionCookies.map((c) => `${c.name}=${c.value}`).join("; ");
 const q = await fetch(`${ADMIN}/api/graph-queue`, { headers: { cookie: cookieHeader } });
-const qj = await q.json().catch(() => ({}));
-const items = qj.pending ?? qj.items ?? qj;
+const qtext = await q.text();
+const qj = (() => { try { return JSON.parse(qtext); } catch { return { raw: qtext.slice(0, 200) }; } })();
+const items = qj.pending ?? qj.items ?? (Array.isArray(qj) ? qj : []);
 console.log("admin queue status:", q.status, "count:", Array.isArray(items) ? items.length : "?");
 const match = Array.isArray(items) && items.find((i) => JSON.stringify(i).includes(queuedId ?? "zzz"));
 console.log("our write in admin panel:", match ? "YES" : `no (id=${queuedId})`);
 
 // 3. approve via the panel API
 if (match && queuedId) {
-  const ap = await fetch(`${ADMIN}/api/graph-queue/${queuedId}/approve`, {
+  const ap = await fetch(`${ADMIN}/api/graph-queue/approve`, {
     method: "POST",
-    headers: { cookie: cookieHeader },
+    headers: { cookie: cookieHeader, "content-type": "application/json" },
+    body: JSON.stringify({ id: queuedId }),
   });
   console.log("approve:", ap.status);
   // 4. verify the write landed
