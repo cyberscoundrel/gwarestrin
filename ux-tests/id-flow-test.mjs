@@ -1,11 +1,11 @@
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
 
-// Usage: node id-flow-test.mjs <user> <pass> <host> [expect=allow|deny]
+// Usage: node id-flow-test.mjs <user> <pass> <host> [expect=allow|deny|deny-login]
 const user = process.argv[2] ?? "admin";
 const pass = process.argv[3] ?? "admin-pass-1";
 const target = process.argv[4] ?? "admin.gw.home";
-const expect = process.argv[5] === "deny" ? "deny" : "allow";
+const expect = process.argv[5] === "deny" ? "deny" : process.argv[5] === "deny-login" ? "deny-login" : "allow";
 
 mkdirSync("/tests/artifacts", { recursive: true });
 const tag = `${user}-${target.split(".")[0]}`;
@@ -32,6 +32,19 @@ if (expect === "deny") {
 }
 
 console.log(`[2] logging in as ${user}`);
+if (expect === "deny") {
+  await page.waitForTimeout(6000);
+  const onFlow = page.url().includes("auth.gw.home") || page.url().includes("outpost.goauthentik.io");
+  const body = (await page.locator("body").innerText().catch(() => "")) ?? "";
+  const denied = body.toLowerCase().includes("forbidden") || body.toLowerCase().includes("denied") || body.includes("403");
+  const verdict = onFlow || denied ? "PASS" : "FAIL";
+  console.log(`[deny] final: ${page.url().slice(0, 90)}`);
+  console.log(`[deny] pushed-to-login: ${onFlow} | explicit-denied: ${denied}`);
+  console.log(`[5] verdict: ${verdict}`);
+  await page.screenshot({ path: `/tests/artifacts/${tag}-final.png` });
+  await browser.close();
+  process.exit(verdict === "PASS" ? 0 : 1);
+}
 try {
   // stage 1: identification
   await page.locator("#ak-identifier-input").waitFor({ state: "visible", timeout: 60000 });
@@ -67,8 +80,19 @@ console.log(`[4] final URL: ${page.url().slice(0, 100)}`);
 console.log(`    title: ${await page.title()}`);
 const body = (await page.locator("body").innerText().catch(() => "")) ?? "";
 const hasUi = body.toLowerCase().includes("gwarestrin") || body.toLowerCase().includes("agent");
-const verdict = back && hasUi ? "PASS" : "FAIL";
-console.log(`    returned-to-app: ${back} | ui rendered: ${hasUi}`);
+const denied = body.toLowerCase().includes("forbidden") || body.toLowerCase().includes("denied") || body.includes("403");
+
+let verdict;
+if (expect === "deny-login") {
+  // success = auth completed but access was refused
+  verdict = denied || (!back && (page.url().includes("auth.gw.home") || page.url().includes("outpost.goauthentik.io")))
+    ? "PASS"
+    : "FAIL";
+  console.log(`    reached-app: ${back} | ui rendered: ${hasUi} | denied: ${denied}`);
+} else {
+  verdict = back && hasUi ? "PASS" : "FAIL";
+  console.log(`    returned-to-app: ${back} | ui rendered: ${hasUi}`);
+}
 console.log(`[5] verdict: ${verdict}`);
 await page.screenshot({ path: `/tests/artifacts/${tag}-final.png`, fullPage: false });
 await browser.close();
