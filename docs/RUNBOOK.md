@@ -275,6 +275,63 @@ Behavior: adopts hand-registered entries whose url points at the same service;
 never clobbers entries resolving elsewhere; keeps (but degrades) entries whose
 container disappears. Poll every 30s; disable by unsetting `DOCKER_PROXY_URL`.
 
+## 3f. Authentik SSO + Traefik edge (identity tier)
+
+Stack: `authentik-server` / `authentik-worker` / `authentik-postgres` /
+`authentik-redis` + `traefik` (all containerized, backend network). Objects are
+provisioned by blueprint `authentik/blueprints/gw.yaml` — groups `gw-admin` /
+`gw-user`, users `admin` / `alice` / `bob` (passwords `<name>-pass-1`), three
+`forward_single` proxy providers, three applications, membership policies
+bound to the applications, and the embedded outpost bound to all providers.
+
+Subdomains → instances (Traefik file provider, `traefik/traefik.yml`):
+
+| host | backend | tier |
+|------|---------|------|
+| `admin.gw.home` | `gwarestrin:3000` | `gw-admin` group, direct writes + approve |
+| `alice.gw.home` | `gw-alice:3000` | `gw-user`, writes queued |
+| `bob.gw.home` | `gw-bob:3000` | `gw-user`, writes queued |
+| `auth.gw.home` | `authentik-server:9000` | login UI |
+
+Notes learned the hard way:
+- **2026.8 auth/traefik endpoint**: forwardAuth = `authentik-server:9000/outpost.goauthentik.io/auth/traefik` (the old `/auth/simple` is gone; port `9300` is metrics).
+- **external_host must include any non-standard port** — the outpost matches the request Host header exactly (browsers send `host:port`). The edge now runs on standard `:80` so this is moot; Pi-hole's web UI moved to `:8080`.
+- **`access_policy_expression` is gone** in 2026.8 — create explicit `expressionpolicy` entries + `policybinding` entries targeting the **application** (providers no longer extend PolicyBindingModel). Membership check: `request.user.ak_groups.filter(name="gw-admin").exists()`.
+- **outpost `authentik_host`** lives inside the `config` object, and must be the public URL (`http://auth.gw.home`) or redirects go to `localhost`.
+- The embedded outpost serves on 9000 with the server; its provider assignment (`providers: [...]`) is required — empty assignment = auth endpoints 404.
+- Blueprint edits: apply with `docker exec -w / gwarestrin-authentik-worker-1 sh -c "PYTHONPATH=/ /ak-root/.venv/bin/python scripts/bp-apply-sync.py"` (or restart the worker). Failed applies are auto-deleted by `clear_failed_blueprints` — errors show in worker logs only during apply.
+- API auth: password basic-auth is removed; use `Authorization: Bearer $AUTHENTIK_BOOTSTRAP_TOKEN` (from `.env`).
+- Mac DNS: `*.gw.home` via `/etc/hosts` → `100.96.0.10` (hosts bypass WARP DNS; Pi-hole listens on `:5300` so Local-Domain-Fallback can't target it).
+
+## 3g. Instance metadata + review panel
+
+Per-instance config (`instances/<name>.json`, host-local, gitignored):
+`{version: 1, instance: {name}, owner, values: {graph: {token}},
+presentation: {queue: {label, url: "http://graph-rag:8000/api/queue", tokenRef: "values.graph.token"}}}`.
+Mounted read-only at `/etc/gwarestrin/instance.json`; hot-reloaded (2s watch);
+absent = legacy open mode. `${values...}` substitution applies to MCP def
+headers/env at agent spawn (fail-closed). `presentation.queue` gives the UI a
+review panel (proxied through the instance server, tokens never reach the
+browser). graph-rag's `token-map.json` maps tokens → caps
+(`read` / `write: direct|queued|deny` / `approve`); the queue URL must include
+the `/api/queue` path.
+
+## 3h. UX tests (headless browser container)
+
+`ux-test` service (`--profile ux`, on-demand): Playwright + Chromium, backend
+network, `*.gw.home` → host-gateway. Everything lives in `ux-tests/`
+(gitignored artifacts + node_modules).
+
+```sh
+docker compose --profile ux build ux-test
+docker compose --profile ux up -d ux-test
+docker exec gwarestrin-ux-test-1 node /tests/id-flow-test.mjs admin admin-pass-1 admin.gw.home          # login e2e
+docker exec gwarestrin-ux-test-1 node /tests/id-flow-test.mjs alice alice-pass-1 admin.gw.home deny-login  # policy denial
+docker exec gwarestrin-ux-test-1 node /tests/queue-e2e-test.mjs   # queued write -> panel -> approve
+```
+
+Screenshots land in the `ux-tests/artifacts/` bind mount.
+
 ## 4. Troubleshooting
 
 | Symptom | Check |
