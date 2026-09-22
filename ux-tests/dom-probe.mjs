@@ -3,22 +3,21 @@ import { chromium } from "playwright";
 const target = process.argv[2] ?? "admin.gw.home:8880";
 const browser = await chromium.launch();
 const page = await browser.newPage();
-await page.goto(`http://${target}/`, { waitUntil: "domcontentloaded", timeout: 30000 });
-await page.waitForTimeout(12000);
-console.log("url:", page.url());
-console.log("title:", await page.title());
-for (const frame of page.frames()) {
-  const inputs = await frame.evaluate(() =>
-    [...document.querySelectorAll("input, button")].map((el) => ({
-      tag: el.tagName,
-      name: el.getAttribute("name"),
-      id: el.id,
-      type: el.getAttribute("type"),
-      cls: (el.className || "").toString().slice(0, 40),
-    })),
-  ).catch((e) => [`frame error: ${e.message.split("\n")[0]}`]);
-  console.log(`frame: ${frame.url().slice(0, 90)}`);
-  console.log(JSON.stringify(inputs, null, 1));
-}
-await page.screenshot({ path: "/tests/artifacts/dom-probe.png", fullPage: true });
+
+page.on("response", (r) => {
+  const u = r.url();
+  if (u.includes("/static") || u.endsWith(".js") || u.endsWith(".css")) {
+    console.log(`${r.status()} ${u.slice(0, 110)}`);
+  }
+});
+page.on("requestfailed", (r) => console.log(`FAILED ${r.failure()?.errorText} ${r.url().slice(0, 110)}`));
+page.on("console", (m) => {
+  if (m.type() === "error") console.log(`console.error: ${m.text().slice(0, 160)}`);
+});
+
+await page.goto(`http://${target}/`, { waitUntil: "networkidle", timeout: 45000 }).catch((e) => console.log(`goto: ${e.message.split("\n")[0]}`));
+await page.waitForTimeout(8000);
+console.log("---- body snippet:");
+const html = await page.content().catch(() => "");
+console.log(html.slice(0, 600).replace(/\s+/g, " "));
 await browser.close();
