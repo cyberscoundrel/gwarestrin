@@ -52,7 +52,7 @@ const cookieHeader = sessionCookies.map((c) => `${c.name}=${c.value}`).join("; "
 const qres = await page.evaluate(async () => {
   const r = await fetch("/api/graph-queue");
   const t = await r.text();
-  return { status: r.status, body: t.slice(0, 400) };
+  return { status: r.status, body: t.slice(0, 20000) };
 });
 const qtext = qres.body ?? "";
 const qj = { status: qres.status, ...( (() => { try { return JSON.parse(qtext); } catch { return { raw: qtext.slice(0, 200) }; } })() ) };
