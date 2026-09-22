@@ -49,13 +49,13 @@ await page.waitForTimeout(4000);
 
 const sessionCookies = await page.context().cookies("http://admin.gw.home");
 const cookieHeader = sessionCookies.map((c) => `${c.name}=${c.value}`).join("; ");
-const qj = await page.evaluate(async () => {
+const qres = await page.evaluate(async () => {
   const r = await fetch("/api/graph-queue");
   const t = await r.text();
   return { status: r.status, body: t.slice(0, 400) };
 });
-const qtext = qj.body ?? "";
-const qj = (() => { try { return JSON.parse(qtext); } catch { return { raw: qtext.slice(0, 200) }; } })();
+const qtext = qres.body ?? "";
+const qj = { status: qres.status, ...( (() => { try { return JSON.parse(qtext); } catch { return { raw: qtext.slice(0, 200) }; } })() ) };
 const items = qj.pending ?? qj.items ?? (Array.isArray(qj) ? qj : []);
 console.log("admin queue status:", qj.status, "count:", Array.isArray(items) ? items.length : "?", "body:", qtext.slice(0, 200));
 const match = Array.isArray(items) && items.find((i) => JSON.stringify(i).includes(queuedId ?? "zzz"));
