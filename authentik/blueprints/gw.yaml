@@ -97,7 +97,7 @@ entries:
     model: authentik_policies.policybinding
     identifiers:
       policy: !KeyOf policy-gw-admin
-      target: !KeyOf provider-gw-admin
+      target: !KeyOf application-gw-admin
     attrs:
       order: 0
       enabled: true
@@ -105,7 +105,7 @@ entries:
     model: authentik_policies.policybinding
     identifiers:
       policy: !KeyOf policy-gw-user
-      target: !KeyOf provider-gw-alice
+      target: !KeyOf application-gw-alice
     attrs:
       order: 0
       enabled: true
@@ -113,7 +113,7 @@ entries:
     model: authentik_policies.policybinding
     identifiers:
       policy: !KeyOf policy-gw-user
-      target: !KeyOf provider-gw-bob
+      target: !KeyOf application-gw-bob
     attrs:
       order: 0
       enabled: true
