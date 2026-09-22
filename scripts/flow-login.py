@@ -81,11 +81,12 @@ def drive_login(username, password):
         return "no executor url"
 
     status, headers, body = req(op, executor)
-    print(f"  executor GET -> {status} {body[:70]}")
+    print(f"  executor GET -> {status} {body[:400]}")
 
     tok = csrf_token(jar)
+    print(f"  csrf: {tok}")
     status, headers, body = req(op, executor, {"uid_field": username}, csrf=tok)
-    print(f"  identification -> {status} {body[:90]}")
+    print(f"  identification -> {status} loc={headers.get('Location', '')} {body[:200]}")
     if status != 200:
         return f"identification failed: {status}"
 
