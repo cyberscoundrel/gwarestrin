@@ -36,7 +36,7 @@ def build_opener():
 
 
 def req(op, url, payload=None, csrf=None, referer=None):
-    headers = {}
+    headers = {"Host": urllib.parse.urlparse(url).netloc.split(":")[0]}
     if payload is not None:
         headers["content-type"] = "application/json"
         if csrf:
