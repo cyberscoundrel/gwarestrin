@@ -46,6 +46,9 @@ def req(op, url, payload=None, csrf=None, referer=None):
     r = urllib.request.Request(url, data=data, headers=headers)
     try:
         resp = op.open(r, timeout=15)
+        sc = resp.headers.get_all("Set-Cookie") or []
+        if sc:
+            print(f"    set-cookie on {url[:70]}: {[s[:60] for s in sc]}")
         return resp.status, dict(resp.headers), resp.read()
     except urllib.error.HTTPError as e:
         return e.code, dict(e.headers), e.read()
