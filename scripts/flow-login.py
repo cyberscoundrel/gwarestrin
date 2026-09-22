@@ -82,9 +82,11 @@ def drive_login(username, password):
     if not executor_url:
         return "no executor url"
 
-    # 3. identification stage
+    # 3. prime the flow session, then identification stage
+    status, headers, body = get(op, executor_url, headers={"Host": auth_host})
+    print(f"  executor GET -> {status} {body[:100]}")
     status, body = post_json(op, executor_url, {"uid_field": username}, headers={"Host": auth_host})
-    print(f"  identification -> {status} {body[:80]}")
+    print(f"  identification -> {status} {body[:100]}")
     data = json.loads(body or b"{}")
     # 4. password stage
     status, body = post_json(op, executor_url, {"password": password}, headers={"Host": auth_host})
