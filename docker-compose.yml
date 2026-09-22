@@ -340,7 +340,9 @@ services:
 
   # ---- headless browser for ux tests (on demand: --profile ux) ----
   ux-test:
-    build: ./ux-tests
+    build:
+      context: ./ux-tests
+      network: host
     profiles: ["ux"]
     command: ["sleep", "infinity"]
     volumes:
