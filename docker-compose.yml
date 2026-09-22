@@ -53,7 +53,7 @@ services:
       # multi-provider topology (see providers.example.json); copy to
       # ./providers.json next to this file on the deploy host
       - ./providers.json:/etc/gwarestrin/providers.json:ro
-      - ./instance.json:/etc/gwarestrin/instance.json:ro
+      - ./instances/admin.json:/etc/gwarestrin/instance.json:ro
 
     networks:
       - default   # outbound (WARP-bypass marked bridge)
