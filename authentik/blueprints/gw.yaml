@@ -45,6 +45,20 @@ entries:
         - !KeyOf group-gw-user
       password: "bob-pass-1"
 
+  # ---- access policies: group membership gates per instance ----
+  - id: policy-gw-admin
+    model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: gw-admin-access
+    attrs:
+      expression: 'return request.user.ak_groups.filter(name="gw-admin").exists()'
+  - id: policy-gw-user
+    model: authentik_policies_expression.expressionpolicy
+    identifiers:
+      name: gw-user-access
+    attrs:
+      expression: 'return request.user.ak_groups.filter(name="gw-user").exists()'
+
   # ---- proxy providers (forward auth, embedded outpost) ----
   - id: provider-gw-admin
     model: authentik_providers_proxy.proxyprovider
@@ -79,45 +93,6 @@ entries:
       authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
       invalidation_flow: !Find [authentik_flows.flow, [slug, default-invalidation-flow]]
 
-  # ---- access policies: group membership gates per instance ----
-  - id: policy-gw-admin
-    model: authentik_policies_expression.expressionpolicy
-    identifiers:
-      name: gw-admin-access
-    attrs:
-      expression: 'return request.user.ak_groups.filter(name="gw-admin").exists()'
-  - id: policy-gw-user
-    model: authentik_policies_expression.expressionpolicy
-    identifiers:
-      name: gw-user-access
-    attrs:
-      expression: 'return request.user.ak_groups.filter(name="gw-user").exists()'
-
-  - id: binding-gw-admin
-    model: authentik_policies.policybinding
-    identifiers:
-      policy: !KeyOf policy-gw-admin
-      target: !KeyOf application-gw-admin
-    attrs:
-      order: 0
-      enabled: true
-  - id: binding-gw-alice
-    model: authentik_policies.policybinding
-    identifiers:
-      policy: !KeyOf policy-gw-user
-      target: !KeyOf application-gw-alice
-    attrs:
-      order: 0
-      enabled: true
-  - id: binding-gw-bob
-    model: authentik_policies.policybinding
-    identifiers:
-      policy: !KeyOf policy-gw-user
-      target: !KeyOf application-gw-bob
-    attrs:
-      order: 0
-      enabled: true
-
   - id: application-gw-admin
     model: authentik_core.application
     identifiers:
@@ -144,6 +119,32 @@ entries:
       name: gw-bob
       provider: !KeyOf provider-gw-bob
       policy_engine_mode: any
+
+  # ---- policy bindings: attach membership policies to applications ----
+  - id: binding-gw-admin
+    model: authentik_policies.policybinding
+    identifiers:
+      policy: !KeyOf policy-gw-admin
+      target: !KeyOf application-gw-admin
+    attrs:
+      order: 0
+      enabled: true
+  - id: binding-gw-alice
+    model: authentik_policies.policybinding
+    identifiers:
+      policy: !KeyOf policy-gw-user
+      target: !KeyOf application-gw-alice
+    attrs:
+      order: 0
+      enabled: true
+  - id: binding-gw-bob
+    model: authentik_policies.policybinding
+    identifiers:
+      policy: !KeyOf policy-gw-user
+      target: !KeyOf application-gw-bob
+    attrs:
+      order: 0
+      enabled: true
 
   - id: outpost-embedded
     model: authentik_outposts.outpost
