@@ -1,10 +1,10 @@
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
 
-// Usage: node id-flow-test.mjs <user> <pass> <host:port> [expect=allow|deny]
+// Usage: node id-flow-test.mjs <user> <pass> <host> [expect=allow|deny]
 const user = process.argv[2] ?? "admin";
 const pass = process.argv[3] ?? "admin-pass-1";
-const target = process.argv[4] ?? "admin.gw.home:8880";
+const target = process.argv[4] ?? "admin.gw.home";
 const expect = process.argv[5] === "deny" ? "deny" : "allow";
 
 mkdirSync("/tests/artifacts", { recursive: true });
@@ -18,7 +18,6 @@ console.log(`[1] opening ${appOrigin}/`);
 await page.goto(`${appOrigin}/`, { waitUntil: "domcontentloaded", timeout: 45000 });
 
 if (expect === "deny") {
-  // unauthenticated user should be pushed into the authentik flow, not the app
   await page.waitForTimeout(6000);
   const onFlow = page.url().includes("auth.gw.home") || page.url().includes("outpost.goauthentik.io");
   const body = (await page.locator("body").innerText().catch(() => "")) ?? "";
@@ -34,15 +33,21 @@ if (expect === "deny") {
 
 console.log(`[2] logging in as ${user}`);
 try {
-  await page.waitForSelector("#ak-identifier-input", { state: "visible", timeout: 45000 });
-  await page.fill("#ak-identifier-input", user);
+  // stage 1: identification
+  await page.locator("#ak-identifier-input").waitFor({ state: "visible", timeout: 60000 });
+  await page.locator("#ak-identifier-input").fill(user);
   await page.screenshot({ path: `/tests/artifacts/${tag}-1-identify.png` });
-  await page.click("button[type=submit]");
+  await page.locator("button[type=submit]:visible").first().click();
 
-  await page.waitForSelector("input[name=password]", { state: "visible", timeout: 45000 });
-  await page.fill("input[name=password]", pass);
+  // stage 2: password (the flow advances via a redirect; wait for the
+  // identification field to disappear and the password field to appear)
+  await page.locator("#ak-identifier-input").waitFor({ state: "detached", timeout: 30000 }).catch(() => {});
+  const pw = page.locator("input[name=password]:visible");
+  await pw.waitFor({ state: "visible", timeout: 60000 });
+  await page.waitForTimeout(1500); // let the stage card settle
+  await pw.fill(pass);
   await page.screenshot({ path: `/tests/artifacts/${tag}-2-password.png` });
-  await page.click("button[type=submit]");
+  await page.locator("button[type=submit]:visible").first().click();
 } catch (err) {
   console.log(`    login interaction failed: ${err.message.split("\n")[0]}`);
 }
@@ -50,13 +55,13 @@ try {
 console.log("[3] waiting for return to app");
 let back = false;
 try {
-  await page.waitForURL(`${appOrigin}/**`, { timeout: 45000 });
+  await page.waitForURL(`${appOrigin}/**`, { timeout: 60000 });
   back = true;
 } catch {
   console.log(`    still at: ${page.url().slice(0, 100)}`);
 }
 await page.waitForLoadState("domcontentloaded").catch(() => {});
-await page.waitForTimeout(4000);
+await page.waitForTimeout(5000);
 
 console.log(`[4] final URL: ${page.url().slice(0, 100)}`);
 console.log(`    title: ${await page.title()}`);
