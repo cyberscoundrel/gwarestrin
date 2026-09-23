@@ -51,13 +51,13 @@ entries:
     identifiers:
       name: gw-admin-access
     attrs:
-      expression: 'return request.user.ak_groups.filter(name="gw-admin").exists()'
+      expression: 'return request.user.is_superuser or request.user.ak_groups.filter(name="gw-admin").exists()'
   - id: policy-gw-user
     model: authentik_policies_expression.expressionpolicy
     identifiers:
       name: gw-user-access
     attrs:
-      expression: 'return request.user.ak_groups.filter(name="gw-user").exists()'
+      expression: 'return request.user.is_superuser or request.user.ak_groups.filter(name="gw-user").exists()'
 
   # ---- proxy providers (forward auth, embedded outpost) ----
   - id: provider-gw-admin
