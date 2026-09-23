@@ -55,6 +55,14 @@ services:
       - ./providers.json:/etc/gwarestrin/providers.json:ro
       - ./instances/admin.json:/etc/gwarestrin/instance.json:ro
 
+    labels:
+      gwarestrin.tenant: "admin"
+      traefik.enable: "true"
+      traefik.docker.network: "gwarestrin_backend"
+      traefik.http.routers.gw-admin.rule: "Host(`admin.gw.home`)"
+      traefik.http.routers.gw-admin.middlewares: "gw-forward-auth"
+      traefik.http.services.gw-admin.loadbalancer.server.port: "3000"
+
     networks:
       - default   # outbound (WARP-bypass marked bridge)
       - backend   # sidecar link (container-local subnet)
@@ -208,6 +216,13 @@ services:
       - gondolin-cache-alice:/home/node/.cache/gondolin
       - ./providers.json:/etc/gwarestrin/providers.json:ro
       - ./instances/alice.json:/etc/gwarestrin/instance.json:ro
+    labels:
+      gwarestrin.tenant: "alice"
+      traefik.enable: "true"
+      traefik.docker.network: "gwarestrin_backend"
+      traefik.http.routers.gw-alice.rule: "Host(`alice.gw.home`)"
+      traefik.http.routers.gw-alice.middlewares: "gw-forward-auth"
+      traefik.http.services.gw-alice.loadbalancer.server.port: "3000"
     devices:
       - /dev/kvm:/dev/kvm
     group_add:
@@ -235,6 +250,13 @@ services:
       - gondolin-cache-bob:/home/node/.cache/gondolin
       - ./providers.json:/etc/gwarestrin/providers.json:ro
       - ./instances/bob.json:/etc/gwarestrin/instance.json:ro
+    labels:
+      gwarestrin.tenant: "bob"
+      traefik.enable: "true"
+      traefik.docker.network: "gwarestrin_backend"
+      traefik.http.routers.gw-bob.rule: "Host(`bob.gw.home`)"
+      traefik.http.routers.gw-bob.middlewares: "gw-forward-auth"
+      traefik.http.services.gw-bob.loadbalancer.server.port: "3000"
     devices:
       - /dev/kvm:/dev/kvm
     group_add:
@@ -320,12 +342,17 @@ services:
     restart: unless-stopped
 
   # ---- edge reverse proxy (tailnet-only, plain HTTP) ----
+  # instance routers come from docker labels (providers.docker); the file
+  # provider holds auth.gw.home + the outpost router only.
   traefik:
     image: traefik:v3.3
     command:
       - --entrypoints.web.address=:80
       - --providers.file.directory=/etc/traefik/dynamic
-      - --log.level=DEBUG
+      - --providers.docker=true
+      - --providers.docker.endpoint=http://docker-proxy:2375
+      - --providers.docker.exposedbydefault=false
+      - --log.level=INFO
     ports:
       # standard :80 edge (pihole web moved to :8080)
       - "80:80"
@@ -333,8 +360,27 @@ services:
       - ./traefik/traefik.yml:/etc/traefik/dynamic/dynamic.yml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - docker-proxy
     networks:
       - default
+      - backend
+    restart: unless-stopped
+
+  # ---- write-scoped docker API for the tenant provisioner ----
+  # separate from the read-only proxy so the server's discovery client
+  # never sees write access.
+  docker-proxy-write:
+    image: tecnativa/docker-socket-proxy
+    environment:
+      CONTAINERS: 1
+      NETWORKS: 1
+      POST: 1
+      ALLOW_START: 1
+      ALLOW_STOP: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
       - backend
     restart: unless-stopped
 
