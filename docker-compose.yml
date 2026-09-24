@@ -351,9 +351,10 @@ services:
       - --providers.file.directory=/etc/traefik/dynamic
       - --providers.docker=true
       - --providers.docker.endpoint=http://docker-proxy:2375
-      # the socket proxy strips version negotiation; pin a modern API
-      - --providers.docker.apiversion=1.43
       - --providers.docker.exposedbydefault=false
+    environment:
+      # the socket proxy strips version negotiation; pin a modern API
+      DOCKER_API_VERSION: "1.43"
       - --log.level=INFO
     ports:
       # standard :80 edge (pihole web moved to :8080)
