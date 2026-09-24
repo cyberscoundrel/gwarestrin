@@ -1,0 +1,26 @@
+# Tenant routers — MANAGED by the provisioner (provisioner/). Edits are
+# overwritten on reconcile; add/remove tenants through the identity tier.
+http:
+  routers:
+    gw-admin:
+      rule: "Host(`admin.gw.home`)"
+      service: gw-admin
+      middlewares: [gw-forward-auth]
+    gw-alice:
+      rule: "Host(`alice.gw.home`)"
+      service: gw-alice
+      middlewares: [gw-forward-auth]
+    gw-bob:
+      rule: "Host(`bob.gw.home`)"
+      service: gw-bob
+      middlewares: [gw-forward-auth]
+  services:
+    gw-admin:
+      loadBalancer:
+        servers: [{url: "http://gwarestrin:3000"}]
+    gw-alice:
+      loadBalancer:
+        servers: [{url: "http://gw-alice:3000"}]
+    gw-bob:
+      loadBalancer:
+        servers: [{url: "http://gw-bob:3000"}]

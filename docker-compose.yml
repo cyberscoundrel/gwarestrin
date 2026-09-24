@@ -57,11 +57,6 @@ services:
 
     labels:
       gwarestrin.tenant: "admin"
-      traefik.enable: "true"
-      traefik.docker.network: "gwarestrin_backend"
-      traefik.http.routers.gw-admin.rule: "Host(`admin.gw.home`)"
-      traefik.http.routers.gw-admin.middlewares: "gw-forward-auth"
-      traefik.http.services.gw-admin.loadbalancer.server.port: "3000"
 
     networks:
       - default   # outbound (WARP-bypass marked bridge)
@@ -218,11 +213,6 @@ services:
       - ./instances/alice.json:/etc/gwarestrin/instance.json:ro
     labels:
       gwarestrin.tenant: "alice"
-      traefik.enable: "true"
-      traefik.docker.network: "gwarestrin_backend"
-      traefik.http.routers.gw-alice.rule: "Host(`alice.gw.home`)"
-      traefik.http.routers.gw-alice.middlewares: "gw-forward-auth"
-      traefik.http.services.gw-alice.loadbalancer.server.port: "3000"
     devices:
       - /dev/kvm:/dev/kvm
     group_add:
@@ -252,11 +242,6 @@ services:
       - ./instances/bob.json:/etc/gwarestrin/instance.json:ro
     labels:
       gwarestrin.tenant: "bob"
-      traefik.enable: "true"
-      traefik.docker.network: "gwarestrin_backend"
-      traefik.http.routers.gw-bob.rule: "Host(`bob.gw.home`)"
-      traefik.http.routers.gw-bob.middlewares: "gw-forward-auth"
-      traefik.http.services.gw-bob.loadbalancer.server.port: "3000"
     devices:
       - /dev/kvm:/dev/kvm
     group_add:
@@ -349,22 +334,15 @@ services:
     command:
       - --entrypoints.web.address=:80
       - --providers.file.directory=/etc/traefik/dynamic
-      - --providers.docker=true
-      - --providers.docker.endpoint=http://docker-proxy:2375
-      - --providers.docker.exposedbydefault=false
+      - --providers.file.watch=true
       - --log.level=INFO
-    environment:
-      # the socket proxy strips version negotiation; pin a modern API
-      DOCKER_API_VERSION: "1.43"
     ports:
       # standard :80 edge (pihole web moved to :8080)
       - "80:80"
     volumes:
-      - ./traefik/traefik.yml:/etc/traefik/dynamic/dynamic.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    depends_on:
-      - docker-proxy
     networks:
       - default
       - backend
