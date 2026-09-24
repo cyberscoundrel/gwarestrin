@@ -365,6 +365,34 @@ services:
       - backend
     restart: unless-stopped
 
+  # ---- tenant provisioner: authentik roles -> per-user instances ----
+  # Creates/locks/stops per-user gwarestrin containers, writes their
+  # authentik objects, graph tokens, instance metadata and traefik routes.
+  provisioner:
+    build: ./provisioner
+    environment:
+      AUTHENTIK_URL: http://authentik-server:9000
+      AUTHENTIK_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN}
+      DOCKER_API: http://docker-proxy-write:2375
+      DOMAIN: gw.home
+      TIER_GROUPS: gw-admin:admin,gw-user:user
+      SEED_TENANTS: admin,alice,bob
+      KVM_GID: ${KVM_GID:-993}
+      COMPOSE_PROJECT: gwarestrin
+      POLL_SECONDS: "30"
+    volumes:
+      - ./instances:/data/instances
+      - ./graph-rag-config:/data/graph-rag-config
+      - ./traefik/dynamic:/data/traefik
+      - ./providers.json:/data/providers.json:ro
+      - ./.env:/data/.env:ro
+    depends_on:
+      - authentik-server
+      - docker-proxy-write
+    networks:
+      - backend
+    restart: unless-stopped
+
   # ---- headless browser for ux tests (on demand: --profile ux) ----
   ux-test:
     build:
