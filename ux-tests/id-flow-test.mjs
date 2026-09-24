@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
+import { lookup } from "node:dns/promises";
 
 // Usage: node id-flow-test.mjs <user> <pass> <host> [expect=allow|deny|deny-login]
 const user = process.argv[2] ?? "admin";
@@ -11,7 +12,12 @@ mkdirSync("/tests/artifacts", { recursive: true });
 const tag = `${user}-${target.split(".")[0]}`;
 const appOrigin = `http://${target}`;
 
-const browser = await chromium.launch();
+// resolve the edge once; chromium maps the tenant host to it (extra_hosts
+// only covers the seed tenants)
+const edgeIp = await lookup("traefik").catch(() => null);
+const browser = await chromium.launch({
+  args: edgeIp ? [`--host-resolver-rules=MAP ${target} ${edgeIp.address}`] : [],
+});
 const page = await browser.newPage();
 
 console.log(`[1] opening ${appOrigin}/`);
