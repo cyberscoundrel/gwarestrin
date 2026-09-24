@@ -352,10 +352,10 @@ services:
       - --providers.docker=true
       - --providers.docker.endpoint=http://docker-proxy:2375
       - --providers.docker.exposedbydefault=false
+      - --log.level=INFO
     environment:
       # the socket proxy strips version negotiation; pin a modern API
       DOCKER_API_VERSION: "1.43"
-      - --log.level=INFO
     ports:
       # standard :80 edge (pihole web moved to :8080)
       - "80:80"
