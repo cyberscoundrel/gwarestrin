@@ -345,7 +345,7 @@ services:
   # instance routers come from docker labels (providers.docker); the file
   # provider holds auth.gw.home + the outpost router only.
   traefik:
-    image: traefik:v3.3
+    image: traefik:v3.5
     command:
       - --entrypoints.web.address=:80
       - --providers.file.directory=/etc/traefik/dynamic
