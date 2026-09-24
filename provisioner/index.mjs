@@ -72,6 +72,12 @@ async function docker(method, path, body) {
 }
 
 const slug = (name) => name.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
+// many authentik list endpoints silently ignore unknown query params — fetch
+// the full list and match exactly client-side
+async function akFind(path, match) {
+  const res = await ak("GET", path);
+  return (res.results ?? []).find(match);
+}
 const readJson = (p, fallback) => (existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : fallback);
 const writeIfChanged = (p, content) => {
   if (existsSync(p) && readFileSync(p, "utf8") === content) return false;
@@ -102,17 +108,14 @@ async function desiredTenants() {
 // ---------- authentik tenant objects (non-seed tenants) ----------
 
 async function ensureFlowPks() {
-  const authz = await ak("GET", "/flows/instances/?slug=default-provider-authorization-implicit-consent");
-  const inval = await ak("GET", "/flows/instances/?slug=default-invalidation-flow");
-  return {
-    authorization: authz.results?.[0]?.pk,
-    invalidation: inval.results?.[0]?.pk,
-  };
+  const authz = await akFind("/flows/instances/", (f) => f.slug === "default-provider-authorization-implicit-consent");
+  const inval = await akFind("/flows/instances/", (f) => f.slug === "default-invalidation-flow");
+  return { authorization: authz?.pk, invalidation: inval?.pk };
 }
 
 async function ensureTenantObjects(name, tier, flows, userId) {
   // tenant group (owner-only membership drives the access policy)
-  let group = (await ak("GET", `/core/groups/?name=gw-${name}`)).results?.[0];
+  let group = (await ak("GET", `/core/groups/?name=gw-${name}`)).results?.find((g) => g.name === `gw-${name}`);
   if (!group) {
     group = await ak("POST", "/core/groups/", { name: `gw-${name}`, attributes: { gw_tenant: name, gw_tier: tier } });
     log(`authentik: group gw-${name} created`);
@@ -125,7 +128,7 @@ async function ensureTenantObjects(name, tier, flows, userId) {
   }
 
   // expression policy: tenant-group membership (superusers always pass)
-  let policy = (await ak("GET", `/policies/expression/?name=gw-${name}-access`)).results?.[0];
+  let policy = await akFind("/policies/expression/", (p) => p.name === `gw-${name}-access`);
   const expr = `return request.user.is_superuser or request.user.ak_groups.filter(name="gw-${name}").exists()`;
   if (!policy) {
     policy = await ak("POST", "/policies/expression/", { name: `gw-${name}-access`, expression: expr });
@@ -133,7 +136,7 @@ async function ensureTenantObjects(name, tier, flows, userId) {
   }
 
   // proxy provider
-  let provider = (await ak("GET", `/providers/proxy/?name=${encodeURIComponent(`gw-${name}-provider`)}`)).results?.[0];
+  let provider = await akFind("/providers/proxy/", (p) => p.name === `gw-${name}-provider`);
   if (!provider) {
     provider = await ak("POST", "/providers/proxy/", {
       name: `gw-${name}-provider`,
@@ -147,7 +150,7 @@ async function ensureTenantObjects(name, tier, flows, userId) {
   }
 
   // application
-  let app = (await ak("GET", `/core/applications/?slug=gw-${name}`)).results?.[0];
+  let app = await akFind("/core/applications/", (a) => a.slug === `gw-${name}`);
   if (!app) {
     app = await ak("POST", "/core/applications/", {
       name: `gw-${name}`,
@@ -362,7 +365,7 @@ async function reconcile() {
       if (tier) {
         // grant (or re-grant / steady state)
         if (!SEED.has(name)) {
-          const user = (await ak("GET", `/core/users/?username=${encodeURIComponent(name)}`)).results?.[0];
+          const user = (await ak("GET", `/core/users/?username=${encodeURIComponent(name)}`)).results?.find((u) => u.username === name);
           await ensureTenantObjects(name, tier, flows, user?.pk);
         }
         const token = ensureToken(name, tier);
@@ -377,7 +380,7 @@ async function reconcile() {
         lockToken(name);
         if (!SEED.has(name)) {
           // drop tenant-group membership (access policy then denies)
-          const group = (await ak("GET", `/core/groups/?name=gw-${name}`)).results?.[0];
+          const group = (await ak("GET", `/core/groups/?name=gw-${name}`)).results?.find((g) => g.name === `gw-${name}`);
           if (group && (group.users_obj ?? []).length > 0) {
             await ak("PATCH", `/core/groups/${group.pk}/`, { users: [] });
             log(`authentik: tenant group gw-${name} emptied (locked)`);
