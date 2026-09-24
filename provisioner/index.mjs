@@ -278,7 +278,7 @@ function tenantContainerSpec(name, tier) {
       RestartPolicy: { Name: "unless-stopped" },
     },
     NetworkingConfig: {
-      EndpointsConfig: { backend: {} },
+      EndpointsConfig: { [`${process.env.COMPOSE_PROJECT ?? "gwarestrin"}_backend`]: {} },
     },
   };
 }
