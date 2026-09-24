@@ -379,6 +379,7 @@ services:
       SEED_TENANTS: admin,alice,bob
       KVM_GID: ${KVM_GID:-993}
       COMPOSE_PROJECT: gwarestrin
+      HOST_BASE: /home/cyber/gwarestrin
       POLL_SECONDS: "30"
     volumes:
       - ./instances:/data/instances

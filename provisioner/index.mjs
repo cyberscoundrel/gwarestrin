@@ -33,6 +33,9 @@ const TIERS = Object.fromEntries(
     .filter((p) => p.length === 2),
 );
 const INSTANCES_DIR = "/data/instances";
+// bind mounts in created containers resolve on the HOST, so the provisioner
+// needs the host-side paths of the shared files
+const HOST_BASE = (process.env.HOST_BASE ?? "/home/cyber/gwarestrin").replace(/\/+$/, "");
 const GRAPH_CONFIG_DIR = "/data/graph-rag-config";
 const TRAEFIK_DIR = "/data/traefik";
 
@@ -262,8 +265,8 @@ function tenantContainerSpec(name, tier) {
       Mounts: [
         { Type: "volume", Source: `gw-${name}-state`, Target: "/var/lib/gwarestrin" },
         { Type: "volume", Source: `gw-${name}-gondolin`, Target: "/home/node/.cache/gondolin" },
-        { Type: "bind", Source: "/data/providers.json", Target: "/etc/gwarestrin/providers.json", ReadOnly: true },
-        { Type: "bind", Source: `${INSTANCES_DIR}/${name}.json`, Target: "/etc/gwarestrin/instance.json", ReadOnly: true },
+        { Type: "bind", Source: `${HOST_BASE}/providers.json`, Target: "/etc/gwarestrin/providers.json", ReadOnly: true },
+        { Type: "bind", Source: `${HOST_BASE}/instances/${name}.json`, Target: "/etc/gwarestrin/instance.json", ReadOnly: true },
       ],
       Devices: [{ PathOnHost: "/dev/kvm", PathInContainer: "/dev/kvm", CgroupPermissions: "rwm" }],
       GroupAdd: [KVM_GID],
