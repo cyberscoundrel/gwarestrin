@@ -332,6 +332,35 @@ docker exec gwarestrin-ux-test-1 node /tests/queue-e2e-test.mjs   # queued write
 
 Screenshots land in the `ux-tests/artifacts/` bind mount.
 
+## 3i. Tenant provisioner (roles -> per-user instances)
+
+The `provisioner` service turns authentik into the tenant control plane. Every
+30s it reads membership of the tier groups (`gw-admin`, `gw-user` via
+`TIER_GROUPS`) and reconciles one gwarestrin instance per user:
+
+- **grant** (user added to a tier group): tenant authentik objects (group
+  `gw-<user>`, expression policy, proxy provider, application, binding,
+  outpost attachment), a graph-rag token (caps by tier), `instances/<user>.json`,
+  a docker container `gw-<user>` (own state + gondolin volumes, kvm) and a
+  traefik route (`<user>.gw.home`, written to `traefik/dynamic/tenants.yml`).
+- **revoke** (role removed): access cut everywhere — container **stopped**
+  (state preserved), graph token caps denied, tenant group emptied. Traefik
+  route stays (authentik denies).
+- **re-grant**: same container restarted, same token, same data.
+
+Notes:
+- Seed tenants (`SEED_TENANTS`, default `admin,alice,bob`) are compose-managed:
+  the provisioner only starts/stops them and manages tokens — it never creates
+  their objects or containers.
+- The provisioner writes `traefik/dynamic/tenants.yml`; the file provider hot-
+  reloads routes. Do not hand-edit that file.
+- Container writes go through `docker-proxy-write` (scoped POST: start/stop);
+  the read-only `docker-proxy` keeps serving the server's discovery client.
+- Create a user via the authentik admin UI or blueprint, set a password, then
+  add them to a tier group — provisioning is automatic within ~30s. The Mac
+  needs a `/etc/hosts` line per new tenant (`100.96.0.10 <user>.gw.home`).
+- Provisioner state ledger: `instances/.provisioner-state.json` (gitignored).
+
 ## 4. Troubleshooting
 
 | Symptom | Check |
