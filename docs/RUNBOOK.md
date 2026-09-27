@@ -361,6 +361,49 @@ Notes:
   needs a `/etc/hosts` line per new tenant (`100.96.0.10 <user>.gw.home`).
 - Provisioner state ledger: `instances/.provisioner-state.json` (gitignored).
 
+## 3i-2. Agent profiles + context engines + shared /tools
+
+**Profiles** (`<stateDir>/profiles.json`, seeded with `default` on boot, edited
+via the UI or `PUT /api/profiles/:id`) drive agent creation:
+
+```json
+{
+  "id": "ops-analyst",
+  "name": "ops-analyst",
+  "defaults": { "tier": "cloud", "model": null, "namePrefix": "sql-" },
+  "mcpServers": ["graph-rag", "mssql"],
+  "contextEngine": {
+    "type": "graph-rag",
+    "prompt": "what the engine should analyze",
+    "maxRounds": 8, "timeoutMs": 300000, "maxChars": 4000
+  },
+  "sharedTools": true
+}
+```
+
+- Create resolution order: explicit create input > selected profile > default
+  profile > server defaults. `mcpServers: "all"` = every registered server.
+- `contextEngine` runs at AGENT CREATION (blocking spinner in the UI) and
+  writes `<agentDir>/home/context-injection.md`, injected every turn by the
+  graph-context extension. `default` omits it (instant create).
+- Engine types: `graph-rag` (LLM tool-loop; tools resolve LIVE from the MCP
+  server's `tools/list`, so no schema duplication — per-tool write-guards for
+  query_graph) and `lexical` (deterministic graph summary, no LLM). A profile
+  prompt runs even without a user firstPrompt.
+- Engine LLM calls are deadline-aware: set `timeoutMs` generously when the
+  local 27B is loaded (it can take minutes per round).
+
+**Shared `/tools` filesystem**: `<stateDir>/shared-tools` is mounted RW into
+every agent VM at `/tools` (gondolin sandboxfs bind — same mechanism as
+/workspace). Sibling agents within an instance share scripts; shell/python
+run from the mount, binaries must be copied to /tmp (no mmap-exec on FUSE).
+`profile.sharedTools: false` disables the mount for that profile's agents.
+UI/API surface: `/api/shared-tools` (list/download/upload/delete/mkdir).
+
+UI: sidebar shows profiles with their agents nested (profile name opens the
+editor in the main area); the create dialog has a profile selector with MCP
+chips and only shows the analyzing spinner for engine profiles.
+
 ## 4. Troubleshooting
 
 | Symptom | Check |
