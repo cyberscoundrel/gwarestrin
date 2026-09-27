@@ -31,6 +31,7 @@ console.log("editor has shared tools toggle:", editor.includes("shared /tools"))
 
 // 3. fill + save a profile with an engine + limited mcp + sharedTools off
 await page.locator("input[placeholder='e.g. sql-analyst']").fill("ops-analyst");
+await page.locator("label", { hasText: "context engine" }).locator("input").check();
 await page.locator("textarea[placeholder*='analysis prompt']").fill("Summarize the homelab machines and services relevant to infrastructure monitoring.");
 await page.locator("label", { hasText: "shared /tools directory" }).locator("input").uncheck();
 const buttons = page.locator("button", { hasText: "pick…" });
