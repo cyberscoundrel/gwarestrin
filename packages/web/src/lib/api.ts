@@ -1,4 +1,4 @@
-import type { AgentRecord, AgentRuntimeSummary, ModelView, ProviderView } from "@gwarestrin/shared";
+import type { AgentRecord, AgentRuntimeSummary, ModelView, ProfileRecord, ProviderView } from "@gwarestrin/shared";
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -19,6 +19,7 @@ export const api = {
   },
   async createAgent(input: {
     name: string;
+    profileId?: string;
     model?: { provider: string; modelId: string } | null;
     mcpServers?: string[];
     firstPrompt?: string;
@@ -73,6 +74,25 @@ export const api = {
   },
   async modelsFor(provider: ProviderView): Promise<ModelView[]> {
     return provider.models;
+  },
+  // ---------- agent profiles ----------
+  async listProfiles(): Promise<ProfileRecord[]> {
+    const r = await json<{ profiles: ProfileRecord[] }>(await fetch("/api/profiles"));
+    return r.profiles;
+  },
+  async saveProfile(id: string, input: Partial<ProfileRecord> & { name: string; mcpServers: string[] | "all" }): Promise<ProfileRecord> {
+    const r = await json<{ profile: ProfileRecord }>(
+      await fetch(`/api/profiles/${encodeURIComponent(id)}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      }),
+    );
+    return r.profile;
+  },
+  async deleteProfile(id: string): Promise<void> {
+    const res = await fetch(`/api/profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok && res.status !== 204) await json(res);
   },
 };
 

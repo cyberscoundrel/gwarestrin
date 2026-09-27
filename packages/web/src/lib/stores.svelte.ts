@@ -1,7 +1,7 @@
 import { getAdapter } from "./rpc-agent-adapter.js";
 import { ws } from "./ws-client.js";
 import type { AgentEvent } from "./agent-types.js";
-import type { AgentRuntimeSummary } from "@gwarestrin/shared";
+import type { AgentRuntimeSummary, ProfileRecord } from "@gwarestrin/shared";
 import { SvelteMap } from "svelte/reactivity";
 
 export interface AgentListItem {
@@ -10,14 +10,19 @@ export interface AgentListItem {
   status: string;
   model: { provider: string; modelId: string } | null;
   mcpServers: string[];
+  profileId: string;
   unread: number;
 }
 
 class Store {
   agents = $state<AgentListItem[]>([]);
+  profiles = $state<ProfileRecord[]>([]);
   selectedId = $state<string | null>(null);
+  /** profile being edited in the main area (null = chat view) */
+  editingProfileId = $state<string | null>(null);
   wsStatus = $state<string>("closed");
   providers = $state<import("@gwarestrin/shared").ProviderView[]>([]);
+  mcpServers = $state<Record<string, unknown>>({});
   defaultProvider = $state<string | null>(null);
   defaultModel = $state<string | null>(null);
   private runtime = new SvelteMap<string, AgentRuntimeSummary>();
@@ -53,12 +58,32 @@ class Store {
 
   select(id: string | null): void {
     this.selectedId = id;
+    if (id) this.editingProfileId = null;
     if (id) {
       const a = this.agents.find((x) => x.id === id);
       if (a) {
         a.unread = 0;
         for (const l of this.unreadListeners) l();
       }
+    }
+  }
+
+  editProfile(id: string | null): void {
+    this.editingProfileId = id;
+    if (id) this.selectedId = null;
+  }
+
+  /** agents grouped under a profile id */
+  agentsInProfile(profileId: string): AgentListItem[] {
+    return this.agents.filter((a) => (a.profileId || "default") === profileId);
+  }
+
+  async refreshProfiles(): Promise<void> {
+    const { api } = await import("./api.js");
+    try {
+      this.profiles = await api.listProfiles();
+    } catch {
+      /* ignore */
     }
   }
 
@@ -72,6 +97,7 @@ class Store {
         status: a.runtime?.status ?? a.status,
         model: a.model,
         mcpServers: a.mcpServers,
+        profileId: a.profileId ?? "default",
         unread: this.agents.find((x) => x.id === a.id)?.unread ?? 0,
       }));
       for (const a of agents) if (a.runtime) this.runtime.set(a.id, a.runtime);

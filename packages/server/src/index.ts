@@ -6,6 +6,7 @@ import { AgentManager } from "./agents/manager.js";
 import { AgentStore } from "./agents/store.js";
 import { loadConfig } from "./config.js";
 import { registerAgentRoutes } from "./http/agents.js";
+import { ProfileStore } from "./agents/profiles.js";
 import { registerFileRoutes } from "./http/files.js";
 import { registerGraphQueueRoutes } from "./http/graph-queue.js";
 import { registerMcpRoutes } from "./http/mcp.js";
@@ -38,7 +39,10 @@ async function main(): Promise<void> {
   const mcpRegistry = new McpRegistryStore(config.stateDir);
   await mcpRegistry.load();
 
-  const manager = new AgentManager(config, registry, store, mcpRegistry);
+  const profiles = new ProfileStore(config.stateDir);
+  await profiles.load();
+
+  const manager = new AgentManager(config, registry, store, mcpRegistry, profiles);
 
   app.get("/api/health", async () => ({
     status: "ok",

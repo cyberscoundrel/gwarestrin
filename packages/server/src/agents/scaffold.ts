@@ -33,6 +33,8 @@ export function dirsFor(stateDir: string, agent: AgentRecord): AgentDirs {
  *   workspace/          <- pi cwd + VM /workspace mount + .mcp.json (M5)
  *   home/               <- $PI_CODING_AGENT_DIR (settings.json, providers.gen.json)
  *   sessions/           <- pi --session-dir
+ * Plus instance-level options:
+ *   shared-tools mount  <- profile-driven /tools mount (stateDir/shared-tools)
  */
 export async function scaffoldAgent(
   stateDir: string,
@@ -40,12 +42,14 @@ export async function scaffoldAgent(
   registry: ProviderRegistry,
   extensionsRoot: string,
   mcpRegistry?: McpRegistryStore,
+  instanceOpts?: { sharedTools?: { enabled: boolean; hostDir: string } },
 ): Promise<AgentDirs> {
   const dirs = dirsFor(stateDir, agent);
   await Promise.all([
     mkdir(dirs.workspace, { recursive: true }),
     mkdir(dirs.home, { recursive: true }),
     mkdir(dirs.sessions, { recursive: true }),
+    ...(instanceOpts?.sharedTools?.enabled ? [mkdir(instanceOpts.sharedTools.hostDir, { recursive: true })] : []),
   ]);
 
   // pi settings: no ambient discovery; defaults from agent record
@@ -70,8 +74,17 @@ export async function scaffoldAgent(
   await writeGeneratedProviders(generatedProvidersPath(dirs.home), gen);
 
   // gondolin-vm extension config (no secret values — env-resolved)
+  const sharedTools = instanceOpts?.sharedTools;
   const agentConfig = {
     workspaceDir: dirs.workspace,
+    ...(sharedTools?.enabled
+      ? {
+          sharedTools: {
+            guestPath: "/tools",
+            hostDir: sharedTools.hostDir,
+          },
+        }
+      : {}),
     gondolin: {
       ...(agent.gondolin.enabled !== undefined ? { enabled: agent.gondolin.enabled } : {}),
       ...(agent.gondolin.image !== undefined ? { image: agent.gondolin.image } : {}),

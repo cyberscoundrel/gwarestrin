@@ -11,7 +11,7 @@ const CACHE_MS = 60_000;
 /** entity dictionary: label+name pairs from the graph, cached for 60s */
 export async function entityDictionary(mcp: McpHttpClient): Promise<Array<{ label: string; name: string }>> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.names;
-  const text = await mcp.callTool("read_neo4j_cypher", {
+  const text = await mcp.callTool("query_graph", {
     query: "MATCH (n) WHERE n.name IS NOT NULL RETURN labels(n)[0] AS label, n.name AS name LIMIT 500",
   });
   const names: Array<{ label: string; name: string }> = [];

@@ -31,6 +31,11 @@ const GUEST_WORKSPACE = "/workspace";
 
 interface GondolinAgentConfig {
   workspaceDir: string;
+  /** optional instance-shared tools directory, mounted at guestPath in the VM */
+  sharedTools?: {
+    guestPath: string;
+    hostDir: string;
+  };
   gondolin: {
     enabled?: boolean;
     image?: string;
@@ -212,17 +217,20 @@ export default async function gondolinVm(pi: ExtensionAPI) {
 
     vmStarting = (async () => {
       ctx?.ui.setStatus("gondolin", "booting");
+      const mounts: Record<string, RealFSProvider> = {
+        [GUEST_WORKSPACE]: new RealFSProvider(localCwd),
+      };
+      const sharedTools = config.sharedTools;
+      if (sharedTools?.hostDir) {
+        mounts[sharedTools.guestPath] = new RealFSProvider(sharedTools.hostDir);
+      }
       const created = await VM.create({
         httpHooks,
         env: guestEnv,
         ...(config.gondolin.cpus !== undefined ? { cpus: config.gondolin.cpus } : {}),
         ...(config.gondolin.memoryMB !== undefined ? { memory: `${config.gondolin.memoryMB}M` } : {}),
         ...(config.gondolin.image !== undefined ? { imagePath: config.gondolin.image } : {}),
-        vfs: {
-          mounts: {
-            [GUEST_WORKSPACE]: new RealFSProvider(localCwd),
-          },
-        },
+        vfs: { mounts },
       });
       vm = created;
       ctx?.ui.setStatus("gondolin", "running");
@@ -294,12 +302,19 @@ export default async function gondolinVm(pi: ExtensionAPI) {
     return { operations: createGondolinBashOps(activeVm, localCwd) };
   });
 
-  // present /workspace as cwd to the model
+  // present /workspace as cwd to the model (+ document the shared tools mount)
   pi.on("before_agent_start", async (event) => {
-    const modified = event.systemPrompt.replace(
+    let modified = event.systemPrompt.replace(
       `Current working directory: ${localCwd}`,
       `Current working directory: ${GUEST_WORKSPACE} (Gondolin VM, mounted from host: ${localCwd}). All file and bash tools execute inside this sandboxed Linux VM.`,
     );
+    const sharedTools = config.sharedTools;
+    if (sharedTools?.hostDir) {
+      modified +=
+        `\n\nShared tools directory: ${sharedTools.guestPath} is mounted read-write and is SHARED with every other agent of this instance — ` +
+        `scripts, utilities and reference files placed there are visible to sibling agents, and you can add your own for them.` +
+        ` Shell/python scripts run directly from it; compiled binaries must be copied to /tmp first (executables cannot run from the mount).`;
+    }
     return { systemPrompt: modified };
   });
 }

@@ -2,6 +2,7 @@ import fastifyMultipart from "@fastify/multipart";
 import { createReadStream } from "node:fs";
 import { lstat, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import type { FastifyInstance } from "fastify";
 import type { AgentManager } from "../agents/manager.js";
@@ -149,6 +150,80 @@ export async function registerFileRoutes(app: FastifyInstance, config: ServerCon
       const { abs } = await resolveSafe({ root: workspaceFor(config, manager, id), input: body.path });
       await mkdir(abs, { recursive: true });
       return reply.code(201).send({ created: body.path });
+    } catch (err) {
+      handlerError(reply, err);
+    }
+  });
+
+  // ---------- instance-shared tools directory (/tools in agent VMs) ----------
+
+  function sharedToolsRoot(): string {
+    return manager.sharedToolsDir();
+  }
+
+  app.get("/api/shared-tools", async (req, reply) => {
+    try {
+      const p = (req.query as { path?: string }).path ?? "";
+      const { abs, rel } = await resolveSafe({ root: sharedToolsRoot(), input: p });
+      const st = await stat(abs);
+      if (!st.isDirectory()) {
+        const l = await lstat(abs);
+        return { path: rel, file: { name: path.basename(abs), type: "file", size: l.size, mtime: l.mtime.toISOString(), mode: l.mode } };
+      }
+      const entries = await listDir(abs);
+      return { path: rel, entries };
+    } catch (err) {
+      handlerError(reply, err);
+    }
+  });
+
+  app.get("/api/shared-tools/download", async (req, reply) => {
+    try {
+      const p = (req.query as { path?: string }).path ?? "";
+      const { abs } = await resolveSafe({ root: sharedToolsRoot(), input: p });
+      assertMutable(abs);
+      await stat(abs);
+      return reply.send(createReadStream(abs));
+    } catch (err) {
+      handlerError(reply, err);
+    }
+  });
+
+  app.post("/api/shared-tools/upload", async (req, reply) => {
+    try {
+      const data = await (req as import("fastify").FastifyRequest & { file?: () => unknown }).file();
+      if (!data) return reply.code(400).send({ error: "multipart body required" });
+      const f = data as import("@fastify/multipart").MultipartFile;
+      const { abs } = await resolveSafe({ root: sharedToolsRoot(), input: (f.fields?.path as { value?: string } | undefined)?.value ?? "" });
+      await mkdir(path.dirname(abs), { recursive: true });
+      const tmp = `${abs}.upload-tmp`;
+      await pipeline(f.file, createWriteStream(tmp));
+      await rename(tmp, abs);
+      void reply.code(201).send({ path: path.relative(sharedToolsRoot(), abs) });
+    } catch (err) {
+      handlerError(reply, err);
+    }
+  });
+
+  app.delete("/api/shared-tools", async (req, reply) => {
+    try {
+      const p = (req.query as { path?: string }).path ?? "";
+      const { abs, rel } = await resolveSafe({ root: sharedToolsRoot(), input: p });
+      if (rel === "") return reply.code(400).send({ error: "cannot delete the shared tools root" });
+      assertMutable(abs);
+      await rm(abs, { recursive: true, force: true });
+      return { deleted: rel };
+    } catch (err) {
+      handlerError(reply, err);
+    }
+  });
+
+  app.post("/api/shared-tools/mkdir", async (req, reply) => {
+    try {
+      const p = (req.body as { path?: string }).path ?? "";
+      const { abs, rel } = await resolveSafe({ root: sharedToolsRoot(), input: p });
+      await mkdir(abs, { recursive: true });
+      return { created: rel };
     } catch (err) {
       handlerError(reply, err);
     }

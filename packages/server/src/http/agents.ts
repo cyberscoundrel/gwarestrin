@@ -2,12 +2,12 @@ import type { FastifyInstance } from "fastify";
 import { createReadStream } from "node:fs";
 import { readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { CreateAgentInput, PatchAgentInput } from "@gwarestrin/shared";
+import type { CreateAgentInput, PatchAgentInput, UpsertProfileInput } from "@gwarestrin/shared";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { AgentManager } from "../agents/manager.js";
 import { dirsFor } from "../agents/scaffold.js";
-import { runAnalysisAgent } from "../analyze/analysis-agent.js";
+import { runContextEngine, type ContextEngineInput } from "../analyze/engines.js";
 import { getInstanceMetadata } from "../instance/metadata.js";
 import type { ServerConfig } from "../config.js";
 import { scoped } from "../util/log.js";
@@ -17,6 +17,7 @@ const log = scoped("agents-http");
 const createAgentSchema = Type.Object(
   {
     name: Type.String({ minLength: 1, maxLength: 64 }),
+    profileId: Type.Optional(Type.String({ minLength: 1 })),
     model: Type.Optional(Type.Object({ provider: Type.String(), modelId: Type.String() })),
     providers: Type.Optional(Type.Array(Type.String())),
     enabledModels: Type.Optional(Type.Array(Type.String())),
@@ -47,39 +48,51 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
     }
     const input = req.body as CreateAgentInput;
     try {
-      const record = await manager.createAgent(input);
+      const record = await manager.createAgent({ ...input, profileId: input.profileId });
+      const profile = manager.profiles.resolve(record.profileId);
+      const engine = profile.contextEngine;
 
-      // chat-first creation: pre-session graph analysis → context injection → start
-      let analysis: "skipped" | "ok" | "failed" = "skipped";
-      if (input.firstPrompt) {
+      // profile context engine: runs at agent creation time (blocking),
+      // producing the standing context block the graph-context extension
+      // injects on every turn. No engine configured = skipped.
+      let context: "skipped" | "ok" | "failed" = "skipped";
+      if (engine && (engine.prompt || input.firstPrompt)) {
         const llm = manager.defaultLlmEndpoint();
         const mcpUrl = manager.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL ?? "http://graph-rag:8000/mcp";
         const values = getInstanceMetadata()?.values as Record<string, { token?: string }> | undefined;
         const graphToken = values?.graph?.token;
-        if (llm) {
-          log.info(`running pre-session analysis for ${record.name}`);
-          const block = await runAnalysisAgent(input.firstPrompt, {
-            llmUrl: llm.url,
-            llmKey: llm.key,
-            model: llm.model,
-            mcpUrl,
-            ...(graphToken ? { graphToken } : {}),
-            timeoutMs: 90_000,
-          });
-          if (block) {
+        if (!llm) {
+          context = "failed";
+          log.warn(`no llm endpoint for context engine (${record.name})`);
+        } else {
+          log.info(`running context engine '${engine.type}' for ${record.name}`);
+          const engineInput: ContextEngineInput = {
+            ...(input.firstPrompt ? { firstPrompt: input.firstPrompt } : {}),
+            ...(engine.prompt ? { profilePrompt: engine.prompt } : {}),
+            agentName: record.name,
+          };
+          const result = await runContextEngine(
+            { ...engine, includeFirstPrompt: engine.includeFirstPrompt ?? true },
+            engineInput,
+            { llm: { llmUrl: llm.url, llmKey: llm.key, model: llm.model }, mcpUrl, ...(graphToken ? { mcpToken: graphToken } : {}) },
+          );
+          context = result.status;
+          if (result.status === "ok" && result.block) {
             const dirs = dirsFor(config.stateDir, record);
-            await writeFile(path.join(dirs.home, "context-injection.md"), block + "\n", "utf8");
-            analysis = "ok";
-            log.info(`analysis injected for ${record.name} (${block.length} chars)`);
-          } else {
-            analysis = "failed";
+            await writeFile(path.join(dirs.home, "context-injection.md"), result.block + "\n", "utf8");
+            log.info(`context injected for ${record.name} (${result.block.length} chars)`);
+          } else if (result.detail) {
+            log.warn(`context engine ${engine.type} for ${record.name}: ${result.detail}`);
           }
         }
-        const runtime = await manager.start(record.id);
-        return reply.code(201).send({ agent: record, runtime, analysis });
+      }
+      if (record.contextStatus === undefined) {
+        record.contextStatus = context;
+        manager.store.setContextStatus(record.id, context);
       }
 
-      return reply.code(201).send({ agent: record });
+      const runtime = await manager.start(record.id);
+      return reply.code(201).send({ agent: record, runtime, analysis: context });
     } catch (err) {
       return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -186,5 +199,66 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
       .header("content-type", "application/jsonl")
       .header("content-disposition", `attachment; filename="${safe}-trace.jsonl"`)
       .send(createReadStream(file));
+  });
+
+  // ---------- agent profiles ----------
+
+  const upsertProfileSchema = Type.Object(
+    {
+      name: Type.String({ minLength: 1, maxLength: 64 }),
+      description: Type.Optional(Type.String({ maxLength: 500 })),
+      defaults: Type.Optional(
+        Type.Object({
+          tier: Type.Optional(Type.String()),
+          model: Type.Optional(Type.Union([Type.Object({ provider: Type.String(), modelId: Type.String() }), Type.Null()])),
+          thinkingLevel: Type.Optional(Type.String()),
+          namePrefix: Type.Optional(Type.String({ maxLength: 32 })),
+        }),
+      ),
+      mcpServers: Type.Union([Type.Array(Type.String()), Type.Literal("all")]),
+      contextEngine: Type.Optional(
+        Type.Object({
+          type: Type.String(),
+          prompt: Type.Optional(Type.String({ maxLength: 4000 })),
+          includeFirstPrompt: Type.Optional(Type.Boolean()),
+          maxRounds: Type.Optional(Type.Number()),
+          timeoutMs: Type.Optional(Type.Number()),
+          maxChars: Type.Optional(Type.Number()),
+        }),
+      ),
+      sharedTools: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+  );
+
+  app.get("/api/profiles", async () => {
+    return { profiles: manager.profiles.list() };
+  });
+
+  app.get("/api/profiles/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const profile = manager.profiles.get(id);
+    if (!profile) return reply.code(404).send({ error: "not found" });
+    return { profile };
+  });
+
+  app.put("/api/profiles/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!Value.Check(upsertProfileSchema, req.body)) {
+      return reply.code(400).send({ error: "invalid profile payload" });
+    }
+    const profile = manager.profiles.upsert(id === "new" ? undefined : id, req.body as UpsertProfileInput);
+    return { profile };
+  });
+
+  app.delete("/api/profiles/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    try {
+      const removed = manager.profiles.remove(id);
+      if (!removed) return reply.code(404).send({ error: "not found" });
+      return { removed: removed.id };
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 }

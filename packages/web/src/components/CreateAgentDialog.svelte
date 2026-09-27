@@ -5,16 +5,20 @@
   import { modelDisplayName } from "../lib/format.js";
   import Dropdown from "./Dropdown.svelte";
 
-  let { onclose } = $props<{ onclose: () => void }>();
+  let { onclose, preselectProfileId }: { onclose: () => void; preselectProfileId?: string | null } = $props();
 
   let promptText = $state("");
   let name = $state("");
+  let profileId = $state("default");
   let tier = $state<"local" | "cloud">("local");
   let providerId = $state<string>("");
   let modelId = $state<string>("");
   let phase = $state<"input" | "analyzing">("input");
   let error = $state<string | null>(null);
 
+  const profile = $derived(store.profiles.find((p) => p.id === profileId) ?? store.profiles.find((p) => p.id === "default"));
+  const hasEngine = $derived(profile?.contextEngine !== undefined);
+  const mcpChips = $derived(profile?.mcpServers === "all" ? Object.keys(store.mcpServers ?? {}) : (profile?.mcpServers ?? []));
   const provider = $derived(store.providers.find((p) => p.id === providerId) ?? null);
   const models = $derived(provider?.models ?? []);
   const tiers = $derived(
@@ -27,6 +31,18 @@
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
+  });
+
+  // apply profile defaults when the selection changes
+  $effect(() => {
+    const p = profile;
+    if (!p) return;
+    const dTier = p.defaults?.tier;
+    if (dTier === "local" || dTier === "cloud") tier = dTier;
+    if (p.defaults?.model) {
+      providerId = p.defaults.model.provider;
+      modelId = p.defaults.model.modelId;
+    }
   });
 
   $effect(() => {
@@ -45,8 +61,22 @@
     }
   });
 
+  onMount(async () => {
+    await store.refreshProfiles();
+    if (preselectProfileId && store.profiles.some((p) => p.id === preselectProfileId)) {
+      profileId = preselectProfileId;
+    }
+    const { mcpApi } = await import("../lib/api.js");
+    store.mcpServers = await mcpApi.list();
+  });
+
   function deriveName(): string {
     if (name.trim()) return name.trim();
+    const prefix = profile?.defaults?.namePrefix;
+    if (prefix?.trim()) {
+      const rest = promptText.trim().split(/\s+/).filter(Boolean).slice(0, 3).join("-");
+      return `${prefix.trim()}${rest}`.slice(0, 64);
+    }
     // first few words, cut at a word boundary rather than mid-word
     const parts = promptText.trim().split(/\s+/).filter(Boolean);
     const out: string[] = [];
@@ -61,24 +91,28 @@
   }
 
   async function submit(): Promise<void> {
-    if (!promptText.trim()) {
+    error = null;
+    // engine-less profiles can start without a prompt
+    if (!promptText.trim() && !hasEngine) {
       error = "write a first prompt to start from";
       return;
     }
     phase = "analyzing";
-    error = null;
     try {
       const { api } = await import("../lib/api.js");
       const res = await api.createAgent({
         name: deriveName(),
+        ...(profileId ? { profileId } : {}),
         model: providerId && modelId ? { provider: providerId, modelId } : null,
-        firstPrompt: promptText.trim(),
+        ...(promptText.trim() ? { firstPrompt: promptText.trim() } : {}),
       });
       await store.refreshAgents();
       store.select(res.agent.id);
       onclose();
-      // hand the first prompt to the running agent; adapter queues until ws open
-      void getAdapter(res.agent.id).prompt(promptText.trim()).catch(() => {});
+      if (promptText.trim()) {
+        // hand the first prompt to the running agent; adapter queues until ws open
+        void getAdapter(res.agent.id).prompt(promptText.trim()).catch(() => {});
+      }
     } catch (e) {
       error =
         e instanceof TypeError && /fetch/i.test(e.message)
@@ -101,9 +135,21 @@
   <h3 class="m-0 tracking-wide">new agent</h3>
 
   {#if phase === "input"}
+    <label class="grid gap-1 text-sm text-muted">
+      profile
+      <select
+        class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-base text-fg outline-none focus:border-accent"
+        bind:value={profileId}
+      >
+        {#each store.profiles as p (p.id)}
+          <option value={p.id}>{p.name}{p.contextEngine ? " ⚙" : ""}</option>
+        {/each}
+      </select>
+    </label>
+
     <textarea
       class="min-h-28 w-full resize-y rounded-md border border-edge2 bg-bg px-3 py-2.5 text-base text-fg outline-none focus:border-accent"
-      placeholder="what should this agent work on first?"
+      placeholder={hasEngine ? "first prompt (optional — the profile's context engine runs either way)" : "what should this agent work on first?"}
       bind:value={promptText}
       autofocus
       onkeydown={(e) => {
@@ -155,6 +201,16 @@
       </div>
     </div>
 
+    {#if mcpChips.length > 0}
+      <div class="flex flex-wrap items-center gap-1.5">
+        <span class="text-xs text-muted">mcp:</span>
+        {#each mcpChips as s (s)}
+          <span class="rounded-full border border-edge2 px-2 py-0.5 text-xs text-muted">{s}</span>
+        {/each}
+        <span class="text-xs text-muted italic">(from profile)</span>
+      </div>
+    {/if}
+
     {#if error}
       <p class="m-0 text-sm text-err">{error}</p>
     {/if}
@@ -165,17 +221,17 @@
         <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-2 text-fg" onclick={onclose}>cancel</button>
         <button
           class="cursor-pointer rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
-          disabled={!promptText.trim()}
+          disabled={!promptText.trim() && !hasEngine}
           onclick={() => void submit()}
         >
-          analyze &amp; start
+          {hasEngine ? "analyze & start" : "start"}
         </button>
       </div>
     </div>
   {:else}
     <div class="grid gap-3 py-6 text-center text-muted">
       <div class="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-edge2 border-t-accent"></div>
-      <p class="m-0">analyzing graph context for your prompt…</p>
+      <p class="m-0">generating context from the profile's engine…</p>
       <p class="m-0 text-xs">(queries the homelab knowledge graph — can take up to a minute)</p>
     </div>
   {/if}

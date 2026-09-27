@@ -6,10 +6,22 @@
   import ChatView from "./components/ChatView.svelte";
   import CreateAgentDialog from "./components/CreateAgentDialog.svelte";
   import ExtensionDialogs from "./components/ExtensionDialogs.svelte";
+  import ProfileEditor from "./components/ProfileEditor.svelte";
 
   let drawerOpen = $state(false);
   let showCreate = $state(false);
+  let createProfileId = $state<string | null>(null);
   let mobile = $state(false);
+
+  function openCreate(profileId?: string) {
+    createProfileId = profileId ?? null;
+    showCreate = true;
+  }
+
+  function openProfileEditor(id: string) {
+    store.editingProfileId = id;
+    store.selectedId = null;
+  }
 
   $effect(() => {
     const mq = window.matchMedia("(max-width: 900px)");
@@ -32,6 +44,7 @@
     ws.connect();
     void store.refreshAgents();
     void store.refreshProviders();
+    void store.refreshProfiles();
     const interval = setInterval(() => void store.refreshAgents(), 15_000);
     return () => clearInterval(interval);
   });
@@ -40,16 +53,21 @@
 {#if !mobile}
   <div class="grid h-screen grid-cols-[240px_1fr] grid-rows-[minmax(0,1fr)] overflow-hidden">
     <aside class="min-h-0 overflow-y-auto border-r border-edge bg-panel">
-      <AgentRail oncreate={() => (showCreate = true)} />
+      <AgentRail oncreate={() => openCreate()} oneditprofile={(id) => openProfileEditor(id)} />
     </aside>
     <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
-      {#if store.agents.length === 0}
+      {#if store.editingProfileId}
+        <ProfileEditor
+          profileId={store.editingProfileId}
+          onclose={() => store.editingProfileId = null}
+        />
+      {:else if store.agents.length === 0}
         <div class="m-auto grid gap-2 text-center text-muted">
           <h2 class="m-0 tracking-widest text-fg">no agents</h2>
           <p>create an agent to get started</p>
           <button
             class="mx-auto rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] cursor-pointer hover:brightness-110"
-            onclick={() => (showCreate = true)}
+            onclick={() => openCreate()}
           >
             create agent
           </button>
@@ -89,7 +107,11 @@
         </div>
         <AgentRail
           oncreate={() => {
-            showCreate = true;
+            openCreate();
+            drawerOpen = false;
+          }}
+          oneditprofile={(id) => {
+            openProfileEditor(id);
             drawerOpen = false;
           }}
           onnavigate={() => (drawerOpen = false)}
@@ -97,12 +119,17 @@
       </aside>
     {/if}
     <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
-      {#if store.agents.length === 0}
+      {#if store.editingProfileId}
+        <ProfileEditor
+          profileId={store.editingProfileId}
+          onclose={() => store.editingProfileId = null}
+        />
+      {:else if store.agents.length === 0}
         <div class="m-auto grid gap-2 text-center text-muted">
           <h2 class="m-0 tracking-widest text-fg">no agents</h2>
           <button
             class="mx-auto rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] cursor-pointer"
-            onclick={() => (showCreate = true)}
+            onclick={() => openCreate()}
           >
             create agent
           </button>
@@ -115,7 +142,7 @@
 {/if}
 
 {#if showCreate}
-  <CreateAgentDialog onclose={() => (showCreate = false)} />
+  <CreateAgentDialog onclose={() => (showCreate = false)} preselectProfileId={createProfileId} />
 {/if}
 
 <ExtensionDialogs />

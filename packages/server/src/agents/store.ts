@@ -55,6 +55,7 @@ export class AgentStore {
       name,
       createdAt: new Date().toISOString(),
       status: "stopped",
+      ...(input.profileId !== undefined ? { profileId: input.profileId } : {}),
       model: input.model ?? null,
       providers: input.providers,
       enabledModels: input.enabledModels,
@@ -106,6 +107,13 @@ export class AgentStore {
     const record = this.agents.get(id);
     if (!record) return;
     record.status = status;
+  }
+
+  setContextStatus(id: string, status: NonNullable<AgentRecord["contextStatus"]>): void {
+    const record = this.agents.get(id);
+    if (!record) return;
+    record.contextStatus = status;
+    void this.persist();
   }
 
   setSessionFile(id: string, sessionFile: string | null): void {

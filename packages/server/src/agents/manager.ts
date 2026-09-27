@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentRecord, AgentRuntimeSummary, CreateAgentInput, PatchAgentInput } from "@gwarestrin/shared";
+import type { AgentRecord, AgentRuntimeSummary, CreateAgentInput, PatchAgentInput, ProfileRecord } from "@gwarestrin/shared";
 import type { ServerConfig } from "../config.js";
 import type { McpRegistryStore } from "../mcp/registry-store.js";
 import type { ProviderRegistry } from "../providers/registry.js";
@@ -12,6 +12,7 @@ import { RpcAgent } from "./rpc-agent.js";
 import { PiProcess } from "./pi-process.js";
 import { dirsFor, piEnvFor, scaffoldAgent } from "./scaffold.js";
 import { AgentStore } from "./store.js";
+import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.js";
 
 const log = scoped("manager");
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,7 @@ export interface ManagerEvents {
 
 export class AgentManager extends EventEmitter<ManagerEvents> {
   readonly store: AgentStore;
+  readonly profiles: ProfileStore;
   private config: ServerConfig;
   private registry: ProviderRegistry;
   private mcpRegistry: McpRegistryStore | undefined;
@@ -47,12 +49,13 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   private restartBudget = new Map<string, number>();
   private extensionsRoot: string;
 
-  constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore) {
+  constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore, profiles?: ProfileStore) {
     super();
     this.config = config;
     this.registry = registry;
     this.store = store;
     this.mcpRegistry = mcpRegistry;
+    this.profiles = profiles ?? new ProfileStore(config.stateDir);
     this.extensionsRoot = resolveExtensionsRoot();
   }
 
@@ -127,18 +130,45 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     await Promise.all([...this.running.keys()].map((id) => this.stop(id)));
   }
 
-  async createAgent(input: Parameters<AgentStore["create"]>[0]): Promise<AgentRecord> {
-    // fill unset fields from server defaults so UI/API-created agents are
-    // consistent with scripted ones (model, MCP enablement)
-    const defaults: CreateAgentInput = { ...input };
+  async createAgent(input: CreateAgentInput & { profileId?: string | undefined }): Promise<AgentRecord> {
+    // resolution order: explicit create input > selected profile > default
+    // profile > server defaults. The profile also fixes the MCP allowlist
+    // unless the request overrides it explicitly.
+    const profile = this.profiles.resolve(input.profileId);
+    const defaults: CreateAgentInput = { ...input, profileId: profile.id };
+
+    const profileModel = profile.defaults.model ?? undefined;
+    if (!defaults.model && profileModel) defaults.model = profileModel;
     if (!defaults.model) {
       const m = this.defaultModel();
       if (m) defaults.model = m;
     }
+    if (defaults.thinkingLevel === undefined && profile.defaults.thinkingLevel !== undefined) {
+      defaults.thinkingLevel = profile.defaults.thinkingLevel;
+    }
+    if (defaults.providers === undefined && profile.defaults.tier) {
+      // tier is a UI preselection hint; server-side it constrains nothing
+    }
+    if (!defaults.mcpServers?.length) {
+      defaults.mcpServers = profile.mcpServers === "all" ? this.defaultMcpServers() : profile.mcpServers;
+    }
     if (!defaults.mcpServers?.length) defaults.mcpServers = this.defaultMcpServers();
+
     const record = this.store.create(defaults);
-    await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry);
+    await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry, {
+      sharedTools: profile.sharedTools === false ? { enabled: false, hostDir: "" } : { enabled: true, hostDir: this.sharedToolsDir() },
+    });
     return record;
+  }
+
+  /** instance-wide directory shared by every agent VM at /tools */
+  sharedToolsDir(): string {
+    return path.join(this.config.stateDir, "shared-tools");
+  }
+
+  /** the profile an agent was created under (fallback: default) */
+  profileFor(record: { profileId?: string | undefined }): ProfileRecord {
+    return this.profiles.resolve(record.profileId);
   }
 
   async patchAgent(id: string, patch: PatchAgentInput): Promise<AgentRecord> {

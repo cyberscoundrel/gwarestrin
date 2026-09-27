@@ -96,6 +96,19 @@ export class McpHttpClient {
     this.initialized = true;
   }
 
+  async listTools(): Promise<Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>> {
+    if (!this.initialized) await this.initialize();
+    const res = await this.post({
+      jsonrpc: "2.0",
+      id: this.nextId++,
+      method: "tools/list",
+      params: {},
+    });
+    if (!res || "error" in res) throw new Error(`tools/list failed: ${JSON.stringify(res).slice(0, 200)}`);
+    const tools = (res as { result?: { tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }> } }).result?.tools ?? [];
+    return tools;
+  }
+
   async callTool(name: string, args: Record<string, unknown>): Promise<string> {
     if (!this.initialized) await this.initialize();
     const res = await this.post({
