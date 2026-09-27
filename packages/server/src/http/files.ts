@@ -191,15 +191,25 @@ export async function registerFileRoutes(app: FastifyInstance, config: ServerCon
 
   app.post("/api/shared-tools/upload", async (req, reply) => {
     try {
-      const data = await (req as import("fastify").FastifyRequest & { file?: () => unknown }).file();
-      if (!data) return reply.code(400).send({ error: "multipart body required" });
-      const f = data as import("@fastify/multipart").MultipartFile;
-      const { abs } = await resolveSafe({ root: sharedToolsRoot(), input: (f.fields?.path as { value?: string } | undefined)?.value ?? "" });
-      await mkdir(path.dirname(abs), { recursive: true });
-      const tmp = `${abs}.upload-tmp`;
-      await pipeline(f.file, createWriteStream(tmp));
-      await rename(tmp, abs);
-      void reply.code(201).send({ path: path.relative(sharedToolsRoot(), abs) });
+      const destDir = (req.query as { path?: string }).path ?? "";
+      const { abs: dirAbs } = await resolveSafe({ root: sharedToolsRoot(), input: destDir });
+      await mkdir(dirAbs, { recursive: true });
+      const written: Array<{ name: string; size: number }> = [];
+      for await (const part of req.files()) {
+        const filename = path.basename(part.filename || "upload");
+        const { abs: targetAbs, rel } = await resolveSafe({
+          root: sharedToolsRoot(),
+          input: path.posix.join(destDir.replace(/\\/g, "/"), filename),
+        });
+        assertMutable(rel);
+        const tmp = targetAbs + ".upload-tmp";
+        await pipeline(part.file, createWriteStream(tmp));
+        const st = await stat(tmp);
+        await rename(tmp, targetAbs);
+        written.push({ name: filename, size: st.size });
+        void st;
+      }
+      return reply.code(201).send({ uploaded: written, path: destDir });
     } catch (err) {
       handlerError(reply, err);
     }
