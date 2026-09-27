@@ -404,6 +404,33 @@ UI: sidebar shows profiles with their agents nested (profile name opens the
 editor in the main area); the create dialog has a profile selector with MCP
 chips and only shows the analyzing spinner for engine profiles.
 
+## 7. Mac → homelab access (WARP-to-WARP) troubleshooting
+
+Path: Mac WARP client → Cloudflare → homelab WARP client (`100.96.0.10`,
+CloudflareWARP iface) → homelab firewall → containers.
+
+- DNS: `*.gw.home` via `/etc/hosts` on the Mac (hosts bypass WARP DNS);
+  re-add after network changes: `100.96.0.10 admin alice bob auth` `.gw.home`.
+- **Symptom "only :22 reachable, everything else times out"** (UI dead, ping
+  + ssh fine): the MAC-side WARP fabric is wedged. The homelab side is fine —
+  verify with tcpdump on CloudflareWARP (SYNs arrive) and
+  `curl -H "Host: auth.gw.home" http://localhost/` on the homelab (302 = edge
+  healthy). **Fix: bounce the Mac's WARP client**
+  (`warp-cli disconnect && warp-cli connect`) — proven 2026-09-27 after two
+  crash cycles.
+- Homelab firewall: warp-svc installs `inet cloudflare-warp` (input/output
+  policy drop; `iif CloudflareWARP accept` lets tunnel traffic in; host
+  replies accept via the `tun` chain saddr rule; published-port replies ride
+  the FORWARD chain, policy accept). `/usr/local/bin/warp-nft-assert.sh`
+  re-asserts 100.64/10 range accepts idempotently — appended to the
+  minute-fire `docker-warp-bypass.sh` (needs one sudo to wire if missing).
+- Don't hand-edit iptables/nft while diagnosing: warp-svc reacts to firewall
+  changes by resetting the tunnel (kills established ssh). Use tcpdump +
+  nft counters passively first.
+- Fallback when WARP-to-WARP misbehaves: ssh port-forward over the proven
+  :22 path — `ssh -L 8080:localhost:80 cyber@100.96.0.10`, then browse
+  `http://admin.gw.home:8080`-style via a hosts override or
+  `--host-resolver-rules` (or forward per-port).
 ## 4. Troubleshooting
 
 | Symptom | Check |
