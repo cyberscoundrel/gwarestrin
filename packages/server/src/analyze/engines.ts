@@ -118,7 +118,9 @@ async function toolLoop(
 
   for (let round = 0; round < budget.maxRounds; round++) {
     if (Date.now() > deadline) return { status: "failed", detail: "deadline exceeded" };
-    const res = await llmCall(messages, tools, ctx);
+    // single-round fetches can be slow on local inference; the effective
+    // cap is the engine deadline plus one call's grace
+    const res = await llmCall(messages, tools, ctx, deadline + 60_000);
     const msg = res as unknown as ChatMessage & { tool_calls?: ChatMessage["tool_calls"] };
     messages.push({ role: "assistant", content: msg.content ?? null, ...(msg.tool_calls ? { tool_calls: msg.tool_calls } : {}) });
 
@@ -151,7 +153,7 @@ async function toolLoop(
   return { status: "failed", detail: "round budget exhausted" };
 }
 
-async function llmCall(messages: ChatMessage[], tools: ResolvedTool[], ctx: EngineContext): Promise<Record<string, unknown>> {
+async function llmCall(messages: ChatMessage[], tools: ResolvedTool[], ctx: EngineContext, deadlineAt: number): Promise<Record<string, unknown>> {
   const res = await fetch(ctx.llm.llmUrl, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${ctx.llm.llmKey}` },
@@ -164,7 +166,7 @@ async function llmCall(messages: ChatMessage[], tools: ResolvedTool[], ctx: Engi
       })),
       max_tokens: 2048,
     }),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(Math.max(30_000, deadlineAt - Date.now())),
   });
   if (!res.ok) throw new Error(`llm -> ${res.status}`);
   const data = (await res.json()) as { choices?: Array<{ message?: Record<string, unknown> }> };
