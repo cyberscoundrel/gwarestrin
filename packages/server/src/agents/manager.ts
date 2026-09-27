@@ -209,7 +209,10 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     }
 
     this.store.setStatus(id, "starting");
-    const dirs = await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry);
+    const profile = this.profiles.resolve(record.profileId);
+    const dirs = await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry, {
+      sharedTools: profile.sharedTools === false ? { enabled: false, hostDir: "" } : { enabled: true, hostDir: this.sharedToolsDir() },
+    });
 
     const args: string[] = [
       // rpc-entry implies --mode rpc
