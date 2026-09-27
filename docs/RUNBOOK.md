@@ -404,7 +404,7 @@ UI: sidebar shows profiles with their agents nested (profile name opens the
 editor in the main area); the create dialog has a profile selector with MCP
 chips and only shows the analyzing spinner for engine profiles.
 
-## 7. Mac → homelab access (WARP-to-WARP) troubleshooting
+## 3j. Mac → homelab access (WARP-to-WARP) troubleshooting
 
 Path: Mac WARP client → Cloudflare → homelab WARP client (`100.96.0.10`,
 CloudflareWARP iface) → homelab firewall → containers.
