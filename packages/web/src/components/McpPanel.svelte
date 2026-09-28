@@ -37,12 +37,25 @@
 
   onMount(() => {
     void refresh();
+    void store.refreshProfiles();
     const timer = setInterval(() => void refresh(), 30_000);
     return () => clearInterval(timer);
   });
 
   function isEnabled(name: string): boolean {
     return record?.mcpServers.includes(name) ?? false;
+  }
+
+  /** the agent's profile allowlist — null means unrestricted ("all") */
+  const allowedSet = $derived.by(() => {
+    const profile = store.profiles.find((p) => p.id === (record?.profileId || "default"));
+    if (!profile || profile.mcpServers === "all") return null;
+    return new Set(profile.mcpServers);
+  });
+
+  /** false = the profile does not grant this server; the toggle is locked */
+  function isGranted(name: string): boolean {
+    return allowedSet === null || allowedSet.has(name);
   }
 
   async function toggle(name: string): Promise<void> {
@@ -176,14 +189,20 @@
           <li class="border-b border-edge/50 px-3 py-2">
             <div class="flex items-center gap-2">
               <span class="{dot.color}" title={dot.title}>●</span>
-              <label class="flex flex-1 items-center gap-2 truncate" title={summarize(def)}>
+              <label
+                class="flex flex-1 items-center gap-2 truncate"
+                title={isGranted(name) ? summarize(def) : "not granted by this agent's profile"}
+              >
                 <input
                   type="checkbox"
                   checked={isEnabled(name)}
-                  disabled={busy || !record}
+                  disabled={busy || !record || !isGranted(name)}
                   onchange={() => void toggle(name)}
                 />
                 <span class="truncate font-medium">{name}</span>
+                {#if !isGranted(name)}
+                  <span class="rounded border border-edge px-1 text-[0.65rem] text-muted" title="the profile that created this agent does not grant this server">profile-locked</span>
+                {/if}
               </label>
               <button class="rounded px-1 text-xs text-muted hover:text-fg" title="edit" onclick={() => startEdit(name)}>✎</button>
               <button class="rounded px-1 text-xs text-err hover:bg-[#2a1218]" title="delete" onclick={() => void remove(name)}>✕</button>
@@ -199,5 +218,8 @@
 
   <div class="border-t border-edge px-3 py-1.5 text-xs text-muted">
     checked = enabled for this agent (restarts it)
+    {#if allowedSet !== null}
+      · servers outside the profile allowlist are locked — edit the profile to grant them
+    {/if}
   </div>
 </div>

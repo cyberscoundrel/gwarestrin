@@ -1,6 +1,7 @@
 <script lang="ts">
   import { store } from "../lib/stores.svelte.js";
   import { api, mcpApi, type McpServerDef } from "../lib/api.js";
+  import Dropdown from "./Dropdown.svelte";
 
   let {
     profileId,
@@ -141,25 +142,37 @@
 
     <div class="grid gap-2">
       <span class="text-xs tracking-wide text-muted uppercase">default model</span>
-      <div class="flex gap-2">
-        <button
-          class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'local' ? 'border-accent text-fg' : 'border-edge text-muted'}"
-          onclick={() => pickTier("local")}>local</button>
-        <button
-          class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'cloud' ? 'border-accent text-fg' : 'border-edge text-muted'}"
-          onclick={() => pickTier("cloud")}>cloud</button>
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="flex gap-2">
+          <button
+            class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'local' ? 'border-accent text-fg' : 'border-edge text-muted'}"
+            onclick={() => pickTier("local")}>local</button>
+          <button
+            class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'cloud' ? 'border-accent text-fg' : 'border-edge text-muted'}"
+            onclick={() => pickTier("cloud")}>cloud</button>
+        </div>
         {#if tier}
-          <select class="rounded-md border border-edge bg-[#12141b] px-2 py-1.5 text-fg" bind:value={modelProvider}>
-            {#each store.providers.filter((p) => (tier === "local") === p.id.includes("local")) as p (p.id)}
-              <option value={p.id}>{p.id}</option>
-            {/each}
-          </select>
-          <select class="min-w-0 flex-1 rounded-md border border-edge bg-[#12141b] px-2 py-1.5 text-fg" bind:value={modelId}>
-            <option value="">(server default)</option>
-            {#each modelOptions as m (m.id)}
-              <option value={m.id}>{m.id}</option>
-            {/each}
-          </select>
+          <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            <div class="w-40 [&_button]:w-full [&_button]:max-w-40">
+              <Dropdown
+                value={modelProvider}
+                options={store.providers
+                  .filter((p) => (tier === "local") === p.id.includes("local"))
+                  .map((p) => ({ value: p.id, label: p.id }))}
+                onchange={(id) => {
+                  modelProvider = id;
+                  modelId = "";
+                }}
+              />
+            </div>
+            <div class="min-w-0 flex-1 [&_button]:w-full">
+              <Dropdown
+                value={modelId}
+                options={modelOptions.map((m) => ({ value: m.id, label: m.id }))}
+                onchange={(id) => (modelId = id)}
+              />
+            </div>
+          </div>
         {/if}
       </div>
       {#if !tier}
@@ -203,10 +216,16 @@
       </label>
       {#if engineEnabled}
         <div class="grid gap-3 rounded-md border border-edge bg-[#12141b] p-3">
-          <select class="rounded-md border border-edge bg-[#1a1d26] px-2 py-1.5 text-fg" bind:value={engineType}>
-            <option value="graph-rag">graph-rag (LLM tool-loop over the knowledge graph)</option>
-            <option value="lexical">lexical (deterministic graph summary)</option>
-          </select>
+          <div>
+            <Dropdown
+              value={engineType}
+              options={[
+                { value: "graph-rag", label: "graph-rag (LLM tool-loop over the knowledge graph)" },
+                { value: "lexical", label: "lexical (deterministic graph summary)" },
+              ]}
+              onchange={(t) => (engineType = t as "graph-rag" | "lexical")}
+            />
+          </div>
           <textarea
             class="min-h-20 rounded-md border border-edge bg-[#1a1d26] px-3 py-2 text-fg"
             bind:value={enginePrompt}
