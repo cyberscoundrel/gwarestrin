@@ -2,15 +2,15 @@
 import { readdirSync, readFileSync } from "node:fs";
 
 // find the pi rpc-entry process
-let pid = null;
+const pids = [];
 for (const p of readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
   try {
-    const cmd = readFileSync(`/proc/${p}/cmdline`, "utf8");
-    if (cmd.includes("rpc-entry")) { pid = p; break; }
+    const cmd = readFileSync(`/proc/${p}/cmdline`, "utf8") + readFileSync(`/proc/${p}/comm`, "utf8");
+    if (cmd.includes("pi-rpc") || cmd.includes("rpc-entry")) pids.push(p);
   } catch { /* vanished */ }
 }
-console.log("pi pid:", pid);
-if (!pid) process.exit(1);
+console.log("pi pids:", pids.join(",") || "none");
+if (pids.length === 0) process.exit(1);
 
 const env = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
 const tok = env.find((l) => l.startsWith("GWARESTRIN_GRAPH_TOKEN="))?.slice("GWARESTRIN_GRAPH_TOKEN=".length);
