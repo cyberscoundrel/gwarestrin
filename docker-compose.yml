@@ -153,6 +153,10 @@ services:
       gwarestrin.mcp.port: "8000"
       gwarestrin.mcp.path: "/mcp"
       gwarestrin.mcp.description: "facet-indexed vector retrieval + graph MCP"
+      # agents authenticate with the instance's graph token (from instance
+      # metadata, injected by the server as GWARESTRIN_GRAPH_TOKEN)
+      gwarestrin.mcp.auth: "bearer"
+      gwarestrin.mcp.bearer-env: "GWARESTRIN_GRAPH_TOKEN"
     networks:
       - backend
     restart: unless-stopped

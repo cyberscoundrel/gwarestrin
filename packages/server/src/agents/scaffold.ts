@@ -148,6 +148,12 @@ export function piEnvFor(
     const key = registry.resolveKey(id);
     if (key) env[`GWARESTRIN_KEY_${id.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()}`] = key;
   }
+  // per-instance graph token for MCP bearer auth (agent defs reference it
+  // via bearerTokenEnv: GWARESTRIN_GRAPH_TOKEN)
+  const graphToken = getInstanceMetadata()?.values as Record<string, { token?: string }> | undefined;
+  if (graphToken?.graph?.token) {
+    env.GWARESTRIN_GRAPH_TOKEN = graphToken.graph.token;
+  }
   // gondolin secret values: extension resolves valueEnv from here
   for (const [name, def] of Object.entries(agent.gondolin.secrets)) {
     const value = process.env[def.valueEnv];

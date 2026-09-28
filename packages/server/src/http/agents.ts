@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { createReadStream } from "node:fs";
-import { readdir, stat, writeFile } from "node:fs/promises";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CreateAgentInput, PatchAgentInput, UpsertProfileInput } from "@gwarestrin/shared";
 import { Type } from "typebox";
@@ -199,6 +199,24 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
       .header("content-type", "application/jsonl")
       .header("content-disposition", `attachment; filename="${safe}-trace.jsonl"`)
       .send(createReadStream(file));
+  });
+
+  /** debug: the standing context generated for this agent at creation */
+  app.get("/api/agents/:id/context", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const record = manager.store.get(id);
+    if (!record) return reply.code(404).send({ error: "not found" });
+    const profile = manager.profiles.resolve(record.profileId);
+    const dirs = dirsFor(config.stateDir, record);
+    const block = await readFile(path.join(dirs.home, "context-injection.md"), "utf8").catch(() => null);
+    return {
+      agentId: id,
+      profileId: profile.id,
+      profileName: profile.name,
+      engine: profile.contextEngine ?? null,
+      status: record.contextStatus ?? (block ? "ok" : "skipped"),
+      block,
+    };
   });
 
   // ---------- agent profiles ----------

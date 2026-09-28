@@ -6,6 +6,7 @@
   import SessionPanel from "./SessionPanel.svelte";
   import FilesPanel from "./FilesPanel.svelte";
   import McpPanel from "./McpPanel.svelte";
+  import ContextPanel from "./ContextPanel.svelte";
 
   let { agentId, agentName }: { agentId: string; agentName: string } = $props();
 
@@ -14,7 +15,7 @@
 
   let busy = $state(false);
   let error = $state<string | null>(null);
-  let drawer = $state<"closed" | "files" | "mcp">("closed");
+  let drawer = $state<"closed" | "files" | "mcp" | "context">("closed");
 
   async function start(): Promise<void> {
     busy = true;
@@ -53,6 +54,12 @@
         >
           mcp
         </button>
+        <button
+          class="select-compact bg-none pr-2 {drawer === 'context' ? '!border-accent !text-accent' : ''}"
+          onclick={() => (drawer = drawer === "context" ? "closed" : "context")}
+        >
+          context
+        </button>
       </div>
     </div>
 
@@ -64,8 +71,10 @@
         <div class="w-80 shrink-0 border-l border-edge">
           {#if drawer === "files"}
             <FilesPanel {agentId} />
-          {:else}
+          {:else if drawer === "mcp"}
             <McpPanel {agentId} />
+          {:else}
+            <ContextPanel {agentId} />
           {/if}
         </div>
       {/if}
