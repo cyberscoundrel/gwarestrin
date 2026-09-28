@@ -431,6 +431,21 @@ CloudflareWARP iface) → homelab firewall → containers.
   :22 path — `ssh -L 8080:localhost:80 cyber@100.96.0.10`, then browse
   `http://admin.gw.home:8080`-style via a hosts override or
   `--host-resolver-rules` (or forward per-port).
+### graph-rag agent auth + context debug (profiles era)
+
+- Agents reach graph-rag with a **per-instance bearer token**: the server
+  injects `GWARESTRIN_GRAPH_TOKEN` (from instance metadata
+  `values.graph.token`) into every pi process env, and the graph-rag registry
+  def (discovery labels `gwarestrin.mcp.auth: bearer` +
+  `gwarestrin.mcp.bearer-env: GWARESTRIN_GRAPH_TOKEN` on the compose service)
+  carries `bearerTokenEnv: GWARESTRIN_GRAPH_TOKEN` into each agent's
+  `.mcp.json`. 401 from graph-rag for an agent = metadata missing or the
+  def unauthenticated — check `agents/<id>/workspace/.mcp.json` for the
+  `auth`/`bearerTokenEnv` pair and the pi env for the token.
+- **Debug generated context**: `GET /api/agents/:id/context` returns the
+  profile, engine config, generation status and the full block; the web UI
+  exposes it as the `context` drawer in the chat header.
+
 ## 4. Troubleshooting
 
 | Symptom | Check |
