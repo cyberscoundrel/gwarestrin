@@ -27,6 +27,8 @@ const nativeSelects = await page.locator("div.max-w-xl select").count();
 console.log("native selects in editor body:", nativeSelects, "(expect 0)");
 
 // 3. click the provider dropdown → options render inside the styled panel
+await page.locator("button", { hasText: "local" }).first().click();
+await page.waitForTimeout(800);
 await page.locator("div.w-40 button").first().click();
 await page.waitForTimeout(800);
 const styledOptions = await page.locator("div.absolute.z-30 button").count();
