@@ -4,23 +4,25 @@
   import { ws } from "./lib/ws-client.js";
   import AgentRail from "./components/AgentRail.svelte";
   import ChatView from "./components/ChatView.svelte";
-  import CreateAgentDialog from "./components/CreateAgentDialog.svelte";
+  import NewChat from "./components/NewChat.svelte";
   import ExtensionDialogs from "./components/ExtensionDialogs.svelte";
   import ProfileEditor from "./components/ProfileEditor.svelte";
 
   let drawerOpen = $state(false);
-  let showCreate = $state(false);
   let createProfileId = $state<string | null>(null);
   let mobile = $state(false);
 
   function openCreate(profileId?: string) {
     createProfileId = profileId ?? null;
-    showCreate = true;
+    store.selectedId = null;
+    store.editingProfileId = null;
+    store.showNewChat = true;
   }
 
   function openProfileEditor(id: string) {
     store.editingProfileId = id;
     store.selectedId = null;
+    store.showNewChat = false;
   }
 
   $effect(() => {
@@ -59,19 +61,10 @@
       {#if store.editingProfileId}
         <ProfileEditor
           profileId={store.editingProfileId}
-          onclose={() => store.editingProfileId = null}
+          onclose={() => (store.editingProfileId = null)}
         />
-      {:else if store.agents.length === 0}
-        <div class="m-auto grid gap-2 text-center text-muted">
-          <h2 class="m-0 tracking-widest text-fg">no agents</h2>
-          <p>create an agent to get started</p>
-          <button
-            class="mx-auto rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] cursor-pointer hover:brightness-110"
-            onclick={() => openCreate()}
-          >
-            create agent
-          </button>
-        </div>
+      {:else if store.showNewChat || store.agents.length === 0}
+        <NewChat preselectProfileId={createProfileId} />
       {:else if store.selected}
         <ChatView agentId={store.selected.id} agentName={store.selected.name} />
       {/if}
@@ -87,7 +80,7 @@
       >
         ☰
       </button>
-      <span class="font-semibold tracking-widest">gwarestrin</span>
+      <span class="font-semibold tracking-widest">ground chat</span>
       <span
         class="ml-auto h-2 w-2 rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
         title={store.wsStatus}
@@ -122,18 +115,10 @@
       {#if store.editingProfileId}
         <ProfileEditor
           profileId={store.editingProfileId}
-          onclose={() => store.editingProfileId = null}
+          onclose={() => (store.editingProfileId = null)}
         />
-      {:else if store.agents.length === 0}
-        <div class="m-auto grid gap-2 text-center text-muted">
-          <h2 class="m-0 tracking-widest text-fg">no agents</h2>
-          <button
-            class="mx-auto rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] cursor-pointer"
-            onclick={() => openCreate()}
-          >
-            create agent
-          </button>
-        </div>
+      {:else if store.showNewChat || store.agents.length === 0}
+        <NewChat preselectProfileId={createProfileId} />
       {:else if store.selected}
         <ChatView agentId={store.selected.id} agentName={store.selected.name} />
       {/if}
@@ -141,8 +126,5 @@
   </div>
 {/if}
 
-{#if showCreate}
-  <CreateAgentDialog onclose={() => (showCreate = false)} preselectProfileId={createProfileId} />
-{/if}
 
 <ExtensionDialogs />

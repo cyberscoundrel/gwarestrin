@@ -20,6 +20,8 @@ class Store {
   selectedId = $state<string | null>(null);
   /** profile being edited in the main area (null = chat view) */
   editingProfileId = $state<string | null>(null);
+  /** centered create view (greeting + composer) */
+  showNewChat = $state(false);
   wsStatus = $state<string>("closed");
   providers = $state<import("@gwarestrin/shared").ProviderView[]>([]);
   mcpServers = $state<Record<string, unknown>>({});
@@ -58,7 +60,10 @@ class Store {
 
   select(id: string | null): void {
     this.selectedId = id;
-    if (id) this.editingProfileId = null;
+    if (id) {
+      this.editingProfileId = null;
+      this.showNewChat = false;
+    }
     if (id) {
       const a = this.agents.find((x) => x.id === id);
       if (a) {
@@ -70,7 +75,10 @@ class Store {
 
   editProfile(id: string | null): void {
     this.editingProfileId = id;
-    if (id) this.selectedId = null;
+    if (id) {
+      this.selectedId = null;
+      this.showNewChat = false;
+    }
   }
 
   /** agents grouped under a profile id */

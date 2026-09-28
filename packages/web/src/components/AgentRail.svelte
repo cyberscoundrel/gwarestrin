@@ -41,7 +41,10 @@
 
 <nav class="flex h-full flex-col gap-3 px-2 py-3">
   <div class="flex items-center gap-2 px-2">
-    <span class="font-bold tracking-[0.12em]">gwarestrin</span>
+    <svg viewBox="0 0 24 24" class="h-4 w-4 text-fg" aria-hidden="true">
+      <path d="M12 3v9M7 14h10M8.5 17h7M10 20h4" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round" />
+    </svg>
+    <span class="font-bold tracking-[0.12em]">ground chat</span>
     <span
       class="h-[7px] w-[7px] rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
       title="ws: {store.wsStatus}"

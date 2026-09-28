@@ -32,6 +32,13 @@ const createAgentSchema = Type.Object(
 const patchAgentSchema = Type.Object({}, { additionalProperties: true });
 
 export async function registerAgentRoutes(app: FastifyInstance, config: ServerConfig, manager: AgentManager): Promise<void> {
+  /** identity for the ui (forwardauth header, fallback: instance owner) */
+  app.get("/api/me", async (req) => {
+    const header = req.headers["x-authentik-username"];
+    const username = (Array.isArray(header) ? header[0] : header) ?? getInstanceMetadata()?.owner?.displayName ?? "";
+    return { username, authed: Boolean(header) };
+  });
+
   app.get("/api/agents", async () => {
     const summaries = new Map(manager.listSummaries().map((s) => [s.id, s]));
     return {

@@ -13,6 +13,9 @@ export interface AgentWithRuntime extends AgentRecord {
 }
 
 export const api = {
+  async me(): Promise<{ username: string; authed: boolean }> {
+    return json(await fetch("/api/me"));
+  },
   async listAgents(): Promise<AgentWithRuntime[]> {
     const r = await json<{ agents: AgentWithRuntime[] }>(await fetch("/api/agents"));
     return r.agents;

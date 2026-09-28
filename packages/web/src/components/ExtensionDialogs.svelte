@@ -80,7 +80,7 @@
           break;
         }
         case "setTitle":
-          document.title = String(r.title ?? "gwarestrin");
+          document.title = String(r.title ?? "ground chat");
           break;
         case "set_editor_text":
           // handled by MessageEditor in future; ignore for now

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { api, mcpApi, type McpServerDef } from "../lib/api.js";
   import { store } from "../lib/stores.svelte.js";
+  import Dropdown from "./Dropdown.svelte";
 
   let { agentId }: { agentId: string } = $props();
 
@@ -161,10 +162,14 @@
     {#if editing !== null}
       <div class="grid gap-2 border-b border-edge px-3 py-2">
         <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="name" bind:value={formName} disabled={editing !== ""} />
-        <select class="select-compact" bind:value={formTransport}>
-          <option value="stdio">stdio (command)</option>
-          <option value="http">http (url)</option>
-        </select>
+        <Dropdown
+          value={formTransport}
+          options={[
+            { value: "stdio", label: "stdio (command)" },
+            { value: "http", label: "http (url)" },
+          ]}
+          onchange={(t) => (formTransport = t as "stdio" | "http")}
+        />
         {#if formTransport === "stdio"}
           <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="command (e.g. npx)" bind:value={formCommand} />
           <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="args (space separated)" bind:value={formArgs} />
