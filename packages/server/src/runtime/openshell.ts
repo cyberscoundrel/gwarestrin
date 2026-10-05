@@ -1,0 +1,185 @@
+import { readFile } from "node:fs/promises";
+import { SandboxClient, errorCode } from "@nvidia/openshell-sdk";
+import type { PiExitInfo, PiTransport, PiTransportFactory } from "../agents/pi-transport.js";
+import { scoped } from "../util/log.js";
+
+const log = scoped("openshell");
+
+/** Grace period between closing pi's stdin (graceful) and cancelling the exec. */
+const STOP_GRACE_MS = 5_000;
+
+export interface OpenShellConfig {
+  /** Gateway URL, e.g. https://127.0.0.1:17670 */
+  gateway: string;
+  /** PEM paths for the gateway's mTLS bundle */
+  caCertPath: string;
+  clientCertPath: string;
+  clientKeyPath: string;
+  /** OpenShell workspace (isolation boundary); one per gwarestrin instance */
+  workspace?: string;
+  /** Sandbox image containing node + pi + the gwarestrin extensions */
+  image: string;
+}
+
+export async function connectOpenShell(cfg: OpenShellConfig): Promise<SandboxClient> {
+  const [caCert, clientCert, clientKey] = await Promise.all([
+    readFile(cfg.caCertPath),
+    readFile(cfg.clientCertPath),
+    readFile(cfg.clientKeyPath),
+  ]);
+  return SandboxClient.connect({ gateway: cfg.gateway, caCert, clientCert, clientKey });
+}
+
+export function sandboxNameFor(agentId: string): string {
+  if (!/^[a-z0-9-]{1,60}$/.test(agentId)) throw new Error(`agent id not usable as sandbox name: ${agentId}`);
+  return `gw-${agentId}`;
+}
+
+export interface SandboxSpecInput {
+  environment?: Record<string, string>;
+  providers?: string[];
+  labels?: Record<string, string>;
+}
+
+/** The slice of SandboxClient the runtime uses (keeps tests free of a gateway). */
+export type SandboxApi = Pick<SandboxClient, "get" | "create" | "waitReady" | "delete" | "execInteractive">;
+
+/**
+ * One persistent sandbox per agent: created on first start, reused after.
+ * The sandbox idles on `sleep infinity`; pi itself runs as an exec session.
+ */
+export class OpenShellRuntime {
+  constructor(
+    private readonly client: SandboxApi,
+    private readonly cfg: Pick<OpenShellConfig, "workspace" | "image">,
+  ) {}
+
+  async ensureSandbox(agentId: string, spec: SandboxSpecInput = {}, readyTimeoutSecs = 300): Promise<string> {
+    const name = sandboxNameFor(agentId);
+    const scope = this.cfg.workspace ? { workspace: this.cfg.workspace } : {};
+    try {
+      await this.client.get(name, scope);
+      log.info(`reusing sandbox ${name}`);
+    } catch (err) {
+      if (errorCode(err) !== "not_found") throw err;
+      log.info(`creating sandbox ${name} (${this.cfg.image})`);
+      await this.client.create({
+        name,
+        ...scope,
+        image: this.cfg.image,
+        command: ["sleep", "infinity"],
+        labels: { "gwarestrin.agent": agentId, ...spec.labels },
+        ...(spec.environment ? { environment: spec.environment } : {}),
+        ...(spec.providers?.length ? { providers: spec.providers } : {}),
+      });
+    }
+    await this.client.waitReady(name, readyTimeoutSecs, scope);
+    return name;
+  }
+
+  async deleteSandbox(agentId: string): Promise<void> {
+    const name = sandboxNameFor(agentId);
+    const scope = this.cfg.workspace ? { workspace: this.cfg.workspace } : {};
+    try {
+      await this.client.delete(name, { ...scope, allowMissing: true });
+    } catch (err) {
+      if (errorCode(err) !== "not_found") throw err;
+    }
+  }
+
+  transport(sandboxName: string, argv: string[], opts: { workdir?: string; environment?: Record<string, string> } = {}): PiTransportFactory {
+    return openShellTransport(this.client, sandboxName, argv, {
+      ...opts,
+      ...(this.cfg.workspace ? { workspace: this.cfg.workspace } : {}),
+    });
+  }
+}
+
+/**
+ * PiTransport over an OpenShell interactive exec (tty off, so stdout stays
+ * byte-exact and LF-framed). Writes issued before the session opens are
+ * queued by awaiting the session promise.
+ */
+export function openShellTransport(
+  client: Pick<SandboxClient, "execInteractive">,
+  sandboxName: string,
+  argv: string[],
+  opts: { workdir?: string; environment?: Record<string, string>; workspace?: string } = {},
+): PiTransportFactory {
+  return (handlers) => {
+    let exited = false;
+    let killSignal: NodeJS.Signals | null = null;
+    let graceTimer: NodeJS.Timeout | undefined;
+
+    const sessionPromise = client.execInteractive(sandboxName, argv, {
+      tty: false,
+      noLoginShell: true,
+      ...(opts.workdir ? { workdir: opts.workdir } : {}),
+      ...(opts.environment ? { environment: opts.environment } : {}),
+      ...(opts.workspace ? { workspace: opts.workspace } : {}),
+    });
+
+    const finish = (code: number | null, crashedHint: boolean): void => {
+      if (exited) return;
+      exited = true;
+      if (graceTimer) clearTimeout(graceTimer);
+      const info: PiExitInfo = killSignal
+        ? { code, signal: killSignal, crashed: true }
+        : { code, signal: null, crashed: crashedHint || (code !== 0 && code !== null) };
+      handlers.exit(info);
+    };
+
+    void (async () => {
+      let exitCode: number | null = null;
+      try {
+        const session = await sessionPromise;
+        for await (const ev of session.output) {
+          if ("type" in ev) {
+            exitCode = ev.exitCode;
+          } else if (ev.stream === "stderr") {
+            handlers.stderr(ev.data.toString("utf8"));
+          } else {
+            handlers.stdout(ev.data);
+          }
+        }
+        handlers.stdoutEnd();
+        finish(exitCode ?? session.exitCode ?? null, exitCode === null);
+      } catch (err) {
+        if (!killSignal) {
+          log.error(`exec stream to ${sandboxName} failed`, err);
+          handlers.stderr(`openshell exec failed: ${err instanceof Error ? err.message : String(err)}\n`);
+        }
+        handlers.stdoutEnd();
+        finish(exitCode, true);
+      }
+    })();
+
+    const transport: PiTransport = {
+      pid: undefined,
+      get writable() {
+        return !exited;
+      },
+      async write(data) {
+        const session = await sessionPromise;
+        if (!exited) session.write(Buffer.from(data, "utf8"));
+      },
+      kill(signal) {
+        if (exited || killSignal) return;
+        killSignal = signal;
+        void sessionPromise.then(
+          (session) => {
+            if (signal === "SIGKILL") {
+              session.cancel();
+              return;
+            }
+            // pi exits cleanly on stdin EOF; cancel only if it lingers
+            session.closeInput();
+            graceTimer = setTimeout(() => session.cancel(), STOP_GRACE_MS);
+          },
+          () => finish(null, true),
+        );
+      },
+    };
+    return transport;
+  };
+}
