@@ -105,7 +105,7 @@ export class OpenShellAgentLauncher {
     const { record, dirs } = inp;
     const { providers } = this.deps;
     const providerNames: string[] = [];
-    const openUrls: string[] = [];
+    const openUrls: Array<{ url: string; match: "prefix" | "exact" }> = [];
 
     // model providers: rewrite base URLs, move keys into OpenShell providers
     const gen = JSON.parse(await readFile(path.join(dirs.home, "providers.gen.json"), "utf8")) as GeneratedProvidersFile;
@@ -113,7 +113,7 @@ export class OpenShellAgentLauncher {
       def.baseUrl = await this.sandboxUrl(def.baseUrl);
       const key = inp.resolveKey(id);
       if (!key) {
-        openUrls.push(def.baseUrl);
+        openUrls.push({ url: def.baseUrl, match: "prefix" });
         continue;
       }
       const profile = inferenceProfile({ id, type: def.type, baseUrl: def.baseUrl }, def.apiKeyEnv);
@@ -140,7 +140,7 @@ export class OpenShellAgentLauncher {
         providerNames.push(name);
       } else {
         if (def.auth === "bearer") log.warn(`mcp ${server}: no value for ${def.bearerTokenEnv ?? "bearer token"}; calls will be unauthenticated`);
-        openUrls.push(def.url);
+        openUrls.push({ url: def.url, match: "exact" });
       }
     }
 

@@ -122,11 +122,14 @@ describe("OpenShellAgentLauncher", () => {
     const f = fakes(true);
     await new OpenShellAgentLauncher(f.deps).prepare(inputs(await fixture()));
     const { spec } = f.calls.find((c) => c[0] === "sandbox")![1] as {
-      spec: { providers: string[]; policy: { networkPolicies: Record<string, { endpoints: Array<{ host: string }> }> } };
+      spec: { providers: string[]; policy: { networkPolicies: Record<string, { endpoints: Array<{ host: string; path?: string }> }> } };
     };
     expect(spec.providers).toEqual(["gw-alice-llm-openrouter", "gw-alice-llm-litellm", "gw-alice-mcp-graph-rag"]);
-    const hosts = Object.values(spec.policy.networkPolicies).flatMap((r) => r.endpoints.map((e) => e.host));
-    expect(hosts).toEqual(expect.arrayContaining(["100.96.0.11", "172.31.99.14", "github.com"]));
+    const eps = Object.values(spec.policy.networkPolicies).flatMap((r) => r.endpoints);
+    expect(eps.map((e) => e.host)).toEqual(expect.arrayContaining(["100.96.0.11", "172.31.99.14", "github.com"]));
+    // keyless model API: prefix; MCP endpoint: exact
+    expect(eps.find((e) => e.host === "100.96.0.11")).toMatchObject({ path: "/v1/**" });
+    expect(eps.find((e) => e.host === "172.31.99.14")).toMatchObject({ path: "/mcp" });
     expect(f.calls.some((c) => c[0] === "setPolicy")).toBe(false);
   });
 

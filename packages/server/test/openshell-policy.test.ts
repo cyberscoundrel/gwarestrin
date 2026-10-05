@@ -28,6 +28,11 @@ describe("endpointFromUrl", () => {
     expect(endpointFromUrl("http://100.96.0.11:8000/v1").allowedIps).toEqual(["100.96.0.11/32"]);
   });
 
+  it("exact match scopes a service endpoint to its own path", () => {
+    expect(endpointFromUrl("http://172.31.99.7:8000/mcp", "exact").path).toBe("/mcp");
+    expect(endpointFromUrl("http://172.31.99.7:8000/", "exact").path).toBe("/**");
+  });
+
   it("does not add allowed_ips for public hosts or a bare root path", () => {
     const ep = endpointFromUrl("https://api.z.ai/");
     expect(ep.allowedIps).toBeUndefined();
@@ -59,7 +64,7 @@ describe("profiles", () => {
     const p = mcpProfile({ name: "graph-rag", url: "http://172.31.99.7:8000/mcp" }, "GWARESTRIN_GRAPH_TOKEN");
     expect(p.id).toBe("gw-mcp-graph-rag");
     expect(p.credentials?.[0]).toMatchObject({ envVars: ["GWARESTRIN_GRAPH_TOKEN"], authStyle: "bearer" });
-    expect(p.endpoints?.[0]).toMatchObject({ host: "172.31.99.7", allowedIps: ["172.31.99.7/32"] });
+    expect(p.endpoints?.[0]).toMatchObject({ host: "172.31.99.7", path: "/mcp", allowedIps: ["172.31.99.7/32"] });
   });
 
   it("names are slugged and instance-scoped", () => {
@@ -78,10 +83,15 @@ describe("sandboxPolicy", () => {
   });
 
   it("opens credential-free destinations to node only, deduplicated", () => {
-    const p = sandboxPolicy({ openUrls: ["http://172.31.99.14:5000/mcp", "http://172.31.99.14:5000/mcp"] });
+    const p = sandboxPolicy({
+      openUrls: [
+        { url: "http://172.31.99.14:5000/mcp", match: "exact" },
+        { url: "http://172.31.99.14:5000/mcp", match: "exact" },
+      ],
+    });
     expect(Object.keys(p.networkPolicies ?? {})).toEqual(["gw_open_0"]);
     expect(p.networkPolicies?.gw_open_0).toMatchObject({
-      endpoints: [{ host: "172.31.99.14", port: 5000, allowedIps: ["172.31.99.14/32"] }],
+      endpoints: [{ host: "172.31.99.14", port: 5000, path: "/mcp", allowedIps: ["172.31.99.14/32"] }],
       binaries: [{ path: AGENT_NODE }],
     });
   });

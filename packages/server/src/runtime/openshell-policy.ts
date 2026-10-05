@@ -57,11 +57,18 @@ function isPrivateIp(host: string): boolean {
 }
 
 /**
- * Endpoint for a base URL. Path is scoped to the URL's path prefix; private
- * IP literals get an exact allowed_ips entry (OpenShell denies private
- * destinations by default).
+ * How a URL scopes requests: an API base URL ("prefix") admits requests
+ * under it (`/api/v1/**`); a service endpoint ("exact", e.g. an MCP server's
+ * `/mcp`) admits that path itself. OpenShell's L7 rules do not match the
+ * bare prefix against `prefix/**`, so MCP URLs must be exact.
  */
-export function endpointFromUrl(rawUrl: string, access: NetworkAccessPreset = NetworkAccessPreset.READ_WRITE): EndpointInit {
+export type PathMatch = "prefix" | "exact";
+
+/**
+ * Endpoint for a URL. Private IP literals get an exact allowed_ips entry
+ * (OpenShell denies private destinations by default).
+ */
+export function endpointFromUrl(rawUrl: string, match: PathMatch = "prefix", access: NetworkAccessPreset = NetworkAccessPreset.READ_WRITE): EndpointInit {
   const u = new URL(rawUrl);
   const host = u.hostname.replace(/^\[|\]$/g, "");
   const port = u.port ? Number(u.port) : u.protocol === "https:" ? 443 : 80;
@@ -72,7 +79,7 @@ export function endpointFromUrl(rawUrl: string, access: NetworkAccessPreset = Ne
     protocol: "rest",
     access,
     enforcement: NetworkEnforcementMode.ENFORCE,
-    path: prefix ? `${prefix}/**` : "/**",
+    path: match === "exact" && prefix ? prefix : prefix ? `${prefix}/**` : "/**",
     ...(isPrivateIp(host) ? { allowedIps: [isIP(host) === 6 ? `${host}/128` : `${host}/32`] } : {}),
   };
 }
@@ -111,14 +118,14 @@ export function mcpProfile(server: { name: string; url: string }, tokenEnv: stri
     description: `MCP server ${server.name}`,
     category: ProviderProfileCategory.KNOWLEDGE,
     credentials: [{ name: "token", envVars: [tokenEnv], required: true, authStyle: "bearer", headerName: "authorization" }],
-    endpoints: [endpointFromUrl(server.url)],
+    endpoints: [endpointFromUrl(server.url, "exact")],
     binaries: [{ path: AGENT_NODE }],
   };
 }
 
 export interface PolicyInput {
-  /** credential-free destinations pi itself calls (MCP servers, keyless model APIs); node only */
-  openUrls?: string[];
+  /** credential-free destinations pi itself calls (MCP servers exact, keyless model APIs prefix); node only */
+  openUrls?: Array<{ url: string; match: PathMatch }>;
   /** agent allowedHosts: hostnames reachable by the agent's tools over https */
   allowedHosts?: string[];
 }
@@ -130,8 +137,10 @@ export interface PolicyInput {
  */
 export function sandboxPolicy(input: PolicyInput): PolicyInit {
   const networkPolicies: NonNullable<PolicyInit["networkPolicies"]> = {};
-  [...new Set(input.openUrls ?? [])].forEach((url, i) => {
-    networkPolicies[`gw_open_${i}`] = { name: `gw_open_${i}`, endpoints: [endpointFromUrl(url)], binaries: [{ path: AGENT_NODE }] };
+  const seen = new Set<string>();
+  const open = (input.openUrls ?? []).filter((o) => !seen.has(`${o.match} ${o.url}`) && seen.add(`${o.match} ${o.url}`));
+  open.forEach((o, i) => {
+    networkPolicies[`gw_open_${i}`] = { name: `gw_open_${i}`, endpoints: [endpointFromUrl(o.url, o.match)], binaries: [{ path: AGENT_NODE }] };
   });
   const hosts = [...new Set(input.allowedHosts ?? [])].filter((h) => /^[a-z0-9.*-]+$/i.test(h));
   if (hosts.length) {
