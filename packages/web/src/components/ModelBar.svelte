@@ -213,10 +213,12 @@
           <button
             class="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-[#1a1d26]
               {effectiveModel?.provider === m.provider && effectiveModel?.modelId === m.id ? 'text-accent' : 'text-fg'}"
+            title="{m.provider}/{m.id}"
             onclick={() => void chooseModel(m.provider, m.id)}
           >
-            {m.name === m.id ? m.id : m.name}
-            {#if m.reasoning}<span class="ml-1 text-xs text-muted">🧠</span>{/if}
+            <!-- same label as the button and rail (no raw file paths) -->
+            {m.name && m.name !== m.id ? m.name : modelDisplayName(m.provider, m.id, store.providers)}
+            {#if m.reasoning}<span class="ml-1 text-xs text-muted">reasoning</span>{/if}
           </button>
         {/each}
       {/each}
