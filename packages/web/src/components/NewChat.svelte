@@ -215,7 +215,7 @@ import Dropdown from "./Dropdown.svelte";
       {/if}
 
       <div class="flex items-center justify-between gap-2">
-        <span class="text-xs text-muted">⌘/ctrl+enter to start</span>
+        <span class="text-xs text-muted pointer-coarse:invisible">⌘/ctrl+enter to start</span>
         <button
           class="cursor-pointer rounded-md bg-accent px-5 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
           disabled={submitting || (!promptText.trim() && !hasEngine)}
