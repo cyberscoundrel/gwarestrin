@@ -7,6 +7,7 @@
   import FilesPanel from "./FilesPanel.svelte";
   import McpPanel from "./McpPanel.svelte";
   import ContextPanel from "./ContextPanel.svelte";
+  import AgentHeader from "./AgentHeader.svelte";
 
   let { agentId, agentName }: { agentId: string; agentName: string } = $props();
 
@@ -33,6 +34,7 @@
 </script>
 
 <section class="flex min-h-0 flex-1 flex-col">
+  <AgentHeader {agentId} />
   {#if runtime?.status === "running" || runtime?.status === "starting"}
     <div class="relative flex flex-wrap items-center gap-2 border-b border-edge bg-panel px-2">
       <div class="flex min-w-0 flex-1 items-center">
@@ -89,7 +91,6 @@
     </div>
   {:else}
     <div class="m-auto grid gap-3 text-center text-muted">
-      <h3 class="m-0 text-fg">{agentName}</h3>
       <p class="m-0 max-w-2xl">
         {runtime?.status === "error"
           ? `errored${runtime.error ? `: ${runtime.error.split("\n")[0]}` : ""}`

@@ -11,6 +11,8 @@ export interface AgentListItem {
   model: { provider: string; modelId: string } | null;
   mcpServers: string[];
   profileId: string;
+  /** whether a briefing was built at create time (absent on older records) */
+  contextStatus?: "skipped" | "ok" | "failed" | undefined;
   unread: number;
 }
 
@@ -106,6 +108,7 @@ class Store {
         model: a.model,
         mcpServers: a.mcpServers,
         profileId: a.profileId ?? "default",
+        contextStatus: a.contextStatus,
         unread: this.agents.find((x) => x.id === a.id)?.unread ?? 0,
       }));
       for (const a of agents) if (a.runtime) this.runtime.set(a.id, a.runtime);
