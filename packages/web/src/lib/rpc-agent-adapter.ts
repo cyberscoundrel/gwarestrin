@@ -184,6 +184,10 @@ export class RpcAgentAdapter implements Agent {
   }
 
   private async bootstrap(): Promise<void> {
+    // messages appended locally while the snapshot is in flight (e.g. the
+    // optimistic first prompt sent right after create) must survive it: the
+    // server answers get_messages before it has processed that prompt
+    const baseline = this.state.messages.length;
     try {
       const results = (await Promise.all([
         ws.rpc(this.agentId, "get_state"),
@@ -196,12 +200,16 @@ export class RpcAgentAdapter implements Agent {
         thinkingLevel?: AgentState["thinkingLevel"];
         isStreaming?: boolean;
       };
-      const messages = ((messagesRes.data ?? {}) as { messages?: AgentMessage[] }).messages ?? [];
+      const snapshot = ((messagesRes.data ?? {}) as { messages?: AgentMessage[] }).messages ?? [];
+      const localSince = this.state.messages
+        .slice(baseline)
+        .filter((m) => !snapshot.some((s) => s.role === m.role && s.content === m.content));
+      const messages = [...snapshot, ...localSince];
       this.state = {
         ...this.state,
         model: s.model ?? null,
         thinkingLevel: s.thinkingLevel ?? "off",
-        isStreaming: Boolean(s.isStreaming),
+        isStreaming: Boolean(s.isStreaming) || (localSince.length > 0 && this.state.isStreaming),
         messages,
       };
       this.bootstrapped = true;
