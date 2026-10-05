@@ -77,9 +77,10 @@ describe("sandboxPolicy", () => {
     expect(p.networkPolicies).toEqual({});
   });
 
-  it("opens credential-free MCP servers to node only", () => {
-    const p = sandboxPolicy({ openMcpUrls: ["http://172.31.99.14:5000/mcp"] });
-    expect(p.networkPolicies?.gw_mcp_0).toMatchObject({
+  it("opens credential-free destinations to node only, deduplicated", () => {
+    const p = sandboxPolicy({ openUrls: ["http://172.31.99.14:5000/mcp", "http://172.31.99.14:5000/mcp"] });
+    expect(Object.keys(p.networkPolicies ?? {})).toEqual(["gw_open_0"]);
+    expect(p.networkPolicies?.gw_open_0).toMatchObject({
       endpoints: [{ host: "172.31.99.14", port: 5000, allowedIps: ["172.31.99.14/32"] }],
       binaries: [{ path: AGENT_NODE }],
     });

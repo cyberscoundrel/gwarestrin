@@ -124,9 +124,11 @@ export class OpenShellRuntime {
     private readonly cfg: Pick<OpenShellConfig, "workspace" | "image">,
   ) {}
 
-  async ensureSandbox(agentId: string, spec: SandboxSpecInput = {}, readyTimeoutSecs = 300): Promise<string> {
+  /** Returns the sandbox name and whether it was created now (vs reused). */
+  async ensureSandbox(agentId: string, spec: SandboxSpecInput = {}, readyTimeoutSecs = 300): Promise<{ name: string; created: boolean }> {
     const name = sandboxNameFor(agentId);
     const scope = this.cfg.workspace ? { workspace: this.cfg.workspace } : {};
+    let created = false;
     try {
       await this.client.get(name, scope);
       log.info(`reusing sandbox ${name}`);
@@ -143,9 +145,10 @@ export class OpenShellRuntime {
         ...(spec.providers?.length ? { providers: spec.providers } : {}),
         ...(spec.policy ? { policy: spec.policy } : {}),
       });
+      created = true;
     }
     await this.client.waitReady(name, readyTimeoutSecs, scope);
-    return name;
+    return { name, created };
   }
 
   /** Deletion is asynchronous on the gateway; wait so attached providers can be removed after. */

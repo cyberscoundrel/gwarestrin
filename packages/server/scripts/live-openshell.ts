@@ -59,7 +59,7 @@ try {
   await providers.ensureProvider(providerName, profile.id!, { [KEY_ENV]: realKey });
   log("provider ensured (create + update)", providerName);
 
-  const name = await runtime.ensureSandbox(AGENT_ID, { providers: [providerName], policy: sandboxPolicy({}) });
+  const { name } = await runtime.ensureSandbox(AGENT_ID, { providers: [providerName], policy: sandboxPolicy({}) });
   log("sandbox ready", name);
 
   proc = new PiProcess({

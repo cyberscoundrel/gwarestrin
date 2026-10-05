@@ -175,8 +175,8 @@ describe("OpenShellRuntime", () => {
   it("creates a missing sandbox idling on sleep, then waits for ready", async () => {
     const { api, calls } = fakeApi(false);
     const rt = new OpenShellRuntime(api, { workspace: "alice", image: "gwarestrin-agent:dev" });
-    const name = await rt.ensureSandbox("1b2c", { providers: ["or-alice"], environment: { X: "1" } });
-    expect(name).toBe("gw-1b2c");
+    const res = await rt.ensureSandbox("1b2c", { providers: ["or-alice"], environment: { X: "1" } });
+    expect(res).toEqual({ name: "gw-1b2c", created: true });
     expect(calls.map((c) => c[0])).toEqual(["get", "create", "waitReady"]);
     expect(calls[1]![1]).toMatchObject({
       name: "gw-1b2c",
@@ -192,7 +192,7 @@ describe("OpenShellRuntime", () => {
   it("reuses an existing sandbox", async () => {
     const { api, calls } = fakeApi(true);
     const rt = new OpenShellRuntime(api, { image: "img" });
-    await rt.ensureSandbox("1b2c");
+    expect(await rt.ensureSandbox("1b2c")).toEqual({ name: "gw-1b2c", created: false });
     expect(calls.map((c) => c[0])).toEqual(["get", "waitReady"]);
   });
 

@@ -117,8 +117,8 @@ export function mcpProfile(server: { name: string; url: string }, tokenEnv: stri
 }
 
 export interface PolicyInput {
-  /** MCP servers reached without credentials (node only) */
-  openMcpUrls?: string[];
+  /** credential-free destinations pi itself calls (MCP servers, keyless model APIs); node only */
+  openUrls?: string[];
   /** agent allowedHosts: hostnames reachable by the agent's tools over https */
   allowedHosts?: string[];
 }
@@ -130,8 +130,8 @@ export interface PolicyInput {
  */
 export function sandboxPolicy(input: PolicyInput): PolicyInit {
   const networkPolicies: NonNullable<PolicyInit["networkPolicies"]> = {};
-  (input.openMcpUrls ?? []).forEach((url, i) => {
-    networkPolicies[`gw_mcp_${i}`] = { name: `gw_mcp_${i}`, endpoints: [endpointFromUrl(url)], binaries: [{ path: AGENT_NODE }] };
+  [...new Set(input.openUrls ?? [])].forEach((url, i) => {
+    networkPolicies[`gw_open_${i}`] = { name: `gw_open_${i}`, endpoints: [endpointFromUrl(url)], binaries: [{ path: AGENT_NODE }] };
   });
   const hosts = [...new Set(input.allowedHosts ?? [])].filter((h) => /^[a-z0-9.*-]+$/i.test(h));
   if (hosts.length) {
