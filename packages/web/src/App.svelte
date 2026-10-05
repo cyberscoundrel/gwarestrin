@@ -82,7 +82,7 @@
     </main>
   </div>
 {:else}
-  <div class="grid h-screen grid-rows-[48px_minmax(0,1fr)] overflow-hidden">
+  <div class="grid h-dvh grid-rows-[48px_minmax(0,1fr)] overflow-hidden">
     <header class="flex items-center gap-3 border-b border-edge bg-panel px-3">
       <button
         class="cursor-pointer border-none bg-transparent px-2 py-1 text-xl text-fg"
@@ -99,7 +99,7 @@
     </header>
     {#if drawerOpen}
       <div class="fixed inset-0 z-39 bg-black/50" onclick={() => (drawerOpen = false)} role="presentation"></div>
-      <aside class="fixed top-0 bottom-0 left-0 z-40 w-[min(280px,80vw)] overflow-y-auto border-r border-edge bg-panel">
+      <aside class="fixed top-0 bottom-0 left-0 z-40 flex w-[min(280px,80vw)] flex-col border-r border-edge bg-panel">
         <div class="flex justify-end px-3 pt-2">
           <button
             class="cursor-pointer rounded border-none bg-transparent px-1.5 text-muted hover:text-fg"
@@ -109,17 +109,19 @@
             ✕
           </button>
         </div>
-        <AgentRail
-          oncreate={() => {
-            openCreate();
-            drawerOpen = false;
-          }}
-          oneditprofile={(id) => {
-            openProfileEditor(id);
-            drawerOpen = false;
-          }}
-          onnavigate={() => (drawerOpen = false)}
-        />
+        <div class="min-h-0 flex-1">
+          <AgentRail
+            oncreate={() => {
+              openCreate();
+              drawerOpen = false;
+            }}
+            oneditprofile={(id) => {
+              openProfileEditor(id);
+              drawerOpen = false;
+            }}
+            onnavigate={() => (drawerOpen = false)}
+          />
+        </div>
       </aside>
     {/if}
     <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
