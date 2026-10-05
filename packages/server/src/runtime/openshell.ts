@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { SandboxClient, errorCode, fromConnect } from "@nvidia/openshell-sdk";
 import type { PiExitInfo, PiTransport, PiTransportFactory } from "../agents/pi-transport.js";
@@ -31,9 +32,14 @@ export async function connectOpenShell(cfg: OpenShellConfig): Promise<SandboxCli
   return SandboxClient.connect({ gateway: cfg.gateway, caCert, clientCert, clientKey });
 }
 
+/**
+ * OpenShell caps sandbox names at 19 characters, so a UUID doesn't fit:
+ * use a stable hash of the agent id ("gw-" + 16 hex). The full id rides
+ * along as the `gwarestrin.agent` label.
+ */
 export function sandboxNameFor(agentId: string): string {
-  if (!/^[a-z0-9-]{1,60}$/.test(agentId)) throw new Error(`agent id not usable as sandbox name: ${agentId}`);
-  return `gw-${agentId}`;
+  if (!agentId) throw new Error("empty agent id");
+  return `gw-${createHash("sha256").update(agentId).digest("hex").slice(0, 16)}`;
 }
 
 export interface SandboxSpecInput {

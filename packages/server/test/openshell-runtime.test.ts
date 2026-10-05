@@ -176,10 +176,10 @@ describe("OpenShellRuntime", () => {
     const { api, calls } = fakeApi(false);
     const rt = new OpenShellRuntime(api, { workspace: "alice", image: "gwarestrin-agent:dev" });
     const res = await rt.ensureSandbox("1b2c", { providers: ["or-alice"], environment: { X: "1" } });
-    expect(res).toEqual({ name: "gw-1b2c", created: true });
+    expect(res).toEqual({ name: sandboxNameFor("1b2c"), created: true });
     expect(calls.map((c) => c[0])).toEqual(["get", "create", "waitReady"]);
     expect(calls[1]![1]).toMatchObject({
-      name: "gw-1b2c",
+      name: sandboxNameFor("1b2c"),
       workspace: "alice",
       image: "gwarestrin-agent:dev",
       command: ["sleep", "infinity"],
@@ -192,19 +192,23 @@ describe("OpenShellRuntime", () => {
   it("reuses an existing sandbox", async () => {
     const { api, calls } = fakeApi(true);
     const rt = new OpenShellRuntime(api, { image: "img" });
-    expect(await rt.ensureSandbox("1b2c")).toEqual({ name: "gw-1b2c", created: false });
+    expect(await rt.ensureSandbox("1b2c")).toEqual({ name: sandboxNameFor("1b2c"), created: false });
     expect(calls.map((c) => c[0])).toEqual(["get", "waitReady"]);
   });
 
   it("deletes tolerantly", async () => {
     const { api, calls } = fakeApi(true);
     await new OpenShellRuntime(api, { image: "img" }).deleteSandbox("1b2c");
-    expect(calls[0]).toEqual(["delete", { name: "gw-1b2c", opts: { allowMissing: true } }]);
+    expect(calls[0]).toEqual(["delete", { name: sandboxNameFor("1b2c"), opts: { allowMissing: true } }]);
     expect(calls[1]?.[0]).toBe("waitDeleted");
   });
 
-  it("rejects ids that cannot be sandbox names", () => {
-    expect(() => sandboxNameFor("../x")).toThrow();
-    expect(sandboxNameFor("3f2a9c1e-0000-4000-8000-123456789abc")).toBe("gw-3f2a9c1e-0000-4000-8000-123456789abc");
+  it("derives stable names within OpenShell's 19-character limit", () => {
+    const id = "c0012944-2f9d-46a2-9a90-19c5de24ce2a";
+    expect(sandboxNameFor(id)).toMatch(/^gw-[0-9a-f]{16}$/);
+    expect(sandboxNameFor(id)).toHaveLength(19);
+    expect(sandboxNameFor(id)).toBe(sandboxNameFor(id));
+    expect(sandboxNameFor(id)).not.toBe(sandboxNameFor("other"));
+    expect(() => sandboxNameFor("")).toThrow();
   });
 });
