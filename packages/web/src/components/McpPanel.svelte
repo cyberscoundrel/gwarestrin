@@ -54,6 +54,15 @@
     return new Set(profile.mcpServers);
   });
 
+  /** allowed connections first, so the agent's usable set reads top-down */
+  const sortedEntries = $derived(
+    Object.entries(registry).sort(([a], [b]) => Number(isGranted(b)) - Number(isGranted(a))),
+  );
+
+  const profileName = $derived(
+    store.profiles.find((p) => p.id === (record?.profileId || "default"))?.name ?? "its agent profile",
+  );
+
   /** false = the profile does not grant this server; the toggle is locked */
   function isGranted(name: string): boolean {
     return allowedSet === null || allowedSet.has(name);
@@ -190,24 +199,25 @@
       <p class="px-3 py-2 text-muted">no tool connections in this workspace yet — add one to make it available to agent profiles</p>
     {:else}
       <ul class="m-0 list-none p-0">
-        {#each Object.entries(registry) as [name, def] (name)}
+        {#each sortedEntries as [name, def] (name)}
           {@const dot = statusDot(name)}
           <li class="border-b border-edge/50 px-3 py-2">
             <div class="flex items-center gap-2">
               <span class="{dot.color}" title={dot.title} role="img" aria-label={dot.title}>●</span>
               <label
                 class="flex flex-1 items-center gap-2 truncate"
-                title={isGranted(name) ? summarize(def) : "not granted by this agent's profile"}
+                title={isGranted(name) ? summarize(def) : `not allowed by ${profileName}`}
               >
                 <input
                   type="checkbox"
                   checked={isEnabled(name)}
-                  disabled={busy || !record || !isGranted(name)}
+                  disabled={busy || !record || (!isGranted(name) && !isEnabled(name))}
+                  aria-label="{isEnabled(name) ? 'switch off' : 'switch on'} {name} for this agent"
                   onchange={() => void toggle(name)}
                 />
                 <span class="truncate font-medium">{name}</span>
                 {#if !isGranted(name)}
-                  <span class="rounded border border-edge px-1 text-[0.65rem] text-muted" title="the profile that created this agent does not grant this server">profile-locked</span>
+                  <span class="rounded border border-edge px-1 text-[0.65rem] text-muted" title="this agent's profile ({profileName}) does not allow this connection">not allowed</span>
                 {/if}
               </label>
               <button
@@ -231,9 +241,12 @@
   </div>
 
   <div class="border-t border-edge px-3 py-1.5 text-xs text-muted">
-    checked = enabled for this agent (restarts it)
+    ticked = switched on for this agent; changing one restarts the agent.
     {#if allowedSet !== null}
-      · servers outside the profile allowlist are locked — edit the profile to grant them
+      only connections allowed by <span class="text-fg">{profileName}</span> can be switched on — edit the agent
+      profile to allow more.
+    {:else}
+      <span class="text-fg">{profileName}</span> allows every workspace connection.
     {/if}
   </div>
 </div>

@@ -59,7 +59,7 @@
       return;
     }
     if (mcpMode === "pick" && pickedMcp.length === 0) {
-      error = "pick at least one MCP server (or switch to all)";
+      error = "allow at least one tool connection (or allow all)";
       return;
     }
     saving = true;
@@ -190,20 +190,29 @@
     </label>
 
     <div class="grid gap-2">
-      <span class="text-xs tracking-wide text-muted uppercase">MCP servers (fixed at agent creation)</span>
-      <div class="flex gap-2">
+      <span class="text-xs tracking-wide text-muted uppercase">allowed tool connections</span>
+      <p class="m-0 text-xs text-muted">
+        agents in this profile can only use the connections allowed here. a new agent starts with every
+        allowed connection switched on; each agent can then switch them off and on again in its tools
+        drawer, but never beyond this list.
+      </p>
+      <div class="flex flex-wrap gap-2">
         <button
           class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {mcpMode === 'all' ? 'border-accent text-fg' : 'border-edge text-muted'}"
-          onclick={() => (mcpMode = "all")}>all instance servers</button>
+          onclick={() => (mcpMode = "all")}>allow all workspace connections</button>
         <button
           class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {mcpMode === 'pick' ? 'border-accent text-fg' : 'border-edge text-muted'}"
-          onclick={() => (mcpMode = "pick")}>pick…</button>
+          onclick={() => (mcpMode = "pick")}>allow only selected…</button>
       </div>
+      {#if mcpMode === "all"}
+        <span class="text-xs text-muted">includes connections added to the workspace later.</span>
+      {/if}
       {#if mcpMode === "pick"}
-        <div class="flex flex-wrap gap-2 rounded-md border border-edge bg-[#12141b] p-3">
+        <div class="flex flex-wrap gap-2 rounded-md border border-edge bg-[#12141b] p-3" role="group" aria-label="allowed tool connections">
           {#each serverNames as s (s)}
             <button
               class="cursor-pointer rounded-full border px-3 py-1 text-xs {pickedMcp.includes(s) ? 'border-accent bg-accent/10 text-fg' : 'border-edge text-muted'}"
+              aria-pressed={pickedMcp.includes(s)}
               onclick={() => (pickedMcp = pickedMcp.includes(s) ? pickedMcp.filter((x) => x !== s) : [...pickedMcp, s])}
             >
               {s}
