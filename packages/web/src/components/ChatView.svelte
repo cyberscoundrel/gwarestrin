@@ -76,7 +76,7 @@
           {:else if drawer === "mcp"}
             <McpPanel {agentId} />
           {:else}
-            <ContextPanel {agentId} />
+            <ContextPanel {agentId} onclose={() => (drawer = "closed")} />
           {/if}
         </div>
       {/if}

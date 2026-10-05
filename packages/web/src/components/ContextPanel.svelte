@@ -30,6 +30,7 @@
     <span class="font-semibold tracking-wide">standing context</span>
     <button
       class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg"
+      aria-label="close standing context"
       onclick={() => onclose?.()}
     >
       ✕
