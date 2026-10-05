@@ -161,7 +161,7 @@
 
 <div class="modelbar-root flex flex-1 flex-wrap items-center gap-2 py-1.5 text-sm">
   <button
-    class="select-compact max-w-64 truncate"
+    class="select-compact max-w-[min(16rem,100%)] truncate"
     title={effectiveModel ? `${effectiveModel.provider}/${effectiveModel.modelId}` : undefined}
     disabled={busy}
     onclick={() => (openModel = !openModel)}

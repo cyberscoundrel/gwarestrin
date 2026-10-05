@@ -36,7 +36,7 @@
   {#if runtime?.status === "running" || runtime?.status === "starting"}
     <div class="relative flex flex-wrap items-center gap-2 border-b border-edge bg-panel px-2">
       <div class="flex min-w-0 flex-1 items-center">
-        <div class="relative">
+        <div class="relative min-w-0 flex-1">
           <ModelBar {agentId} />
         </div>
       </div>
