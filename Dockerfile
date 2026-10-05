@@ -8,6 +8,8 @@ COPY package.json package-lock.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
+# vendored @nvidia/openshell-sdk (GitHub Packages only upstream)
+COPY vendor vendor
 RUN npm ci
 
 # gondolin-vm extension is versioned outside the npm workspaces
