@@ -59,7 +59,10 @@ type RawClient = SandboxClient["raw"];
 export class OpenShellProviders {
   private readonly scope: { workspaceScope: { selection: { case: "workspace"; value: string } } };
 
-  constructor(private readonly raw: RawClient, workspace = "default") {
+  constructor(
+    private readonly raw: RawClient,
+    private readonly workspace = "default",
+  ) {
     this.scope = { workspaceScope: { selection: { case: "workspace", value: workspace } } };
   }
 
@@ -85,7 +88,9 @@ export class OpenShellProviders {
 
   /** Create or replace a provider instance's credentials. Values never leave the server except to the gateway. */
   async ensureProvider(name: string, profileId: string, credentials: Record<string, string>): Promise<void> {
-    const provider = { metadata: { name }, type: profileId, credentials };
+    // profiles are imported workspace-scoped; without profileWorkspace the
+    // gateway resolves the type at platform scope and rejects it
+    const provider = { metadata: { name }, type: profileId, credentials, profileWorkspace: this.workspace };
     try {
       await this.raw.getProvider({ ...this.scope, name });
     } catch (err) {
