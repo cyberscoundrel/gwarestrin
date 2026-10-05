@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
-import { SandboxClient, errorCode } from "@nvidia/openshell-sdk";
+import { SandboxClient, errorCode, fromConnect } from "@nvidia/openshell-sdk";
 import type { PiExitInfo, PiTransport, PiTransportFactory } from "../agents/pi-transport.js";
 import { scoped } from "../util/log.js";
+import type { PolicyInit, ProfileInit } from "./openshell-policy.js";
 
 const log = scoped("openshell");
 
@@ -39,6 +40,70 @@ export interface SandboxSpecInput {
   environment?: Record<string, string>;
   providers?: string[];
   labels?: Record<string, string>;
+  /** create-time policy (filesystem/landlock/process are fixed after creation) */
+  policy?: PolicyInit;
+}
+
+/** Normalized error code for SDK and raw Connect errors alike. */
+function codeOf(err: unknown): string | null {
+  return errorCode(err) ?? errorCode(fromConnect(err));
+}
+
+type RawClient = SandboxClient["raw"];
+
+/**
+ * Provider profiles + instances on the gateway. Profiles describe where a
+ * credential may be used; instances hold the real values (gateway-side,
+ * encrypted). Both calls are idempotent: create, or update in place.
+ */
+export class OpenShellProviders {
+  private readonly scope: { workspaceScope: { selection: { case: "workspace"; value: string } } };
+
+  constructor(private readonly raw: RawClient, workspace = "default") {
+    this.scope = { workspaceScope: { selection: { case: "workspace", value: workspace } } };
+  }
+
+  async ensureProfile(profile: ProfileInit): Promise<void> {
+    const id = profile.id ?? "";
+    const res = await this.raw.importProviderProfiles({ ...this.scope, profiles: [{ profile, source: "gwarestrin" }] });
+    if (res.imported) return;
+    const diag = res.diagnostics.map((d) => JSON.stringify(d)).join("; ");
+    let existing;
+    try {
+      existing = await this.raw.getProviderProfile({ ...this.scope, id });
+    } catch (err) {
+      if (codeOf(err) === "not_found") throw new Error(`profile ${id} import rejected: ${diag}`);
+      throw err;
+    }
+    await this.raw.updateProviderProfiles({
+      ...this.scope,
+      id,
+      profile: { profile, source: "gwarestrin" },
+      expectedResourceVersion: existing.profile?.resourceVersion ?? 0n,
+    });
+  }
+
+  /** Create or replace a provider instance's credentials. Values never leave the server except to the gateway. */
+  async ensureProvider(name: string, profileId: string, credentials: Record<string, string>): Promise<void> {
+    const provider = { metadata: { name }, type: profileId, credentials };
+    try {
+      await this.raw.getProvider({ ...this.scope, name });
+    } catch (err) {
+      if (codeOf(err) !== "not_found") throw err;
+      await this.raw.createProvider({ ...this.scope, provider });
+      log.info(`created provider ${name} (${profileId})`);
+      return;
+    }
+    await this.raw.updateProvider({ ...this.scope, provider });
+  }
+
+  async deleteProvider(name: string): Promise<void> {
+    await this.raw.deleteProvider({ ...this.scope, name, allowMissing: true });
+  }
+
+  async deleteProfile(id: string): Promise<void> {
+    await this.raw.deleteProviderProfile({ ...this.scope, id, allowMissing: true });
+  }
 }
 
 /** The slice of SandboxClient the runtime uses (keeps tests free of a gateway). */
@@ -71,6 +136,7 @@ export class OpenShellRuntime {
         labels: { "gwarestrin.agent": agentId, ...spec.labels },
         ...(spec.environment ? { environment: spec.environment } : {}),
         ...(spec.providers?.length ? { providers: spec.providers } : {}),
+        ...(spec.policy ? { policy: spec.policy } : {}),
       });
     }
     await this.client.waitReady(name, readyTimeoutSecs, scope);
