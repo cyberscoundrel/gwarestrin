@@ -112,7 +112,7 @@ export class OpenShellProviders {
 }
 
 /** The slice of SandboxClient the runtime uses (keeps tests free of a gateway). */
-export type SandboxApi = Pick<SandboxClient, "get" | "create" | "waitReady" | "delete" | "execInteractive">;
+export type SandboxApi = Pick<SandboxClient, "get" | "create" | "waitReady" | "delete" | "waitDeleted" | "execInteractive">;
 
 /**
  * One persistent sandbox per agent: created on first start, reused after.
@@ -148,11 +148,13 @@ export class OpenShellRuntime {
     return name;
   }
 
-  async deleteSandbox(agentId: string): Promise<void> {
+  /** Deletion is asynchronous on the gateway; wait so attached providers can be removed after. */
+  async deleteSandbox(agentId: string, timeoutSecs = 120): Promise<void> {
     const name = sandboxNameFor(agentId);
     const scope = this.cfg.workspace ? { workspace: this.cfg.workspace } : {};
     try {
       await this.client.delete(name, { ...scope, allowMissing: true });
+      await this.client.waitDeleted(name, timeoutSecs, scope);
     } catch (err) {
       if (errorCode(err) !== "not_found") throw err;
     }

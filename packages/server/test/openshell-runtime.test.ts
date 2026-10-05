@@ -164,6 +164,7 @@ describe("OpenShellRuntime", () => {
       create: async (spec: unknown) => (calls.push(["create", spec]), {}),
       waitReady: async (name: string, secs: number) => (calls.push(["waitReady", { name, secs }]), {}),
       delete: async (name: string, opts: unknown) => (calls.push(["delete", { name, opts }]), {}),
+      waitDeleted: async (name: string) => void calls.push(["waitDeleted", { name, opts: undefined }]),
       execInteractive: async () => {
         throw new Error("unused");
       },
@@ -199,6 +200,7 @@ describe("OpenShellRuntime", () => {
     const { api, calls } = fakeApi(true);
     await new OpenShellRuntime(api, { image: "img" }).deleteSandbox("1b2c");
     expect(calls[0]).toEqual(["delete", { name: "gw-1b2c", opts: { allowMissing: true } }]);
+    expect(calls[1]?.[0]).toBe("waitDeleted");
   });
 
   it("rejects ids that cannot be sandbox names", () => {
