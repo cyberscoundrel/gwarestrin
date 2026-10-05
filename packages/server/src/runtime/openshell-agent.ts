@@ -209,7 +209,10 @@ export class OpenShellAgentLauncher {
   private async refreshSandbox(sandbox: string, policy: ReturnType<typeof sandboxPolicy>, providerNames: string[]): Promise<void> {
     const scope = this.deps.workspace ? { workspace: this.deps.workspace } : {};
     try {
-      await this.deps.sandbox.setPolicy(sandbox, policy, { ...scope, wait: true });
+      // no wait: the effective hash includes provider-derived layers, so waiting
+      // for the submitted hash times out (60s) although the policy applies; the
+      // sandbox polls for changes and pi only reaches MCP after startup
+      await this.deps.sandbox.setPolicy(sandbox, policy, { ...scope, wait: false });
     } catch (err) {
       log.warn(`policy refresh for ${sandbox} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
