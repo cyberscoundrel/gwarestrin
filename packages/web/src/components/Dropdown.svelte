@@ -54,7 +54,7 @@
     {disabled}
     aria-haspopup="listbox"
     aria-expanded={open}
-    aria-label={label}
+    aria-label={label ? `${label}: ${current?.label ?? "none"}` : undefined}
     onclick={() => (open = !open)}
   >
     {current?.label ?? "—"}
