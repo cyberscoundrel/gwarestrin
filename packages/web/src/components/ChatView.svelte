@@ -63,12 +63,14 @@
       </div>
     </div>
 
-    <div class="flex min-h-0 flex-1">
+    <div class="relative flex min-h-0 flex-1">
       <div class="flex min-w-0 flex-1 flex-col">
         <LitAgentInterface agent={adapter} />
       </div>
       {#if drawer !== "closed"}
-        <div class="w-80 shrink-0 border-l border-edge">
+        <!-- side drawer on wide screens; overlays the chat on narrow ones so the
+             transcript is not squeezed into a sliver -->
+        <div class="w-80 shrink-0 max-[900px]:absolute max-[900px]:inset-0 max-[900px]:z-20 max-[900px]:w-full">
           {#if drawer === "files"}
             <FilesPanel {agentId} />
           {:else if drawer === "mcp"}
