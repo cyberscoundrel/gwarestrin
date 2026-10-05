@@ -88,7 +88,7 @@
             {#each members as a (a.id)}
               <li class="group relative">
                 <button
-                  class="grid w-full grid-cols-[10px_1fr_auto] items-center gap-2 rounded-md px-2.5 py-2 text-left
+                  class="grid w-full grid-cols-[10px_1fr_auto] items-center gap-2 rounded-md px-2.5 py-2 text-left pointer-coarse:pr-8
                     text-[0.9rem] text-fg cursor-pointer border-none bg-transparent hover:bg-[#1a1d26]
                     {a.id === store.selectedId && !store.editingProfileId ? 'bg-[#20242f]' : ''}"
                   onclick={() => {
@@ -111,7 +111,7 @@
                 </button>
                 <button
                   class="absolute top-1.5 right-1.5 hidden rounded px-1 text-xs text-muted hover:bg-[#2a1218] hover:text-err
-                    group-hover:block"
+                    group-hover:block group-focus-within:block pointer-coarse:block pointer-coarse:px-2 pointer-coarse:py-1"
                   title="delete {a.name}"
                   aria-label="delete {a.name}"
                   onclick={(e) => {
