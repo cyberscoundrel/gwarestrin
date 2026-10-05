@@ -8,6 +8,14 @@
   let exported = $state(false);
   let error = $state<string | null>(null);
 
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onclose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
+
   function exportTrace(): void {
     // plain navigation download; browser handles it as an attachment
     window.open(api.exportUrl(agentId), "_blank");
@@ -36,8 +44,9 @@
     border border-edge2 bg-panel2 p-5"
   role="alertdialog"
   aria-modal="true"
+  aria-labelledby="delete-agent-title"
 >
-  <h3 class="m-0 tracking-wide">delete {agentName}?</h3>
+  <h3 id="delete-agent-title" class="m-0 tracking-wide">delete {agentName}?</h3>
   <p class="m-0 text-sm text-muted">
     this erases <span class="text-warn font-medium">all data</span> for this agent — workspace files, session
     history, and configuration. this cannot be undone.

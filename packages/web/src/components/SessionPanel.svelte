@@ -16,6 +16,15 @@
   }
   let forkMessages = $state<ForkMessage[]>([]);
 
+  $effect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") open = false;
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
+
   async function loadForkable(): Promise<void> {
     try {
       const res = (await ws.rpc(agentId, "get_fork_messages")) as {
@@ -55,6 +64,8 @@
   <button
     class="select-compact relative z-30"
     disabled={busy}
+    aria-haspopup="menu"
+    aria-expanded={open}
     onclick={() => {
       open = !open;
       if (open) void loadForkable();

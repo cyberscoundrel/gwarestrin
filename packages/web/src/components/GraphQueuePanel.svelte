@@ -52,6 +52,14 @@
     }
   }
 
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onclose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
+
   onMount(() => {
     void refresh();
     const t = setInterval(() => void refresh(), 15_000);
@@ -65,10 +73,11 @@
     gap-3 overflow-hidden rounded-xl border border-edge2 bg-panel2 p-5"
   role="dialog"
   aria-modal="true"
+  aria-labelledby="graph-queue-title"
 >
   <div class="flex items-center justify-between">
-    <h3 class="m-0 tracking-wide">graph write approvals</h3>
-    <button class="cursor-pointer border-none bg-transparent text-muted hover:text-fg" onclick={onclose}>✕</button>
+    <h3 id="graph-queue-title" class="m-0 tracking-wide">graph write approvals</h3>
+    <button class="cursor-pointer border-none bg-transparent text-muted hover:text-fg" aria-label="close" onclick={onclose}>✕</button>
   </div>
 
   {#if !enabled}
