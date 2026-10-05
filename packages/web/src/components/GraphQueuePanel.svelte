@@ -20,6 +20,7 @@
     error = null;
     try {
       const r = await fetch("/api/graph-queue");
+      if (!r.ok) throw new Error(`couldn't load the review queue (${r.status})`);
       const j = await r.json();
       enabled = j.enabled !== false;
       pending = (j.pending ?? []).map((p: Record<string, unknown>) => ({
@@ -30,7 +31,6 @@
         language: String(p.language ?? "sql"),
       }));
     } catch (e) {
-      enabled = false;
       error = e instanceof Error ? e.message : String(e);
     }
   }
@@ -39,11 +39,15 @@
     busy = true;
     error = null;
     try {
-      await fetch(`/api/graph-queue/${kind}`, {
+      const r = await fetch(`/api/graph-queue/${kind}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ id }),
       });
+      if (!r.ok) {
+        const body = (await r.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error ?? `${kind} failed (${r.status})`);
+      }
       await refresh();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -80,17 +84,17 @@
     <button class="cursor-pointer border-none bg-transparent text-muted hover:text-fg" aria-label="close" onclick={onclose}>✕</button>
   </div>
 
+  {#if error}<p class="m-0 text-sm text-err">{error}</p>{/if}
   {#if !enabled}
     <p class="m-0 text-sm text-muted">no review surface configured for this instance.</p>
-  {:else}
-    {#if error}<p class="m-0 text-sm text-err">{error}</p>{/if}
+  {:else if !error || pending.length > 0}
     {#if pending.length === 0}
       <p class="m-0 py-6 text-center text-sm text-muted">no pending writes.</p>
     {:else}
       <div class="min-h-0 flex-1 overflow-y-auto">
         {#each pending as p (p["@rid"])}
           <div class="mb-2 rounded-lg border border-edge2 bg-bg p-3">
-            <div class="mb-1 flex items-center gap-2 text-xs text-muted">
+            <div class="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted">
               <span class="font-mono">{p["@rid"]}</span>
               <span>· {p.requested_by}</span>
               <span>· {p.created_at}</span>
@@ -111,7 +115,7 @@
                 </button>
               </span>
             </div>
-            <pre class="m-0 overflow-x-auto rounded border border-edge bg-panel p-2 font-mono text-xs text-fg">{p.payload}</pre>
+            <pre class="m-0 max-h-60 overflow-y-auto rounded border border-edge bg-panel p-2 font-mono text-xs break-words whitespace-pre-wrap text-fg">{p.payload}</pre>
           </div>
         {/each}
       </div>
