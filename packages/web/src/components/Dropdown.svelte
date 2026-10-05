@@ -6,6 +6,8 @@
     compact = false,
     disabled = false,
     align = "left",
+    full = false,
+    label,
   }: {
     value: string;
     options: Array<{ value: string; label: string }>;
@@ -13,6 +15,10 @@
     compact?: boolean;
     disabled?: boolean;
     align?: "left" | "right";
+    /** stretch to the parent's width (label truncates) instead of sizing to content */
+    full?: boolean;
+    /** accessible name when no visible label is attached */
+    label?: string;
   } = $props();
 
   let open = $state(false);
@@ -42,13 +48,20 @@
   });
 </script>
 
-<div class="relative inline-block" bind:this={root}>
-  <button class="{compact ? 'select-compact' : 'select'} max-w-64 truncate text-left" {disabled} onclick={() => (open = !open)}>
+<div class="relative {full ? 'block w-full min-w-0' : 'inline-block max-w-full'}" bind:this={root}>
+  <button
+    class="{compact ? 'select-compact' : 'select'} {full ? 'w-full' : 'max-w-64'} block truncate text-left"
+    {disabled}
+    aria-haspopup="listbox"
+    aria-expanded={open}
+    aria-label={label}
+    onclick={() => (open = !open)}
+  >
     {current?.label ?? "—"}
   </button>
   {#if open}
     <div
-      class="absolute {align === 'right' ? 'right-0' : 'left-0'} z-30 mt-1 max-h-72 min-w-full w-max overflow-y-auto
+      class="absolute {align === 'right' ? 'right-0' : 'left-0'} z-30 mt-1 max-h-72 w-max min-w-full max-w-[min(32rem,calc(100vw-2rem))] overflow-y-auto
         rounded-lg border border-edge2 bg-panel2 shadow-xl"
     >
       {#each options as o (o.value)}

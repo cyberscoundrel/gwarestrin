@@ -153,8 +153,10 @@
         </div>
         {#if tier}
           <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-            <div class="w-40 [&_button]:w-full [&_button]:max-w-40">
+            <div class="w-40 max-w-full">
               <Dropdown
+                full
+                label="default provider"
                 value={modelProvider}
                 options={store.providers
                   .filter((p) => (tier === "local") === p.id.includes("local"))
@@ -165,8 +167,10 @@
                 }}
               />
             </div>
-            <div class="min-w-0 flex-1 [&_button]:w-full">
+            <div class="min-w-48 flex-1 max-sm:min-w-full">
               <Dropdown
+                full
+                label="default model"
                 value={modelId}
                 options={modelOptions.map((m) => ({ value: m.id, label: m.id }))}
                 onchange={(id) => (modelId = id)}
