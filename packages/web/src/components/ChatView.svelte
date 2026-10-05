@@ -45,7 +45,7 @@
         <button
           class="select-compact bg-none pr-2 {drawer === 'files' ? '!border-accent !text-accent' : ''}"
           aria-pressed={drawer === "files"}
-          title="files in this agent's workspace"
+          title="files in this agent's sandbox"
           onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
         >
           files
@@ -53,18 +53,18 @@
         <button
           class="select-compact bg-none pr-2 {drawer === 'mcp' ? '!border-accent !text-accent' : ''}"
           aria-pressed={drawer === "mcp"}
-          title="MCP tool servers this agent can use"
+          title="tool connections this agent can use"
           onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
         >
-          mcp
+          tools
         </button>
         <button
           class="select-compact bg-none pr-2 {drawer === 'context' ? '!border-accent !text-accent' : ''}"
           aria-pressed={drawer === "context"}
-          title="standing context injected into this agent's prompt"
+          title="the briefing this agent keeps in mind"
           onclick={() => (drawer = drawer === "context" ? "closed" : "context")}
         >
-          context
+          briefing
         </button>
       </div>
     </div>

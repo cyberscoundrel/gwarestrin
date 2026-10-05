@@ -16,8 +16,8 @@
   const mobileTitle = $derived(
     store.editingProfileId
       ? store.editingProfileId === "new"
-        ? "new profile"
-        : "edit profile"
+        ? "new agent profile"
+        : "edit agent profile"
       : store.showNewChat || store.agents.length === 0
         ? null
         : (store.selected?.name ?? null),
@@ -81,7 +81,7 @@
 {#snippet offlineBanner()}
   {#if offline}
     <div role="status" class="border-b border-err/40 bg-[#2a1218] px-3 py-1.5 text-center text-xs text-err">
-      can't reach the server — retrying. agents and settings shown may be out of date.
+      can't reach the workspace server — retrying. agents and settings shown may be out of date.
     </div>
   {/if}
 {/snippet}

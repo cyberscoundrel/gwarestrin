@@ -102,7 +102,7 @@
       onclose?.();
       return;
     }
-    if (!confirm(`delete profile "${name}"? agents keep running but fall back to the default profile.`)) return;
+    if (!confirm(`delete agent profile "${name}"? its agents keep running but fall back to the default agent profile.`)) return;
     try {
       await api.deleteProfile(profileId);
       await store.refreshProfiles();
@@ -116,7 +116,7 @@
 
 <div class="m-auto w-full max-w-xl overflow-y-auto p-6">
   <div class="mb-4 flex items-center gap-3">
-    <h2 class="m-0 tracking-wide text-fg">{isNew ? "new profile" : `edit profile — ${name || profileId}`}</h2>
+    <h2 class="m-0 tracking-wide text-fg">{isNew ? "new agent profile" : `edit agent profile — ${name || profileId}`}</h2>
     <button
       class="ml-auto cursor-pointer rounded border-none bg-transparent px-2 py-1 text-muted hover:text-fg"
       aria-label="close editor"
@@ -137,7 +137,7 @@
 
     <label class="grid gap-1">
       <span class="text-xs tracking-wide text-muted uppercase">description</span>
-      <input class="rounded-md border border-edge bg-[#12141b] px-3 py-2 text-fg" bind:value={description} placeholder="what agents under this profile do" />
+      <input class="rounded-md border border-edge bg-[#12141b] px-3 py-2 text-fg" bind:value={description} placeholder="what agents in this profile focus on" />
     </label>
 
     <div class="grid gap-2">
@@ -146,10 +146,10 @@
         <div class="flex gap-2">
           <button
             class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'local' ? 'border-accent text-fg' : 'border-edge text-muted'}"
-            onclick={() => pickTier("local")}>local</button>
+            onclick={() => pickTier("local")}>On-prem</button>
           <button
             class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'cloud' ? 'border-accent text-fg' : 'border-edge text-muted'}"
-            onclick={() => pickTier("cloud")}>cloud</button>
+            onclick={() => pickTier("cloud")}>Cloud</button>
         </div>
         {#if tier}
           <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
@@ -180,7 +180,7 @@
         {/if}
       </div>
       {#if !tier}
-        <span class="text-xs text-muted">no model default — server default is used at create time</span>
+        <span class="text-xs text-muted">no default model — the workspace default is used when an agent is created</span>
       {/if}
     </div>
 
@@ -216,7 +216,7 @@
     <div class="grid gap-2">
       <label class="flex items-center gap-2 text-sm text-fg">
         <input type="checkbox" class="accent-[var(--accent)]" bind:checked={engineEnabled} />
-        <span class="tracking-wide">context engine — generate standing context at agent creation</span>
+        <span class="tracking-wide">briefing — when an agent is created, build a briefing from the knowledge graph</span>
       </label>
       {#if engineEnabled}
         <div class="grid gap-3 rounded-md border border-edge bg-[#12141b] p-3">
@@ -224,8 +224,8 @@
             <Dropdown
               value={engineType}
               options={[
-                { value: "graph-rag", label: "graph-rag (LLM tool-loop over the knowledge graph)" },
-                { value: "lexical", label: "lexical (deterministic graph summary)" },
+                { value: "graph-rag", label: "graph-rag (an AI model reads the knowledge graph and writes it)" },
+                { value: "lexical", label: "lexical (fixed summary of the knowledge graph, no AI)" },
               ]}
               onchange={(t) => (engineType = t as "graph-rag" | "lexical")}
             />
@@ -233,7 +233,7 @@
           <textarea
             class="min-h-20 rounded-md border border-edge bg-[#1a1d26] px-3 py-2 text-fg"
             bind:value={enginePrompt}
-            placeholder="analysis prompt — what should the engine focus on? (runs even without a user first prompt)"
+            placeholder="what should the briefing focus on? (used even when the agent gets no first prompt)"
           ></textarea>
           <div class="flex items-center gap-3 text-xs text-muted">
             <label class="flex items-center gap-1">rounds <input type="number" min="1" max="20" class="w-16 rounded border border-edge bg-[#1a1d26] px-1.5 py-1 text-fg" bind:value={engineRounds} /></label>
@@ -245,7 +245,7 @@
 
     <label class="flex items-center gap-2 text-sm text-fg">
       <input type="checkbox" class="accent-[var(--accent)]" bind:checked={sharedTools} />
-      <span class="tracking-wide">shared /tools directory — agents under this profile can share scripts with the instance</span>
+      <span class="tracking-wide">shared /tools directory — agents in this profile can share scripts with the rest of the workspace</span>
     </label>
 
     {#if error}
@@ -258,7 +258,7 @@
         disabled={saving}
         onclick={save}
       >
-        {saving ? "saving…" : isNew ? "create profile" : "save changes"}
+        {saving ? "saving…" : isNew ? "create agent profile" : "save changes"}
       </button>
       {#if !isNew}
         <button

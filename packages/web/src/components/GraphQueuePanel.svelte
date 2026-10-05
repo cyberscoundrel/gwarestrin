@@ -20,7 +20,7 @@
     error = null;
     try {
       const r = await fetch("/api/graph-queue");
-      if (!r.ok) throw new Error(`couldn't load the review queue (${r.status})`);
+      if (!r.ok) throw new Error(`couldn't load approvals (${r.status})`);
       const j = await r.json();
       enabled = j.enabled !== false;
       pending = (j.pending ?? []).map((p: Record<string, unknown>) => ({
@@ -80,16 +80,16 @@
   aria-labelledby="graph-queue-title"
 >
   <div class="flex items-center justify-between">
-    <h3 id="graph-queue-title" class="m-0 tracking-wide">graph write approvals</h3>
+    <h3 id="graph-queue-title" class="m-0 tracking-wide">approvals <span class="text-sm font-normal text-muted">· changes agents want to write to the knowledge graph</span></h3>
     <button class="cursor-pointer border-none bg-transparent text-muted hover:text-fg" aria-label="close" onclick={onclose}>✕</button>
   </div>
 
   {#if error}<p class="m-0 text-sm text-err">{error}</p>{/if}
   {#if !enabled}
-    <p class="m-0 text-sm text-muted">no review surface configured for this instance.</p>
+    <p class="m-0 text-sm text-muted">approvals aren't set up for this workspace.</p>
   {:else if !error || pending.length > 0}
     {#if pending.length === 0}
-      <p class="m-0 py-6 text-center text-sm text-muted">no pending writes.</p>
+      <p class="m-0 py-6 text-center text-sm text-muted">nothing is waiting for approval.</p>
     {:else}
       <div class="min-h-0 flex-1 overflow-y-auto">
         {#each pending as p (p["@rid"])}

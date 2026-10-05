@@ -2,7 +2,7 @@
 import { onMount } from "svelte";
 import { store } from "../lib/stores.svelte.js";
 import { getAdapter } from "../lib/rpc-agent-adapter.js";
-import { modelDisplayName } from "../lib/format.js";
+import { modelDisplayName, tierName } from "../lib/format.js";
 import Dropdown from "./Dropdown.svelte";
 
   let { preselectProfileId }: { preselectProfileId?: string | null } = $props();
@@ -137,23 +137,24 @@ import Dropdown from "./Dropdown.svelte";
         />
       </svg>
       <h1 class="m-0 text-2xl tracking-wide text-fg">{greeting()}</h1>
-      <p class="m-0 text-sm text-muted">start an agent — pick a profile, drop your first prompt</p>
+      <p class="m-0 text-sm text-muted">start an agent — pick an agent profile, drop your first prompt</p>
     </div>
 
     <div class="grid w-full gap-4 rounded-xl border border-edge bg-panel p-5 max-sm:p-4">
       <div class="grid gap-2">
-        <span class="text-xs tracking-wide text-muted uppercase">profile</span>
+        <span class="text-xs tracking-wide text-muted uppercase">agent profile</span>
         <div class="flex flex-wrap items-center gap-2">
           <div class="max-w-full">
             <Dropdown
-              label="profile"
+              label="agent profile"
               value={profileId}
-              options={store.profiles.map((p) => ({ value: p.id, label: p.name + (p.contextEngine ? " ⚙" : "") }))}
+              options={store.profiles.map((p) => ({ value: p.id, label: p.name + (p.contextEngine ? " · briefing" : "") }))}
               onchange={(id) => (profileId = id)}
             />
           </div>
           {#if mcpChips.length > 0}
-            <div class="flex flex-wrap items-center gap-1.5">
+            <div class="flex flex-wrap items-center gap-1.5" title="tool connections this agent profile allows">
+              <span class="text-xs text-muted">tools:</span>
               {#each mcpChips as s (s)}
                 <span class="rounded-full border border-edge2 px-2 py-0.5 text-xs text-muted">{s}</span>
               {/each}
@@ -168,9 +169,9 @@ import Dropdown from "./Dropdown.svelte";
           <div class="w-28">
             <Dropdown
               full
-              label="model tier"
+              label="where the model runs"
               value={tier}
-              options={tiers.map((t) => ({ value: t, label: t }))}
+              options={tiers.map((t) => ({ value: t, label: tierName(t) }))}
               onchange={(t) => {
                 tier = t as "local" | "cloud";
                 const first = store.providers.find((p) => p.tier === tier);
@@ -203,7 +204,7 @@ import Dropdown from "./Dropdown.svelte";
 
       <textarea
         class="min-h-24 w-full resize-y rounded-lg border border-edge2 bg-bg px-4 py-3 text-base text-fg outline-none focus:border-accent"
-        placeholder={hasEngine ? "first prompt (optional — the profile's engine runs either way)" : "what should this agent work on first?"}
+        placeholder={hasEngine ? "first prompt (optional — the briefing is built either way)" : "what should this agent work on first?"}
         bind:value={promptText}
         onkeydown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
@@ -222,9 +223,9 @@ import Dropdown from "./Dropdown.svelte";
           onclick={() => void submit()}
         >
           {#if submitting}
-            {hasEngine ? "generating context…" : "starting…"}
+            {hasEngine ? "building briefing…" : "starting…"}
           {:else}
-            {hasEngine ? "analyze & start" : "start"}
+            {hasEngine ? "build briefing & start" : "start"}
           {/if}
         </button>
       </div>

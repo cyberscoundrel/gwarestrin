@@ -70,7 +70,7 @@
         case "setStatus": {
           const text = r.statusText ? String(r.statusText) : "";
           if (String(r.statusKey) === "gondolin") {
-            statusLine = text ? `vm: ${text}` : "";
+            statusLine = text ? `sandbox: ${text}` : "";
           }
           break;
         }

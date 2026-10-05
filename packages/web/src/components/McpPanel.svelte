@@ -91,7 +91,7 @@
   async function save(): Promise<void> {
     const name = formName.trim();
     if (!name) {
-      error = "server name required";
+      error = "connection name required";
       return;
     }
     const def: McpServerDef = {};
@@ -118,7 +118,7 @@
   }
 
   async function remove(name: string): Promise<void> {
-    if (!confirm(`remove MCP server "${name}" from the registry?`)) return;
+    if (!confirm(`remove tool connection "${name}" from the workspace? every agent loses it.`)) return;
     busy = true;
     error = null;
     try {
@@ -137,7 +137,7 @@
   function statusDot(name: string): { color: string; title: string } {
     if (!isEnabled(name)) return { color: "text-muted", title: "not enabled for this agent" };
     const p = probes[name];
-    if (!p || p.reachable === null) return { color: "text-muted", title: "no http probe (stdio server)" };
+    if (!p || p.reachable === null) return { color: "text-muted", title: "local command connection (no reachability check)" };
     if (p.reachable) return { color: "text-ok", title: `reachable${p.ms != null ? ` · ${p.ms}ms` : ""}` };
     return { color: "text-err", title: "unreachable" };
   }
@@ -145,9 +145,10 @@
 
 <div class="flex h-full flex-col border-l border-edge bg-panel text-sm">
   <div class="flex items-center gap-2 border-b border-edge px-3 py-2">
-    <span class="font-semibold tracking-wide">mcp servers</span>
+    <span class="font-semibold tracking-wide">tool connections</span>
     <button
       class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg"
+      title="add a tool connection to the workspace"
       onclick={() => startEdit(null)}
     >
       + add
@@ -186,7 +187,7 @@
     {/if}
 
     {#if Object.keys(registry).length === 0}
-      <p class="px-3 py-2 text-muted">registry is empty — add a server to make it available to agents</p>
+      <p class="px-3 py-2 text-muted">no tool connections in this workspace yet — add one to make it available to agent profiles</p>
     {:else}
       <ul class="m-0 list-none p-0">
         {#each Object.entries(registry) as [name, def] (name)}
@@ -211,13 +212,13 @@
               </label>
               <button
                 class="rounded px-1 text-xs text-muted hover:text-fg"
-                title="edit {name} (registry, all agents)"
-                aria-label="edit {name} in the registry"
+                title="edit {name} (workspace-wide, all agents)"
+                aria-label="edit tool connection {name} for the whole workspace"
                 onclick={() => startEdit(name)}>✎</button>
               <button
                 class="rounded px-1 text-xs text-err hover:bg-[#2a1218]"
-                title="remove {name} from the registry (all agents)"
-                aria-label="remove {name} from the registry"
+                title="remove {name} from the workspace (all agents)"
+                aria-label="remove tool connection {name} from the workspace"
                 onclick={() => void remove(name)}>✕</button>
             </div>
             <div class="mt-0.5 truncate pl-6 text-xs text-muted" title={summarize(def)}>

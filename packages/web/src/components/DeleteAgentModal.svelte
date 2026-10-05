@@ -48,7 +48,7 @@
 >
   <h3 id="delete-agent-title" class="m-0 tracking-wide">delete {agentName}?</h3>
   <p class="m-0 text-sm text-muted">
-    this erases <span class="text-warn font-medium">all data</span> for this agent — workspace files, session
+    this erases <span class="text-warn font-medium">all data</span> for this agent — its files, conversation
     history, and configuration. this cannot be undone.
   </p>
   {#if error}
@@ -59,9 +59,9 @@
       class="cursor-pointer rounded-md border border-edge2 bg-transparent px-3 py-2 text-sm text-muted hover:text-fg"
       onclick={exportTrace}
       disabled={busy}
-      title="download the conversation trace (session jsonl)"
+      title="download the conversation history (jsonl)"
     >
-      {exported ? "trace downloaded ✓" : "export trace"}
+      {exported ? "history downloaded ✓" : "export conversation"}
     </button>
     <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-2 text-fg" onclick={onclose} disabled={busy}>
       cancel

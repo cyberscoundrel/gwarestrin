@@ -71,7 +71,7 @@
   }
 
   async function mkdirPrompt(): Promise<void> {
-    const name = prompt("new directory name");
+    const name = prompt("new folder name");
     if (!name?.trim()) return;
     error = null;
     try {
@@ -110,8 +110,8 @@
   aria-label="files"
 >
   <div class="flex items-center gap-2 border-b border-edge px-3 py-2">
-    <span class="font-semibold tracking-wide">workspace</span>
-    <button class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg" onclick={mkdirPrompt}>+ dir</button>
+    <span class="font-semibold tracking-wide">files</span>
+    <button class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg" onclick={mkdirPrompt}>+ folder</button>
     <label class="rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg cursor-pointer">
       upload
       <input

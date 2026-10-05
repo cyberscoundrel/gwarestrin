@@ -3,7 +3,7 @@
   import { store } from "../lib/stores.svelte.js";
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
   import { ws } from "../lib/ws-client.js";
-  import { modelDisplayName } from "../lib/format.js";
+  import { modelDisplayName, whereItRuns } from "../lib/format.js";
   import type { ModelInfo } from "../lib/agent-types.js";
   import Dropdown from "./Dropdown.svelte";
 
@@ -135,17 +135,18 @@
   }
 
   const grouped = $derived.by(() => {
-    // tier grouping (local first) — cloud providers collapse into one group
-    const tierOf = (providerId: string): "local" | "cloud" =>
-      store.providers.find((p) => p.id === providerId)?.tier ?? "cloud";
-    const byTier = new Map<string, ModelInfo[]>();
+    // one group per place the model runs: "On-prem" first, then
+    // "Cloud: <provider>" so the vendor that sees the prompts is explicit
+    const byWhere = new Map<string, { local: boolean; list: ModelInfo[] }>();
     for (const m of models) {
-      const tier = tierOf(m.provider);
-      const list = byTier.get(tier) ?? [];
-      list.push(m);
-      byTier.set(tier, list);
+      const where = whereItRuns(m.provider, store.providers);
+      const group = byWhere.get(where.label) ?? { local: where.tier === "local", list: [] };
+      group.list.push(m);
+      byWhere.set(where.label, group);
     }
-    return [...byTier.entries()].sort(([a], [b]) => (a === "local" ? -1 : b === "local" ? 1 : 0));
+    return [...byWhere.entries()]
+      .sort(([, a], [, b]) => Number(b.local) - Number(a.local))
+      .map(([label, g]) => [label, g.list] as const);
   });
 
   const pct = $derived(stats?.context?.percent ?? null);
@@ -207,8 +208,8 @@
     {#if models.length === 0}
       <p class="px-3 py-2 text-sm text-muted">no models (agent not running?)</p>
     {:else}
-      {#each grouped as [tier, list]}
-        <div class="px-3 pt-2 text-xs font-semibold tracking-wide text-muted">{tier === "local" ? "local" : "cloud"}</div>
+      {#each grouped as [where, list]}
+        <div class="px-3 pt-2 text-xs font-semibold tracking-wide text-muted">{where}</div>
         {#each list as m (m.id)}
           <button
             class="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-[#1a1d26]
