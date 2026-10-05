@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ws } from "../lib/ws-client.js";
+  import { store } from "../lib/stores.svelte.js";
   import type { WsUiRequest } from "@gwarestrin/shared";
 
   type DialogState = {
@@ -92,8 +93,13 @@
 
 {#each dialogs as d (d!.id)}
   <div class="fixed inset-0 z-60 bg-black/55" role="presentation"></div>
-  <div class="fixed top-1/2 left-1/2 z-61 grid min-w-88 max-w-2xl -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl border border-edge2 bg-panel2 p-5" role="dialog" aria-modal="true">
-    <h3 class="m-0">{d!.title ?? d!.method}</h3>
+  <div class="fixed top-1/2 left-1/2 z-61 grid w-[min(36rem,92vw)] -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl border border-edge2 bg-panel2 p-5" role="dialog" aria-modal="true">
+    <div class="grid gap-0.5 pr-6">
+      <span class="truncate text-xs text-muted">
+        request from agent <span class="text-fg">{store.agents.find((a) => a.id === d!.agentId)?.name ?? d!.agentId}</span>
+      </span>
+      <h3 class="m-0">{d!.title ?? d!.method}</h3>
+    </div>
     {#if d!.message}
       <p class="m-0 text-sm text-muted">{d!.message}</p>
     {/if}
