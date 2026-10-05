@@ -9,6 +9,8 @@
   const record = $derived(store.agents.find((a) => a.id === agentId));
 
   let registry = $state<Record<string, McpServerDef>>({});
+  /** false until the first registry load settles (avoids an "empty" flash) */
+  let loaded = $state(false);
   let error = $state<string | null>(null);
   let busy = $state(false);
 
@@ -30,6 +32,7 @@
     error = null;
     try {
       registry = await mcpApi.list();
+      loaded = true;
       probes = await mcpApi.status();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -195,7 +198,9 @@
       </div>
     {/if}
 
-    {#if Object.keys(registry).length === 0}
+    {#if !loaded && !error}
+      <p class="px-3 py-2 text-muted">loading…</p>
+    {:else if Object.keys(registry).length === 0}
       <p class="px-3 py-2 text-muted">no tool connections in this workspace yet — add one to make it available to agent profiles</p>
     {:else}
       <ul class="m-0 list-none p-0">

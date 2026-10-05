@@ -5,6 +5,8 @@
 
   let cwd = $state("");
   let entries = $state<FileEntry[]>([]);
+  /** false while a listing is in flight (avoids an "empty" flash) */
+  let loaded = $state(false);
   let error = $state<string | null>(null);
   let busy = $state(false);
   let dragOver = $state(false);
@@ -15,6 +17,7 @@
     error = null;
     try {
       entries = await filesApi.list(agentId, cwd);
+      loaded = true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -25,6 +28,7 @@
     void agentId;
     cwd = "";
     entries = [];
+    loaded = false;
     void refresh();
   });
 
@@ -137,6 +141,8 @@
   <div class="min-h-0 flex-1 overflow-y-auto">
     {#if error}
       <p class="px-3 py-2 text-err">{error}</p>
+    {:else if !loaded}
+      <p class="px-3 py-2 text-muted">loading…</p>
     {:else if entries.length === 0}
       <p class="px-3 py-2 text-muted">empty — drag files here to upload</p>
     {:else}
