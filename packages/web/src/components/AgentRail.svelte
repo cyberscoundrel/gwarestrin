@@ -47,7 +47,9 @@
     <span class="font-bold tracking-[0.12em]">ground chat</span>
     <span
       class="h-[7px] w-[7px] rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
-      title="ws: {store.wsStatus}"
+      role="img"
+      aria-label={store.wsStatus === "open" ? "connected" : "disconnected"}
+      title={store.wsStatus === "open" ? "connected to server" : "disconnected from server"}
     ></span>
   </div>
 

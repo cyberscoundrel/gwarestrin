@@ -193,7 +193,7 @@
           {@const dot = statusDot(name)}
           <li class="border-b border-edge/50 px-3 py-2">
             <div class="flex items-center gap-2">
-              <span class="{dot.color}" title={dot.title}>●</span>
+              <span class="{dot.color}" title={dot.title} role="img" aria-label={dot.title}>●</span>
               <label
                 class="flex flex-1 items-center gap-2 truncate"
                 title={isGranted(name) ? summarize(def) : "not granted by this agent's profile"}
@@ -209,8 +209,16 @@
                   <span class="rounded border border-edge px-1 text-[0.65rem] text-muted" title="the profile that created this agent does not grant this server">profile-locked</span>
                 {/if}
               </label>
-              <button class="rounded px-1 text-xs text-muted hover:text-fg" title="edit" onclick={() => startEdit(name)}>✎</button>
-              <button class="rounded px-1 text-xs text-err hover:bg-[#2a1218]" title="delete" onclick={() => void remove(name)}>✕</button>
+              <button
+                class="rounded px-1 text-xs text-muted hover:text-fg"
+                title="edit {name} (registry, all agents)"
+                aria-label="edit {name} in the registry"
+                onclick={() => startEdit(name)}>✎</button>
+              <button
+                class="rounded px-1 text-xs text-err hover:bg-[#2a1218]"
+                title="remove {name} from the registry (all agents)"
+                aria-label="remove {name} from the registry"
+                onclick={() => void remove(name)}>✕</button>
             </div>
             <div class="mt-0.5 truncate pl-6 text-xs text-muted" title={summarize(def)}>
               {summarize(def)}{def.description ? ` — ${def.description}` : ""}

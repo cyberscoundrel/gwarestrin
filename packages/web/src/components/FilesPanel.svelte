@@ -151,8 +151,9 @@
             {/if}
             <span class="text-xs text-muted">{e.type === "file" ? fmtSize(e.size) : ""}</span>
             <button
-              class="invisible rounded px-1 text-xs text-err hover:bg-[#2a1218] group-hover:visible"
-              title="delete"
+              class="invisible rounded px-1 text-xs text-err hover:bg-[#2a1218] group-hover:visible group-focus-within:visible pointer-coarse:visible"
+              title="delete {e.name}"
+              aria-label="delete {e.name}"
               onclick={() => void remove(e.name)}
             >
               ✕

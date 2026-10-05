@@ -44,18 +44,24 @@
         <SessionPanel {agentId} />
         <button
           class="select-compact bg-none pr-2 {drawer === 'files' ? '!border-accent !text-accent' : ''}"
+          aria-pressed={drawer === "files"}
+          title="files in this agent's workspace"
           onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
         >
           files
         </button>
         <button
           class="select-compact bg-none pr-2 {drawer === 'mcp' ? '!border-accent !text-accent' : ''}"
+          aria-pressed={drawer === "mcp"}
+          title="MCP tool servers this agent can use"
           onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
         >
           mcp
         </button>
         <button
           class="select-compact bg-none pr-2 {drawer === 'context' ? '!border-accent !text-accent' : ''}"
+          aria-pressed={drawer === "context"}
+          title="standing context injected into this agent's prompt"
           onclick={() => (drawer = drawer === "context" ? "closed" : "context")}
         >
           context

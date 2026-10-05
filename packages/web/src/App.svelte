@@ -118,7 +118,9 @@
       <span class="min-w-0 truncate font-semibold {mobileTitle ? '' : 'tracking-widest'}">{mobileTitle ?? "ground chat"}</span>
       <span
         class="ml-auto h-2 w-2 rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
-        title={store.wsStatus}
+        role="img"
+        aria-label={store.wsStatus === "open" ? "connected" : "disconnected"}
+        title={store.wsStatus === "open" ? "connected" : "disconnected"}
       ></span>
     </header>
     {#if drawerOpen}
