@@ -47,7 +47,7 @@
 
   function pickTier(t: "local" | "cloud") {
     tier = t;
-    const prov = store.providers.find((p) => (t === "local" ? p.id.includes("local") : !p.id.includes("local")));
+    const prov = store.providers.find((p) => p.tier === t);
     modelProvider = prov?.id ?? store.defaultProvider ?? "";
     modelId = "";
   }
@@ -159,7 +159,7 @@
                 label="default provider"
                 value={modelProvider}
                 options={store.providers
-                  .filter((p) => (tier === "local") === p.id.includes("local"))
+                  .filter((p) => p.tier === tier)
                   .map((p) => ({ value: p.id, label: p.id }))}
                 onchange={(id) => {
                   modelProvider = id;
