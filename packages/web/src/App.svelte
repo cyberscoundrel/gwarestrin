@@ -12,6 +12,17 @@
   let createProfileId = $state<string | null>(null);
   let mobile = $state(false);
 
+  // mobile has no rail on screen, so the header names the current view
+  const mobileTitle = $derived(
+    store.editingProfileId
+      ? store.editingProfileId === "new"
+        ? "new profile"
+        : "edit profile"
+      : store.showNewChat || store.agents.length === 0
+        ? null
+        : (store.selected?.name ?? null),
+  );
+
   function openCreate(profileId?: string) {
     createProfileId = profileId ?? null;
     store.selectedId = null;
@@ -80,7 +91,7 @@
       >
         ☰
       </button>
-      <span class="font-semibold tracking-widest">ground chat</span>
+      <span class="min-w-0 truncate font-semibold {mobileTitle ? '' : 'tracking-widest'}">{mobileTitle ?? "ground chat"}</span>
       <span
         class="ml-auto h-2 w-2 rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
         title={store.wsStatus}
