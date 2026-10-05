@@ -68,7 +68,9 @@ import Dropdown from "./Dropdown.svelte";
     if (preselectProfileId && store.profiles.some((p) => p.id === preselectProfileId)) {
       profileId = preselectProfileId;
     }
-    store.mcpServers = await mcpApi.list();
+    try {
+      store.mcpServers = await mcpApi.list();
+    } catch { /* tool chips just stay empty; the offline banner explains why */ }
   });
 
   function deriveName(): string {
