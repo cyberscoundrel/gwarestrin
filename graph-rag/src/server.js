@@ -27,6 +27,7 @@ import {
   writableHomes,
 } from "./positions.js";
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
+import { grantedView, isActive, resolveExpiry } from "./grants.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -109,15 +110,32 @@ function scopeOf(identity) {
   if (!positionMap) return { homes: new Set(), writeHome: null, root: false };
   const held = heldPositions(positionMap, identity.positions);
   const homes = visibleHomes(positionMap, held);
-  return { homes, writeHome: defaultHome(positionMap, held), root: homes === null, held };
+  // grants add homes (subtree grants) and single records (entity grants)
+  const granted = grantedView(positionMap, held, grantCache);
+  return { homes, writeHome: defaultHome(positionMap, held), root: homes === null, held, granted };
 }
 
-/** SQL predicate (prefixed with AND) limiting rows to the caller's homes */
-function homeFilter(scope) {
+/**
+ * SQL predicate (prefixed with AND) limiting rows to what the caller sees:
+ * its homes plus what grants show it. `own: true` = by home only: what the
+ * caller owns (may move, grant onward), never what it was granted.
+ */
+function homeFilter(scope, { own = false } = {}) {
   if (scope.homes === null) return "";
-  if (scope.homes.size === 0) return " AND 1 = 0";
-  return ` AND _home IN [${[...scope.homes].map((h) => `'${esc(h)}'`).join(",")}]`;
+  const homes = new Set(scope.homes);
+  const rids = [];
+  if (!own && scope.granted) {
+    for (const h of scope.granted.homes) homes.add(h);
+    for (const r of scope.granted.rids) if (RID_RE.test(r)) rids.push(r);
+  }
+  const conds = [];
+  if (homes.size) conds.push(`_home IN [${[...homes].map((h) => `'${esc(h)}'`).join(",")}]`);
+  if (rids.length) conds.push(`@rid IN [${rids.join(",")}]`);
+  return conds.length ? ` AND (${conds.join(" OR ")})` : " AND 1 = 0";
 }
+
+/** does the caller see this home by its own positions (not through a grant) */
+const ownsHome = (scope, home) => scope.homes === null || scope.homes.has(effectiveHome(positionMap, home));
 
 /** where a write lands: the caller's choice if it may write there, else its default */
 function resolveWriteHome(scope, requested) {
@@ -386,6 +404,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
             labels: row["@type"] ? [row["@type"]] : [],
             properties: publicProps(row),
             ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
+            ...(SCOPED && positionMap && !ownsHome(scope, row._home) ? { via: "grant" } : {}),
             score: -2,
             facets: [],
             rid,
@@ -412,6 +431,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
         name: row.name,
         properties: publicProps(row),
         ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
+        ...(SCOPED && positionMap && !ownsHome(scope, row._home) ? { via: "grant" } : {}),
         score: null,
         facets: ["lexical"],
         rid: row["@rid"],
@@ -570,6 +590,7 @@ async function executePending(rec) {
   // upsert payloads carry the home resolved when the write was requested
   if (rec.kind === "upsert") return upsertEntities(JSON.parse(rec.payload));
   if (rec.kind === "rehome") return applyRehome(JSON.parse(rec.payload));
+  if (rec.kind === "grant") return storeGrant(JSON.parse(rec.payload));
   if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
   return adbCommand(rec.payload, rec.language ?? "sql");
 }
@@ -582,11 +603,11 @@ async function setHome({ entities, to }, identity, scope) {
   for (const ref of entities) {
     const from = ref.home === undefined ? undefined : positionId(ref.home);
     const rows = await adbQuery(
-      `SELECT @rid AS rid, name, _home FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope)}`,
+      `SELECT @rid AS rid, name, _home FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope, { own: true })}`,
       { name: ref.name },
     );
     const candidates = rows.filter((r) => from === undefined || effectiveHome(positionMap, r._home) === from);
-    if (candidates.length === 0) throw new Error(`no visible entity ${ref.name}${from ? ` homed at ${ref.home}` : ""}`);
+    if (candidates.length === 0) throw new Error(`no visible entity ${ref.name}${from ? ` homed at ${ref.home}` : ""} (granted entities can't be moved)`);
     if (candidates.length > 1) throw new Error(`${ref.name} exists at several homes you can see; pass its home`);
     const node = candidates[0];
     const current = effectiveHome(positionMap, node._home);
@@ -616,6 +637,128 @@ async function applyRehome({ rid, name, from, to }) {
   await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
   log.info(`entity ${name} rehomed ${positionMap.positions[from]?.name} -> ${positionMap.positions[to]?.name}`);
   return { moved: true, from: positionMap.positions[from]?.name, to: positionMap.positions[to]?.name };
+}
+
+/** ---- grants (see grants.js) ---- */
+
+let grantCache = []; // active grants, refreshed on change and every minute
+
+async function ensureGrantSchema() {
+  await adbCommand("CREATE DOCUMENT TYPE AccessGrant IF NOT EXISTS").catch(() => {});
+  for (const prop of ["id", "kind", "target", "target_name", "target_home", "to_pos", "reason", "granted_by", "created_at", "expires_at", "status", "revoked_at", "revoked_by"]) {
+    await adbCommand(`CREATE PROPERTY AccessGrant.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  }
+}
+
+async function refreshGrants() {
+  if (!SCOPED) return;
+  try {
+    const rows = await adbQuery("SELECT FROM AccessGrant WHERE status = 'active' LIMIT 5000");
+    grantCache = rows.map((r) => ({ ...r, to: r.to_pos })).filter((g) => isActive(g));
+  } catch (e) {
+    log.warn(`grant refresh failed (keeping ${grantCache.length}): ${String(e).slice(0, 160)}`);
+  }
+}
+
+const positionName = (id) => positionMap?.positions[id]?.name ?? id;
+
+/** propose or make a grant; owners only, agents and queued writers propose */
+async function grantAccess({ entities, subtree: subtreeRef, to, reason, until }, identity, scope) {
+  if (!SCOPED || !positionMap) throw new Error("position scoping is not enabled");
+  if (!!entities === !!subtreeRef) throw new Error("grant either entities or a subtree, not both");
+  const toPos = positionId(to);
+  const expires_at = resolveExpiry(until, { root: scope.root });
+  const base = { to_pos: toPos, reason: String(reason).slice(0, 500), granted_by: identity.user, expires_at };
+  const targets = [];
+  if (subtreeRef) {
+    const p = positionId(subtreeRef);
+    if (!ownsHome(scope, p)) throw new Error(`you can only grant what you own: ${subtreeRef} is outside your positions`);
+    const toView = visibleHomes(positionMap, [toPos]); // null = the root, sees everything
+    if (toView === null || toView.has(p)) throw new Error(`${positionName(toPos)} already sees ${positionName(p)}`);
+    targets.push({ kind: "subtree", target: p, target_name: positionName(p), target_home: p });
+  } else {
+    for (const ref of entities) {
+      const from = ref.home === undefined ? undefined : positionId(ref.home);
+      const rows = await adbQuery(
+        `SELECT @rid AS rid, name, _home FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope, { own: true })}`,
+        { name: ref.name },
+      );
+      const hits = rows.filter((r) => from === undefined || effectiveHome(positionMap, r._home) === from);
+      if (hits.length === 0) throw new Error(`no entity ${ref.name} you own${from ? ` at ${ref.home}` : ""} (granted entities can't be granted onward)`);
+      if (hits.length > 1) throw new Error(`${ref.name} exists at several homes you own; pass its home`);
+      const home = effectiveHome(positionMap, hits[0]._home);
+      if (visibleHomes(positionMap, [toPos])?.has(home) ?? true) throw new Error(`${positionName(toPos)} already sees ${ref.name}`);
+      targets.push({ kind: "entity", target: String(hits[0].rid), target_name: ref.name, target_home: home });
+    }
+  }
+  const results = [];
+  for (const t of targets) {
+    const grant = { id: randomUUID(), ...base, ...t };
+    // only people grant directly: agents (and queued writers) propose
+    if (identity.caps.write === "direct" && !identity.agent) {
+      await storeGrant(grant);
+      results.push({ granted: true, id: grant.id, target: t.target_name, to: positionName(toPos), expires_at });
+    } else {
+      const q = await queueWrite({ kind: "grant", payload: JSON.stringify(grant), user: identity.user, home: t.target_home });
+      results.push({ proposed: true, target: t.target_name, to: positionName(toPos), ...q });
+    }
+  }
+  return { results };
+}
+
+async function storeGrant(g) {
+  if (g.expires_at && Date.parse(g.expires_at) <= Date.now()) throw new Error("this grant has already expired");
+  await adbCommand(
+    "INSERT INTO AccessGrant SET id = :id, kind = :kind, target = :target, target_name = :target_name, target_home = :target_home, " +
+      "to_pos = :to_pos, reason = :reason, granted_by = :granted_by, created_at = :created_at, expires_at = :expires_at, status = 'active'",
+    "sql",
+    { ...g, created_at: new Date().toISOString(), expires_at: g.expires_at ?? null },
+  );
+  log.info(`grant ${g.id}: ${g.kind} ${g.target_name} -> ${positionName(g.to_pos)} by ${g.granted_by} until ${g.expires_at ?? "revoked"}`);
+  await refreshGrants();
+  return { granted: true, id: g.id };
+}
+
+/** revoking only restricts: the grantor or any owner of the data may */
+async function revokeGrant({ id }, identity, scope) {
+  if (!positionMap) throw new Error("position map not loaded");
+  if (!PENDING_ID_RE.test(id)) throw new Error("invalid grant id");
+  const rows = await adbQuery("SELECT FROM AccessGrant WHERE id = :id AND status = 'active'", { id });
+  const g = rows[0];
+  if (!g || !(g.granted_by === identity.user || ownsHome(scope, g.target_home))) throw new Error(`no grant ${id} you can revoke`);
+  await adbCommand("UPDATE AccessGrant SET status = 'revoked', revoked_at = :now, revoked_by = :by WHERE id = :id", "sql", {
+    now: new Date().toISOString(),
+    by: identity.user,
+    id,
+  });
+  log.info(`grant ${id} revoked by ${identity.user}`);
+  await refreshGrants();
+  return { revoked: true, id };
+}
+
+/** grants on data the caller owns (outgoing) and grants it receives (incoming) */
+function listGrants(scope) {
+  if (!positionMap) return { grants: [] };
+  const vis = scope.homes;
+  const out = [];
+  for (const g of grantCache) {
+    if (!isActive(g)) continue;
+    const outgoing = ownsHome(scope, g.target_home);
+    const incoming = vis === null || vis.has(g.to_pos);
+    if (!outgoing && !incoming) continue;
+    out.push({
+      id: g.id,
+      kind: g.kind,
+      target: g.target_name,
+      target_home: positionName(g.target_home),
+      to: positionName(g.to_pos),
+      reason: g.reason,
+      granted_by: g.granted_by,
+      expires_at: g.expires_at ?? null,
+      direction: outgoing ? "outgoing" : "incoming",
+    });
+  }
+  return { grants: out };
 }
 
 async function schemaGraph() {
@@ -861,6 +1004,45 @@ homes you can see).`,
     },
   );
 
+  if (SCOPED && caps.write !== "deny") server.tool(
+    "grant_access",
+    `Show data you own to another position for a while: either named entities or a whole subtree
+(a position and everything below it). Give a reason and an expiry (until, ISO date; at most 90
+days unless you hold the root). People with direct write rights grant at once; agents and queued
+writers propose, and a person approves. Data you only see through a grant can't be granted onward.`,
+    {
+      entities: z.array(z.object({ name: z.string().min(1), home: z.string().optional() })).min(1).max(32).optional(),
+      subtree: z.string().min(1).optional(),
+      to: z.string().min(1),
+      reason: z.string().min(3).max(500),
+      until: z.string().optional(),
+    },
+    async (args) => {
+      need("write");
+      return { content: [{ type: "text", text: JSON.stringify(await grantAccess(args, identity, scope)) }] };
+    },
+  );
+
+  if (SCOPED) server.tool(
+    "list_grants",
+    "List active grants on data you own (outgoing) and grants that show you data (incoming).",
+    {},
+    async () => {
+      need("read");
+      return { content: [{ type: "text", text: JSON.stringify(listGrants(scope)) }] };
+    },
+  );
+
+  if (SCOPED && caps.write !== "deny") server.tool(
+    "revoke_grant",
+    "Revoke a grant (takes effect at once). The person who granted it or any owner of the data may revoke.",
+    { id: z.string().min(1) },
+    async (args) => {
+      need("write");
+      return { content: [{ type: "text", text: JSON.stringify(await revokeGrant(args, identity, scope)) }] };
+    },
+  );
+
   if (caps.approve === true) server.tool(
     "list_pending_writes",
     "List queued graph writes awaiting approval (requires approve capability).",
@@ -990,6 +1172,11 @@ async function boot() {
   // declared, or SQL WHERE can't see it (see upsertEntities)
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._home IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_home) NOTUNIQUE`).catch(() => {});
+  if (SCOPED) {
+    await ensureGrantSchema();
+    await refreshGrants();
+    setInterval(() => void refreshGrants(), 60_000);
+  }
   await ensurePendingSchema();
   console.log(`[graph-rag] indexes ready: ${[...knownIndexes].join(", ")}`);
   const sweep = async () => {
