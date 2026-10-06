@@ -30,6 +30,17 @@ class Store {
   defaultProvider = $state<string | null>(null);
   defaultModel = $state<string | null>(null);
   private runtime = new SvelteMap<string, AgentRuntimeSummary>();
+  /** extension status text per agent (e.g. "sandbox: running"), shown in its header */
+  private statusLines = new SvelteMap<string, string>();
+
+  statusLineFor(id: string): string {
+    return this.statusLines.get(id) ?? "";
+  }
+
+  setStatusLine(id: string, text: string): void {
+    if (text) this.statusLines.set(id, text);
+    else this.statusLines.delete(id);
+  }
   private unreadListeners = new Set<() => void>();
 
   constructor() {

@@ -17,7 +17,6 @@
 
   let dialogs = $state<DialogState[]>([]);
   let toasts = $state<Array<{ id: string; agentId: string; message: string; kind: string }>>([]);
-  let statusLine = $state<string>("");
   let inputValue = $state("");
   let editorValue = $state("");
 
@@ -70,13 +69,13 @@
         case "setStatus": {
           const text = r.statusText ? String(r.statusText) : "";
           if (String(r.statusKey) === "gondolin") {
-            statusLine = text ? `sandbox: ${text}` : "";
+            store.setStatusLine(msg.agentId, text ? `sandbox: ${text}` : "");
           }
           break;
         }
         case "setWidget": {
           if (Array.isArray(r.widgetLines)) {
-            statusLine = (r.widgetLines as string[]).join(" · ");
+            store.setStatusLine(msg.agentId, (r.widgetLines as string[]).join(" · "));
           }
           break;
         }
@@ -157,9 +156,3 @@
     </div>
   {/each}
 </div>
-
-{#if statusLine}
-  <div class="fixed bottom-1 left-2 z-70 rounded bg-panel2/90 px-2 py-0.5 text-xs text-muted">
-    {statusLine}
-  </div>
-{/if}

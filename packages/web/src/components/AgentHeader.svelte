@@ -87,6 +87,9 @@
       <span class="max-[900px]:hidden">·</span> agent profile <span class="text-fg">{profile?.name ?? record?.profileId ?? "Default"}</span>
     </span>
     <span class="text-xs text-muted" role="status">· {statusView.label}</span>
+    {#if store.statusLineFor(agentId)}
+      <span class="truncate text-xs text-muted" title={store.statusLineFor(agentId)}>· {store.statusLineFor(agentId)}</span>
+    {/if}
   </div>
 
   <ul class="m-0 flex min-w-0 list-none flex-wrap items-center gap-1.5 p-0" aria-label="what this agent can reach">
