@@ -259,6 +259,8 @@ async function adbCommand(command, language = "sql", params) {
 
 /** escape a string literal for embedding in sql/cypher */
 const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+/** a user-typed term inside an ILIKE pattern: escaped, with its own wildcards removed */
+const likeTerm = (s) => esc(String(s).replace(/[%_]/g, ""));
 
 async function ensureIndex(facet) {
   if (knownIndexes.has(facet)) return;
@@ -423,7 +425,8 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
   if (!vectorWorked && !temporal_filter) {
     const terms = query.split(/\s+/).filter((t) => t.length > 2).slice(0, 6);
     if (terms.length > 0) {
-      const conds = terms.map((t) => `(name CONTAINS '${esc(t)}' OR text_identity CONTAINS '${esc(t)}')`);
+      // ILIKE: ArcadeDB's CONTAINS is a collection operator and never matches substrings
+      const conds = terms.map((t) => `(name ILIKE '%${likeTerm(t)}%' OR text_identity ILIKE '%${likeTerm(t)}%')`);
       const rows = await adbQuery(
         `SELECT FROM ${ENTITY_LABEL} WHERE (${conds.join(" OR ")})${visible} LIMIT ${k}`,
       );
@@ -1209,8 +1212,7 @@ app.get("/api/entities", (req, res) => {
   if (!ctx) return;
   const q = String(req.query.q ?? "").trim().slice(0, 80);
   // case-insensitive: people type "thinkcentre" for "ThinkCentre"
-  const lq = esc(q.toLowerCase());
-  const match = q ? ` AND (name.toLowerCase() CONTAINS '${lq}' OR text_identity.toLowerCase() CONTAINS '${lq}')` : "";
+  const match = q ? ` AND (name ILIKE '%${likeTerm(q)}%' OR text_identity ILIKE '%${likeTerm(q)}%')` : "";
   void adbQuery(`SELECT name, _home FROM ${ENTITY_LABEL} WHERE name IS NOT NULL${match}${homeFilter(ctx.scope, { own: true })} ORDER BY name LIMIT 25`).then(
     (rows) => res.json({ entities: rows.map((r) => ({ name: r.name, home: homeLabel(r._home) })) }),
     (e) => httpError(res, e),
