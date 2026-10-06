@@ -62,6 +62,7 @@ export class AgentStore {
       thinkingLevel: input.thinkingLevel,
       mcpServers: input.mcpServers ?? [],
       gondolin: {
+        ...(input.gondolin?.enabled !== undefined ? { enabled: input.gondolin.enabled } : {}),
         allowedHosts: input.gondolin?.allowedHosts ?? [],
         ...(input.gondolin?.allowedInternalHosts !== undefined ? { allowedInternalHosts: input.gondolin.allowedInternalHosts } : {}),
         secrets: input.gondolin?.secrets ?? {},

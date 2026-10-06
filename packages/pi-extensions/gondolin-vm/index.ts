@@ -27,6 +27,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { createHttpHooks, RealFSProvider, VM } from "@earendil-works/gondolin";
 
+import { shQuote, writeFileScript } from "./write-script.ts";
+
 const GUEST_WORKSPACE = "/workspace";
 
 interface GondolinAgentConfig {
@@ -45,10 +47,6 @@ interface GondolinAgentConfig {
     allowedInternalHosts?: string[];
     secrets?: Record<string, { hosts: string[]; valueEnv: string }>;
   };
-}
-
-function shQuote(value: string): string {
-  return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
 function toGuestPath(localCwd: string, localPath: string): string {
@@ -92,15 +90,8 @@ function createGondolinWriteOps(vm: VM, localCwd: string): WriteOperations {
   return {
     writeFile: async (p, content) => {
       const guestPath = toGuestPath(localCwd, p);
-      const dir = path.posix.dirname(guestPath);
-      // chunked base64 to stay under MAX_ARG_STRLEN (gondolin #130)
-      const b64 = Buffer.from(content, "utf8").toString("base64");
-      const CHUNK = 65536;
-      const script = [`set -eu`, `mkdir -p ${shQuote(dir)}`, `: > ${shQuote(guestPath)}`];
-      for (let i = 0; i < b64.length; i += CHUNK) {
-        script.push(`printf %s ${shQuote(b64.slice(i, i + CHUNK))} >> ${shQuote(guestPath)}`);
-      }
-      const r = await vm.exec(["/bin/sh", "-lc", script.join("\n")]);
+      // base64 chunks -> temp file -> base64 -d into place (see write-script.ts)
+      const r = await vm.exec(["/bin/sh", "-lc", writeFileScript(guestPath, content)]);
       if (!r.ok) throw new Error(`write failed (${r.exitCode}): ${r.stderr}`);
     },
     mkdir: async (dir) => {

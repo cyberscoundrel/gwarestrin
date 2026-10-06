@@ -47,6 +47,17 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   private mcpRegistry: McpRegistryStore | undefined;
   private running = new Map<string, RpcAgent>();
   private restartBudget = new Map<string, number>();
+  /** pending bounded auto-restart timers, cancelled by stop()/start() */
+  private restartTimers = new Map<string, NodeJS.Timeout>();
+  /**
+   * agent instances we asked to stop. pi handles SIGTERM itself and exits
+   * normally (code set, signal null), so the exit signal alone cannot tell a
+   * requested stop from a crash. Tracked per instance (not per id) so the
+   * late exit of an old process during restart() is attributed correctly.
+   */
+  private stopRequested = new WeakSet<RpcAgent>();
+  /** instances killed by a failed start(); their exit must keep status error */
+  private startFailed = new WeakSet<RpcAgent>();
   private extensionsRoot: string;
 
   constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore, profiles?: ProfileStore) {
@@ -202,6 +213,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const record = this.store.get(id);
     if (!record) throw new Error(`no such agent: ${id}`);
     if (this.running.has(id)) return this.running.get(id)!.summary();
+    this.cancelPendingRestart(id);
 
     const runningCount = this.running.size;
     if (runningCount >= this.config.maxAgents) {
@@ -261,7 +273,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     });
     agent.on("state", (state) => this.emit("agentState", state));
 
-    proc.on("exit", (info) => this.onExit(id, info));
+    proc.on("exit", (info) => this.onExit(id, agent, info));
 
     try {
       // readiness probe: first successful response means RPC is up and
@@ -274,24 +286,30 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       log.info(`agent ${record.name} (${id}) running pid=${proc.pid}`);
       return agent.summary();
     } catch (err) {
-      this.running.delete(id);
+      if (this.running.get(id) === agent) this.running.delete(id);
       this.store.setStatus(id, "error");
       agent.noteError(err instanceof Error ? err.message : String(err));
+      this.startFailed.add(agent);
       proc.kill("SIGKILL");
       throw err;
     }
   }
 
   async stop(id: string): Promise<void> {
+    // a requested stop also cancels a pending crash auto-restart
+    this.cancelPendingRestart(id);
+    this.restartBudget.delete(id);
     const agent = this.running.get(id);
     if (!agent) {
       this.store.setStatus(id, "stopped");
       return;
     }
+    // mark before anything can make the process exit
+    this.stopRequested.add(agent);
     try {
       await agent.waitIdle().catch(() => {});
     } finally {
-      this.running.delete(id);
+      if (this.running.get(id) === agent) this.running.delete(id);
       agent.kill("SIGTERM");
       this.store.setStatus(id, "stopped");
       log.info(`agent ${id} stopped`);
@@ -303,30 +321,58 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     return this.start(id);
   }
 
-  private onExit(id: string, info: { code: number | null; signal: NodeJS.Signals | null; crashed: boolean }): void {
-    const agent = this.running.get(id);
-    this.running.delete(id);
-    if (info.signal === "SIGTERM" || info.signal === "SIGKILL") {
-      // deliberate stop
+  private cancelPendingRestart(id: string): void {
+    const timer = this.restartTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      this.restartTimers.delete(id);
+    }
+  }
+
+  private onExit(
+    id: string,
+    agent: RpcAgent,
+    info: { code: number | null; signal: NodeJS.Signals | null; crashed: boolean },
+  ): void {
+    const current = this.running.get(id);
+    if (current === agent) this.running.delete(id);
+
+    if (this.startFailed.has(agent)) {
+      // start() already recorded status "error" and the reason; keep it
+      this.startFailed.delete(agent);
+      return;
+    }
+    if (current && current !== agent) {
+      // stale exit of a replaced instance (e.g. old process exiting after
+      // restart() already spawned a new one): don't touch the new one's state
+      this.stopRequested.delete(agent);
+      log.info(`agent ${id}: previous process exited (code=${info.code} signal=${info.signal})`);
+      return;
+    }
+    if (this.stopRequested.has(agent) || info.signal === "SIGTERM" || info.signal === "SIGKILL") {
+      // deliberate stop (signal check is a fallback for kills from outside stop())
+      this.stopRequested.delete(agent);
+      this.restartBudget.delete(id);
       this.store.setStatus(id, "stopped");
       return;
     }
     log.warn(`agent ${id} crashed (code=${info.code} signal=${info.signal})`);
     this.store.setStatus(id, "error");
-    if (agent) {
-      agent.noteError(`exit code=${info.code} signal=${info.signal}\n${agent.lastStderr()}`.trim());
-    }
+    agent.noteError(`exit code=${info.code} signal=${info.signal}\n${agent.lastStderr()}`.trim());
     // bounded auto-restart (budget tracked per agent id in the manager)
     const attempt = (this.restartBudget.get(id) ?? 0) + 1;
     this.restartBudget.set(id, attempt);
     if (attempt <= MAX_RESTARTS) {
       const delay = 2_000 * 2 ** (attempt - 1);
       log.info(`restarting agent ${id} in ${delay}ms (attempt ${attempt}/${MAX_RESTARTS})`);
-      setTimeout(() => {
+      this.cancelPendingRestart(id);
+      const timer = setTimeout(() => {
+        this.restartTimers.delete(id);
         this.start(id)
           .then(() => this.restartBudget.set(id, 0))
           .catch((err) => log.error(`restart failed for ${id}`, err));
       }, delay);
+      this.restartTimers.set(id, timer);
     } else {
       log.error(`agent ${id} exceeded restart budget; leaving stopped`);
     }
