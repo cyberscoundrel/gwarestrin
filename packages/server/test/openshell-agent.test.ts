@@ -243,6 +243,8 @@ describe("OpenShellAgentLauncher", () => {
     ]);
     // the stale shared credential is detached; providers not managed by this instance are left alone
     expect(f.calls.filter((c) => c[0] === "detach").map((c) => (c[1] as { provider: string }).provider)).toEqual(["gw-alice-mcp-graph-rag"]);
+    // and the shared (user-level) credential is retired
+    expect(f.calls.filter((c) => c[0] === "deleteProvider").map((c) => c[1])).toEqual(["gw-alice-mcp-graph-rag"]);
   });
 
   it("deletes only the agent's own providers with its sandbox", async () => {

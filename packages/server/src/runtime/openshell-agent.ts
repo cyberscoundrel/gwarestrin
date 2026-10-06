@@ -290,6 +290,16 @@ export class OpenShellAgentLauncher {
       for (const name of stale) {
         await this.deps.sandbox.detachProvider(sandbox, name, scope);
         log.info(`detached ${name} from ${sandbox}`);
+        // a shared MCP credential from before per-agent ones (the user-level
+        // graph token) is retired: if the gateway refuses (still attached
+        // elsewhere) a later start removes it; if it doesn't, agents still on
+        // it lose graph access until their next start gives them their own
+        if (/-mcp-[a-z0-9-]+$/.test(name) && !/-[0-9a-f]{8}$/.test(name)) {
+          await this.deps.providers.deleteProvider(name).then(
+            () => log.info(`deleted shared provider ${name}`),
+            () => {},
+          );
+        }
       }
     } catch (err) {
       log.warn(`provider cleanup for ${sandbox} failed: ${err instanceof Error ? err.message : String(err)}`);
