@@ -192,6 +192,38 @@ describe("OpenShellAgentLauncher", () => {
     expect((f.transport()[1] as string[]).includes("--session")).toBe(false);
   });
 
+  it("carries an existing local workspace into a new sandbox, once", async () => {
+    const run = async (created: boolean) => {
+      const f = fakes(created);
+      const scripts: string[][] = [];
+      let uploaded = "";
+      const exec = f.deps.sandbox.exec;
+      f.deps.sandbox.exec = (async (name: string, argv: string[], opts?: { stdin?: Buffer }) => {
+        scripts.push(argv);
+        if (argv[2] === 'cat >> "$1"' && argv[4]?.endsWith(".gw-seed.tar")) uploaded += opts?.stdin?.toString("latin1") ?? "";
+        return (exec as (...a: unknown[]) => unknown)(name, argv, opts);
+      }) as never;
+      const dirs = await fixture();
+      await mkdir(path.join(dirs.workspace, "notes"), { recursive: true });
+      await writeFile(path.join(dirs.workspace, "notes", "ops.md"), "hello from the local runtime\n");
+      await new OpenShellAgentLauncher(f.deps).prepare(inputs(dirs));
+      return { scripts, uploaded: () => uploaded };
+    };
+
+    const fresh = await run(true);
+    const tar = fresh.uploaded();
+    expect(tar).toContain("notes/ops.md");
+    expect(tar).toContain("hello from the local runtime");
+    // the generated MCP config is pushed separately, never from the host copy
+    expect(tar).not.toContain(".mcp.json");
+    const extract = fresh.scripts.find((a) => a[0] === "sh" && a[2]!.startsWith("tar -xf"));
+    expect(extract?.slice(4)).toEqual(["/sandbox/workspace/.gw-seed.tar", "/sandbox/workspace"]);
+
+    const reused = await run(false);
+    expect(reused.uploaded()).toBe("");
+    expect(reused.scripts.some((a) => a[2]?.startsWith("tar -xf"))).toBe(false);
+  });
+
   it("refreshes policy and attachments on a reused sandbox", async () => {
     const f = fakes(false);
     await new OpenShellAgentLauncher(f.deps).prepare(inputs(await fixture()));

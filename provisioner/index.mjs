@@ -269,6 +269,8 @@ function tenantContainerSpec(name, tier) {
     "GWARESTRIN_STATE=/var/lib/gwarestrin",
     "GWARESTRIN_PROVIDERS_FILE=/etc/gwarestrin/providers.json",
     "GWARESTRIN_INSTANCE_METADATA=/etc/gwarestrin/instance.json",
+    // labeled-sidecar MCP discovery (graph-rag, mssql, ...)
+    `DOCKER_PROXY_URL=${process.env.TENANT_DOCKER_PROXY_URL ?? "http://docker-proxy:2375"}`,
     ...(sandboxed
       ? [
           "GWARESTRIN_RUNTIME=openshell",

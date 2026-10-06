@@ -179,7 +179,8 @@ export function createOpenShell({ ak, akFind, log }) {
       log("authentik: oauth2 provider openshell reconciled");
     }
 
-    let app = await akFind("/core/applications/?page_size=200", (a) => a.slug === "openshell");
+    // the plain list only shows apps the caller may use; the access policy excludes us
+    let app = await akFind("/core/applications/?superuser_full_list=true&page_size=200", (a) => a.slug === "openshell");
     if (!app) {
       app = await ak("POST", "/core/applications/", { name: "openshell", slug: "openshell", provider: provider.pk, policy_engine_mode: "any" });
       log("authentik: application openshell created");
