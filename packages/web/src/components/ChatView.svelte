@@ -79,9 +79,9 @@
           class="animate-drawer-right w-80 shrink-0 max-[900px]:absolute max-[900px]:inset-0 max-[900px]:z-20 max-[900px]:w-full"
         >
           {#if drawer === "files"}
-            <FilesPanel {agentId} />
+            <FilesPanel {agentId} onclose={() => (drawer = "closed")} />
           {:else if drawer === "mcp"}
-            <McpPanel {agentId} />
+            <McpPanel {agentId} onclose={() => (drawer = "closed")} />
           {:else}
             <ContextPanel {agentId} onclose={() => (drawer = "closed")} />
           {/if}

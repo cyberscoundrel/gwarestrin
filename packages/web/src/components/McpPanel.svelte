@@ -2,9 +2,16 @@
   import { onMount } from "svelte";
   import { api, mcpApi, type McpServerDef } from "../lib/api.js";
   import { store } from "../lib/stores.svelte.js";
-  import Dropdown from "./Dropdown.svelte";
+  import { Lock, Pencil, Plus, Trash2, TriangleAlert, Wrench } from "lucide";
+  import Icon from "./Icon.svelte";
+  import PanelHeader from "./PanelHeader.svelte";
+  import EmptyState from "./EmptyState.svelte";
+  import SkeletonRows from "./SkeletonRows.svelte";
+  import Switch from "./Switch.svelte";
 
-  let { agentId }: { agentId: string } = $props();
+  let { agentId, onclose }: { agentId: string; onclose?: (() => void) | undefined } = $props();
+
+  let showCatalogue = $state(false);
 
   const record = $derived(store.agents.find((a) => a.id === agentId));
 
@@ -103,7 +110,7 @@
   async function save(): Promise<void> {
     const name = formName.trim();
     if (!name) {
-      error = "connection name required";
+      error = "Give the connection a name.";
       return;
     }
     const def: McpServerDef = {};
@@ -130,7 +137,7 @@
   }
 
   async function remove(name: string): Promise<void> {
-    if (!confirm(`remove tool connection "${name}" from the workspace? every agent loses it.`)) return;
+    if (!confirm(`Remove tool connection "${name}" from the workspace? Every agent loses access to it.`)) return;
     busy = true;
     error = null;
     try {
@@ -146,112 +153,193 @@
     return def.url ? def.url : `${def.command} ${(def.args ?? []).join(" ")}`.trim();
   }
 
-  function statusDot(name: string): { color: string; title: string } {
-    if (!isEnabled(name)) return { color: "text-dim", title: "not enabled for this agent" };
+  function statusDot(name: string): { cls: string; title: string } {
+    if (!isEnabled(name)) return { cls: "bg-edge2", title: "Off for this agent" };
     const p = probes[name];
-    if (!p || p.reachable === null) return { color: "text-dim", title: "local command connection (no reachability check)" };
-    if (p.reachable) return { color: "text-ok", title: `reachable${p.ms != null ? ` · ${p.ms}ms` : ""}` };
-    return { color: "text-err", title: "unreachable" };
+    if (!p || p.reachable === null) return { cls: "bg-faint", title: "Local command connection (no reachability check)" };
+    if (p.reachable) return { cls: "bg-ok", title: `Reachable${p.ms != null ? ` · ${p.ms} ms` : ""}` };
+    return { cls: "bg-err", title: "Unreachable" };
   }
+
+  const allowedEntries = $derived(sortedEntries.filter(([n]) => isGranted(n)));
+  const blockedEntries = $derived(sortedEntries.filter(([n]) => !isGranted(n)));
+  const onCount = $derived(allowedEntries.filter(([n]) => isEnabled(n)).length);
 </script>
 
+{#snippet row(name: string, def: McpServerDef, allowed: boolean)}
+  {@const dot = statusDot(name)}
+  <li class="flex items-center gap-3 rounded-md px-2.5 py-2 transition-colors hover:bg-hover">
+    <span class="h-1.5 w-1.5 shrink-0 rounded-full {dot.cls}" role="img" aria-label={dot.title} title={dot.title}></span>
+    <div class="grid min-w-0 flex-1">
+      <span class="flex items-center gap-1.5 truncate text-sm {allowed ? 'text-fg' : 'text-dim'}">
+        {name}
+        {#if !allowed}<Icon icon={Lock} size={12} class="text-faint" label="not allowed" />{/if}
+      </span>
+      <span class="truncate font-mono text-2xs text-faint" title={summarize(def)}>
+        {def.description ?? summarize(def)}
+      </span>
+    </div>
+    <Switch
+      checked={isEnabled(name)}
+      disabled={busy || !record || (!allowed && !isEnabled(name))}
+      label="{isEnabled(name) ? 'switch off' : 'switch on'} {name} for this agent"
+      onchange={() => void toggle(name)}
+    />
+  </li>
+{/snippet}
+
 <div class="flex h-full flex-col border-l border-edge bg-panel text-sm">
-  <div class="flex items-center gap-2 border-b border-edge px-3 py-2">
-    <span class="font-semibold tracking-wide">tool connections</span>
-    <button
-      class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-dim hover:text-fg"
-      title="add a tool connection to the workspace"
-      onclick={() => startEdit(null)}
-    >
-      + add
-    </button>
-  </div>
+  <PanelHeader
+    title="Tools"
+    subtitle="Tool connections this agent may use. {profileName} sets the limit."
+    icon={Wrench}
+    {onclose}
+  />
 
   <div class="min-h-0 flex-1 overflow-y-auto">
     {#if error}
-      <p class="px-3 py-2 text-err">{error}</p>
-    {/if}
-
-    {#if editing !== null}
-      <div class="grid gap-2 border-b border-edge px-3 py-2">
-        <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="name" bind:value={formName} disabled={editing !== ""} />
-        <Dropdown
-          value={formTransport}
-          options={[
-            { value: "stdio", label: "stdio (command)" },
-            { value: "http", label: "http (url)" },
-          ]}
-          onchange={(t) => (formTransport = t as "stdio" | "http")}
-        />
-        {#if formTransport === "stdio"}
-          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="command (e.g. npx)" bind:value={formCommand} />
-          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="args (space separated)" bind:value={formArgs} />
-        {:else}
-          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="url (https://…/mcp)" bind:value={formUrl} />
-          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="bearer token env var (optional)" bind:value={formBearerEnv} />
-        {/if}
-        <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="description (optional)" bind:value={formDescription} />
-        <div class="flex justify-end gap-2">
-          <button class="rounded border border-edge2 bg-transparent px-2 py-1 text-xs text-dim hover:text-fg" onclick={() => (editing = null)}>cancel</button>
-          <button class="rounded bg-signal px-3 py-1 text-xs font-semibold text-on-signal disabled:opacity-50" disabled={busy} onclick={() => void save()}>save</button>
-        </div>
+      <div class="mx-4 mt-3 flex items-start gap-2 rounded-md border border-err/30 bg-err-soft px-3 py-2 text-xs text-err" role="alert">
+        <Icon icon={TriangleAlert} size={14} class="mt-px" />
+        {error}
       </div>
     {/if}
 
     {#if !loaded && !error}
-      <p class="px-3 py-2 text-dim">loading…</p>
+      <SkeletonRows rows={3} />
     {:else if Object.keys(registry).length === 0}
-      <p class="px-3 py-2 text-dim">no tool connections in this workspace yet — add one to make it available to agent profiles</p>
+      <EmptyState
+        icon={Wrench}
+        title="No tool connections yet"
+        hint="Add one to the workspace, then allow it in an agent profile."
+      />
     {:else}
-      <ul class="m-0 list-none p-0">
-        {#each sortedEntries as [name, def] (name)}
-          {@const dot = statusDot(name)}
-          <li class="border-b border-edge/50 px-3 py-2">
-            <div class="flex items-center gap-2">
-              <span class="{dot.color}" title={dot.title} role="img" aria-label={dot.title}>●</span>
-              <label
-                class="flex flex-1 items-center gap-2 truncate"
-                title={isGranted(name) ? summarize(def) : `not allowed by ${profileName}`}
-              >
-                <input
-                  type="checkbox"
-                  checked={isEnabled(name)}
-                  disabled={busy || !record || (!isGranted(name) && !isEnabled(name))}
-                  aria-label="{isEnabled(name) ? 'switch off' : 'switch on'} {name} for this agent"
-                  onchange={() => void toggle(name)}
-                />
-                <span class="truncate font-medium">{name}</span>
-                {#if !isGranted(name)}
-                  <span class="rounded border border-edge px-1 text-[0.65rem] text-dim" title="this agent's profile ({profileName}) does not allow this connection">not allowed</span>
-                {/if}
-              </label>
-              <button
-                class="rounded px-1 text-xs text-dim hover:text-fg"
-                title="edit {name} (workspace-wide, all agents)"
-                aria-label="edit tool connection {name} for the whole workspace"
-                onclick={() => startEdit(name)}>✎</button>
-              <button
-                class="rounded px-1 text-xs text-err hover:bg-err-soft"
-                title="remove {name} from the workspace (all agents)"
-                aria-label="remove tool connection {name} from the workspace"
-                onclick={() => void remove(name)}>✕</button>
-            </div>
-            <div class="mt-0.5 truncate pl-6 text-xs text-dim" title={summarize(def)}>
-              {summarize(def)}{def.description ? ` — ${def.description}` : ""}
-            </div>
-          </li>
-        {/each}
-      </ul>
+      <section class="px-1.5 pt-3 pb-2">
+        <div class="flex items-center justify-between px-2.5 pb-1.5">
+          <span class="eyebrow">Allowed</span>
+          <span class="tabular text-2xs text-faint">{onCount} of {allowedEntries.length} on</span>
+        </div>
+        {#if allowedEntries.length === 0}
+          <p class="m-0 px-2.5 py-2 text-xs text-faint">{profileName} allows no tool connections.</p>
+        {:else}
+          <ul class="m-0 grid list-none gap-px p-0">
+            {#each allowedEntries as [name, def] (name)}
+              {@render row(name, def, true)}
+            {/each}
+          </ul>
+        {/if}
+      </section>
+
+      {#if blockedEntries.length > 0}
+        <section class="border-t border-edge px-1.5 pt-3 pb-2">
+          <div class="px-2.5 pb-1.5">
+            <span class="eyebrow">Not allowed by {profileName}</span>
+          </div>
+          <ul class="m-0 grid list-none gap-px p-0">
+            {#each blockedEntries as [name, def] (name)}
+              {@render row(name, def, false)}
+            {/each}
+          </ul>
+          <p class="m-0 px-2.5 pt-1 text-xs text-faint">Edit the agent profile to allow more.</p>
+        </section>
+      {/if}
     {/if}
+
+    <!-- workspace-wide administration, deliberately separate from the
+         per-agent switches above: changes here affect every agent -->
+    <section class="mx-3 mt-3 mb-4 rounded-lg border border-edge bg-bg">
+      <button
+        class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-hover"
+        aria-expanded={showCatalogue}
+        onclick={() => (showCatalogue = !showCatalogue)}
+      >
+        <span class="grid">
+          <span class="text-xs font-medium text-fg">Workspace connections</span>
+          <span class="text-2xs text-faint">Add, edit or remove for every agent</span>
+        </span>
+        <span class="text-2xs text-faint">{showCatalogue ? "Hide" : "Manage"}</span>
+      </button>
+
+      {#if showCatalogue}
+        <div class="animate-enter border-t border-edge p-1.5">
+          <ul class="m-0 grid list-none gap-px p-0">
+            {#each Object.entries(registry) as [name, def] (name)}
+              <li class="group flex items-center gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-hover">
+                <span class="min-w-0 flex-1 truncate text-xs text-fg" title={summarize(def)}>{name}</span>
+                <button
+                  class="grid h-6 w-6 cursor-pointer place-items-center rounded-md text-faint transition-colors hover:bg-selected hover:text-fg"
+                  title="Edit {name} (workspace-wide)"
+                  aria-label="edit tool connection {name} for the whole workspace"
+                  onclick={() => startEdit(name)}><Icon icon={Pencil} size={13} /></button
+                >
+                <button
+                  class="grid h-6 w-6 cursor-pointer place-items-center rounded-md text-faint transition-colors hover:bg-err-soft hover:text-err"
+                  title="Remove {name} from the workspace (all agents)"
+                  aria-label="remove tool connection {name} from the workspace"
+                  onclick={() => void remove(name)}><Icon icon={Trash2} size={13} /></button
+                >
+              </li>
+            {/each}
+          </ul>
+
+          {#if editing !== null}
+            <form
+              class="animate-enter mt-1.5 grid gap-3 rounded-md border border-edge bg-panel p-3"
+              onsubmit={(e) => {
+                e.preventDefault();
+                void save();
+              }}
+            >
+              <div class="field">
+                <label class="field-label" for="mcp-name">Name</label>
+                <input id="mcp-name" class="input" placeholder="e.g. crm" bind:value={formName} disabled={editing !== ""} />
+              </div>
+              <div class="field">
+                <span class="field-label">Connects via</span>
+                <div class="segmented" role="group" aria-label="transport">
+                  <button type="button" aria-pressed={formTransport === "stdio"} onclick={() => (formTransport = "stdio")}>Command</button>
+                  <button type="button" aria-pressed={formTransport === "http"} onclick={() => (formTransport = "http")}>HTTP URL</button>
+                </div>
+              </div>
+              {#if formTransport === "stdio"}
+                <div class="field">
+                  <label class="field-label" for="mcp-cmd">Command</label>
+                  <input id="mcp-cmd" class="input input-mono" placeholder="npx" bind:value={formCommand} />
+                </div>
+                <div class="field">
+                  <label class="field-label" for="mcp-args">Arguments</label>
+                  <input id="mcp-args" class="input input-mono" placeholder="-y @modelcontextprotocol/server-filesystem /workspace" bind:value={formArgs} />
+                  <span class="field-hint">Separated by spaces.</span>
+                </div>
+              {:else}
+                <div class="field">
+                  <label class="field-label" for="mcp-url">URL</label>
+                  <input id="mcp-url" class="input input-mono" placeholder="https://…/mcp" bind:value={formUrl} />
+                </div>
+                <div class="field">
+                  <label class="field-label" for="mcp-env">Bearer token variable</label>
+                  <input id="mcp-env" class="input input-mono" placeholder="CRM_TOKEN (optional)" bind:value={formBearerEnv} />
+                  <span class="field-hint">Name of a server-side environment variable, never the token itself.</span>
+                </div>
+              {/if}
+              <div class="field">
+                <label class="field-label" for="mcp-desc">Description</label>
+                <input id="mcp-desc" class="input" placeholder="What it gives agents access to" bind:value={formDescription} />
+              </div>
+              <div class="flex justify-end gap-2">
+                <button type="button" class="btn btn-ghost btn-sm" onclick={() => (editing = null)}>Cancel</button>
+                <button type="submit" class="btn btn-primary btn-sm" disabled={busy}>{editing === "" ? "Add connection" : "Save"}</button>
+              </div>
+            </form>
+          {:else}
+            <button class="btn btn-ghost btn-sm mt-1 w-full justify-start" onclick={() => startEdit(null)}>
+              <Icon icon={Plus} size={13} />
+              Add tool connection
+            </button>
+          {/if}
+        </div>
+      {/if}
+    </section>
   </div>
 
-  <div class="border-t border-edge px-3 py-1.5 text-xs text-dim">
-    ticked = switched on for this agent; changing one restarts the agent.
-    {#if allowedSet !== null}
-      only connections allowed by <span class="text-fg">{profileName}</span> can be switched on — edit the agent
-      profile to allow more.
-    {:else}
-      <span class="text-fg">{profileName}</span> allows every workspace connection.
-    {/if}
-  </div>
+  <div class="border-t border-edge px-4 py-2 text-2xs text-faint">Switching a connection restarts the agent.</div>
 </div>

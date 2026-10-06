@@ -1,5 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { Check, CircleCheck, Inbox, TriangleAlert, X } from "lucide";
+  import Dialog from "./Dialog.svelte";
+  import PanelHeader from "./PanelHeader.svelte";
+  import EmptyState from "./EmptyState.svelte";
+  import SkeletonRows from "./SkeletonRows.svelte";
+  import Icon from "./Icon.svelte";
 
   let { onclose }: { onclose: () => void } = $props();
 
@@ -15,6 +21,18 @@
   let pending = $state<Pending[]>([]);
   let busy = $state(false);
   let error = $state<string | null>(null);
+  let loaded = $state(false);
+
+  function ago(iso: string | undefined): string {
+    const t = iso ? Date.parse(iso) : NaN;
+    if (Number.isNaN(t)) return iso ?? "";
+    const m = Math.round((Date.now() - t) / 60_000);
+    if (m < 1) return "just now";
+    if (m < 60) return `${m} min ago`;
+    const h = Math.round(m / 60);
+    if (h < 24) return `${h} h ago`;
+    return new Date(t).toLocaleDateString();
+  }
 
   async function refresh(): Promise<void> {
     error = null;
@@ -30,6 +48,7 @@
         payload: String(p.payload ?? ""),
         language: String(p.language ?? "sql"),
       }));
+      loaded = true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -56,14 +75,6 @@
     }
   }
 
-  $effect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onclose();
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  });
-
   onMount(() => {
     void refresh();
     const t = setInterval(() => void refresh(), 15_000);
@@ -71,54 +82,52 @@
   });
 </script>
 
-<div class="fixed inset-0 z-50 bg-black/55" role="presentation" onclick={onclose}></div>
-<div
-  class="fixed top-1/2 left-1/2 z-51 flex max-h-[80vh] w-[min(46rem,92vw)] -translate-x-1/2 -translate-y-1/2 flex-col
-    gap-3 overflow-hidden rounded-xl border border-edge2 bg-panel2 p-5"
-  role="dialog"
-  aria-modal="true"
-  aria-labelledby="graph-queue-title"
->
-  <div class="flex items-center justify-between">
-    <h3 id="graph-queue-title" class="m-0 tracking-wide">approvals <span class="text-sm font-normal text-dim">· changes agents want to write to the knowledge graph</span></h3>
-    <button class="cursor-pointer border-none bg-transparent text-dim hover:text-fg" aria-label="close" onclick={onclose}>✕</button>
-  </div>
+<Dialog {onclose} labelledby="graph-queue-title" width="44rem">
+  <PanelHeader
+    id="graph-queue-title"
+    title="Approvals"
+    subtitle="Changes agents want to write to the knowledge graph. Nothing is written until someone approves."
+    icon={Inbox}
+    {onclose}
+  />
 
-  {#if error}<p class="m-0 text-sm text-err">{error}</p>{/if}
-  {#if !enabled}
-    <p class="m-0 text-sm text-dim">approvals aren't set up for this workspace.</p>
-  {:else if !error || pending.length > 0}
-    {#if pending.length === 0}
-      <p class="m-0 py-6 text-center text-sm text-dim">nothing is waiting for approval.</p>
-    {:else}
-      <div class="min-h-0 flex-1 overflow-y-auto">
-        {#each pending as p (p["@rid"])}
-          <div class="mb-2 rounded-lg border border-edge2 bg-bg p-3">
-            <div class="mb-1 flex flex-wrap items-center gap-2 text-xs text-dim">
-              <span class="font-mono">{p["@rid"]}</span>
-              <span>· {p.requested_by}</span>
-              <span>· {p.created_at}</span>
-              <span class="ml-auto flex gap-1">
-                <button
-                  class="cursor-pointer rounded-md bg-ok px-3 py-1 text-xs font-semibold text-on-signal disabled:opacity-50"
-                  disabled={busy}
-                  onclick={() => void act("approve", p["@rid"])}
-                >
-                  approve
-                </button>
-                <button
-                  class="cursor-pointer rounded-md bg-err px-3 py-1 text-xs font-semibold text-on-signal disabled:opacity-50"
-                  disabled={busy}
-                  onclick={() => void act("reject", p["@rid"])}
-                >
-                  reject
-                </button>
-              </span>
-            </div>
-            <pre class="m-0 max-h-60 overflow-y-auto rounded border border-edge bg-panel p-2 font-mono text-xs break-words whitespace-pre-wrap text-fg">{p.payload}</pre>
-          </div>
-        {/each}
+  <div class="min-h-0 flex-1 overflow-y-auto">
+    {#if error}
+      <div class="mx-5 mt-4 flex items-start gap-2 rounded-md border border-err/30 bg-err-soft px-3 py-2 text-xs text-err" role="alert">
+        <Icon icon={TriangleAlert} size={14} class="mt-px" />
+        {error}
       </div>
     {/if}
-  {/if}
-</div>
+    {#if !enabled}
+      <EmptyState icon={Inbox} title="Approvals aren't set up" hint="This workspace has no review step for knowledge-graph writes." />
+    {:else if !loaded && !error}
+      <SkeletonRows rows={3} />
+    {:else if pending.length === 0 && !error}
+      <EmptyState icon={CircleCheck} title="All caught up" hint="Nothing is waiting for approval. New requests appear here as agents make them." />
+    {:else}
+      <ul class="m-0 grid list-none gap-3 p-5">
+        {#each pending as p (p["@rid"])}
+          <li class="animate-enter grid gap-3 rounded-lg border border-edge bg-panel p-4">
+            <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              <span class="text-sm text-fg">Requested by <span class="font-medium">{p.requested_by}</span></span>
+              <span class="text-xs text-faint" title={p.created_at}>{ago(p.created_at)}</span>
+              <span class="ml-auto font-mono text-2xs text-faint" title="record id">{p["@rid"]}</span>
+            </div>
+            <pre
+              class="m-0 max-h-60 overflow-y-auto rounded-md border border-edge bg-inset p-3 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap text-fg">{p.payload}</pre>
+            <div class="flex justify-end gap-2">
+              <button class="btn btn-danger btn-sm" disabled={busy} onclick={() => void act("reject", p["@rid"])}>
+                <Icon icon={X} size={13} />
+                Reject
+              </button>
+              <button class="btn btn-primary btn-sm" disabled={busy} onclick={() => void act("approve", p["@rid"])}>
+                <Icon icon={Check} size={13} />
+                Approve
+              </button>
+            </div>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </div>
+</Dialog>

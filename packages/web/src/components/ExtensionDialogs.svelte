@@ -3,6 +3,14 @@
   import { ws } from "../lib/ws-client.js";
   import { store } from "../lib/stores.svelte.js";
   import type { WsUiRequest } from "@gwarestrin/shared";
+  import { Bot, Info, TriangleAlert } from "lucide";
+  import Dialog from "./Dialog.svelte";
+  import Icon from "./Icon.svelte";
+
+  // focus the first field when a dialog opens (instead of the autofocus attr)
+  function focusOnMount(el: HTMLElement): void {
+    el.focus();
+  }
 
   type DialogState = {
     agentId: string;
@@ -91,68 +99,81 @@
 </script>
 
 {#each dialogs as d (d!.id)}
-  <div class="fixed inset-0 z-60 bg-black/55" role="presentation"></div>
-  <div class="fixed top-1/2 left-1/2 z-61 grid w-[min(36rem,92vw)] -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl border border-edge2 bg-panel2 p-5" role="dialog" aria-modal="true">
-    <div class="grid gap-0.5 pr-6">
-      <span class="truncate text-xs text-dim">
-        request from agent <span class="text-fg">{store.agents.find((a) => a.id === d!.agentId)?.name ?? d!.agentId}</span>
-      </span>
-      <h3 class="m-0">{d!.title ?? d!.method}</h3>
+  {@const agentName = store.agents.find((a) => a.id === d!.agentId)?.name ?? d!.agentId}
+  <Dialog onclose={() => answer(d, { cancelled: true })} labelledby="ext-dialog-{d!.id}" width="34rem" z={60}>
+    <div class="grid gap-3 p-5">
+      <div class="flex items-start gap-3">
+        <span class="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-edge bg-panel text-faint">
+          <Icon icon={Bot} size={15} />
+        </span>
+        <div class="grid min-w-0 gap-1">
+          <span class="truncate text-xs text-faint">Request from <span class="text-dim">{agentName}</span></span>
+          <h3 id="ext-dialog-{d!.id}" class="m-0 text-base font-medium break-words text-fg">{d!.title ?? "The agent needs your input"}</h3>
+          {#if d!.message}
+            <p class="m-0 text-sm break-words text-dim">{d!.message}</p>
+          {/if}
+        </div>
+      </div>
+
+      {#if d!.method === "select"}
+        <div class="grid gap-1" role="listbox" aria-label="options">
+          {#each d!.options ?? [] as opt, i}
+            <button
+              class="flex w-full cursor-pointer items-center rounded-md border border-edge2 bg-panel px-3 py-2 text-left text-sm text-fg transition-colors hover:border-faint"
+              role="option"
+              aria-selected="false"
+              onclick={() => answer(d, { value: opt })}>{opt}</button
+            >
+          {/each}
+        </div>
+      {:else if d!.method === "input"}
+        <input
+          class="input"
+          placeholder={d!.placeholder ?? ""}
+          aria-label={d!.title ?? "answer"}
+          bind:value={inputValue}
+          use:focusOnMount
+          onkeydown={(e) => e.key === "Enter" && answer(d, { value: inputValue })}
+        />
+      {:else if d!.method === "editor"}
+        <textarea class="input input-mono min-h-40" aria-label={d!.title ?? "text"} bind:value={editorValue} use:focusOnMount></textarea>
+      {/if}
     </div>
-    {#if d!.message}
-      <p class="m-0 text-sm text-dim">{d!.message}</p>
-    {/if}
 
-    {#if d!.method === "select"}
-      <div class="flex flex-wrap gap-2">
-        {#each d!.options ?? [] as opt}
-          <button class="rounded-md bg-signal px-3 py-1.5 font-medium text-on-signal" onclick={() => answer(d, { value: opt })}>{opt}</button>
-        {/each}
+    {#if d!.method !== "select"}
+      <div class="flex justify-end gap-2 border-t border-edge bg-panel px-5 py-3">
+        {#if d!.method === "confirm"}
+          <button class="btn btn-secondary btn-sm" onclick={() => answer(d, { confirmed: false })}>No</button>
+          <button class="btn btn-primary btn-sm" use:focusOnMount onclick={() => answer(d, { confirmed: true })}>Yes</button>
+        {:else if d!.method === "input"}
+          <button class="btn btn-ghost btn-sm" onclick={() => answer(d, { cancelled: true })}>Cancel</button>
+          <button class="btn btn-primary btn-sm" onclick={() => answer(d, { value: inputValue })}>OK</button>
+        {:else}
+          <button class="btn btn-ghost btn-sm" onclick={() => answer(d, { cancelled: true })}>Cancel</button>
+          <button class="btn btn-primary btn-sm" onclick={() => answer(d, { value: editorValue })}>Done</button>
+        {/if}
       </div>
-    {:else if d!.method === "confirm"}
-      <div class="flex justify-end gap-2">
-        <button class="rounded-md border border-edge2 bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { confirmed: false })}>no</button>
-        <button class="rounded-md bg-signal px-4 py-1.5 font-semibold text-on-signal" onclick={() => answer(d, { confirmed: true })}>yes</button>
-      </div>
-    {:else if d!.method === "input"}
-      <input
-        class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-fg outline-none focus:border-signal"
-        placeholder={d!.placeholder ?? ""}
-        bind:value={inputValue}
-        autofocus
-        onkeydown={(e) => e.key === "Enter" && answer(d, { value: inputValue })}
-      />
-      <div class="flex justify-end gap-2">
-        <button class="cursor-pointer rounded-md border border-edge2 bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { cancelled: true })}>cancel</button>
-        <button class="cursor-pointer rounded-md bg-signal px-4 py-1.5 font-semibold text-on-signal" onclick={() => answer(d, { value: inputValue })}>ok</button>
-      </div>
-    {:else if d!.method === "editor"}
-      <textarea
-        class="min-h-40 rounded-md border border-edge2 bg-bg px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-signal"
-        bind:value={editorValue}
-        autofocus
-      ></textarea>
-      <div class="flex justify-end gap-2">
-        <button class="cursor-pointer rounded-md border border-edge2 bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { cancelled: true })}>cancel</button>
-        <button class="cursor-pointer rounded-md bg-signal px-4 py-1.5 font-semibold text-on-signal" onclick={() => answer(d, { value: editorValue })}>done</button>
+    {:else}
+      <div class="flex justify-end border-t border-edge bg-panel px-5 py-3">
+        <button class="btn btn-ghost btn-sm" onclick={() => answer(d, { cancelled: true })}>Dismiss</button>
       </div>
     {/if}
-
-    <button
-      class="absolute top-3 right-3 rounded px-1.5 text-dim hover:text-fg"
-      aria-label="dismiss"
-      onclick={() => answer(d, { cancelled: true })}
-    >
-      ✕
-    </button>
-  </div>
+  </Dialog>
 {/each}
 
-<div class="pointer-events-none fixed right-3 bottom-3 z-70 grid gap-2">
+<div class="pointer-events-none fixed right-4 bottom-4 z-70 grid w-[min(22rem,calc(100vw-2rem))] gap-2" aria-live="polite">
   {#each toasts as t (t.id)}
-    <div class="rounded-lg border px-3 py-2 text-sm shadow-lg
-      {t.kind === 'error' ? 'border-err bg-err-soft text-err' : t.kind === 'warning' ? 'border-warn bg-warn-soft text-warn' : 'border-edge bg-panel2 text-fg'}">
-      {t.message}
+    <div
+      class="animate-enter pointer-events-auto flex items-start gap-2.5 rounded-lg border bg-panel2 px-3 py-2.5 text-sm shadow-overlay
+        {t.kind === 'error' ? 'border-err/40 text-fg' : t.kind === 'warning' ? 'border-warn/40 text-fg' : 'border-edge2 text-fg'}"
+      role={t.kind === "error" ? "alert" : "status"}
+    >
+      <Icon
+        icon={t.kind === "error" || t.kind === "warning" ? TriangleAlert : Info}
+        size={15}
+        class="mt-0.5 {t.kind === 'error' ? 'text-err' : t.kind === 'warning' ? 'text-warn' : 'text-faint'}"
+      />
+      <span class="min-w-0 break-words">{t.message}</span>
     </div>
   {/each}
 </div>

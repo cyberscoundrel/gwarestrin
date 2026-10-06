@@ -283,6 +283,73 @@
     background-size: 0.7rem;
   }
 
+  /* ---- field anatomy: label, optional hint, control, inline error ---- */
+  .field {
+    @apply grid gap-1.5;
+  }
+  .field-label {
+    @apply text-xs font-medium text-dim;
+  }
+  .field-hint {
+    @apply text-xs text-faint;
+  }
+  .field-error {
+    @apply text-xs text-err;
+  }
+  .input {
+    @apply h-8 w-full rounded-md border border-edge2 bg-inset px-2.5 text-sm text-fg transition-colors outline-none
+      placeholder:text-faint hover:border-faint focus-visible:border-signal disabled:opacity-50;
+  }
+  .input-mono {
+    @apply font-mono text-xs;
+  }
+  textarea.input {
+    @apply h-auto py-2 leading-relaxed;
+  }
+  .input[aria-invalid="true"] {
+    @apply border-err;
+  }
+
+  /* ---- buttons: one primary per view, quiet everything else ---- */
+  .btn {
+    @apply inline-flex h-8 cursor-pointer items-center justify-center gap-1.5 rounded-md border px-3 text-sm font-medium whitespace-nowrap
+      transition-colors disabled:cursor-default disabled:opacity-50;
+  }
+  .btn-sm {
+    @apply h-7 px-2.5 text-xs;
+  }
+  .btn-primary {
+    @apply border-transparent bg-fg text-bg hover:opacity-90;
+  }
+  .btn-secondary {
+    @apply border-edge2 bg-panel2 text-fg hover:border-faint;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-dim hover:bg-hover hover:text-fg;
+  }
+  .btn-danger {
+    @apply border-err/40 bg-transparent text-err hover:bg-err-soft;
+  }
+  .btn-danger-solid {
+    @apply border-transparent bg-err text-on-signal hover:opacity-90;
+  }
+
+  /* segmented control (e.g. transport, briefing engine) */
+  .segmented {
+    @apply inline-flex rounded-md border border-edge2 bg-inset p-0.5;
+  }
+  .segmented > button {
+    @apply cursor-pointer rounded-[5px] px-2.5 py-1 text-xs text-dim transition-colors hover:text-fg;
+  }
+  .segmented > button[aria-pressed="true"] {
+    @apply bg-panel2 text-fg shadow-sm;
+  }
+
+  /* section label inside drawers/menus */
+  .eyebrow {
+    @apply text-2xs font-medium tracking-wide text-faint uppercase;
+  }
+
   /* ---- tool card (lib/tool-renderers.ts) ---- */
   .gw-tool {
     border: 1px solid var(--gw-line);
