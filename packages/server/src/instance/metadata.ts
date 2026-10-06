@@ -62,10 +62,11 @@ export function getInstanceMetadata(): InstanceMetadata | undefined {
 
 /**
  * Metadata the instance itself uses and nothing may substitute into agent
- * config: values.openshell holds this instance's gateway credential, which
- * would let an agent change its own sandbox policy.
+ * config: values.openshell holds this instance's gateway credential (an agent
+ * could change its own sandbox policy), values.graph.delegationKey signs agent
+ * graph tokens (an agent could place itself anywhere its user reaches).
  */
-const PRIVATE_PATHS = [/^values\.openshell(\.|$)/];
+const PRIVATE_PATHS = [/^values\.openshell(\.|$)/, /^values\.graph\.delegationKey$/];
 
 /**
  * Substitute ${a.b.c} paths (resolved against the instance metadata) inside

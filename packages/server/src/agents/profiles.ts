@@ -82,6 +82,13 @@ export class ProfileStore {
       mcpServers: input.mcpServers,
       ...(input.contextEngine !== undefined ? { contextEngine: input.contextEngine } : existing?.contextEngine ? { contextEngine: existing.contextEngine } : {}),
       ...(input.sharedTools !== undefined ? { sharedTools: input.sharedTools } : existing?.sharedTools !== undefined ? { sharedTools: existing.sharedTools } : {}),
+      ...(input.positions !== undefined
+        ? input.positions.length > 0
+          ? { positions: [...new Set(input.positions)] }
+          : {}
+        : existing?.positions
+          ? { positions: existing.positions }
+          : {}),
     };
     this.profiles.set(recordId, record);
     void this.persist();

@@ -1,8 +1,8 @@
 # Data scoping
 
-Status: the position tree, homes, filtered reads and set_home are built in
-graph-rag (2026-10-06); grants, semantic grading, derived-data labels and
-per-agent (profile) positions are not yet. Last discussed 2026-10-06.
+Status: the position tree, homes, filtered reads, set_home and per-agent
+positions from profiles are built (2026-10-06); grants, semantic grading and
+derived-data labels are not yet. Last discussed 2026-10-06.
 
 An agent is untrusted: prompt injection can make it ask for anything. So who
 may see what is enforced by the data source, against an identity the agent
@@ -100,6 +100,15 @@ allowed to use it; otherwise defining a profile would escalate privileges.
 - **Moves**: `set_home` restricts directly (direct writers) and queues every
   widening for a person; approvers only see queued writes they can see.
 - **Legacy data** (no `_home`) is root-only until released with `set_home`.
+- **Agents** each have their own graph token, signed by their instance with a
+  provisioner-issued delegation key (`values.graph.delegationKey`, never
+  substituted into agent config) and naming their profile's positions
+  (`positions` on the agent profile; empty = where the user stands).
+  graph-rag drops positions outside what the instance's user reaches and
+  never lets an agent approve or run raw queries; writes are attributed to
+  `<user>/agent:<id>`. On OpenShell the token is the agent's own provider
+  credential. The profile editor's *Knowledge access* section picks the
+  positions from the part of the tree the user reaches.
 - Verified live with the test tree org > Operations (alice) > Production floor
   (bob): 20/20 checks (manager's email invisible to the floor, same-name
   entities kept apart, edges to hidden entities dropped, moves).

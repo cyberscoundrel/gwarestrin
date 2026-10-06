@@ -104,6 +104,12 @@ export interface ProfileRecord {
   contextEngine?: ProfileContextEngine | undefined;
   /** mount the instance-shared /tools directory into agent VMs (default true) */
   sharedTools?: boolean | undefined;
+  /**
+   * knowledge-graph positions agents under this profile work at (position
+   * ids). Empty/omitted = where the instance's user stands. Positions outside
+   * the user's reach are ignored by the graph (see docs/DATA-SCOPING.md).
+   */
+  positions?: string[] | undefined;
 }
 
 export interface UpsertProfileInput {
@@ -113,4 +119,5 @@ export interface UpsertProfileInput {
   mcpServers: string[] | "all";
   contextEngine?: ProfileContextEngine | undefined;
   sharedTools?: boolean | undefined;
+  positions?: string[] | undefined;
 }

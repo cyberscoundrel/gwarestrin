@@ -12,6 +12,21 @@ export interface AgentWithRuntime extends AgentRecord {
   runtime?: AgentRuntimeSummary | undefined;
 }
 
+export interface PositionView {
+  id: string;
+  name: string;
+  parent: string | null;
+  description?: string;
+}
+export interface PositionsView {
+  /** false: the knowledge graph isn't divided into positions */
+  scoped: boolean;
+  root?: string;
+  /** positions the user holds */
+  held: string[];
+  positions: PositionView[];
+}
+
 export const api = {
   async me(): Promise<{ username: string; authed: boolean }> {
     return json(await fetch("/api/me"));
@@ -77,6 +92,11 @@ export const api = {
   },
   async modelsFor(provider: ProviderView): Promise<ModelView[]> {
     return provider.models;
+  },
+  // ---------- knowledge-graph positions ----------
+  /** positions this workspace's user reaches (theirs and below) */
+  async positions(): Promise<PositionsView> {
+    return json(await fetch("/api/positions"));
   },
   // ---------- agent profiles ----------
   async listProfiles(): Promise<ProfileRecord[]> {

@@ -7,6 +7,7 @@ import type { McpRegistryStore } from "../mcp/registry-store.js";
 import type { ProviderRegistry } from "../providers/registry.js";
 import { buildGeneratedProviders, generatedProvidersPath, writeGeneratedProviders } from "../providers/generate.js";
 import { scoped } from "../util/log.js";
+import { graphTokenFor } from "./graph-token.js";
 import { agentDir } from "./store.js";
 
 const log = scoped("scaffold");
@@ -148,6 +149,7 @@ export function piEnvFor(
   dirs: AgentDirs,
   registry: ProviderRegistry,
   agent: AgentRecord,
+  profile: { positions?: string[] | undefined } = {},
 ): Record<string, string> {
   const env: Record<string, string> = {
     PI_CODING_AGENT_DIR: dirs.home,
@@ -161,12 +163,10 @@ export function piEnvFor(
     const key = registry.resolveKey(id);
     if (key) env[`GWARESTRIN_KEY_${id.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()}`] = key;
   }
-  // per-instance graph token for MCP bearer auth (agent defs reference it
-  // via bearerTokenEnv: GWARESTRIN_GRAPH_TOKEN)
-  const graphToken = getInstanceMetadata()?.values as Record<string, { token?: string }> | undefined;
-  if (graphToken?.graph?.token) {
-    env.GWARESTRIN_GRAPH_TOKEN = graphToken.graph.token;
-  }
+  // this agent's graph token for MCP bearer auth (agent defs reference it
+  // via bearerTokenEnv: GWARESTRIN_GRAPH_TOKEN); carries the profile's positions
+  const graphToken = graphTokenFor(agent, profile);
+  if (graphToken) env.GWARESTRIN_GRAPH_TOKEN = graphToken;
   // gondolin secret values: extension resolves valueEnv from here
   for (const [name, def] of Object.entries(agent.gondolin.secrets)) {
     const value = process.env[def.valueEnv];

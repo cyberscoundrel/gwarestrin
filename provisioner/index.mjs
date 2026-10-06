@@ -268,8 +268,14 @@ function ensureToken(name, tier, positions) {
       log(`token: positions for ${name} -> ${positions.length} position(s)`);
     }
   }
+  // the tenant signs its agents' graph tokens with this (graph-rag checks it)
+  if (typeof entry.delegationKey !== "string" || entry.delegationKey.length < 64) {
+    entry.delegationKey = randomToken() + randomToken();
+    changed = true;
+    log(`token: delegation key issued for ${name}`);
+  }
   if (changed) writeIfChanged(p, JSON.stringify(map, null, 1));
-  return entry.token;
+  return { token: entry.token, delegationKey: entry.delegationKey };
 }
 
 function lockToken(name) {
@@ -285,13 +291,15 @@ function lockToken(name) {
   }
 }
 
-function ensureMetadata(name, tier, token, oshValues) {
+function ensureMetadata(name, tier, { token, delegationKey }, oshValues) {
   const doc = {
     version: 1,
     instance: { name, displayName: `${name} instance` },
     owner: { id: name, displayName: name },
     // openshell: the instance's gateway identity (never substituted into agent config)
-    values: { graph: { token }, ...(oshValues ? { openshell: oshValues } : {}) },
+    // graph.delegationKey: signs this instance's agent tokens (never substituted
+    // into agent config, like openshell: the instance's own credentials)
+    values: { graph: { token, delegationKey }, ...(oshValues ? { openshell: oshValues } : {}) },
   };
   if (tier === "admin") {
     doc.presentation = { queue: { label: "Graph review", url: "http://graph-rag:8000/api/queue", tokenRef: "values.graph.token" } };

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { graphTokenFor } from "../agents/graph-token.js";
 import { createReadStream } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -66,8 +67,8 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
       if (engine && (engine.prompt || input.firstPrompt)) {
         const llm = manager.defaultLlmEndpoint();
         const mcpUrl = manager.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL ?? "http://graph-rag:8000/mcp";
-        const values = getInstanceMetadata()?.values as Record<string, { token?: string }> | undefined;
-        const graphToken = values?.graph?.token;
+        // the agent's own token: the briefing is built from where it works
+        const graphToken = graphTokenFor(record, profile);
         if (!llm) {
           context = "failed";
           log.warn(`no llm endpoint for context engine (${record.name})`);
@@ -252,6 +253,7 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
         }),
       ),
       sharedTools: Type.Optional(Type.Boolean()),
+      positions: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 16 })),
     },
     { additionalProperties: false },
   );

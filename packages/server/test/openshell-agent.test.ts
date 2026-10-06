@@ -5,6 +5,10 @@ import type { AgentRecord } from "@gwarestrin/shared";
 import { describe, expect, it } from "vitest";
 import type { AgentDirs } from "../src/agents/scaffold.js";
 import { DEFAULT_GUEST_LAYOUT, type LauncherDeps, OpenShellAgentLauncher } from "../src/runtime/openshell-agent.js";
+import { agentSuffix } from "../src/runtime/openshell-policy.js";
+
+// MCP credentials are per agent (record id "a1")
+const GRAPH_PROVIDER = `gw-alice-mcp-graph-rag-${agentSuffix("a1")}`;
 
 const KEYS: Record<string, string> = { openrouter: "sk-or-REAL-openrouter", litellm: "sk-REAL-litellm" };
 const GRAPH_TOKEN = "REAL-graph-token";
@@ -51,7 +55,7 @@ function record(over: Partial<AgentRecord> = {}): AgentRecord {
   };
 }
 
-function fakes(created: boolean) {
+function fakes(created: boolean, attachedAlready: string[] = []) {
   const calls: Array<[string, unknown]> = [];
   const written = new Map<string, string>();
   let transportArgs: unknown[] = [];
@@ -61,6 +65,7 @@ function fakes(created: boolean) {
     providers: {
       ensureProfile: async (p) => void calls.push(["profile", p]),
       ensureProvider: async (name, type, creds) => void calls.push(["provider", { name, type, creds }]),
+      deleteProvider: async (name) => void calls.push(["deleteProvider", name]),
     },
     runtime: {
       ensureSandbox: async (id, spec) => (calls.push(["sandbox", { id, spec }]), { name: `gw-${id}`, created }),
@@ -77,6 +82,8 @@ function fakes(created: boolean) {
       execStream: (async function* () {}) as never,
       setPolicy: (async (name: string) => (calls.push(["setPolicy", name]), {})) as never,
       attachProvider: (async (name: string, provider: string) => (calls.push(["attach", { name, provider }]), {})) as never,
+      detachProvider: (async (name: string, provider: string) => (calls.push(["detach", { name, provider }]), {})) as never,
+      listAllProviders: (async () => attachedAlready.map((name) => ({ id: name, name, type: "", labels: {}, resourceVersion: "1" }))) as never,
     },
   };
   return { deps, calls, written, transport: () => transportArgs };
@@ -121,7 +128,7 @@ describe("OpenShellAgentLauncher", () => {
     expect(providers).toEqual([
       { name: "gw-alice-llm-openrouter", type: "gw-llm-openrouter", creds: { GWARESTRIN_KEY_OPENROUTER: KEYS.openrouter } },
       { name: "gw-alice-llm-litellm", type: "gw-llm-litellm", creds: { GWARESTRIN_KEY_LITELLM: KEYS.litellm } },
-      { name: "gw-alice-mcp-graph-rag", type: "gw-mcp-graph-rag", creds: { GWARESTRIN_GRAPH_TOKEN: GRAPH_TOKEN } },
+      { name: GRAPH_PROVIDER, type: "gw-mcp-graph-rag", creds: { GWARESTRIN_GRAPH_TOKEN: GRAPH_TOKEN } },
     ]);
     const litellmProfile = f.calls.find((c) => c[0] === "profile" && (c[1] as { id: string }).id === "gw-llm-litellm")![1] as {
       endpoints: Array<{ host: string; allowedIps?: string[] }>;
@@ -140,7 +147,7 @@ describe("OpenShellAgentLauncher", () => {
     const { spec } = f.calls.find((c) => c[0] === "sandbox")![1] as {
       spec: { providers: string[]; policy: { networkPolicies: Record<string, { endpoints: Array<{ host: string; path?: string }> }> } };
     };
-    expect(spec.providers).toEqual(["gw-alice-llm-openrouter", "gw-alice-llm-litellm", "gw-alice-mcp-graph-rag"]);
+    expect(spec.providers).toEqual(["gw-alice-llm-openrouter", "gw-alice-llm-litellm", GRAPH_PROVIDER]);
     const eps = Object.values(spec.policy.networkPolicies).flatMap((r) => r.endpoints);
     expect(eps.map((e) => e.host)).toEqual(expect.arrayContaining(["100.96.0.11", "172.31.99.14", "github.com"]));
     // keyless model API: prefix; MCP endpoint: exact
@@ -225,13 +232,24 @@ describe("OpenShellAgentLauncher", () => {
   });
 
   it("refreshes policy and attachments on a reused sandbox", async () => {
-    const f = fakes(false);
+    // attached before per-agent credentials: the shared instance graph provider
+    const f = fakes(false, ["gw-alice-llm-openrouter", "gw-alice-mcp-graph-rag", "someone-elses-provider"]);
     await new OpenShellAgentLauncher(f.deps).prepare(inputs(await fixture()));
     expect(f.calls.filter((c) => c[0] === "setPolicy")).toHaveLength(1);
     expect(f.calls.filter((c) => c[0] === "attach").map((c) => (c[1] as { provider: string }).provider)).toEqual([
       "gw-alice-llm-openrouter",
       "gw-alice-llm-litellm",
-      "gw-alice-mcp-graph-rag",
+      GRAPH_PROVIDER,
     ]);
+    // the stale shared credential is detached; providers not managed by this instance are left alone
+    expect(f.calls.filter((c) => c[0] === "detach").map((c) => (c[1] as { provider: string }).provider)).toEqual(["gw-alice-mcp-graph-rag"]);
+    // and the shared (user-level) credential is retired
+    expect(f.calls.filter((c) => c[0] === "deleteProvider").map((c) => c[1])).toEqual(["gw-alice-mcp-graph-rag"]);
+  });
+
+  it("deletes only the agent's own providers with its sandbox", async () => {
+    const f = fakes(true, ["gw-alice-llm-openrouter", GRAPH_PROVIDER, `gw-alice-mcp-graph-rag-${agentSuffix("other")}`]);
+    await new OpenShellAgentLauncher(f.deps).deleteSandbox("a1");
+    expect(f.calls.filter((c) => c[0] === "deleteProvider").map((c) => c[1])).toEqual([GRAPH_PROVIDER]);
   });
 });

@@ -26,6 +26,7 @@ import {
   visibleHomes,
   writableHomes,
 } from "./positions.js";
+import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -58,6 +59,7 @@ const {
 const OPEN_CAPS = { read: true, write: "direct", approve: true, raw: true };
 const OPEN_MODE = !TOKEN_MAP_PATH && GRAPH_RAG_OPEN_MODE === "1";
 let tokenMap = new Map(); // empty = nobody authenticates
+let entriesByUser = new Map(); // for agent tokens (signed with the tenant's delegationKey)
 
 function loadTokenMap() {
   if (!TOKEN_MAP_PATH) {
@@ -67,7 +69,9 @@ function loadTokenMap() {
   try {
     const parsed = JSON.parse(readFileSync(TOKEN_MAP_PATH, "utf8"));
     if (!Array.isArray(parsed.tokens)) throw new Error("token map has no tokens array");
-    tokenMap = new Map(parsed.tokens.filter((e) => typeof e?.token === "string" && e.token).map((e) => [e.token, e]));
+    const entries = parsed.tokens.filter((e) => typeof e?.token === "string" && e.token);
+    tokenMap = new Map(entries.map((e) => [e.token, e]));
+    entriesByUser = new Map(entries.filter((e) => typeof e.user === "string").map((e) => [e.user, e]));
     console.log(`[graph-rag] token map loaded: ${tokenMap.size} token(s)`);
   } catch (err) {
     console.warn(`[graph-rag] token map load failed (keeping ${tokenMap.size} previously loaded token(s)): ${String(err).slice(0, 160)}`);
@@ -151,6 +155,8 @@ function resolveIdentity(authorization) {
     ? authorization.slice(7).trim()
     : null;
   if (!token) return null;
+  // an agent's own token: the tenant placed it at its profile's positions
+  if (token.startsWith(AGENT_TOKEN_PREFIX)) return resolveAgentToken(token, (u) => entriesByUser.get(u), positionMap);
   const entry = tokenMap.get(token);
   if (!entry) return null;
   return {
@@ -945,6 +951,23 @@ app.post("/api/queue/:id/reject", (req, res) => {
     (result) => res.json({ result }),
     (err) => res.status(400).json({ error: String(err).slice(0, 200) }),
   );
+});
+
+/**
+ * The part of the position tree the caller can reach (its positions and
+ * everything below): what a tenant may place its agents at.
+ */
+app.get("/api/positions", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (!SCOPED) return res.json({ scoped: false, held: [], positions: [] });
+  if (!positionMap) return res.status(503).json({ error: "position map not loaded" });
+  const held = heldPositions(positionMap, identity.positions);
+  const reach = visibleHomes(positionMap, held);
+  const positions = Object.entries(positionMap.positions)
+    .filter(([id]) => reach === null || reach.has(id))
+    .map(([id, p]) => ({ id, name: p.name, parent: p.parent, ...(p.description ? { description: p.description } : {}) }));
+  res.json({ scoped: true, root: positionMap.root, held, positions });
 });
 
 /** boot: ensure advertised indexes + periodic identity sweep */

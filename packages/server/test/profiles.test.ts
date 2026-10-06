@@ -48,6 +48,18 @@ describe("ProfileStore", () => {
     await store.flush();
   });
 
+  it("keeps a profile's positions until they're changed; an empty list clears them", async () => {
+    const store = new ProfileStore(dir);
+    await store.load();
+    const p = store.upsert(undefined, { name: "floor assistant", mcpServers: "all", positions: ["pos-floor", "pos-floor"] });
+    expect(store.get(p.id)!.positions).toEqual(["pos-floor"]);
+    store.upsert(p.id, { name: "floor assistant", mcpServers: "all" });
+    expect(store.get(p.id)!.positions).toEqual(["pos-floor"]);
+    store.upsert(p.id, { name: "floor assistant", mcpServers: "all", positions: [] });
+    expect(store.get(p.id)!.positions).toBeUndefined();
+    await store.flush();
+  });
+
   it("refuses to delete the default profile and reloads from disk", async () => {
     const store = new ProfileStore(dir);
     await store.load();

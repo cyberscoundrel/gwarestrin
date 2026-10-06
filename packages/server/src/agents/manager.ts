@@ -10,6 +10,7 @@ import { buildGeneratedProviders } from "../providers/generate.js";
 import { scoped } from "../util/log.js";
 import { RpcAgent } from "./rpc-agent.js";
 import { PiProcess } from "./pi-process.js";
+import { graphTokenFor } from "./graph-token.js";
 import { dirsFor, piEnvFor, scaffoldAgent, secretForEnv } from "./scaffold.js";
 import { getInstanceMetadata } from "../instance/metadata.js";
 import { OpenShellAgentLauncher } from "../runtime/openshell-agent.js";
@@ -288,7 +289,8 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
           record,
           dirs,
           resolveKey: (providerId) => this.registry.resolveKey(providerId),
-          resolveSecret: secretForEnv,
+          // the graph token is the agent's own (its profile's positions)
+          resolveSecret: (env) => (env === "GWARESTRIN_GRAPH_TOKEN" ? graphTokenFor(record, profile) : secretForEnv(env)),
         });
         proc = new PiProcess({ transport: launch.transport });
       } catch (err) {
@@ -375,7 +377,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       cliPath: this.cliPath(),
       args,
       cwd: dirs.workspace,
-      env: piEnvFor(dirs, this.registry, record),
+      env: piEnvFor(dirs, this.registry, record, this.profiles.resolve(record.profileId)),
     });
   }
 

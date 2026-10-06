@@ -9,6 +9,7 @@ import { registerAgentRoutes } from "./http/agents.js";
 import { ProfileStore } from "./agents/profiles.js";
 import { registerFileRoutes } from "./http/files.js";
 import { registerGraphQueueRoutes } from "./http/graph-queue.js";
+import { registerPositionRoutes } from "./http/positions.js";
 import { registerMcpRoutes } from "./http/mcp.js";
 import { registerProviderRoutes } from "./http/providers.js";
 import { McpRegistryStore } from "./mcp/registry-store.js";
@@ -55,6 +56,7 @@ async function main(): Promise<void> {
   await registerAgentRoutes(app, config, manager);
   await registerFileRoutes(app, config, manager);
   await registerGraphQueueRoutes(app);
+  await registerPositionRoutes(app, manager);
   await registerMcpRoutes(app, mcpRegistry);
   await registerWs(app, config, manager);
   startSidecarDiscovery(process.env.DOCKER_PROXY_URL, mcpRegistry);

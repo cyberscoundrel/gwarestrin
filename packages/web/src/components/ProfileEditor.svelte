@@ -3,7 +3,7 @@
   import { ArrowLeft, Copy, Ellipsis, Lock, Trash2, TriangleAlert, Users } from "lucide";
   import type { ThinkingLevel } from "@gwarestrin/shared";
   import { store } from "../lib/stores.svelte.js";
-  import { api, mcpApi, type McpServerDef } from "../lib/api.js";
+  import { api, mcpApi, type McpServerDef, type PositionsView } from "../lib/api.js";
   import Dropdown from "./Dropdown.svelte";
   import Icon from "./Icon.svelte";
   import ModelPicker from "./ModelPicker.svelte";
@@ -45,6 +45,8 @@
   let engineRounds = $state(existing?.contextEngine?.maxRounds ?? 8);
   let engineTimeoutS = $state(Math.round((existing?.contextEngine?.timeoutMs ?? 90_000) / 1000));
   let sharedTools = $state(existing?.sharedTools !== false);
+  let positionMode = $state<"mine" | "pick">(existing?.positions?.length ? "pick" : "mine");
+  let pickedPositions = $state<string[]>(existing?.positions ? [...existing.positions] : []);
 
   let servers = $state<Record<string, McpServerDef>>({});
   let serversLoaded = $state(false);
@@ -52,6 +54,8 @@
   let error = $state("");
   let attempted = $state(false);
   let menuOpen = $state(false);
+  let tree = $state<PositionsView | null>(null);
+  let treeError = $state("");
 
   $effect(() => {
     void mcpApi
@@ -63,15 +67,51 @@
 
   const serverNames = $derived(Object.keys(servers));
 
+  $effect(() => {
+    void api
+      .positions()
+      .then((t) => (tree = t))
+      .catch((err) => (treeError = err instanceof Error ? err.message : String(err)));
+  });
+
+  /** reachable positions in tree order with their depth below the user's view */
+  const positionRows = $derived.by(() => {
+    if (!tree?.scoped) return [];
+    const byParent = new Map<string | null, typeof tree.positions>();
+    const ids = new Set(tree.positions.map((p) => p.id));
+    for (const p of tree.positions) {
+      const key = p.parent && ids.has(p.parent) ? p.parent : null;
+      byParent.set(key, [...(byParent.get(key) ?? []), p]);
+    }
+    const rows: Array<{ id: string; name: string; description?: string; depth: number; held: boolean }> = [];
+    const walk = (parent: string | null, depth: number) => {
+      for (const p of [...(byParent.get(parent) ?? [])].sort((a, b) => a.name.localeCompare(b.name))) {
+        rows.push({ id: p.id, name: p.name, ...(p.description ? { description: p.description } : {}), depth, held: tree!.held.includes(p.id) });
+        walk(p.id, depth + 1);
+      }
+    };
+    walk(null, 0);
+    return rows;
+  });
+  /** saved positions the user no longer reaches (shown so they can be removed) */
+  const unreachable = $derived(tree?.scoped ? pickedPositions.filter((id) => !tree!.positions.some((p) => p.id === id)) : []);
+
+  function setPosition(id: string, on: boolean): void {
+    pickedPositions = on ? [...new Set([...pickedPositions, id])] : pickedPositions.filter((x) => x !== id);
+  }
+
   // ---- dirty state: compare against the seeded snapshot ----
   const snapshot = () =>
-    JSON.stringify([name, description, tier, model, thinkingLevel, namePrefix, mcpMode, [...pickedMcp].sort(), engineEnabled, engineType, enginePrompt, engineRounds, engineTimeoutS, sharedTools]);
+    JSON.stringify([name, description, tier, model, thinkingLevel, namePrefix, mcpMode, [...pickedMcp].sort(), engineEnabled, engineType, enginePrompt, engineRounds, engineTimeoutS, sharedTools, positionMode, [...pickedPositions].sort()]);
   const initial = untrack(snapshot);
   const dirty = $derived(snapshot() !== initial || duplicating);
 
   // ---- inline validation ----
   const nameError = $derived(attempted && !name.trim() ? "Give the agent profile a name." : "");
   const toolsError = $derived(attempted && mcpMode === "pick" && pickedMcp.length === 0 ? "Allow at least one connection, or allow all." : "");
+  const positionsError = $derived(
+    attempted && positionMode === "pick" && pickedPositions.length === 0 ? "Pick at least one position, or let agents work where you stand." : "",
+  );
 
   const thinkingOptions = [
     { value: "", label: "Workspace default" },
@@ -94,7 +134,7 @@
   async function save() {
     attempted = true;
     error = "";
-    if (nameError || toolsError) return;
+    if (nameError || toolsError || positionsError) return;
     saving = true;
     try {
       const saved = await api.saveProfile(isNew ? "new" : profileId, {
@@ -119,6 +159,8 @@
             }
           : {}),
         sharedTools,
+        // empty = where the workspace's user stands
+        positions: positionMode === "pick" ? [...pickedPositions] : [],
       });
       await store.refreshProfiles();
       store.editingProfileId = saved.id;
@@ -289,6 +331,63 @@
   {#if toolsError}<span class="field-error">{toolsError}</span>{/if}
 {/snippet}
 
+{#snippet accessBody()}
+  {#if treeError}
+    <p class="m-0 text-xs text-err" role="alert">Couldn't load positions: {treeError}</p>
+  {:else if !tree}
+    <SkeletonRows rows={2} />
+  {:else if !tree.scoped}
+    <p class="m-0 rounded-lg border border-dashed border-edge2 px-4 py-6 text-center text-xs text-faint">
+      This workspace's knowledge graph isn't divided into positions, so agents see all of it.
+    </p>
+  {:else}
+    <div class="flex flex-wrap items-center gap-3">
+      <div class="segmented" role="group" aria-label="where agents in this profile work">
+        <button type="button" aria-pressed={positionMode === "mine"} onclick={() => (positionMode = "mine")}>Where I stand</button>
+        <button type="button" aria-pressed={positionMode === "pick"} onclick={() => (positionMode = "pick")}>Specific positions</button>
+      </div>
+      {#if positionMode === "mine"}<span class="text-xs text-faint">Agents see what you see.</span>{/if}
+    </div>
+    {#if positionMode === "pick"}
+      {#if positionRows.length === 0}
+        <p class="m-0 rounded-lg border border-dashed border-edge2 px-4 py-6 text-center text-xs text-faint">
+          You don't hold a position yet, so there is nothing to place agents at. Ask an admin to add you to one.
+        </p>
+      {:else}
+        <ul class="m-0 grid list-none gap-2 p-0" aria-label="positions">
+          {#each positionRows as p (p.id)}
+            {@const on = pickedPositions.includes(p.id)}
+            <li
+              class="flex items-center gap-3 rounded-lg border px-3.5 py-3 transition-colors {on ? 'border-edge2 bg-panel' : 'border-edge bg-bg'}"
+              style="margin-left: {Math.min(p.depth, 4) * 1.25}rem"
+            >
+              <Switch checked={on} label="place agents at {p.name}" onchange={(v) => setPosition(p.id, v)} />
+              <div class="grid min-w-0 flex-1">
+                <span class="flex items-center gap-1.5 text-sm {on ? 'text-fg' : 'text-dim'}">
+                  {p.name}
+                  {#if p.held}<span class="text-2xs text-faint">You</span>{/if}
+                </span>
+                {#if p.description}<span class="truncate text-xs text-faint" title={p.description}>{p.description}</span>{/if}
+              </div>
+            </li>
+          {/each}
+          {#each unreachable as id (id)}
+            <li class="flex items-center gap-3 rounded-lg border border-edge bg-bg px-3.5 py-3">
+              <Switch checked={true} label="remove unavailable position" onchange={() => setPosition(id, false)} />
+              <span class="flex items-center gap-1.5 text-sm text-dim">
+                <Icon icon={Lock} size={11} /> Not available to you
+                <span class="font-mono text-2xs text-faint">{id.slice(0, 8)}</span>
+              </span>
+            </li>
+          {/each}
+        </ul>
+        <span class="field-hint">Agents see the knowledge graph from each selected position down, and write there by default. Positions above yours aren't offered.</span>
+      {/if}
+      {#if positionsError}<span class="field-error">{positionsError}</span>{/if}
+    {/if}
+  {/if}
+{/snippet}
+
 {#snippet briefingBody()}
   <label class="flex items-start gap-3">
     <Switch checked={engineEnabled} label="build a briefing for new agents" onchange={(v) => (engineEnabled = v)} />
@@ -410,6 +509,11 @@
         "Tool connections",
         "The connections agents in this profile may use at all. Agents can switch allowed ones off and on, never beyond this list.",
         toolsBody,
+      )}
+      {@render section(
+        "Knowledge access",
+        "Where in the organization agents in this profile work. They see the knowledge graph from there down, never more than you do.",
+        accessBody,
       )}
       {@render section("Briefing", "Standing knowledge from the graph that a new agent keeps in mind on every turn.", briefingBody)}
       {@render section("Shared scripts", "Reuse across agents.", sharedBody)}
