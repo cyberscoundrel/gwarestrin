@@ -19,8 +19,11 @@ export interface FileEntry {
 
 export type SandboxFsApi = Pick<SandboxClient, "exec" | "execStream">;
 
-/** upload chunk size per exec (stdin is buffered per call) */
-const WRITE_CHUNK = 4 * 1024 * 1024;
+/**
+ * Upload chunk size per exec. stdin travels in one gRPC message and the
+ * gateway rejects messages over 1 MiB, so stay well under it.
+ */
+const WRITE_CHUNK = 512 * 1024;
 
 /**
  * In-sandbox helper: `node -e FSCTL <op> <root> <rel>` prints one JSON
