@@ -59,8 +59,12 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
    * late exit of an old process during restart() is attributed correctly.
    */
   private stopRequested = new WeakSet<RpcAgent>();
-  /** instances killed by a failed start(); their exit must keep status error */
-  private startFailed = new WeakSet<RpcAgent>();
+  /**
+   * instances whose start() hasn't succeeded yet: start() owns their status,
+   * so an exit (pi dying during startup, or the kill after a failed probe)
+   * must not be handled as a crash and auto-restarted
+   */
+  private starting = new WeakSet<RpcAgent>();
   private extensionsRoot: string;
   private launcher: Promise<OpenShellAgentLauncher> | undefined;
 
@@ -308,6 +312,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     });
     agent.on("state", (state) => this.emit("agentState", state));
 
+    this.starting.add(agent);
     proc.on("exit", (info) => this.onExit(id, agent, info));
 
     try {
@@ -317,16 +322,21 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       if (!state.success) throw new Error(`rpc not ready: ${state.error ?? "get_state failed"}`);
       const data = state.data as { sessionFile?: string } | undefined;
       if (data?.sessionFile) this.store.setSessionFile(id, data.sessionFile);
+      this.starting.delete(agent);
       this.store.setStatus(id, "running");
       log.info(`agent ${record.name} (${id}) running pid=${proc.pid}`);
       return agent.summary();
     } catch (err) {
       if (this.running.get(id) === agent) this.running.delete(id);
       this.store.setStatus(id, "error");
-      agent.noteError(err instanceof Error ? err.message : String(err));
-      this.startFailed.add(agent);
+      const message = err instanceof Error ? err.message : String(err);
+      const stderr = agent.lastStderr().trim();
+      agent.noteError(`${message}\n${stderr}`.trim());
       proc.kill("SIGKILL");
-      throw err;
+      log.warn(`agent ${record.name} (${id}) failed to start: ${message}${stderr ? `\n${stderr}` : ""}`);
+      // the last stderr line is usually the reason (e.g. an extension that failed to load)
+      const reason = stderr.split("\n").filter(Boolean).pop();
+      throw reason ? new Error(`${message}: ${reason.slice(0, 300)}`) : err;
     }
   }
 
@@ -405,9 +415,9 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const current = this.running.get(id);
     if (current === agent) this.running.delete(id);
 
-    if (this.startFailed.has(agent)) {
-      // start() already recorded status "error" and the reason; keep it
-      this.startFailed.delete(agent);
+    if (this.starting.has(agent)) {
+      // start() records status "error" and the reason; keep it
+      this.starting.delete(agent);
       return;
     }
     if (current && current !== agent) {
