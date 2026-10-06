@@ -113,13 +113,14 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
         clientKeyPath: path.join(cfg.pkiDir, "client", "tls.key"),
         image: cfg.image,
       });
-      log.info(`openshell runtime: gateway ${cfg.gateway}, workspace ${cfg.workspace}, image ${cfg.image}`);
+      log.info(`openshell runtime: gateway ${cfg.gateway}, workspace ${cfg.workspace}, image ${cfg.image}, resolve ${cfg.resolve}`);
       return new OpenShellAgentLauncher({
         runtime: new OpenShellRuntime(client, { workspace: cfg.workspace, image: cfg.image }),
         providers: new OpenShellProviders(client.raw, cfg.workspace),
         sandbox: client,
         instance: getInstanceMetadata()?.instance.name ?? process.env.GWARESTRIN_INSTANCE ?? "default",
         workspace: cfg.workspace,
+        rewriteHosts: cfg.resolve !== "names",
       });
     })().catch((err) => {
       this.launcher = undefined;

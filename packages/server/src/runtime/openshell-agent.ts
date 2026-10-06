@@ -66,6 +66,8 @@ export interface LauncherDeps {
   guest?: GuestLayout;
   /** hostname -> IP as the server sees it; injectable for tests */
   resolveHost?: (host: string) => Promise<string | null>;
+  /** false when the gateway resolves compose names itself (VM driver in compose) */
+  rewriteHosts?: boolean;
 }
 
 async function defaultResolveHost(host: string): Promise<string | null> {
@@ -98,6 +100,7 @@ export class OpenShellAgentLauncher {
    * the server sees when it is a private address. Public hosts stay as-is.
    */
   async sandboxUrl(rawUrl: string): Promise<string> {
+    if (this.deps.rewriteHosts === false) return rawUrl;
     const u = new URL(rawUrl);
     if (isIP(u.hostname)) return rawUrl;
     const ip = await this.resolveHost(u.hostname);

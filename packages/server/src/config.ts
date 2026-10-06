@@ -22,6 +22,13 @@ export interface OpenShellRuntimeConfig {
   pkiDir: string;
   workspace: string;
   image: string;
+  /**
+   * How sandboxes reach compose services. "ips": the server rewrites service
+   * names to the IPs it resolves (gateway outside compose, e.g. the Docker
+   * driver's host-network supervisor). "names": keep names; the gateway runs
+   * on the compose network and resolves them itself (VM driver in compose).
+   */
+  resolve: "ips" | "names";
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -60,6 +67,13 @@ function runtimeConfig(): Pick<ServerConfig, "runtime" | "openshell"> {
       pkiDir: process.env.GWARESTRIN_OPENSHELL_PKI ?? "/etc/gwarestrin/openshell-pki",
       workspace: process.env.GWARESTRIN_OPENSHELL_WORKSPACE ?? "default",
       image,
+      resolve: resolveMode(process.env.GWARESTRIN_OPENSHELL_RESOLVE),
     },
   };
+}
+
+function resolveMode(raw: string | undefined): "ips" | "names" {
+  if (raw === undefined || raw === "ips") return "ips";
+  if (raw === "names") return "names";
+  throw new Error(`GWARESTRIN_OPENSHELL_RESOLVE must be ips or names (got ${raw})`);
 }

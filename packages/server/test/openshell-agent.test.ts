@@ -98,6 +98,21 @@ describe("OpenShellAgentLauncher", () => {
     expect(await l.sandboxUrl("http://100.96.0.11:8000/v1")).toBe("http://100.96.0.11:8000/v1");
   });
 
+  it("keeps service names when the gateway resolves them itself", async () => {
+    const f = fakes(true);
+    const l = new OpenShellAgentLauncher({ ...f.deps, rewriteHosts: false });
+    expect(await l.sandboxUrl("http://litellm:4000/v1")).toBe("http://litellm:4000/v1");
+    await l.prepare(inputs(await fixture()));
+    const mcp = JSON.parse(f.written.get("/sandbox/workspace/.mcp.json")!);
+    expect(mcp.mcpServers["graph-rag"].url).toBe("http://graph-rag:8000/mcp");
+    const { spec } = f.calls.find((c) => c[0] === "sandbox")![1] as {
+      spec: { policy: { networkPolicies: Record<string, { endpoints: Array<{ host: string; allowedIps?: string[]; path?: string }> }> } };
+    };
+    const dab = Object.values(spec.policy.networkPolicies).flatMap((r) => r.endpoints).find((e) => e.host === "dab");
+    expect(dab).toMatchObject({ host: "dab", port: 5000, path: "/mcp" });
+    expect(dab?.allowedIps).toBeUndefined();
+  });
+
   it("turns keys and tokens into instance-scoped providers, never into sandbox files or env", async () => {
     const f = fakes(true);
     const launch = await new OpenShellAgentLauncher(f.deps).prepare(inputs(await fixture()));
