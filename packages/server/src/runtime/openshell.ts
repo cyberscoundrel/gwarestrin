@@ -242,8 +242,9 @@ export function openShellTransport(
         return !exited;
       },
       async write(data) {
-        const session = await sessionPromise;
-        if (!exited) session.write(Buffer.from(data, "utf8"));
+        // a failed exec start is reported once, through exit; nothing to write to
+        const session = await sessionPromise.catch(() => undefined);
+        if (session && !exited) session.write(Buffer.from(data, "utf8"));
       },
       kill(signal) {
         if (exited || killSignal) return;
