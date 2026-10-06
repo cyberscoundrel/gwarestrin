@@ -62,7 +62,7 @@ openshell/scripts/pki.sh                      # deployment CA + gateway/client/r
 docker compose -f openshell/compose.yml up -d openshell-gateway openshell-registry
 openshell/scripts/publish-agent.sh dev        # -> registry:5443/gwarestrin-agent:dev
 docker compose up -d provisioner              # identities + workspaces for OPENSHELL_TENANTS
-docker compose up -d gw-alice gw-bob          # tenants on this runtime (x-openshell-tenant-env)
+docker compose up -d gwarestrin gw-alice gw-bob   # tenants on this runtime (x-openshell-tenant-env)
 ```
 
 `openshell/pki/` holds private keys and is gitignored. Only `ca.crt`,

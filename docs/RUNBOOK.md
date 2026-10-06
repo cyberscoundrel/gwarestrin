@@ -471,7 +471,7 @@ cd ~/gwarestrin
 openshell/scripts/pki.sh                     # first time; later runs only add missing certs
 docker compose -f openshell/compose.yml up -d openshell-gateway openshell-registry
 openshell/scripts/publish-agent.sh dev       # after changing the agent image stage
-docker compose up -d provisioner gw-alice gw-bob
+docker compose up -d provisioner gwarestrin gw-alice gw-bob
 ```
 
 - **Tenancy:** each tenant on this runtime has its own gateway identity and
@@ -483,6 +483,12 @@ docker compose up -d provisioner gw-alice gw-bob
   settings + `openshell-pki` mounts (compose seeds) — provisioner-created
   tenants get them automatically and are recreated when their runtime changes.
   Revoking a tenant deactivates its account and removes its membership.
+- **Moving a tenant from gondolin:** its agents keep their records; the first
+  start of each creates its sandbox and copies the agent's existing workspace
+  files in (once, up to 256 MB). Conversation history from the local runtime
+  is not resumed (host session files), so agents start a fresh session.
+- **All tenants (admin, alice, bob) run on OpenShell since 2026-10-06**; the
+  gondolin volumes are kept for rollback.
 - **Identity checks:** the provisioner log shows `openshell: platform admin
   connected` and one `admin membership granted` per tenant; the tenant server
   logs `workspace gw-<tenant> … auth oidc` on its first agent start. A tenant
