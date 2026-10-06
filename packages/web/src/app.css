@@ -273,7 +273,7 @@
   /* padding-right reserves room for the chevron; it must come after the px-*
      shorthand or the label runs underneath the chevron */
   .select {
-    @apply px-2.5 py-1.5 text-sm;
+    @apply h-8 px-2.5 py-0 text-sm leading-[30px];
     padding-right: 1.75rem;
   }
 

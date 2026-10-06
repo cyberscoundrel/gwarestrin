@@ -45,6 +45,8 @@ class Store {
   selectedId = $state<string | null>(null);
   /** profile being edited in the main area (null = chat view) */
   editingProfileId = $state<string | null>(null);
+  /** values to prefill a "new" profile editor with (Duplicate); consumed once */
+  profileSeed: ProfileRecord | null = null;
   /** centered create view (greeting + composer) */
   showNewChat = $state(false);
   wsStatus = $state<string>("closed");
