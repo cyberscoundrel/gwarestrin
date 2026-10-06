@@ -17,8 +17,11 @@ import type { PiTransportFactory } from "../agents/pi-transport.js";
 import type { AgentDirs } from "../agents/scaffold.js";
 import type { GeneratedProvidersFile } from "../providers/generate.js";
 import { scoped } from "../util/log.js";
+import { errorCode } from "@nvidia/openshell-sdk";
+import { HttpPathError } from "../util/paths.js";
+import { SandboxFs } from "./openshell-fs.js";
 import { inferenceProfile, mcpProfile, providerNameFor, sandboxPolicy } from "./openshell-policy.js";
-import type { OpenShellProviders, OpenShellRuntime } from "./openshell.js";
+import { type OpenShellProviders, type OpenShellRuntime, sandboxNameFor } from "./openshell.js";
 
 const log = scoped("openshell-agent");
 
@@ -56,7 +59,7 @@ export interface Launch {
 export interface LauncherDeps {
   runtime: Pick<OpenShellRuntime, "ensureSandbox" | "transport" | "deleteSandbox">;
   providers: Pick<OpenShellProviders, "ensureProfile" | "ensureProvider">;
-  sandbox: Pick<SandboxClient, "exec" | "setPolicy" | "attachProvider">;
+  sandbox: Pick<SandboxClient, "exec" | "execStream" | "setPolicy" | "attachProvider">;
   /** gwarestrin instance (tenant) name; scopes provider instances */
   instance: string;
   workspace?: string;
@@ -81,6 +84,8 @@ function isPrivateIpv4(ip: string): boolean {
 export class OpenShellAgentLauncher {
   private readonly guest: GuestLayout;
   private readonly resolveHost: (host: string) => Promise<string | null>;
+  /** sandbox name -> absolute workspace dir inside it */
+  private readonly workspaceRoots = new Map<string, string>();
 
   constructor(private readonly deps: LauncherDeps) {
     this.guest = deps.guest ?? DEFAULT_GUEST_LAYOUT;
@@ -157,6 +162,7 @@ export class OpenShellAgentLauncher {
     const pwd = await this.deps.sandbox.exec(sandbox, ["pwd"], { ...scope, noLoginShell: true });
     const root = pwd.stdout.toString("utf8").trim() || "/sandbox";
     const g = { home: `${root}/.gw/home`, sessions: `${root}/.gw/sessions`, workspace: `${root}/workspace` };
+    this.workspaceRoots.set(sandbox, g.workspace);
 
     const files: Array<[string, string]> = [
       [`${g.home}/settings.json`, await readFile(path.join(dirs.home, "settings.json"), "utf8")],
@@ -202,7 +208,26 @@ export class OpenShellAgentLauncher {
   }
 
   async deleteSandbox(agentId: string): Promise<void> {
+    this.workspaceRoots.delete(sandboxNameFor(agentId));
     await this.deps.runtime.deleteSandbox(agentId);
+  }
+
+  /** File access to the agent's workspace inside its sandbox (the files API on this runtime). */
+  async workspaceFs(agentId: string): Promise<SandboxFs> {
+    const sandbox = sandboxNameFor(agentId);
+    const scope = this.deps.workspace ? { workspace: this.deps.workspace } : {};
+    let root = this.workspaceRoots.get(sandbox);
+    if (!root) {
+      try {
+        const pwd = await this.deps.sandbox.exec(sandbox, ["pwd"], { ...scope, noLoginShell: true });
+        root = `${pwd.stdout.toString("utf8").trim() || "/sandbox"}/workspace`;
+      } catch (err) {
+        if (errorCode(err) === "not_found") throw new HttpPathError(409, "agent has no sandbox yet; start it once");
+        throw err;
+      }
+      this.workspaceRoots.set(sandbox, root);
+    }
+    return new SandboxFs(this.deps.sandbox, sandbox, root, this.deps.workspace);
   }
 
   /** A reused sandbox keeps its create-time policy; bring network rules and attachments up to date. */

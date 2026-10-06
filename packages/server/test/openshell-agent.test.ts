@@ -74,6 +74,7 @@ function fakes(created: boolean) {
         calls.push(["exec", argv[0]]);
         return { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
       }) as never,
+      execStream: (async function* () {}) as never,
       setPolicy: (async (name: string) => (calls.push(["setPolicy", name]), {})) as never,
       attachProvider: (async (name: string, provider: string) => (calls.push(["attach", { name, provider }]), {})) as never,
     },

@@ -117,8 +117,13 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     return this.launcher;
   }
 
-  private get onOpenShell(): boolean {
+  get onOpenShell(): boolean {
     return this.config.runtime === "openshell";
+  }
+
+  /** the agent's workspace inside its OpenShell sandbox (runtime=openshell only) */
+  async workspaceFs(id: string): Promise<import("../runtime/openshell-fs.js").SandboxFs> {
+    return (await this.openShellLauncher()).workspaceFs(id);
   }
 
   /** default provider endpoint for server-side LLM calls (analysis agent) */
