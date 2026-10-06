@@ -155,7 +155,7 @@ The new `AgentHeader.svelte` sits above the chat toolbar and is shown whether th
 - **P-12 Trust-strip data gaps** (provider display name / upstream vendor, sandbox network allow-list), see above.
 - **P-13 Phone toolbar density.** On a 375px screen the header, trust strip and toolbar together take about 190px. Collapse the model/thinking/conversation controls into one "⋯" menu below 600px. (Round 3 gave the model name its own full-width row so it is readable, which makes the toolbar one row taller.)
 - **P-14 Pricing data for models** (backend). OpenRouter's discovered catalogue has `cost` set to all zeros, so the UI can only treat `:free` ids as free. Every other model may be billed, but nothing says so. Fill `ModelView.cost` from the provider's pricing so the pickers can show price and warn before choosing a paid model.
-- **P-15 Landing selection.** With no running agent, the app selects the first agent in the list, which is often someone else's stopped one, and shows its big "start agent" button. Starting a VM by accident is easy. Land on the composer, or on the user's last agent, instead.
+- **P-15 Landing selection:** done in round 4. The app now lands on the composer unless this browser previously opened an agent that still exists (remembered in localStorage). The 15s poll never auto-selects. Deleting the open agent returns to the composer. There is no URL deep-linking in the app; rail selection works as before.
 
 ## Round 3: real-backend findings (admin instance, main's backend)
 
@@ -178,4 +178,8 @@ The new `AgentHeader.svelte` sits above the chat toolbar and is shown whether th
   - `manager.stop()` deletes the agent from `running` before killing it, and `onExit` only treats a SIGTERM/SIGKILL *signal* as deliberate. The VM wrapper apparently exits with a normal exit code, so the stop is counted as a crash and the auto-restart kicks in.
   - The header's "stop agent" button is affected (main has no stop button, so this was latent). Until it is fixed the button gives a misleading result. Decision needed: hide it until the backend fix lands, or keep it.
 
-**Needs a decision or follow-up:** B-1 and B-2 (backend), P-14 and P-15 above.
+**Round 4 status:**
+- B-1 (base64 `write`) and B-2 (stop counted as a crash and auto-restarted) are being fixed in the backend on `fix/main-bugs`. No UI change is needed.
+- The header's "stop agent" button stays, by decision. Re-check stop against the backend once `fix/main-bugs` lands.
+- P-15 is done (see above).
+- P-14 (model pricing data) is still open.
