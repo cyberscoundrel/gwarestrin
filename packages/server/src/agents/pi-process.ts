@@ -117,6 +117,10 @@ export class PiProcess extends EventEmitter<PiProcessEvents> {
         await this.transport.write(next);
         this.stdinQueue.shift();
       }
+    } catch (err) {
+      // the exit handler rejects pending requests; drop what can't be sent
+      log.warn(`stdin write failed (pid=${this.pid}): ${err instanceof Error ? err.message : String(err)}`);
+      this.stdinQueue.length = 0;
     } finally {
       this.stdinBusy = false;
     }
