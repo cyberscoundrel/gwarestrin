@@ -1,8 +1,8 @@
 # Data scoping
 
-Status: the position tree, homes, filtered reads, set_home and per-agent
-positions from profiles are built (2026-10-06); grants, semantic grading and
-derived-data labels are not yet. Last discussed 2026-10-06.
+Status: the position tree, homes, filtered reads, set_home, per-agent
+positions from profiles and grants are built (2026-10-06); semantic grading
+and derived-data labels are not yet. Last discussed 2026-10-06.
 
 An agent is untrusted: prompt injection can make it ask for anything. So who
 may see what is enforced by the data source, against an identity the agent
@@ -100,6 +100,17 @@ allowed to use it; otherwise defining a profile would escalate privileges.
 - **Moves**: `set_home` restricts directly (direct writers) and queues every
   widening for a person; approvers only see queued writes they can see.
 - **Legacy data** (no `_home`) is root-only until released with `set_home`.
+- **Grants** (`grant_access`, `list_grants`, `revoke_grant`): named entities
+  or a whole subtree, shown to a receiving position (its holders and those
+  above it) as if also homed there. Only owners grant (they see the data by
+  home, not through a grant, so nothing is re-shared); people with direct
+  write rights grant at once, agents and queued writers propose and a person
+  approves. Non-root grants expire within 90 days; only the root grants
+  standing access. Revoking (grantor or any owner) applies at once; expiry is
+  checked at query time. Granted results carry `via: "grant"`; granted data
+  can't be moved or granted onward. Verified live: 24/24 checks.
+- **Review queue**: an approval claims the queued write before running it, so
+  it runs once; approved and rejected writes leave the queue.
 - **Agents** each have their own graph token, signed by their instance with a
   provisioner-issued delegation key (`values.graph.delegationKey`, never
   substituted into agent config) and naming their profile's positions
@@ -120,8 +131,8 @@ allowed to use it; otherwise defining a profile would escalate privileges.
 2. **Items that belong to several positions** (an order touching Sales and
    Production): home at the lowest common ancestor (strict) or several homes
    (wider)?
-3. **Standing vs temporary grants**: "Sales always sees Engineering's release
-   notes" vs "for this deal". Both, with standing grants admin-only?
+3. ~~Standing vs temporary grants~~: built as both; standing grants are
+   root-only, everyone else's expire within 90 days.
 4. **Per-organization defaults**: which of the above are settings per client?
 
 ## Prerequisites (closed 2026-10-06)

@@ -195,3 +195,13 @@ entries:
         description: Shop floor - work orders, machine status, shift schedules, quality checks
       users:
         - !KeyOf user-bob
+  - id: position-sales
+    model: authentik_core.group
+    identifiers:
+      name: Sales
+    attrs:
+      parents:
+        - !KeyOf position-org
+      attributes:
+        gw_position: true
+        description: Sales - quotes, customer relationships, deals in progress
