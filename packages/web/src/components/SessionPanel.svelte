@@ -2,6 +2,7 @@
   import { store } from "../lib/stores.svelte.js";
   import { ws } from "../lib/ws-client.js";
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
+  import { conversationAction } from "../lib/conversation.js";
   import { ChevronDown, Copy, GitBranch, MessagesSquare, Shrink, SquarePen, type IconNode } from "lucide";
   import Icon from "./Icon.svelte";
 
@@ -42,13 +43,8 @@
     busy = true;
     error = null;
     try {
-      const res = (await ws.rpc(agentId, type, payload)) as { success?: boolean; error?: string };
-      if (res.success === false) throw new Error(res.error ?? `${type} failed`);
+      await conversationAction(agentId, type, payload);
       open = false;
-      // session-replacing commands: re-pull state so the cleared transcript shows
-      if (type === "new_session" || type === "fork" || type === "clone") {
-        await getAdapter(agentId).refreshSession();
-      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

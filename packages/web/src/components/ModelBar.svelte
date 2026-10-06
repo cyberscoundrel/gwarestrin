@@ -174,7 +174,7 @@
   );
 </script>
 
-<div class="modelbar-root flex flex-1 flex-wrap items-center gap-2 py-1 text-sm">
+<div class="modelbar-root flex min-w-0 flex-1 flex-wrap items-center gap-2 py-1 text-sm max-sm:flex-nowrap">
   <button
     class="select-compact inline-flex max-w-[min(18rem,100%)] items-center gap-1.5 font-mono text-2xs"
     title={effectiveModel ? `${effectiveModel.provider}/${effectiveModel.modelId}` : undefined}
@@ -208,7 +208,7 @@
   {#if pct !== null && tok !== null}
     <!-- context window meter: quiet until it matters -->
     <span
-      class="tabular ml-auto inline-flex items-center gap-2 font-mono text-2xs whitespace-nowrap {pct > 80 ? 'text-warn' : 'text-faint'}"
+      class="tabular ml-auto inline-flex items-center gap-2 font-mono text-2xs whitespace-nowrap max-sm:hidden {pct > 80 ? 'text-warn' : 'text-faint'}"
       title="Context window used by this conversation"
     >
       <span class="h-1 w-12 overflow-hidden rounded-full bg-edge" aria-hidden="true">

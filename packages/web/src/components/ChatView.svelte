@@ -9,7 +9,8 @@
   import ContextPanel from "./ContextPanel.svelte";
   import AgentHeader from "./AgentHeader.svelte";
   import Icon from "./Icon.svelte";
-  import { BookOpen, FolderOpen, Moon, Play, TriangleAlert, Wrench, type IconNode } from "lucide";
+  import { BookOpen, Check, Copy, Ellipsis, FolderOpen, Moon, Play, Shrink, SquarePen, TriangleAlert, Wrench, type IconNode } from "lucide";
+  import { conversationAction } from "../lib/conversation.js";
 
   let { agentId, agentName }: { agentId: string; agentName: string } = $props();
 
@@ -19,6 +20,29 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let drawer = $state<"closed" | "files" | "mcp" | "context">("closed");
+
+  // phone (<640px): the toolbar folds into one menu (P-13)
+  let phoneMenu = $state(false);
+  let phoneError = $state<string | null>(null);
+
+  async function phoneAction(type: string): Promise<void> {
+    phoneError = null;
+    try {
+      await conversationAction(agentId, type);
+      phoneMenu = false;
+    } catch (e) {
+      phoneError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  $effect(() => {
+    if (!phoneMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") phoneMenu = false;
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
 
   async function start(): Promise<void> {
     busy = true;
@@ -54,12 +78,58 @@
     <div class="relative flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-edge bg-bg px-3 py-1">
       <!-- narrow screens: the model bar gets its own full-width row so the
            model name stays readable instead of truncating to a few letters -->
-      <div class="flex min-w-0 flex-1 items-center max-[900px]:basis-full">
+      <div class="flex min-w-0 flex-1 items-center max-[900px]:basis-full max-sm:basis-auto">
         <div class="relative min-w-0 flex-1">
           <ModelBar {agentId} />
         </div>
       </div>
-      <div class="flex items-center gap-0.5">
+      <!-- phone: one menu for panels + conversation actions -->
+      <div class="relative sm:hidden">
+        <button
+          class="grid h-8 w-8 cursor-pointer place-items-center rounded-md transition-colors
+            {phoneMenu || drawer !== 'closed' ? 'bg-selected text-fg' : 'text-dim hover:bg-hover hover:text-fg'}"
+          aria-label="more"
+          aria-haspopup="menu"
+          aria-expanded={phoneMenu}
+          onclick={() => (phoneMenu = !phoneMenu)}
+        >
+          <Icon icon={Ellipsis} size={16} />
+        </button>
+        {#if phoneMenu}
+          <div class="fixed inset-0 z-29" role="presentation" onclick={() => (phoneMenu = false)}></div>
+          <div class="animate-pop absolute right-0 z-30 mt-1 w-64 rounded-xl border border-edge2 bg-panel2 p-1 shadow-overlay" role="menu">
+            {#each [["files", FolderOpen, "Files"], ["mcp", Wrench, "Tools"], ["context", BookOpen, "Briefing"]] as const as [kind, icon, label] (kind)}
+              <button
+                class="flex w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-fg hover:bg-hover"
+                role="menuitemcheckbox"
+                aria-checked={drawer === kind}
+                onclick={() => {
+                  drawer = drawer === kind ? "closed" : kind;
+                  phoneMenu = false;
+                }}
+              >
+                <Icon {icon} size={15} class="text-faint" />
+                {label}
+                {#if drawer === kind}<Icon icon={Check} size={14} class="ml-auto text-signal" />{/if}
+              </button>
+            {/each}
+            <div class="my-1 h-px bg-edge" role="separator"></div>
+            <p class="eyebrow m-0 px-2.5 pt-1 pb-1">Conversation</p>
+            {#each [["new_session", SquarePen, "New conversation"], ["clone", Copy, "Clone conversation"], ["compact", Shrink, "Compact conversation"]] as const as [type, icon, label] (type)}
+              <button
+                class="flex w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-sm text-fg hover:bg-hover"
+                role="menuitem"
+                onclick={() => void phoneAction(type)}
+              >
+                <Icon {icon} size={15} class="text-faint" />
+                {label}
+              </button>
+            {/each}
+            {#if phoneError}<p class="m-0 px-2.5 py-1.5 text-xs text-err">{phoneError}</p>{/if}
+          </div>
+        {/if}
+      </div>
+      <div class="flex items-center gap-0.5 max-sm:hidden">
         <SessionPanel {agentId} />
         <span class="mx-1 h-4 w-px bg-edge" aria-hidden="true"></span>
         {@render drawerToggle("files", FolderOpen, "Files", "Files in this agent's sandbox")}
