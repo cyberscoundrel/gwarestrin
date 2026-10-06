@@ -4,7 +4,7 @@
 #
 #   docker compose -f openshell/compose.yml up -d openshell-gateway openshell-registry
 #   openshell/scripts/publish-agent.sh dev
-#   docker compose -f openshell/compose.yml --profile trial up -d gw-osh
+# Tenants opt in from the main stack (x-openshell-tenant-env, OPENSHELL_TENANTS).
 name: gwarestrin-openshell
 
 services:
@@ -48,47 +48,9 @@ services:
           - registry
     restart: unless-stopped
 
-  # trial gwarestrin instance on the OpenShell runtime (`--profile trial`)
-  gw-osh:
-    profiles: ["trial"]
-    image: gwarestrin:openshell-dev
-    env_file:
-      - ../.env
-    environment:
-      GWARESTRIN_MAX_AGENTS: "1"
-      GWARESTRIN_STATE: /var/lib/gwarestrin
-      GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
-      GWARESTRIN_INSTANCE: osh
-      DOCKER_PROXY_URL: http://docker-proxy:2375
-      GWARESTRIN_RUNTIME: openshell
-      GWARESTRIN_OPENSHELL_GATEWAY: https://openshell-gateway:17670
-      GWARESTRIN_OPENSHELL_PKI: /etc/gwarestrin/openshell-pki
-      GWARESTRIN_OPENSHELL_IMAGE: registry:5443/gwarestrin-agent:dev
-      # the gateway shares the compose network: keep service names, no IP rewriting
-      GWARESTRIN_OPENSHELL_RESOLVE: names
-    volumes:
-      - gw-osh-state:/var/lib/gwarestrin
-      - ../providers.json:/etc/gwarestrin/providers.json:ro
-      - ./pki/ca.crt:/etc/gwarestrin/openshell-pki/ca.crt:ro
-      - ./pki/client:/etc/gwarestrin/openshell-pki/client:ro
-    dns:
-      - 1.1.1.1
-      - 1.0.0.1
-    ports:
-      - "3200:3000"
-    labels:
-      gwarestrin.tenant: osh-trial
-    networks:
-      - backend
-    depends_on:
-      - openshell-gateway
-    restart: unless-stopped
-
 volumes:
   openshell-state:
   openshell-registry:
-  gw-osh-state:
-    external: true
 
 networks:
   backend:

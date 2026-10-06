@@ -61,8 +61,15 @@ export function getInstanceMetadata(): InstanceMetadata | undefined {
 }
 
 /**
+ * Metadata the instance itself uses and nothing may substitute into agent
+ * config: values.openshell holds this instance's gateway credential, which
+ * would let an agent change its own sandbox policy.
+ */
+const PRIVATE_PATHS = [/^values\.openshell(\.|$)/];
+
+/**
  * Substitute ${a.b.c} paths (resolved against the instance metadata) inside
- * a string. Returns ok=false when any referenced path is missing.
+ * a string. Returns ok=false when any referenced path is missing or private.
  */
 export function substituteInstanceValue(
   input: string,
@@ -74,7 +81,12 @@ export function substituteInstanceValue(
       ok = false;
       return "";
     }
-    const resolved = resolveMetadataPath(metadata, rawPath.trim());
+    const p = rawPath.trim();
+    if (PRIVATE_PATHS.some((re) => re.test(p))) {
+      ok = false;
+      return "";
+    }
+    const resolved = resolveMetadataPath(metadata, p);
     if (resolved === undefined || resolved === null || typeof resolved === "object") {
       ok = false;
       return "";

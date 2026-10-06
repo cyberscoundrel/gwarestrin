@@ -1,3 +1,16 @@
+# Tenant settings for the OpenShell runtime (agents in the gateway's microVMs,
+# see openshell/README.md). Needs the openshell compose project up; the
+# provisioner issues each such tenant its gateway identity (values.openshell in
+# its instance metadata) when the tenant is listed in OPENSHELL_TENANTS.
+x-openshell-tenant-env: &openshell-tenant-env
+  GWARESTRIN_RUNTIME: openshell
+  GWARESTRIN_OPENSHELL_GATEWAY: https://openshell-gateway:17670
+  GWARESTRIN_OPENSHELL_PKI: /etc/gwarestrin/openshell-pki
+  GWARESTRIN_OPENSHELL_IMAGE: registry:5443/gwarestrin-agent:dev
+  GWARESTRIN_OPENSHELL_RESOLVE: names
+  GWARESTRIN_OPENSHELL_OIDC_ISSUER: https://authentik-server:9443/application/o/openshell/
+  NODE_EXTRA_CA_CERTS: /etc/gwarestrin/openshell-pki/ca.crt
+
 services:
   gwarestrin:
     # build with host networking: on WARP hosts the docker bridge's inherited
@@ -210,17 +223,19 @@ services:
       GWARESTRIN_STATE: /var/lib/gwarestrin
       GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
       GWARESTRIN_INSTANCE_METADATA: /etc/gwarestrin/instance.json
+      # OpenShell runtime: drop this line (and the openshell-pki mounts, and
+      # restore /dev/kvm + the gondolin cache) to go back to gondolin
+      <<: *openshell-tenant-env
     volumes:
       - gwarestrin-state-alice:/var/lib/gwarestrin
-      - gondolin-cache-alice:/home/node/.cache/gondolin
       - ./providers.json:/etc/gwarestrin/providers.json:ro
       - ./instances/alice.json:/etc/gwarestrin/instance.json:ro
+      # gateway transport credential (authorization is the OIDC identity)
+      - ./openshell/pki/ca.crt:/etc/gwarestrin/openshell-pki/ca.crt:ro
+      - ./openshell/pki/client:/etc/gwarestrin/openshell-pki/client:ro
     labels:
       gwarestrin.tenant: "alice"
-    devices:
-      - /dev/kvm:/dev/kvm
-    group_add:
-      - "${KVM_GID:-993}"
+      gwarestrin.runtime: openshell
     dns:
       - 1.1.1.1
       - 1.0.0.1
@@ -239,17 +254,19 @@ services:
       GWARESTRIN_STATE: /var/lib/gwarestrin
       GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
       GWARESTRIN_INSTANCE_METADATA: /etc/gwarestrin/instance.json
+      # OpenShell runtime: drop this line (and the openshell-pki mounts, and
+      # restore /dev/kvm + the gondolin cache) to go back to gondolin
+      <<: *openshell-tenant-env
     volumes:
       - gwarestrin-state-bob:/var/lib/gwarestrin
-      - gondolin-cache-bob:/home/node/.cache/gondolin
       - ./providers.json:/etc/gwarestrin/providers.json:ro
       - ./instances/bob.json:/etc/gwarestrin/instance.json:ro
+      # gateway transport credential (authorization is the OIDC identity)
+      - ./openshell/pki/ca.crt:/etc/gwarestrin/openshell-pki/ca.crt:ro
+      - ./openshell/pki/client:/etc/gwarestrin/openshell-pki/client:ro
     labels:
       gwarestrin.tenant: "bob"
-    devices:
-      - /dev/kvm:/dev/kvm
-    group_add:
-      - "${KVM_GID:-993}"
+      gwarestrin.runtime: openshell
     dns:
       - 1.1.1.1
       - 1.0.0.1
@@ -373,7 +390,10 @@ services:
   # Creates/locks/stops per-user gwarestrin containers, writes their
   # authentik objects, graph tokens, instance metadata and traefik routes.
   provisioner:
-    build: ./provisioner
+    build:
+      context: .
+      dockerfile: provisioner/Dockerfile
+      network: host
     environment:
       AUTHENTIK_URL: http://authentik-server:9000
       AUTHENTIK_TOKEN: ${AUTHENTIK_BOOTSTRAP_TOKEN}
@@ -385,8 +405,18 @@ services:
       COMPOSE_PROJECT: gwarestrin
       HOST_BASE: /home/cyber/gwarestrin
       POLL_SECONDS: "30"
+      # OpenShell tenancy: the provisioner is the gateway's Platform Admin
+      OPENSHELL_GATEWAY: https://openshell-gateway:17670
+      OPENSHELL_PKI: /data/openshell-pki
+      OPENSHELL_ISSUER_BASE: https://authentik-server:9443
+      OPENSHELL_TENANTS: alice,bob
+      NODE_EXTRA_CA_CERTS: /data/openshell-pki/ca.crt
     volumes:
       - ./instances:/data/instances
+      - ./openshell/pki/ca.crt:/data/openshell-pki/ca.crt:ro
+      - ./openshell/pki/client:/data/openshell-pki/client:ro
+      # issuer certificate for authentik's internal HTTPS listener
+      - ./openshell/pki/authentik:/data/openshell-pki/authentik:ro
       - ./graph-rag-config:/data/graph-rag-config
       - ./traefik/dynamic:/data/traefik
       - ./providers.json:/data/providers.json:ro

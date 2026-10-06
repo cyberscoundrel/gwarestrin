@@ -5,7 +5,7 @@ import { applyInstanceSubstitution, substituteInstanceValue } from "../src/insta
 const md: InstanceMetadata = {
   version: 1,
   instance: { name: "alice" },
-  values: { graph: { token: "secret-1" }, sql: { token: "sql-1" } },
+  values: { graph: { token: "secret-1" }, sql: { token: "sql-1" }, openshell: { workspace: "gw-alice", clientSecret: "gw-cred" } },
 };
 
 describe("substituteInstanceValue", () => {
@@ -17,6 +17,11 @@ describe("substituteInstanceValue", () => {
   });
   it("fails closed without metadata", () => {
     expect(substituteInstanceValue("Bearer ${values.graph.token}", undefined).ok).toBe(false);
+  });
+  it("never substitutes the instance's own gateway credential", () => {
+    for (const ref of ["${values.openshell.clientSecret}", "${ values.openshell.workspace }", "${values.openshell}"]) {
+      expect(substituteInstanceValue(`Bearer ${ref}`, md)).toEqual({ value: "Bearer ", ok: false });
+    }
   });
 });
 

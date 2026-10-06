@@ -29,6 +29,12 @@ export interface OpenShellRuntimeConfig {
    * on the compose network and resolves them itself (VM driver in compose).
    */
   resolve: "ips" | "names";
+  /**
+   * OIDC client-credentials identity at the gateway (multi-tenant gateways).
+   * The secret and the workspace come from instance metadata, see
+   * runtime/openshell-identity.ts. Unset: mTLS-only (single-user gateway).
+   */
+  oidc?: { issuer: string; clientId: string } | undefined;
 }
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -68,6 +74,14 @@ function runtimeConfig(): Pick<ServerConfig, "runtime" | "openshell"> {
       workspace: process.env.GWARESTRIN_OPENSHELL_WORKSPACE ?? "default",
       image,
       resolve: resolveMode(process.env.GWARESTRIN_OPENSHELL_RESOLVE),
+      ...(process.env.GWARESTRIN_OPENSHELL_OIDC_ISSUER
+        ? {
+            oidc: {
+              issuer: process.env.GWARESTRIN_OPENSHELL_OIDC_ISSUER,
+              clientId: process.env.GWARESTRIN_OPENSHELL_OIDC_CLIENT_ID ?? "openshell-gateway",
+            },
+          }
+        : {}),
     },
   };
 }

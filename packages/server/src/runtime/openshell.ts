@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { SandboxClient, errorCode, fromConnect } from "@nvidia/openshell-sdk";
+import { type OidcTokenProvider, SandboxClient, errorCode, fromConnect } from "@nvidia/openshell-sdk";
 import type { PiExitInfo, PiTransport, PiTransportFactory } from "../agents/pi-transport.js";
 import { scoped } from "../util/log.js";
 import type { PolicyInit, ProfileInit } from "./openshell-policy.js";
@@ -21,6 +21,8 @@ export interface OpenShellConfig {
   workspace?: string;
   /** Sandbox image containing node + pi + the gwarestrin extensions */
   image: string;
+  /** bearer identity; the certificate alone is only a transport credential */
+  tokenProvider?: OidcTokenProvider;
 }
 
 export async function connectOpenShell(cfg: OpenShellConfig): Promise<SandboxClient> {
@@ -29,7 +31,13 @@ export async function connectOpenShell(cfg: OpenShellConfig): Promise<SandboxCli
     readFile(cfg.clientCertPath),
     readFile(cfg.clientKeyPath),
   ]);
-  return SandboxClient.connect({ gateway: cfg.gateway, caCert, clientCert, clientKey });
+  return SandboxClient.connect({
+    gateway: cfg.gateway,
+    caCert,
+    clientCert,
+    clientKey,
+    ...(cfg.tokenProvider ? { oidcTokenProvider: cfg.tokenProvider } : {}),
+  });
 }
 
 /**
