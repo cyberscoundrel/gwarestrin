@@ -9,7 +9,11 @@ import {
   setAppStorage,
 } from "@earendil-works/pi-web-ui";
 import App from "./App.svelte";
+import { registerGwToolRenderers } from "./lib/tool-renderers.js";
 import "./app.css";
+
+// readable cards for bash/write/read/edit (overrides pi-web-ui's defaults)
+registerGwToolRenderers();
 
 // pi-web-ui requires an app storage instance before any component touches it
 const settings = new SettingsStore();

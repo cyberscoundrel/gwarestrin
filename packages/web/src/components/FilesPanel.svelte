@@ -5,6 +5,8 @@
 
   let cwd = $state("");
   let entries = $state<FileEntry[]>([]);
+  /** false while a listing is in flight (avoids an "empty" flash) */
+  let loaded = $state(false);
   let error = $state<string | null>(null);
   let busy = $state(false);
   let dragOver = $state(false);
@@ -15,6 +17,7 @@
     error = null;
     try {
       entries = await filesApi.list(agentId, cwd);
+      loaded = true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -25,6 +28,7 @@
     void agentId;
     cwd = "";
     entries = [];
+    loaded = false;
     void refresh();
   });
 
@@ -71,7 +75,7 @@
   }
 
   async function mkdirPrompt(): Promise<void> {
-    const name = prompt("new directory name");
+    const name = prompt("new folder name");
     if (!name?.trim()) return;
     error = null;
     try {
@@ -110,8 +114,8 @@
   aria-label="files"
 >
   <div class="flex items-center gap-2 border-b border-edge px-3 py-2">
-    <span class="font-semibold tracking-wide">workspace</span>
-    <button class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg" onclick={mkdirPrompt}>+ dir</button>
+    <span class="font-semibold tracking-wide">files</span>
+    <button class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg" onclick={mkdirPrompt}>+ folder</button>
     <label class="rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg cursor-pointer">
       upload
       <input
@@ -137,6 +141,8 @@
   <div class="min-h-0 flex-1 overflow-y-auto">
     {#if error}
       <p class="px-3 py-2 text-err">{error}</p>
+    {:else if !loaded}
+      <p class="px-3 py-2 text-muted">loading…</p>
     {:else if entries.length === 0}
       <p class="px-3 py-2 text-muted">empty — drag files here to upload</p>
     {:else}
@@ -151,8 +157,9 @@
             {/if}
             <span class="text-xs text-muted">{e.type === "file" ? fmtSize(e.size) : ""}</span>
             <button
-              class="invisible rounded px-1 text-xs text-err hover:bg-[#2a1218] group-hover:visible"
-              title="delete"
+              class="invisible rounded px-1 text-xs text-err hover:bg-[#2a1218] group-hover:visible group-focus-within:visible pointer-coarse:visible"
+              title="delete {e.name}"
+              aria-label="delete {e.name}"
               onclick={() => void remove(e.name)}
             >
               ✕

@@ -11,7 +11,30 @@ export interface AgentListItem {
   model: { provider: string; modelId: string } | null;
   mcpServers: string[];
   profileId: string;
+  /** whether a briefing was built at create time (absent on older records) */
+  contextStatus?: "skipped" | "ok" | "failed" | undefined;
   unread: number;
+}
+
+// last agent this browser opened (per-browser convenience; storage may be
+// unavailable in private windows, so every access is guarded)
+const SELECTED_AGENT_KEY = "gwarestrin.selectedAgentId";
+
+function readRememberedAgent(): string | null {
+  try {
+    return localStorage.getItem(SELECTED_AGENT_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function rememberAgent(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(SELECTED_AGENT_KEY, id);
+    else localStorage.removeItem(SELECTED_AGENT_KEY);
+  } catch {
+    /* storage unavailable: selection just isn't remembered */
+  }
 }
 
 class Store {
@@ -28,6 +51,19 @@ class Store {
   defaultProvider = $state<string | null>(null);
   defaultModel = $state<string | null>(null);
   private runtime = new SvelteMap<string, AgentRuntimeSummary>();
+  /** the remembered agent is restored once, on the first agent list load */
+  private initialSelectionDone = false;
+  /** extension status text per agent (e.g. "sandbox: running"), shown in its header */
+  private statusLines = new SvelteMap<string, string>();
+
+  statusLineFor(id: string): string {
+    return this.statusLines.get(id) ?? "";
+  }
+
+  setStatusLine(id: string, text: string): void {
+    if (text) this.statusLines.set(id, text);
+    else this.statusLines.delete(id);
+  }
   private unreadListeners = new Set<() => void>();
 
   constructor() {
@@ -63,6 +99,7 @@ class Store {
     if (id) {
       this.editingProfileId = null;
       this.showNewChat = false;
+      rememberAgent(id);
     }
     if (id) {
       const a = this.agents.find((x) => x.id === id);
@@ -106,13 +143,20 @@ class Store {
         model: a.model,
         mcpServers: a.mcpServers,
         profileId: a.profileId ?? "default",
+        contextStatus: a.contextStatus,
         unread: this.agents.find((x) => x.id === a.id)?.unread ?? 0,
       }));
       for (const a of agents) if (a.runtime) this.runtime.set(a.id, a.runtime);
-      if (!this.selectedId && this.agents.length > 0) {
-        // land on a live conversation when possible instead of a stopped agent
-        const live = this.agents.find((a) => ["running", "streaming", "starting"].includes(a.status));
-        this.selectedId = (live ?? this.agents[0]!).id;
+      // first load only: reopen the agent this browser last picked, if it
+      // still exists. Otherwise stay on the composer - never auto-select
+      // some other agent (often someone else's, stopped, with a big "start").
+      const remembered = readRememberedAgent();
+      if (remembered && !this.agents.some((a) => a.id === remembered)) rememberAgent(null);
+      if (!this.initialSelectionDone) {
+        this.initialSelectionDone = true;
+        if (!this.selectedId && !this.showNewChat && !this.editingProfileId && remembered) {
+          if (this.agents.some((a) => a.id === remembered)) this.select(remembered);
+        }
       }
       for (const l of this.unreadListeners) l();
     } catch {

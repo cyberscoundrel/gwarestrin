@@ -3,7 +3,7 @@
   import { store } from "../lib/stores.svelte.js";
   import { getAdapter } from "../lib/rpc-agent-adapter.js";
   import { ws } from "../lib/ws-client.js";
-  import { modelDisplayName } from "../lib/format.js";
+  import { isFreeModelId, modelDisplayName, whereItRuns } from "../lib/format.js";
   import type { ModelInfo } from "../lib/agent-types.js";
   import Dropdown from "./Dropdown.svelte";
 
@@ -17,6 +17,18 @@
   let currentModel = $state<{ provider: string; modelId: string } | null>(null);
   let currentThinking = $state<string>("off");
   let openModel = $state(false);
+  // picker filter: hundreds of cloud models, paid and free mixed
+  let modelQuery = $state("");
+  let freeOnly = $state(false);
+
+  function focusOnMount(el: HTMLInputElement): void {
+    el.focus();
+  }
+
+  // a fresh search each time the picker opens (the free-only choice sticks)
+  $effect(() => {
+    if (!openModel) modelQuery = "";
+  });
   let busy = $state(false);
   let error = $state<string | null>(null);
   let streaming = $state(false);
@@ -135,17 +147,24 @@
   }
 
   const grouped = $derived.by(() => {
-    // tier grouping (local first) — cloud providers collapse into one group
-    const tierOf = (providerId: string): "local" | "cloud" =>
-      store.providers.find((p) => p.id === providerId)?.tier ?? "cloud";
-    const byTier = new Map<string, ModelInfo[]>();
-    for (const m of models) {
-      const tier = tierOf(m.provider);
-      const list = byTier.get(tier) ?? [];
-      list.push(m);
-      byTier.set(tier, list);
+    // one group per place the model runs: "On-prem" first, then
+    // "Cloud: <provider>" so the vendor that sees the prompts is explicit
+    const byWhere = new Map<string, { local: boolean; list: ModelInfo[] }>();
+    const q = modelQuery.trim().toLowerCase();
+    const shown = models.filter(
+      (m) =>
+        (!q || m.id.toLowerCase().includes(q) || (m.name ?? "").toLowerCase().includes(q)) &&
+        (!freeOnly || isFreeModelId(m.id)),
+    );
+    for (const m of shown) {
+      const where = whereItRuns(m.provider, store.providers);
+      const group = byWhere.get(where.label) ?? { local: where.tier === "local", list: [] };
+      group.list.push(m);
+      byWhere.set(where.label, group);
     }
-    return [...byTier.entries()].sort(([a], [b]) => (a === "local" ? -1 : b === "local" ? 1 : 0));
+    return [...byWhere.entries()]
+      .sort(([, a], [, b]) => Number(b.local) - Number(a.local))
+      .map(([label, g]) => [label, g.list] as const);
   });
 
   const pct = $derived(stats?.context?.percent ?? null);
@@ -161,7 +180,7 @@
 
 <div class="modelbar-root flex flex-1 flex-wrap items-center gap-2 py-1.5 text-sm">
   <button
-    class="select-compact max-w-64 truncate"
+    class="select-compact max-w-[min(16rem,100%)] truncate"
     title={effectiveModel ? `${effectiveModel.provider}/${effectiveModel.modelId}` : undefined}
     disabled={busy}
     onclick={() => (openModel = !openModel)}
@@ -203,23 +222,53 @@
 </div>
 
 {#if openModel}
-  <div class="modelbar-root absolute z-30 mt-1 max-h-96 w-80 overflow-y-auto rounded-lg border border-edge2 bg-panel2 shadow-xl">
+  <div
+    class="modelbar-root absolute z-30 mt-1 flex max-h-96 w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-lg border
+      border-edge2 bg-panel2 shadow-xl"
+  >
+    {#if models.length > 8}
+      <div class="flex items-center gap-2 border-b border-edge p-1.5">
+        <input
+          class="min-w-0 flex-1 rounded border border-edge2 bg-bg px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+          placeholder="type to filter ({models.length})"
+          aria-label="filter models"
+          bind:value={modelQuery}
+          use:focusOnMount
+          onkeydown={(e) => {
+            const first = grouped[0]?.[1][0];
+            if (e.key === "Enter" && first) void chooseModel(first.provider, first.id);
+          }}
+        />
+        {#if models.some((m) => isFreeModelId(m.id))}
+          <label class="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-muted">
+            <input type="checkbox" bind:checked={freeOnly} />
+            free only
+          </label>
+        {/if}
+      </div>
+    {/if}
+    <div class="min-h-0 overflow-y-auto">
     {#if models.length === 0}
       <p class="px-3 py-2 text-sm text-muted">no models (agent not running?)</p>
+    {:else if grouped.length === 0}
+      <p class="px-3 py-2 text-sm text-muted">no matches</p>
     {:else}
-      {#each grouped as [tier, list]}
-        <div class="px-3 pt-2 text-xs font-semibold tracking-wide text-muted">{tier === "local" ? "local" : "cloud"}</div>
+      {#each grouped as [where, list]}
+        <div class="px-3 pt-2 text-xs font-semibold tracking-wide text-muted">{where}</div>
         {#each list as m (m.id)}
           <button
             class="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-[#1a1d26]
               {effectiveModel?.provider === m.provider && effectiveModel?.modelId === m.id ? 'text-accent' : 'text-fg'}"
+            title="{m.provider}/{m.id}"
             onclick={() => void chooseModel(m.provider, m.id)}
           >
-            {m.name === m.id ? m.id : m.name}
-            {#if m.reasoning}<span class="ml-1 text-xs text-muted">🧠</span>{/if}
+            <!-- same label as the button and rail (no raw file paths) -->
+            {m.name && m.name !== m.id ? m.name : modelDisplayName(m.provider, m.id, store.providers)}
+            {#if m.reasoning}<span class="ml-1 text-xs text-muted">reasoning</span>{/if}
           </button>
         {/each}
       {/each}
     {/if}
+    </div>
   </div>
 {/if}

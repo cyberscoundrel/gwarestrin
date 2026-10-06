@@ -9,6 +9,8 @@
   const record = $derived(store.agents.find((a) => a.id === agentId));
 
   let registry = $state<Record<string, McpServerDef>>({});
+  /** false until the first registry load settles (avoids an "empty" flash) */
+  let loaded = $state(false);
   let error = $state<string | null>(null);
   let busy = $state(false);
 
@@ -30,6 +32,7 @@
     error = null;
     try {
       registry = await mcpApi.list();
+      loaded = true;
       probes = await mcpApi.status();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -53,6 +56,15 @@
     if (!profile || profile.mcpServers === "all") return null;
     return new Set(profile.mcpServers);
   });
+
+  /** allowed connections first, so the agent's usable set reads top-down */
+  const sortedEntries = $derived(
+    Object.entries(registry).sort(([a], [b]) => Number(isGranted(b)) - Number(isGranted(a))),
+  );
+
+  const profileName = $derived(
+    store.profiles.find((p) => p.id === (record?.profileId || "default"))?.name ?? "its agent profile",
+  );
 
   /** false = the profile does not grant this server; the toggle is locked */
   function isGranted(name: string): boolean {
@@ -91,7 +103,7 @@
   async function save(): Promise<void> {
     const name = formName.trim();
     if (!name) {
-      error = "server name required";
+      error = "connection name required";
       return;
     }
     const def: McpServerDef = {};
@@ -118,7 +130,7 @@
   }
 
   async function remove(name: string): Promise<void> {
-    if (!confirm(`remove MCP server "${name}" from the registry?`)) return;
+    if (!confirm(`remove tool connection "${name}" from the workspace? every agent loses it.`)) return;
     busy = true;
     error = null;
     try {
@@ -137,7 +149,7 @@
   function statusDot(name: string): { color: string; title: string } {
     if (!isEnabled(name)) return { color: "text-muted", title: "not enabled for this agent" };
     const p = probes[name];
-    if (!p || p.reachable === null) return { color: "text-muted", title: "no http probe (stdio server)" };
+    if (!p || p.reachable === null) return { color: "text-muted", title: "local command connection (no reachability check)" };
     if (p.reachable) return { color: "text-ok", title: `reachable${p.ms != null ? ` · ${p.ms}ms` : ""}` };
     return { color: "text-err", title: "unreachable" };
   }
@@ -145,9 +157,10 @@
 
 <div class="flex h-full flex-col border-l border-edge bg-panel text-sm">
   <div class="flex items-center gap-2 border-b border-edge px-3 py-2">
-    <span class="font-semibold tracking-wide">mcp servers</span>
+    <span class="font-semibold tracking-wide">tool connections</span>
     <button
       class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg"
+      title="add a tool connection to the workspace"
       onclick={() => startEdit(null)}
     >
       + add
@@ -185,32 +198,43 @@
       </div>
     {/if}
 
-    {#if Object.keys(registry).length === 0}
-      <p class="px-3 py-2 text-muted">registry is empty — add a server to make it available to agents</p>
+    {#if !loaded && !error}
+      <p class="px-3 py-2 text-muted">loading…</p>
+    {:else if Object.keys(registry).length === 0}
+      <p class="px-3 py-2 text-muted">no tool connections in this workspace yet — add one to make it available to agent profiles</p>
     {:else}
       <ul class="m-0 list-none p-0">
-        {#each Object.entries(registry) as [name, def] (name)}
+        {#each sortedEntries as [name, def] (name)}
           {@const dot = statusDot(name)}
           <li class="border-b border-edge/50 px-3 py-2">
             <div class="flex items-center gap-2">
-              <span class="{dot.color}" title={dot.title}>●</span>
+              <span class="{dot.color}" title={dot.title} role="img" aria-label={dot.title}>●</span>
               <label
                 class="flex flex-1 items-center gap-2 truncate"
-                title={isGranted(name) ? summarize(def) : "not granted by this agent's profile"}
+                title={isGranted(name) ? summarize(def) : `not allowed by ${profileName}`}
               >
                 <input
                   type="checkbox"
                   checked={isEnabled(name)}
-                  disabled={busy || !record || !isGranted(name)}
+                  disabled={busy || !record || (!isGranted(name) && !isEnabled(name))}
+                  aria-label="{isEnabled(name) ? 'switch off' : 'switch on'} {name} for this agent"
                   onchange={() => void toggle(name)}
                 />
                 <span class="truncate font-medium">{name}</span>
                 {#if !isGranted(name)}
-                  <span class="rounded border border-edge px-1 text-[0.65rem] text-muted" title="the profile that created this agent does not grant this server">profile-locked</span>
+                  <span class="rounded border border-edge px-1 text-[0.65rem] text-muted" title="this agent's profile ({profileName}) does not allow this connection">not allowed</span>
                 {/if}
               </label>
-              <button class="rounded px-1 text-xs text-muted hover:text-fg" title="edit" onclick={() => startEdit(name)}>✎</button>
-              <button class="rounded px-1 text-xs text-err hover:bg-[#2a1218]" title="delete" onclick={() => void remove(name)}>✕</button>
+              <button
+                class="rounded px-1 text-xs text-muted hover:text-fg"
+                title="edit {name} (workspace-wide, all agents)"
+                aria-label="edit tool connection {name} for the whole workspace"
+                onclick={() => startEdit(name)}>✎</button>
+              <button
+                class="rounded px-1 text-xs text-err hover:bg-[#2a1218]"
+                title="remove {name} from the workspace (all agents)"
+                aria-label="remove tool connection {name} from the workspace"
+                onclick={() => void remove(name)}>✕</button>
             </div>
             <div class="mt-0.5 truncate pl-6 text-xs text-muted" title={summarize(def)}>
               {summarize(def)}{def.description ? ` — ${def.description}` : ""}
@@ -222,9 +246,12 @@
   </div>
 
   <div class="border-t border-edge px-3 py-1.5 text-xs text-muted">
-    checked = enabled for this agent (restarts it)
+    ticked = switched on for this agent; changing one restarts the agent.
     {#if allowedSet !== null}
-      · servers outside the profile allowlist are locked — edit the profile to grant them
+      only connections allowed by <span class="text-fg">{profileName}</span> can be switched on — edit the agent
+      profile to allow more.
+    {:else}
+      <span class="text-fg">{profileName}</span> allows every workspace connection.
     {/if}
   </div>
 </div>

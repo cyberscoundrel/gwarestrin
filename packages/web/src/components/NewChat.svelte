@@ -2,7 +2,7 @@
 import { onMount } from "svelte";
 import { store } from "../lib/stores.svelte.js";
 import { getAdapter } from "../lib/rpc-agent-adapter.js";
-import { modelDisplayName } from "../lib/format.js";
+import { isFreeModelId, modelDisplayName, tierName } from "../lib/format.js";
 import Dropdown from "./Dropdown.svelte";
 
   let { preselectProfileId }: { preselectProfileId?: string | null } = $props();
@@ -53,7 +53,10 @@ import Dropdown from "./Dropdown.svelte";
   });
   $effect(() => {
     if (provider && models.length > 0 && !models.some((m) => m.id === modelId)) {
-      const def = models.find((m) => m.id === store.defaultModel) ?? models[0]!;
+      // workspace default, else a free model if the provider has any (an
+      // unpriced catalogue's first entry may be billed), else the first
+      const def =
+        models.find((m) => m.id === store.defaultModel) ?? models.find((m) => isFreeModelId(m.id)) ?? models[0]!;
       modelId = def.id;
     }
   });
@@ -68,7 +71,9 @@ import Dropdown from "./Dropdown.svelte";
     if (preselectProfileId && store.profiles.some((p) => p.id === preselectProfileId)) {
       profileId = preselectProfileId;
     }
-    store.mcpServers = await mcpApi.list();
+    try {
+      store.mcpServers = await mcpApi.list();
+    } catch { /* tool chips just stay empty; the offline banner explains why */ }
   });
 
   function deriveName(): string {
@@ -122,7 +127,7 @@ import Dropdown from "./Dropdown.svelte";
   }
 </script>
 
-<div class="grid h-full place-items-center overflow-y-auto p-6">
+<div class="grid h-full grid-cols-[minmax(0,1fr)] place-items-center overflow-y-auto p-6 max-sm:p-4">
   <div class="grid w-full max-w-2xl justify-items-center gap-6">
     <div class="grid justify-items-center gap-2 text-center">
       <svg viewBox="0 0 24 24" class="h-10 w-10 text-muted" aria-hidden="true">
@@ -135,22 +140,24 @@ import Dropdown from "./Dropdown.svelte";
         />
       </svg>
       <h1 class="m-0 text-2xl tracking-wide text-fg">{greeting()}</h1>
-      <p class="m-0 text-sm text-muted">start an agent — pick a profile, drop your first prompt</p>
+      <p class="m-0 text-sm text-muted">start an agent — pick an agent profile, drop your first prompt</p>
     </div>
 
-    <div class="grid w-full gap-4 rounded-xl border border-edge bg-panel p-5">
+    <div class="grid w-full gap-4 rounded-xl border border-edge bg-panel p-5 max-sm:p-4">
       <div class="grid gap-2">
-        <span class="text-xs tracking-wide text-muted uppercase">profile</span>
+        <span class="text-xs tracking-wide text-muted uppercase">agent profile</span>
         <div class="flex flex-wrap items-center gap-2">
-          <div class="[&_button]:w-full">
+          <div class="max-w-full">
             <Dropdown
+              label="agent profile"
               value={profileId}
-              options={store.profiles.map((p) => ({ value: p.id, label: p.name + (p.contextEngine ? " ⚙" : "") }))}
+              options={store.profiles.map((p) => ({ value: p.id, label: p.name + (p.contextEngine ? " · briefing" : "") }))}
               onchange={(id) => (profileId = id)}
             />
           </div>
           {#if mcpChips.length > 0}
-            <div class="flex flex-wrap items-center gap-1.5">
+            <div class="flex flex-wrap items-center gap-1.5" title="tool connections this agent profile allows">
+              <span class="text-xs text-muted">tools:</span>
               {#each mcpChips as s (s)}
                 <span class="rounded-full border border-edge2 px-2 py-0.5 text-xs text-muted">{s}</span>
               {/each}
@@ -164,8 +171,10 @@ import Dropdown from "./Dropdown.svelte";
         <div class="flex flex-wrap items-center gap-2">
           <div class="w-28">
             <Dropdown
+              full
+              label="where the model runs"
               value={tier}
-              options={tiers.map((t) => ({ value: t, label: t }))}
+              options={tiers.map((t) => ({ value: t, label: tierName(t) }))}
               onchange={(t) => {
                 tier = t as "local" | "cloud";
                 const first = store.providers.find((p) => p.tier === tier);
@@ -173,8 +182,10 @@ import Dropdown from "./Dropdown.svelte";
               }}
             />
           </div>
-          <div class="w-44 [&_button]:w-full [&_button]:max-w-44">
+          <div class="w-44 max-w-full">
             <Dropdown
+              full
+              label="provider"
               value={providerId}
               options={store.providers
                 .filter((p) => p.tier === tier)
@@ -182,8 +193,12 @@ import Dropdown from "./Dropdown.svelte";
               onchange={(id) => (providerId = id)}
             />
           </div>
-          <div class="min-w-0 flex-1 [&_button]:w-full">
+          <div class="min-w-48 flex-1 max-sm:min-w-full">
             <Dropdown
+              full
+              label="model"
+              searchable
+              quickFilter={models.some((m) => isFreeModelId(m.id)) ? { label: "free only", match: isFreeModelId } : undefined}
               value={modelId}
               options={models.map((m) => ({ value: m.id, label: modelDisplayName(providerId, m.id, store.providers) }))}
               onchange={(id) => (modelId = id)}
@@ -194,7 +209,7 @@ import Dropdown from "./Dropdown.svelte";
 
       <textarea
         class="min-h-24 w-full resize-y rounded-lg border border-edge2 bg-bg px-4 py-3 text-base text-fg outline-none focus:border-accent"
-        placeholder={hasEngine ? "first prompt (optional — the profile's engine runs either way)" : "what should this agent work on first?"}
+        placeholder={hasEngine ? "first prompt (optional — the briefing is built either way)" : "what should this agent work on first?"}
         bind:value={promptText}
         onkeydown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) void submit();
@@ -206,16 +221,16 @@ import Dropdown from "./Dropdown.svelte";
       {/if}
 
       <div class="flex items-center justify-between gap-2">
-        <span class="text-xs text-muted">⌘/ctrl+enter to start</span>
+        <span class="text-xs text-muted pointer-coarse:invisible">⌘/ctrl+enter to start</span>
         <button
           class="cursor-pointer rounded-md bg-accent px-5 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
           disabled={submitting || (!promptText.trim() && !hasEngine)}
           onclick={() => void submit()}
         >
           {#if submitting}
-            {hasEngine ? "generating context…" : "starting…"}
+            {hasEngine ? "building briefing…" : "starting…"}
           {:else}
-            {hasEngine ? "analyze & start" : "start"}
+            {hasEngine ? "build briefing & start" : "start"}
           {/if}
         </button>
       </div>

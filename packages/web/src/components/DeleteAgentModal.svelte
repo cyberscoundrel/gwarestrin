@@ -8,6 +8,14 @@
   let exported = $state(false);
   let error = $state<string | null>(null);
 
+  $effect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onclose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
+
   function exportTrace(): void {
     // plain navigation download; browser handles it as an attachment
     window.open(api.exportUrl(agentId), "_blank");
@@ -21,7 +29,8 @@
       await api.deleteAgent(agentId, true);
       const wasSelected = store.selectedId === agentId;
       await store.refreshAgents();
-      if (wasSelected) store.select(store.agents[0]?.id ?? null);
+      // back to the composer rather than jumping into some other agent
+      if (wasSelected) store.select(null);
       onclose();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -36,10 +45,11 @@
     border border-edge2 bg-panel2 p-5"
   role="alertdialog"
   aria-modal="true"
+  aria-labelledby="delete-agent-title"
 >
-  <h3 class="m-0 tracking-wide">delete {agentName}?</h3>
+  <h3 id="delete-agent-title" class="m-0 tracking-wide">delete {agentName}?</h3>
   <p class="m-0 text-sm text-muted">
-    this erases <span class="text-warn font-medium">all data</span> for this agent — workspace files, session
+    this erases <span class="text-warn font-medium">all data</span> for this agent — its files, conversation
     history, and configuration. this cannot be undone.
   </p>
   {#if error}
@@ -50,9 +60,9 @@
       class="cursor-pointer rounded-md border border-edge2 bg-transparent px-3 py-2 text-sm text-muted hover:text-fg"
       onclick={exportTrace}
       disabled={busy}
-      title="download the conversation trace (session jsonl)"
+      title="download the conversation history (jsonl)"
     >
-      {exported ? "trace downloaded ✓" : "export trace"}
+      {exported ? "history downloaded ✓" : "export conversation"}
     </button>
     <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-2 text-fg" onclick={onclose} disabled={busy}>
       cancel

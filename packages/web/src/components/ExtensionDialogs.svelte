@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ws } from "../lib/ws-client.js";
+  import { store } from "../lib/stores.svelte.js";
   import type { WsUiRequest } from "@gwarestrin/shared";
 
   type DialogState = {
@@ -16,7 +17,6 @@
 
   let dialogs = $state<DialogState[]>([]);
   let toasts = $state<Array<{ id: string; agentId: string; message: string; kind: string }>>([]);
-  let statusLine = $state<string>("");
   let inputValue = $state("");
   let editorValue = $state("");
 
@@ -69,13 +69,13 @@
         case "setStatus": {
           const text = r.statusText ? String(r.statusText) : "";
           if (String(r.statusKey) === "gondolin") {
-            statusLine = text ? `vm: ${text}` : "";
+            store.setStatusLine(msg.agentId, text ? `sandbox: ${text}` : "");
           }
           break;
         }
         case "setWidget": {
           if (Array.isArray(r.widgetLines)) {
-            statusLine = (r.widgetLines as string[]).join(" · ");
+            store.setStatusLine(msg.agentId, (r.widgetLines as string[]).join(" · "));
           }
           break;
         }
@@ -92,8 +92,13 @@
 
 {#each dialogs as d (d!.id)}
   <div class="fixed inset-0 z-60 bg-black/55" role="presentation"></div>
-  <div class="fixed top-1/2 left-1/2 z-61 grid min-w-88 max-w-2xl -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl border border-edge2 bg-panel2 p-5" role="dialog" aria-modal="true">
-    <h3 class="m-0">{d!.title ?? d!.method}</h3>
+  <div class="fixed top-1/2 left-1/2 z-61 grid w-[min(36rem,92vw)] -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl border border-edge2 bg-panel2 p-5" role="dialog" aria-modal="true">
+    <div class="grid gap-0.5 pr-6">
+      <span class="truncate text-xs text-muted">
+        request from agent <span class="text-fg">{store.agents.find((a) => a.id === d!.agentId)?.name ?? d!.agentId}</span>
+      </span>
+      <h3 class="m-0">{d!.title ?? d!.method}</h3>
+    </div>
     {#if d!.message}
       <p class="m-0 text-sm text-muted">{d!.message}</p>
     {/if}
@@ -151,9 +156,3 @@
     </div>
   {/each}
 </div>
-
-{#if statusLine}
-  <div class="fixed bottom-1 left-2 z-70 rounded bg-panel2/90 px-2 py-0.5 text-xs text-muted">
-    {statusLine}
-  </div>
-{/if}

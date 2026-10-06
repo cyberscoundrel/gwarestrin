@@ -47,7 +47,9 @@
     <span class="font-bold tracking-[0.12em]">ground chat</span>
     <span
       class="h-[7px] w-[7px] rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
-      title="ws: {store.wsStatus}"
+      role="img"
+      aria-label={store.wsStatus === "open" ? "connected" : "disconnected"}
+      title={store.wsStatus === "open" ? "connected to server" : "disconnected from server"}
     ></span>
   </div>
 
@@ -59,7 +61,7 @@
         <div class="group grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md px-2 py-1.5 hover:bg-[#1a1d26]">
           <button
             class="cursor-pointer border-none bg-transparent p-0 text-[0.7rem] text-muted transition-transform {isCollapsed ? '' : 'rotate-90'}"
-            aria-label="toggle {profile.name}"
+            aria-label="show or hide agents in {profile.name}"
             onclick={() => (collapsed[profile.id] = !isCollapsed)}
           >
             ▶
@@ -73,8 +75,8 @@
           </button>
           <button
             class="cursor-pointer rounded border-none bg-transparent px-1 text-[0.7rem] text-muted hover:text-fg"
-            title="edit profile"
-            aria-label="edit profile {profile.name}"
+            title="edit agent profile"
+            aria-label="edit agent profile {profile.name}"
             onclick={() => oneditprofile?.(profile.id)}
           >
             ✎
@@ -88,7 +90,7 @@
             {#each members as a (a.id)}
               <li class="group relative">
                 <button
-                  class="grid w-full grid-cols-[10px_1fr_auto] items-center gap-2 rounded-md px-2.5 py-2 text-left
+                  class="grid w-full grid-cols-[10px_1fr_auto] items-center gap-2 rounded-md px-2.5 py-2 text-left pointer-coarse:pr-8
                     text-[0.9rem] text-fg cursor-pointer border-none bg-transparent hover:bg-[#1a1d26]
                     {a.id === store.selectedId && !store.editingProfileId ? 'bg-[#20242f]' : ''}"
                   onclick={() => {
@@ -111,7 +113,7 @@
                 </button>
                 <button
                   class="absolute top-1.5 right-1.5 hidden rounded px-1 text-xs text-muted hover:bg-[#2a1218] hover:text-err
-                    group-hover:block"
+                    group-hover:block group-focus-within:block pointer-coarse:block pointer-coarse:px-2 pointer-coarse:py-1"
                   title="delete {a.name}"
                   aria-label="delete {a.name}"
                   onclick={(e) => {
@@ -142,13 +144,13 @@
         hover:border-accent hover:text-fg"
       onclick={() => oneditprofile?.("new")}
     >
-      + new profile
+      + new agent profile
     </button>
     <button
       class="cursor-pointer rounded-md border-none bg-transparent px-4 py-1 text-xs text-muted hover:text-fg"
       onclick={() => (showReview = true)}
     >
-      graph review
+      approvals
     </button>
   </div>
 </nav>

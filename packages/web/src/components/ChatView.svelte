@@ -7,6 +7,7 @@
   import FilesPanel from "./FilesPanel.svelte";
   import McpPanel from "./McpPanel.svelte";
   import ContextPanel from "./ContextPanel.svelte";
+  import AgentHeader from "./AgentHeader.svelte";
 
   let { agentId, agentName }: { agentId: string; agentName: string } = $props();
 
@@ -33,10 +34,13 @@
 </script>
 
 <section class="flex min-h-0 flex-1 flex-col">
+  <AgentHeader {agentId} ondrawer={(d) => (drawer = d)} />
   {#if runtime?.status === "running" || runtime?.status === "starting"}
     <div class="relative flex flex-wrap items-center gap-2 border-b border-edge bg-panel px-2">
-      <div class="flex min-w-0 flex-1 items-center">
-        <div class="relative">
+      <!-- narrow screens: the model bar gets its own full-width row so the
+           model name stays readable instead of truncating to a few letters -->
+      <div class="flex min-w-0 flex-1 items-center max-[900px]:basis-full">
+        <div class="relative min-w-0 flex-1">
           <ModelBar {agentId} />
         </div>
       </div>
@@ -44,44 +48,51 @@
         <SessionPanel {agentId} />
         <button
           class="select-compact bg-none pr-2 {drawer === 'files' ? '!border-accent !text-accent' : ''}"
+          aria-pressed={drawer === "files"}
+          title="files in this agent's sandbox"
           onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
         >
           files
         </button>
         <button
           class="select-compact bg-none pr-2 {drawer === 'mcp' ? '!border-accent !text-accent' : ''}"
+          aria-pressed={drawer === "mcp"}
+          title="tool connections this agent can use"
           onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
         >
-          mcp
+          tools
         </button>
         <button
           class="select-compact bg-none pr-2 {drawer === 'context' ? '!border-accent !text-accent' : ''}"
+          aria-pressed={drawer === "context"}
+          title="the briefing this agent keeps in mind"
           onclick={() => (drawer = drawer === "context" ? "closed" : "context")}
         >
-          context
+          briefing
         </button>
       </div>
     </div>
 
-    <div class="flex min-h-0 flex-1">
+    <div class="relative flex min-h-0 flex-1">
       <div class="flex min-w-0 flex-1 flex-col">
         <LitAgentInterface agent={adapter} />
       </div>
       {#if drawer !== "closed"}
-        <div class="w-80 shrink-0 border-l border-edge">
+        <!-- side drawer on wide screens; overlays the chat on narrow ones so the
+             transcript is not squeezed into a sliver -->
+        <div class="w-80 shrink-0 max-[900px]:absolute max-[900px]:inset-0 max-[900px]:z-20 max-[900px]:w-full">
           {#if drawer === "files"}
             <FilesPanel {agentId} />
           {:else if drawer === "mcp"}
             <McpPanel {agentId} />
           {:else}
-            <ContextPanel {agentId} />
+            <ContextPanel {agentId} onclose={() => (drawer = "closed")} />
           {/if}
         </div>
       {/if}
     </div>
   {:else}
     <div class="m-auto grid gap-3 text-center text-muted">
-      <h3 class="m-0 text-fg">{agentName}</h3>
       <p class="m-0 max-w-2xl">
         {runtime?.status === "error"
           ? `errored${runtime.error ? `: ${runtime.error.split("\n")[0]}` : ""}`
