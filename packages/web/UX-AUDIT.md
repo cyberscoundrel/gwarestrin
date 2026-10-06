@@ -1,4 +1,6 @@
-# gwarestrin web console: UX audit (round 1)
+# gwarestrin web console: UX audit (rounds 1 and 2)
+
+Round 2 adopted the vocabulary and the tool-scope rule, and added the chat header with the trust strip. Those parts are in the sections at the end. The findings table below is round 1, with the statuses updated.
 
 Branch `ux/polish-1`, 2026-10-05. Scope is `packages/web` only.
 
@@ -8,6 +10,7 @@ Branch `ux/polish-1`, 2026-10-05. Scope is `packages/web` only.
 - To still see every screen, I used a throwaway mock of the REST + WS surface. It lives in the session scratchpad and is not committed. It has fake providers (a `llama-local` tier with a gguf path id, and `openrouter` with `:free` models), two profiles (`Default`, `sql-analyst` with graph-rag), three MCP servers (one with a very long name and URL, one unreachable) and one synthetic review-queue item. Its fake agent streams text, makes one `bash` tool call and can raise an extension `confirm` dialog.
 - Dev loop: `GW_BACKEND=<url> GW_DEV_USER=ux-admin npm run dev:web`. The proxy target and the identity header now come from env (commit 1).
 - I checked desktop (~1000px), tablet (768) and mobile (375, touch emulation), and emulated light and dark color schemes. I read the console at each step.
+- **Round 2 also needs a live check:** the header's start/stop against real sandboxes (stop takes time, and the status should step through starting/stopped over the WebSocket), that `contextStatus` and `tier` are actually filled in on the admin instance's records and providers, and the restart that happens when a tool connection is toggled.
 - **Still needs a live check against the real backend:** real streaming timing, long tool output, the context-engine create path ("analyze & start"), and real extension dialogs.
 
 Screenshots of the issues as found (before the fixes) are in `ux-audit/`. They show mock data.
@@ -41,11 +44,11 @@ Status: **fixed** = committed on this branch. **proposal** = needs a decision, s
 | 14 | Delete / graph review / session menu | Escape does nothing. Other popovers already close on Escape. | Inconsistent. | Escape now closes them; added dialog labels and `aria-expanded`. | fixed |
 | 15 | Extension dialogs | "allow network access?" pops up over any view without saying which agent is asking (`10`). | With several agents the user can't make an informed security decision. | Shows "request from agent X"; the dialog is sized to the viewport. | fixed |
 | 16 | MCP panel | Per-agent toggles sit right next to registry-wide edit and delete. ✕ removes the server for **every** agent, and its tooltip just says "delete" (`11`). | It is easy to break other agents by accident, and the scope can't be explained in a demo. | Labels and tooltips now say "registry (all agents)". Splitting the panel is proposal **P-3**. | partly fixed |
-| 17 | MCP panel vs profile editor | The profile says "MCP servers (fixed at agent creation)", but the agent's MCP panel lets you toggle them later. The footer says "(restarts it)". | Contradictory copy about tool access. | Proposal **P-3**. | proposal |
+| 17 | MCP panel vs profile editor | The profile says "MCP servers (fixed at agent creation)", but the agent's MCP panel lets you toggle them later. The footer says "(restarts it)". | Contradictory copy about tool access. | Round 2: copy rewritten to match the agreed rule (see "Tool-scope rule"). | fixed (round 2) |
 | 18 | Composer | There is no name field. The agent is named after the first ~32 characters of the prompt ("ux-demo list the wo…"). The code already has unused `name` state. | Agents end up with sentence-fragment names in the rail. | Proposal **P-5**. | proposal |
 | 19 | Rail profile headers | Clicking a profile name opens the profile editor. Most people expect that to select or collapse the group. ✎ beside it does the same thing. | A non-technical user lands in a settings form by surprise. | Proposal **P-2**. | proposal |
 | 20 | The whole app | Dark only: `<html class="dark">` and `color-scheme: dark` are hard-coded, so a light OS preference is ignored. | Some audiences (projectors, printed screenshots) need light. | Proposal **P-6** (needs a palette). | proposal |
-| 21 | Model picker and composer | Tiers show as "local" / "cloud" with provider ids ("llama-local", "openrouter") and raw model ids. Nothing shows *where the data goes*. | Data control is the pitch, and it is invisible. | Proposal **P-1**. | proposal |
+| 21 | Model picker and composer | Tiers show as "local" / "cloud" with provider ids ("llama-local", "openrouter") and raw model ids. Nothing shows *where the data goes*. | Data control is the pitch, and it is invisible. | Round 2: "On-prem" / "Cloud: <provider>" labels and the trust strip (P-1). | fixed (round 2) |
 
 ### P2: polish
 
@@ -59,8 +62,8 @@ Status: **fixed** = committed on this branch. **proposal** = needs a decision, s
 | 27 | Tool calls (pi-web-ui `BashRenderer`) | A finished command still says "Running command..." (only the icon turns green). This is upstream copy. | proposal **P-7** |
 | 28 | Chat | Two stop buttons while streaming: the model bar's red "stop" and the composer's square. | proposal **P-8** |
 | 29 | Context drawer footer | "(context-injection.md)" is developer jargon. | proposal (copy) |
-| 30 | Naming drift | The button says "files" and the panel says "workspace". The button says "context" and the panel says "standing context". "graph review" vs "graph write approvals". | proposal **P-4** (vocabulary) |
-| 31 | Profile dropdown | "⚙" after a name means "has a context engine". It is not explained. | proposal **P-1/P-4** |
+| 30 | Naming drift | The button says "files" and the panel says "workspace". The button says "context" and the panel says "standing context". "graph review" vs "graph write approvals". | fixed (round 2 vocabulary) |
+| 31 | Profile dropdown | "⚙" after a name means "has a context engine". It is not explained. | fixed (round 2): now "· briefing" |
 | 32 | Graph review | Raw `#41:7` record ids and ISO timestamps. There is no pending-count badge on the rail button, so pending writes go unnoticed. | proposal **P-9** |
 | 33 | Session menu | "clone branch", "compact context" and "fork from message" have no explanations. | proposal (tooltips) |
 | 34 | Profile editor | Once a tier is picked it can't be cleared back to "server default". | proposal |
@@ -83,34 +86,71 @@ Status: **fixed** = committed on this branch. **proposal** = needs a decision, s
 14. **Mobile / tablet**: findings 2, 5, 8, 9, 10, 11.
 15. **Light scheme**: finding 20.
 
-## Proposed vocabulary
+## Vocabulary (adopted, round 2)
 
-Pick one word per concept and use it everywhere: UI copy, headings, tooltips and docs.
+The user approved these terms. They are **UI labels only**: code identifiers, API fields, routes and store keys are unchanged. The UI keeps its lowercase style for running copy. Tier badges use the exact forms "On-prem" and "Cloud: <vendor>".
 
-| Concept (code) | UI term | One-line definition shown in the UI | Where it should appear |
+| Concept (code) | UI term | Meaning | Where it appears now |
 |---|---|---|---|
-| instance (tenant) | **Workspace** (or "Organisation" if you sell to multi-team customers) | "Your private gwarestrin deployment: its agents, tools, models and knowledge graph." | Top of the rail under the brand ("Acme · workspace"), browser title, offline banner. It is never shown today. |
-| profile | **Agent template** | "Defaults for new agents: model tier, allowed tools, knowledge context." | Rail group headers, composer ("Template"), editor title "Edit template". "Profile" reads like a user profile. |
-| agent | **Agent** | "A persistent AI worker with its own sandbox, files and history." | As now. |
-| sandbox (gondolin VM) | **Sandbox** | "Isolated machine the agent runs in; it can only reach approved hosts." | Agent header status ("sandbox running"), dialogs that ask for network access. |
-| session | **Conversation** | "One thread of messages with an agent. Start a new one any time; files stay." | Session menu becomes "Conversation ▾ / New conversation / Branch from here / Summarise to save space". |
-| MCP server | **Tool connection** (keep "MCP" as a small technical tag) | "An external system the agent may use (database, GitHub, files…)." | Drawer button "Tools", the template editor's "Allowed tools", composer chips under a "Tools" label. |
-| MCP registry | **Tool catalogue** (admin) | "All tool connections this workspace knows about." | A separate admin page, not the per-agent drawer (P-3). |
-| provider / tier | **Model** + **Where it runs**: "On-prem (private)" / "Cloud: <vendor>" | "On-prem: data never leaves your network. Cloud: prompts are sent to <vendor>." | Model pickers, rail model line, agent header badge. |
-| context engine | **Knowledge briefing** | "Before the agent starts, it reads the knowledge graph and writes a briefing it always keeps in mind." | Template editor section, context drawer ("Briefing"), the "⚙" marker replaced with a "briefing" tag. |
-| standing context | **Briefing** | as above | Context drawer title, button "Briefing". |
-| shared tools (`/tools`) | **Shared scripts** | "Scripts agents can save and reuse across the workspace." | Template editor checkbox. |
-| graph review queue | **Approvals** | "Changes agents want to make to the knowledge graph. Nothing is written until someone approves." | Rail button "Approvals (3)" with a count; dialog title. |
+| instance (tenant) | **workspace** | Your private gwarestrin deployment: its agents, tool connections, models and knowledge graph. | Offline banner, profile editor ("allow all workspace connections", shared /tools), tools drawer, approvals empty state. The agent's own file browser is now "files", so "workspace" only means the instance. |
+| profile | **agent profile** | A group of agents that share a contextual focus and tooling: which tool connections they may use, a default model, an optional briefing. | Rail headers, "+ new agent profile", composer label, editor title ("edit agent profile — x"), chat header ("agent profile sql-analyst"), confirms, aria-labels. |
+| agent | **agent** | A persistent AI worker with its own sandbox, files and conversations. | Unchanged. |
+| session | **conversation** | One thread of messages with an agent. | Toolbar menu "conversation" (new / clone / compact / fork), delete dialog, "export conversation". |
+| MCP server | **tool connection** | An external system an agent may use (database, GitHub, files…). | Drawer button "tools", drawer heading, profile editor "allowed tool connections", composer "tools:" chips, trust strip, confirms. |
+| provider tier | **On-prem** / **Cloud: <vendor>** | Where the model runs. On-prem: on your own infrastructure. Cloud: prompts are sent to that provider. | Composer and profile-editor tier pickers ("On-prem" / "Cloud"), model picker groups ("On-prem", "Cloud: openrouter"), trust strip. |
+| context engine / context injection | **briefing** | Before an agent starts, the knowledge graph is summarised into a briefing the agent keeps in mind on every turn. | Drawer button and heading "briefing", composer ("build briefing & start", "· briefing" profile tag replacing "⚙"), profile editor section, trust strip. |
+| graph review queue | **approvals** | Changes agents want to write to the knowledge graph; nothing is written until someone approves. | Rail button "approvals", dialog title and empty/error states. |
+
+Not decided yet, so these keep their current wording: "sandbox" (used in a few tooltips and the status line), the MCP registry (described as "the workspace" in copy), and "shared /tools directory".
+
+## Tool-scope rule (round 2)
+
+**Rule:** the agent profile defines which tool connections its agents may use at all. Each allowed connection has a configurable default (on/off). An agent can only toggle within the allowed set.
+
+**What the current API can express** (read from `packages/server`, which I did not change):
+- `ProfileRecord.mcpServers` is the allowed set: a list of names, or `"all"`.
+- At creation, the server switches on every allowed connection (`manager.ts`: `defaults.mcpServers = profile.mcpServers === "all" ? all registry : profile.mcpServers`).
+- `AgentRecord.mcpServers` is the agent's switched-on set, changed with `PATCH /api/agents/:id` (this restarts the agent).
+
+**What the UI now says:**
+- Profile editor: "allowed tool connections", with an explanation that a new agent starts with every allowed connection switched on, and each agent can switch them off and on in its tools drawer but never beyond the list. The choices are "allow all workspace connections" (which also allows connections added later) and "allow only selected…".
+- Tools drawer: allowed connections come first. The footer names the agent profile that sets the limit. Connections outside the set are marked "not allowed" and can't be switched on. One that is already on but no longer allowed (because the profile changed) can still be switched off.
+
+**API change needed (proposal P-11, backend):**
+- Add a per-connection default to the profile, e.g. `mcpDefaults: Record<name, boolean>`, or change `mcpServers` to `Array<{ name, defaultOn }>`. Create-time would then switch on only the connections whose default is on.
+- Enforce the allowed set on `PATCH /api/agents/:id`. Today only the UI blocks switching on a connection the profile doesn't allow.
+- Until both exist, the UI does not offer a per-connection default toggle, so it doesn't fake behaviour the server lacks.
+
+## Trust strip and chat header (P-1 and P-10, implemented in round 2)
+
+The new `AgentHeader.svelte` sits above the chat toolbar and is shown whether the agent is running or stopped. It contains:
+- The agent name (hidden on phones, where the app header already shows it), its **agent profile**, and its status (running / working / starting / stopped / error).
+- **start agent / stop agent**, using the existing `/api/agents/:id/start` and `/stop`.
+- The **trust strip**:
+  - **Where the model runs:** "On-prem" in green or "Cloud: <provider id>" in amber. It is derived from the agent's model provider and that provider's declared `tier`, falling back to the workspace default model. The tooltip names the model.
+  - **N tool connections:** the agent's switched-on set; the tooltip lists them.
+  - **briefing / briefing failed / no briefing:** from `AgentRecord.contextStatus` plus the profile's `contextEngine.type`.
+  - While the agent runs, the tools and briefing chips open their drawers.
+
+**Gaps (proposal P-12):**
+- **Vendor name:** "Cloud: <vendor>" uses the provider *id* (e.g. `openrouter`). OpenRouter routes to many upstream vendors, so the real recipient of the data isn't known to the UI. Needed: a display name per provider (and ideally the upstream vendor per model) in `ProviderView`.
+- **Live vs declared model:** the strip uses the *declared* model on the record. The model bar can show a live model the agent switched to over RPC. Model-bar changes are persisted with PATCH, so the two normally agree.
+- **Sandbox network allow-list:** `gondolin.allowedHosts` is on the record and would complete the picture ("can reach: api.github.com, …"). I left it out to keep the strip short; it needs a decision on how to present it.
+- **Briefing on old records:** `contextStatus` may be absent on agents created before it existed. Those show "no briefing".
+- **Rail:** the strip is only in the chat header. A small On-prem/Cloud tag on each rail row is a possible follow-up.
 
 ## Open proposals (need a decision; not implemented)
 
-- **P-1 Data-control badge per agent.** Put a compact "trust strip" in the chat header and the rail: where the model runs (On-prem / Cloud: vendor), how many tools are allowed and which ones, and whether a briefing is attached. This is the security pitch made visible. It needs the agent's tier (already in `/api/providers`) and its MCP list (already on the record). Web only, but it is a new UI element.
-- **P-2 Rail interaction.** Clicking a template header should collapse or expand the group; only ✎ opens the editor. Optionally add "+ agent from this template" on hover. This changes existing behaviour.
-- **P-3 Split tool scope.** The agent drawer only toggles that agent's tools, within what its template allows. Registry add/edit/delete moves to an admin "Tool catalogue" screen. Also fix the contradictory "fixed at agent creation" copy once the intended rule is confirmed (can agent tools change after creation or not?).
-- **P-4 Adopt the vocabulary above.** These are renames of core concepts, so they need your sign-off and should be done in one pass.
-- **P-5 Optional name field in the composer.** It is prefilled from the template prefix, with the prompt-derived name as the placeholder.
-- **P-6 Light theme.** The tokens already exist in `@theme`. It needs a light palette, removing the hard-coded `class="dark"`, and checking pi-web-ui's light styles.
-- **P-7 Tool-call copy.** Override pi-web-ui's "Running command..." for finished calls, either through its i18n or a custom renderer.
-- **P-8 One stop button.** Keep the composer's stop button and drop the model-bar duplicate, or the other way round.
-- **P-9 Approvals badge and readable items.** Show a pending count on the rail button. Show "requested by <agent> · 5 min ago", and a short summary of the write ("create Customer 'Acme'") above the raw statement.
-- **P-10 Agent header.** Give the chat view a title row: agent name, template, status and a stop/start control. Today the name only appears in the rail (and, after fix 11, the mobile header).
+- **P-1 Trust strip:** implemented in round 2, see above. Gaps are in P-12.
+- **P-2 Rail interaction.** Clicking an agent profile header should collapse or expand the group; only ✎ opens the editor. Optionally add "+ agent in this profile" on hover. This changes existing behaviour.
+- **P-3 Split tool scope:** the copy is done in round 2. Still open: move workspace-wide add/edit/remove of tool connections out of the per-agent drawer into an admin screen. Today ✎/✕ are only labelled "workspace-wide, all agents".
+- **P-4 Vocabulary:** adopted in round 2.
+- **P-5 Optional name field in the composer.** It would be prefilled from the profile's name prefix, with the prompt-derived name as the placeholder. (Round 2 note: a profile prefix like `sql-` is prepended to the derived name, so an agent created from prompt "ux-scope …" was named `sql-ux-scope-list-files`.)
+- **P-6 Light theme.** It needs a light palette, removing the hard-coded `class="dark"`, and checking pi-web-ui's light styles.
+- **P-7 Tool-call copy.** Override pi-web-ui's "Running command..." for finished calls.
+- **P-8 One stop button.** The model bar's "stop" (interrupt the current reply) and the composer's square do the same thing. Round 2 added "stop agent" in the header (stop the sandbox), so the labels need to stay distinct, e.g. "interrupt" vs "stop agent".
+- **P-9 Approvals badge and readable items.** A pending count on the rail button, "requested by <agent> · 5 min ago", and a short summary of the write above the raw statement.
+- **P-10 Agent header:** implemented in round 2.
+- **P-11 Per-connection default and server-side allow-list enforcement** (backend), see "Tool-scope rule".
+- **P-12 Trust-strip data gaps** (provider display name / upstream vendor, sandbox network allow-list), see above.
+- **P-13 Phone toolbar density.** On a 375px screen the header, trust strip and toolbar together take about 190px. Collapse the model/thinking/conversation controls into one "⋯" menu below 600px.
