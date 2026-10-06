@@ -7,7 +7,7 @@
   import type { ModelInfo } from "../lib/agent-types.js";
   import Dropdown from "./Dropdown.svelte";
   import Icon from "./Icon.svelte";
-  import { Cpu } from "lucide";
+  import { Check, Cloud, Cpu, Server } from "lucide";
 
   let { agentId }: { agentId: string } = $props();
 
@@ -223,14 +223,14 @@
 
 {#if openModel}
   <div
-    class="modelbar-root animate-pop absolute z-30 mt-1 flex max-h-96 w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-lg border
+    class="modelbar-root animate-pop absolute z-30 mt-1 flex max-h-96 w-[24rem] max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-xl border
       border-edge2 bg-panel2 shadow-overlay"
   >
     {#if models.length > 8}
-      <div class="flex items-center gap-2 border-b border-edge p-1.5">
+      <div class="flex items-center gap-2 border-b border-edge p-2">
         <input
-          class="min-w-0 flex-1 rounded border border-edge2 bg-bg px-2 py-1 text-sm text-fg outline-none focus:border-signal"
-          placeholder="type to filter ({models.length})"
+          class="input h-7"
+          placeholder="Filter {models.length} models"
           aria-label="filter models"
           bind:value={modelQuery}
           use:focusOnMount
@@ -240,35 +240,45 @@
           }}
         />
         {#if models.some((m) => isFreeModelId(m.id))}
-          <label class="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-dim">
-            <input type="checkbox" bind:checked={freeOnly} />
-            free only
+          <label class="flex shrink-0 cursor-pointer items-center gap-1.5 text-xs text-dim">
+            <input type="checkbox" class="accent-signal" bind:checked={freeOnly} />
+            Free only
           </label>
         {/if}
       </div>
     {/if}
-    <div class="min-h-0 overflow-y-auto">
-    {#if models.length === 0}
-      <p class="px-3 py-2 text-sm text-dim">no models (agent not running?)</p>
-    {:else if grouped.length === 0}
-      <p class="px-3 py-2 text-sm text-dim">no matches</p>
-    {:else}
-      {#each grouped as [where, list]}
-        <div class="px-3 pt-2 text-xs font-semibold tracking-wide text-dim">{where}</div>
-        {#each list as m (m.id)}
-          <button
-            class="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-hover
-              {effectiveModel?.provider === m.provider && effectiveModel?.modelId === m.id ? 'text-signal' : 'text-fg'}"
-            title="{m.provider}/{m.id}"
-            onclick={() => void chooseModel(m.provider, m.id)}
-          >
-            <!-- same label as the button and rail (no raw file paths) -->
-            {m.name && m.name !== m.id ? m.name : modelDisplayName(m.provider, m.id, store.providers)}
-            {#if m.reasoning}<span class="ml-1 text-xs text-dim">reasoning</span>{/if}
-          </button>
+    <div class="min-h-0 overflow-y-auto p-1" role="listbox" aria-label="models">
+      {#if models.length === 0}
+        <p class="m-0 px-3 py-6 text-center text-sm text-faint">No models yet. The agent may still be starting.</p>
+      {:else if grouped.length === 0}
+        <p class="m-0 px-3 py-6 text-center text-sm text-faint">No models match.</p>
+      {:else}
+        {#each grouped as [where, list]}
+          <div class="flex items-center gap-1.5 px-2 pt-2.5 pb-1">
+            <Icon icon={where === "On-prem" ? Server : Cloud} size={12} class={where === "On-prem" ? "text-signal" : "text-warn"} />
+            <span class="eyebrow">{where}</span>
+            <span class="tabular ml-auto text-2xs text-faint">{list.length}</span>
+          </div>
+          {#each list as m (m.provider + m.id)}
+            {@const selected = effectiveModel?.provider === m.provider && effectiveModel?.modelId === m.id}
+            <button
+              class="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-hover"
+              role="option"
+              aria-selected={selected}
+              title="{m.provider}/{m.id}"
+              onclick={() => void chooseModel(m.provider, m.id)}
+            >
+              <span class="w-3.5 shrink-0">{#if selected}<Icon icon={Check} size={14} class="text-signal" />{/if}</span>
+              <!-- same label as the button and rail (no raw file paths) -->
+              <span class="min-w-0 flex-1 truncate text-sm {selected ? 'text-fg' : 'text-dim'}">
+                {m.name && m.name !== m.id ? m.name : modelDisplayName(m.provider, m.id, store.providers)}
+              </span>
+              {#if isFreeModelId(m.id)}<span class="shrink-0 text-2xs text-ok">free</span>{/if}
+              {#if m.reasoning}<span class="shrink-0 text-2xs text-faint">reasoning</span>{/if}
+            </button>
+          {/each}
         {/each}
-      {/each}
-    {/if}
+      {/if}
     </div>
   </div>
 {/if}
