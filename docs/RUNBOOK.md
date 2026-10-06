@@ -458,27 +458,41 @@ CloudflareWARP iface) → homelab firewall → containers.
   profile, engine config, generation status and the full block; the web UI
   exposes it as the `context` drawer in the chat header.
 
-## 3k. OpenShell runtime (experimental branch)
+## 3k. OpenShell runtime
 
 Agents can run as OpenShell microVMs instead of host pi + gondolin
 (`GWARESTRIN_RUNTIME=openshell`). Deployment, architecture and server settings:
-[`openshell/README.md`](../openshell/README.md). It is its own compose project
-(`gwarestrin-openshell`) on the external `gwarestrin_backend` network, so it
-never touches the main stack.
+[`openshell/README.md`](../openshell/README.md). The gateway + registry are
+their own compose project (`gwarestrin-openshell`) on the external
+`gwarestrin_backend` network; tenants opt in from the main stack.
 
 ```bash
-cd ~/gw-openshell    # worktree of experimental/openshell
+cd ~/gwarestrin
+openshell/scripts/pki.sh                     # first time; later runs only add missing certs
 docker compose -f openshell/compose.yml up -d openshell-gateway openshell-registry
 openshell/scripts/publish-agent.sh dev       # after changing the agent image stage
-docker compose -f openshell/compose.yml --profile trial up -d gw-osh   # trial instance :3200
+docker compose up -d provisioner gw-alice gw-bob
 ```
 
-- **Inspect sandboxes / audit log:** the gateway isn't published. Use the CLI
-  inside its container (copy the client registration in once per container):
-  `G=$(docker compose -f openshell/compose.yml ps -q openshell-gateway)`,
-  `docker cp ~/.config/openshell/gateways/openshell/. $G:/home/node/.config/openshell/gateways/openshell/`,
-  then `docker exec $G openshell -g openshell sandbox list` /
-  `openshell -g openshell logs <sandbox> | grep OCSF`.
+- **Tenancy:** each tenant on this runtime has its own gateway identity and
+  workspace `gw-<tenant>`; another tenant's sandboxes, providers and policy are
+  invisible to it. The provisioner manages it all (it is the gateway's Platform
+  Admin): authentik service accounts `gw-<tenant>-osh`, the `openshell` OAuth2
+  provider, and the workspaces. A tenant opts in by being in
+  `OPENSHELL_TENANTS` (provisioner) and getting the `x-openshell-tenant-env`
+  settings + `openshell-pki` mounts (compose seeds) — provisioner-created
+  tenants get them automatically and are recreated when their runtime changes.
+  Revoking a tenant deactivates its account and removes its membership.
+- **Identity checks:** the provisioner log shows `openshell: platform admin
+  connected` and one `admin membership granted` per tenant; the tenant server
+  logs `workspace gw-<tenant> … auth oidc` on its first agent start. A tenant
+  whose metadata lost its secret gets a rotated one on the next pass (30 s).
+- **Inspect sandboxes / audit log:** the gateway isn't published and only
+  accepts authentik tokens. Ops calls go through the provisioner's Platform
+  Admin identity (`instances/.openshell-platform.json`, root-only) with the
+  SDK from inside the provisioner container; `openshell logs <sandbox>` style
+  OCSF review needs the same identity
+  (`OPENSHELL_OIDC_CLIENT_SECRET` = that file's `secret`).
 - **Gateway restart:** VMs are restored from `/state` (volume
   `gwarestrin-openshell_openshell-state`); running pi sessions drop and the
   server's crash handling restarts the agent (workspace and sessions survive).
@@ -490,7 +504,9 @@ docker compose -f openshell/compose.yml --profile trial up -d gw-osh   # trial i
   see placeholders.
 - **Retired 2026-10-06:** the host-installed Docker-driver gateway (systemd user
   unit removed; its state `~/.local/state/openshell/gateway` and PKI
-  `~/.local/state/openshell/pki` are kept for rollback, providers deleted).
+  `~/.local/state/openshell/pki` are kept for rollback, providers deleted), and
+  the `gw-osh` trial instance (volume `gw-osh-state` kept; its sandbox and
+  providers in the `default` workspace deleted).
 
 ## 4. Troubleshooting
 
@@ -505,6 +521,7 @@ docker compose -f openshell/compose.yml --profile trial up -d gw-osh   # trial i
 | WARP nftables firewall kills host↔container TCP | Cloudflare WARP applies an nft table (`inet cloudflare-warp`) with input/output `policy drop`. ICMP passes (explicit accept) so pings lie; TCP handshakes die, docker-proxy replies never return. The `warp-nft-assert.timer` systemd unit re-asserts docker/LAN accepts every minute; check `nft list chain inet cloudflare-warp output` contains `172.16.0.0/12 accept`. Also note `/dev/tcp` tests through `sh` are false negatives — dash doesn't support it, use `bash -c` or a real client |
 | sidecars can't reach other compose projects via host.docker.internal | published ports get DNAT'd to the target container, and cross-bridge FORWARD traffic is dropped by docker isolation. Fix: attach the backend network to the service's own compose project (see `neo4j-compose`'s `networks: backend: {name: gwarestrin_backend, external: true}`) and connect by container name (`bolt://neo4j:7687`). Host-networked containers (mssql-server) are reachable via `host.docker.internal` — different path, works |
 | dab sidecar restart-loops | check `docker logs gwarestrin-dab-1`: "Unable to find the specified file" = cwd issue (compose sets `working_dir: /etc/dab`); SQL connect errors = mssql down (`docker ps` — mssql-server needs its `--restart unless-stopped` policy, now set) |
+| OpenShell agent start: `unauthenticated` / `permission_denied` | tenant missing from `OPENSHELL_TENANTS`, or no `values.openshell` in `instances/<tenant>.json` yet (provisioner log); authentik must serve the deployment-CA cert on `authentik-server:9443` (brand `authentik-server`) |
 | container restarts loop | `docker compose logs --tail 200 gwarestrin` |
 
 ## 5. Host-side e2e (verification without the UI)
