@@ -3,7 +3,9 @@
 # Serves MCP over streamable HTTP at :5000/mcp; config bind-mounted at /etc/dab.
 
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
-RUN dotnet tool install Microsoft.DataApiBuilder --tool-path /opt/dab
+# pinned: newer releases do not install on the .NET 8 SDK
+ARG DAB_VERSION=2.0.12
+RUN dotnet tool install Microsoft.DataApiBuilder --version ${DAB_VERSION} --tool-path /opt/dab
 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
 COPY --from=build /opt/dab /opt/dab
