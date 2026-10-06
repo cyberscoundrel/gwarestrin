@@ -1208,7 +1208,9 @@ app.get("/api/entities", (req, res) => {
   const ctx = httpScope(req, res);
   if (!ctx) return;
   const q = String(req.query.q ?? "").trim().slice(0, 80);
-  const match = q ? ` AND (name CONTAINS '${esc(q)}' OR text_identity CONTAINS '${esc(q)}')` : "";
+  // case-insensitive: people type "thinkcentre" for "ThinkCentre"
+  const lq = esc(q.toLowerCase());
+  const match = q ? ` AND (name.toLowerCase() CONTAINS '${lq}' OR text_identity.toLowerCase() CONTAINS '${lq}')` : "";
   void adbQuery(`SELECT name, _home FROM ${ENTITY_LABEL} WHERE name IS NOT NULL${match}${homeFilter(ctx.scope, { own: true })} ORDER BY name LIMIT 25`).then(
     (rows) => res.json({ entities: rows.map((r) => ({ name: r.name, home: homeLabel(r._home) })) }),
     (e) => httpError(res, e),
