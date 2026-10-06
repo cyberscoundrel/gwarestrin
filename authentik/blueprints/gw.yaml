@@ -158,3 +158,40 @@ entries:
         - !KeyOf provider-gw-admin
         - !KeyOf provider-gw-alice
         - !KeyOf provider-gw-bob
+
+  # ---- position tree (knowledge-graph scoping, docs/DATA-SCOPING.md) ----
+  # Test tree: alice runs Operations, bob works the Production floor under it.
+  # Admin-tier users hold the root (org). Positions are groups with
+  # attributes.gw_position; the provisioner mirrors them for graph-rag.
+  - id: position-org
+    model: authentik_core.group
+    identifiers:
+      name: org
+    attrs:
+      attributes:
+        gw_position: true
+        description: The whole organization
+  - id: position-operations
+    model: authentik_core.group
+    identifiers:
+      name: Operations
+    attrs:
+      parents:
+        - !KeyOf position-org
+      attributes:
+        gw_position: true
+        description: Operations management - customer orders, suppliers, planning, staffing
+      users:
+        - !KeyOf user-alice
+  - id: position-production-floor
+    model: authentik_core.group
+    identifiers:
+      name: Production floor
+    attrs:
+      parents:
+        - !KeyOf position-operations
+      attributes:
+        gw_position: true
+        description: Shop floor - work orders, machine status, shift schedules, quality checks
+      users:
+        - !KeyOf user-bob

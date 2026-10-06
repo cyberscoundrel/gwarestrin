@@ -157,10 +157,14 @@ services:
       EMBED_MODEL: embed-minilm
       EMBED_DIM: "384"
       SWEEP_INTERVAL_MS: "600000"
-      # identity capability map (infra-authored; hot-reloaded)
-      TOKEN_MAP_PATH: /app/token-map.json
+      # identity capability map + position tree (written by the provisioner,
+      # hot-reloaded; graph-rag fails closed while either is missing)
+      TOKEN_MAP_PATH: /app/config/token-map.json
+      POSITION_MAP_PATH: /app/config/position-map.json
     volumes:
-      - ./graph-rag-config/token-map.json:/app/token-map.json:ro
+      # the directory, not single files: a file that doesn't exist yet would
+      # become an empty directory mount
+      - ./graph-rag-config:/app/config:ro
     labels:
       gwarestrin.mcp.enable: "true"
       gwarestrin.mcp.port: "8000"

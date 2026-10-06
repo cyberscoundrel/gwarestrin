@@ -16,6 +16,16 @@
 import express from "express";
 import { readFileSync, watchFile } from "node:fs";
 import { randomUUID } from "node:crypto";
+import {
+  canSee,
+  defaultHome,
+  effectiveHome,
+  heldPositions,
+  moveKind,
+  parsePositionMap,
+  visibleHomes,
+  writableHomes,
+} from "./positions.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -33,6 +43,7 @@ const {
   PORT = "8000",
   TOKEN_MAP_PATH = "",
   GRAPH_RAG_OPEN_MODE = "",
+  POSITION_MAP_PATH = "",
 } = process.env;
 
 /**
@@ -63,9 +74,79 @@ function loadTokenMap() {
   }
 }
 
+/**
+ * Position scoping (see positions.js): enabled when POSITION_MAP_PATH is set.
+ * Fails closed: until a valid map is loaded nobody sees or writes anything
+ * (a broken reload keeps the last good map).
+ */
+const SCOPED = POSITION_MAP_PATH !== "";
+let positionMap = null;
+
+function loadPositionMap() {
+  if (!SCOPED) {
+    console.warn("[graph-rag] POSITION_MAP_PATH not set: no position scoping (every identity sees the whole graph)");
+    return;
+  }
+  try {
+    positionMap = parsePositionMap(JSON.parse(readFileSync(POSITION_MAP_PATH, "utf8")));
+    console.log(`[graph-rag] position map loaded: ${Object.keys(positionMap.positions).length} position(s), root ${positionMap.positions[positionMap.root].name}`);
+  } catch (err) {
+    console.warn(`[graph-rag] position map load failed (${positionMap ? "keeping the previous map" : "nothing is visible until it loads"}): ${String(err).slice(0, 160)}`);
+  }
+}
+
+/**
+ * The caller's view of the graph: `homes` null = everything, else the set of
+ * visible position ids; `writeHome` = where its writes land by default.
+ * Unscoped deployments and open mode see everything.
+ */
+function scopeOf(identity) {
+  if (!SCOPED || identity.open) return { homes: null, writeHome: undefined, root: true };
+  if (!positionMap) return { homes: new Set(), writeHome: null, root: false };
+  const held = heldPositions(positionMap, identity.positions);
+  const homes = visibleHomes(positionMap, held);
+  return { homes, writeHome: defaultHome(positionMap, held), root: homes === null, held };
+}
+
+/** SQL predicate (prefixed with AND) limiting rows to the caller's homes */
+function homeFilter(scope) {
+  if (scope.homes === null) return "";
+  if (scope.homes.size === 0) return " AND 1 = 0";
+  return ` AND _home IN [${[...scope.homes].map((h) => `'${esc(h)}'`).join(",")}]`;
+}
+
+/** where a write lands: the caller's choice if it may write there, else its default */
+function resolveWriteHome(scope, requested) {
+  if (!SCOPED || scope.writeHome === undefined) return undefined;
+  if (!positionMap) throw new Error("position map not loaded; graph writes are refused");
+  if (requested === undefined || requested === null || requested === "") {
+    if (!scope.writeHome) throw new Error("this identity holds no position; graph writes are refused");
+    return scope.writeHome;
+  }
+  const id = positionId(requested);
+  if (!writableHomes(positionMap, scope.held).has(id)) {
+    throw new Error(`cannot home a write at ${requested}: only at your own positions or above them`);
+  }
+  return id;
+}
+
+/** accept a position id or its exact name */
+function positionId(ref) {
+  if (positionMap?.positions[ref]) return ref;
+  const hit = Object.entries(positionMap?.positions ?? {}).find(([, p]) => p.name === ref);
+  if (!hit) throw new Error(`unknown position: ${ref}`);
+  return hit[0];
+}
+
+const homeLabel = (home) => {
+  if (!SCOPED || !positionMap) return undefined;
+  const id = effectiveHome(positionMap, home);
+  return { id, name: positionMap.positions[id].name };
+};
+
 /** resolve an Authorization header to capabilities; null = unauthenticated */
 function resolveIdentity(authorization) {
-  if (OPEN_MODE) return { user: "anonymous", caps: { ...OPEN_CAPS } };
+  if (OPEN_MODE) return { user: "anonymous", caps: { ...OPEN_CAPS }, open: true, positions: [] };
   const token = typeof authorization === "string" && authorization.startsWith("Bearer ")
     ? authorization.slice(7).trim()
     : null;
@@ -81,6 +162,7 @@ function resolveIdentity(authorization) {
       // raw Cypher/SQL bypasses every read filter: root-level identities only
       raw: entry.caps?.raw === true,
     },
+    positions: Array.isArray(entry.positions) ? entry.positions.filter((p) => typeof p === "string") : [],
   };
 }
 
@@ -203,7 +285,7 @@ async function embedBatch(texts) {
 function publicProps(props) {
   const out = {};
   for (const [k, v] of Object.entries(props ?? {})) {
-    if (k.startsWith("embed_")) continue;
+    if (k.startsWith("embed_") || k === "_home") continue;
     out[k] = v;
   }
   return out;
@@ -222,7 +304,7 @@ function identityText(name, labels, props) {
 
 /** ---- tool implementations ---- */
 
-async function searchGraph({ query, facets, k = 8, temporal_filter }) {
+async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { homes: null }) {
   console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter })}`);
   const facetList = (facets?.length ? facets : Object.keys(FACETS)).map((f) => {
     if (typeof f !== "string" || !FACET_RE.test(f)) throw new Error(`invalid facet: ${f}`);
@@ -234,7 +316,9 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
     if (!knownIndexes.has(f) && FACETS[f]) await ensureIndex(f);
   }
 
-  let where = "";
+  // every read path below carries the caller's home filter
+  const visible = homeFilter(scope);
+  let where = visible;
   if (temporal_filter) {
     const p = temporal_filter.property;
     if (!PROP_RE.test(p)) throw new Error(`invalid temporal property: ${p}`);
@@ -242,10 +326,11 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
     if (temporal_filter.after) conds.push(`${p} >= '${esc(temporal_filter.after)}'`);
     if (temporal_filter.before) conds.push(`${p} <= '${esc(temporal_filter.before)}'`);
     // appended to a query that already has WHERE embed_<facet> IS NOT NULL
-    where = " AND " + conds.join(" AND ");
+    where = visible + " AND " + conds.join(" AND ");
   }
 
-  const byName = new Map();
+  // keyed by record id: the same name can exist once per home
+  const byRid = new Map();
   let vectorWorked = false;
   let embedFailed = false;
 
@@ -286,24 +371,27 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
         const denom = Math.sqrt(na) * Math.sqrt(nb);
         const score = denom === 0 ? 0 : dot / denom;
         const name = row.name;
-        if (!name) continue;
+        const rid = row["@rid"];
+        if (!name || !rid) continue;
         const entry =
-          byName.get(name) ??
+          byRid.get(rid) ??
           {
             name,
             labels: row["@type"] ? [row["@type"]] : [],
             properties: publicProps(row),
+            ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
             score: -2,
             facets: [],
+            rid,
           };
         if (score > entry.score) entry.score = score;
         if (!entry.facets.includes(facet)) entry.facets.push(facet);
-        byName.set(name, entry);
+        byRid.set(rid, entry);
       }
     }
   }
 
-  let results = [...byName.values()].sort((a, b) => b.score - a.score);
+  let results = [...byRid.values()].sort((a, b) => b.score - a.score);
 
   // lexical fallback when embeddings are unavailable or the index is empty —
   // never when a temporal_filter is set (lexical matching can't honor it)
@@ -312,37 +400,49 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }) {
     if (terms.length > 0) {
       const conds = terms.map((t) => `(name CONTAINS '${esc(t)}' OR text_identity CONTAINS '${esc(t)}')`);
       const rows = await adbQuery(
-        `SELECT FROM ${ENTITY_LABEL} WHERE (${conds.join(" OR ")}) LIMIT ${k}`,
+        `SELECT FROM ${ENTITY_LABEL} WHERE (${conds.join(" OR ")})${visible} LIMIT ${k}`,
       );
-      results = rows.map((row) => ({ name: row.name, properties: publicProps(row), score: null, facets: ["lexical"] }));
+      results = rows.map((row) => ({
+        name: row.name,
+        properties: publicProps(row),
+        ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
+        score: null,
+        facets: ["lexical"],
+        rid: row["@rid"],
+      }));
     }
   }
 
-  // 1-hop relationships for the top results
+  // 1-hop relationships for the top results: by record id, and only to
+  // neighbours the caller may see (an edge must not reveal a hidden node)
   let relationships = [];
-  if (results.length > 0) {
-    const names = results.slice(0, 12).map((r) => `'${esc(r.name)}'`).join(",");
+  const top = results.slice(0, 12).filter((r) => RID_RE.test(String(r.rid)));
+  if (top.length > 0) {
     try {
-      const rows = await adbQueryLang(
-        `MATCH (n:${ENTITY_LABEL})-[r]-(m) WHERE n.name IN [${names}] ` +
-          `RETURN n.name AS src, type(r) AS rel, m.name AS dst LIMIT 50`,
-        "cypher",
-      );
-      relationships = rows.map((r) => ({ from: r.src, rel: r.rel, to: r.dst }));
-    } catch {
-      /* traversal is best-effort */
+      const edges = await adbQuery(`SELECT @type AS rel, @out AS src, @in AS dst FROM (SELECT expand(bothE()) FROM [${top.map((r) => r.rid).join(",")}]) LIMIT 50`);
+      const ends = [...new Set(edges.flatMap((e) => [String(e.src), String(e.dst)]).filter((r) => RID_RE.test(r)))];
+      const nodes = ends.length
+        ? await adbQuery(`SELECT @rid AS rid, name FROM [${ends.join(",")}] WHERE name IS NOT NULL${visible}`)
+        : [];
+      const nameOf = new Map(nodes.map((n) => [String(n.rid), n.name]));
+      relationships = edges
+        .filter((e) => nameOf.has(String(e.src)) && nameOf.has(String(e.dst)))
+        .map((e) => ({ from: nameOf.get(String(e.src)), rel: e.rel, to: nameOf.get(String(e.dst)) }));
+    } catch (e) {
+      log.warn(`traversal failed: ${String(e).slice(0, 160)}`); // best-effort
     }
   }
 
   return {
     query,
-    results: results.slice(0, 12),
+    results: results.slice(0, 12).map(({ rid: _rid, ...r }) => r),
     relationships,
     ...(embedFailed ? { note: "embedding backend unavailable; lexical fallback used" } : {}),
   };
 }
 
-async function upsertEntities({ entities }) {
+/** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
+async function upsertEntities({ entities, home }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
 
@@ -366,8 +466,11 @@ async function upsertEntities({ entities }) {
         await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${k} IF NOT EXISTS ${type}`).catch(() => {});
       }
       const labelClause = labels.map((l) => `SET n:\`${l}\``).join(" ");
+    // an entity is (name, home): a write never touches a same-named entity
+    // homed where the writer may not write
+    const key = home === undefined ? `{name: '${esc(e.name)}'}` : `{name: '${esc(e.name)}', \`_home\`: '${esc(home)}'}`;
     await adbCommand(
-      `MERGE (n:${ENTITY_LABEL} {name: '${esc(e.name)}'}) ` +
+      `MERGE (n:${ENTITY_LABEL} ${key}) ` +
         `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""} ${labelClause}`,
       "cypher",
     );
@@ -386,8 +489,9 @@ async function upsertEntities({ entities }) {
     const vecs = await embedBatch(jobs.map((j) => j.text));
     for (let i = 0; i < jobs.length; i++) {
       const { name, facet, text } = jobs[i];
+      const homeCond = home === undefined ? "" : ` AND _home = '${esc(home)}'`;
       await adbCommand(
-        `UPDATE (SELECT FROM ${ENTITY_LABEL} WHERE name = '${esc(name)}') ` +
+        `UPDATE (SELECT FROM ${ENTITY_LABEL} WHERE name = '${esc(name)}'${homeCond}) ` +
           `SET embed_${facet} = [${vecs[i].join(",")}], text_${facet} = '${esc(text)}'`,
       );
       embedded++;
@@ -406,6 +510,7 @@ async function backfillIdentity(limit = 64) {
 
   const texts = [];
   const names = [];
+  const rids = [];
   for (const n of nodes) {
     const props = publicProps(n);
     const labels = Object.keys(n).filter((k) => k.startsWith(ENTITY_LABEL) === false && k.startsWith("@") === false && k === k.toLowerCase() === false);
@@ -413,12 +518,13 @@ async function backfillIdentity(limit = 64) {
     void labels;
     texts.push(identityText(n.name, n["@type"] ? [n["@type"]] : [], props));
     names.push(n.name);
+    rids.push(n["@rid"]);
   }
   const vecs = await embedBatch(texts);
   for (let i = 0; i < names.length; i++) {
+    if (!RID_RE.test(String(rids[i]))) continue;
     await adbCommand(
-      `UPDATE (SELECT FROM ${ENTITY_LABEL} WHERE name = '${esc(names[i])}') ` +
-        `SET embed_identity = [${vecs[i].join(",")}], text_identity = '${esc(texts[i])}'`,
+      `UPDATE ${rids[i]} SET embed_identity = [${vecs[i].join(",")}], text_identity = '${esc(texts[i])}'`,
     );
   }
   await ensureFullText();
@@ -453,9 +559,55 @@ async function executeGraph({ command, language = "cypher" }, identity) {
 
 /** execute a queued write (admin approval path) */
 async function executePending(rec) {
+  // upsert payloads carry the home resolved when the write was requested
   if (rec.kind === "upsert") return upsertEntities(JSON.parse(rec.payload));
+  if (rec.kind === "rehome") return applyRehome(JSON.parse(rec.payload));
   if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
   return adbCommand(rec.payload, rec.language ?? "sql");
+}
+
+/** move entities to another home: restricting applies, widening needs a person */
+async function setHome({ entities, to }, identity, scope) {
+  if (!SCOPED || !positionMap) throw new Error("position scoping is not enabled");
+  const target = positionId(to);
+  const results = [];
+  for (const ref of entities) {
+    const from = ref.home === undefined ? undefined : positionId(ref.home);
+    const rows = await adbQuery(
+      `SELECT @rid AS rid, name, _home FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope)}`,
+      { name: ref.name },
+    );
+    const candidates = rows.filter((r) => from === undefined || effectiveHome(positionMap, r._home) === from);
+    if (candidates.length === 0) throw new Error(`no visible entity ${ref.name}${from ? ` homed at ${ref.home}` : ""}`);
+    if (candidates.length > 1) throw new Error(`${ref.name} exists at several homes you can see; pass its home`);
+    const node = candidates[0];
+    const current = effectiveHome(positionMap, node._home);
+    if (current === target) {
+      results.push({ name: ref.name, unchanged: true });
+      continue;
+    }
+    const clash = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE name = :name AND _home = :to`, { name: ref.name, to: target });
+    if (clash.length) throw new Error(`${ref.name} already exists at ${positionMap.positions[target].name}`);
+    const move = { rid: String(node.rid), name: ref.name, from: current, to: target };
+    const kind = moveKind(positionMap, current, target);
+    if (kind === "restrict" && identity.caps.write === "direct") {
+      results.push({ name: ref.name, ...(await applyRehome(move)) });
+    } else {
+      // only people widen who sees what; queued writers queue restrictions too
+      results.push({ name: ref.name, [kind === "widen" ? "widening" : "restricting"]: true, ...(await queueWrite({ kind: "rehome", payload: JSON.stringify(move), user: identity.user, home: current })) });
+    }
+  }
+  return { results };
+}
+
+async function applyRehome({ rid, name, from, to }) {
+  if (!RID_RE.test(rid)) throw new Error("invalid record id");
+  const rows = await adbQuery(`SELECT _home FROM ${rid}`);
+  if (!rows.length) throw new Error(`entity ${name} no longer exists`);
+  if (effectiveHome(positionMap, rows[0]._home) !== from) throw new Error(`entity ${name} moved since the request`);
+  await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
+  log.info(`entity ${name} rehomed ${positionMap.positions[from]?.name} -> ${positionMap.positions[to]?.name}`);
+  return { moved: true, from: positionMap.positions[from]?.name, to: positionMap.positions[to]?.name };
 }
 
 async function schemaGraph() {
@@ -469,7 +621,7 @@ async function schemaGraph() {
 
 async function ensurePendingSchema() {
   await adbCommand("CREATE DOCUMENT TYPE PendingWrite").catch(() => {});
-  for (const prop of ["id", "kind", "payload", "language", "requested_by", "created_at", "status", "executed_at", "approved_by"]) {
+  for (const prop of ["id", "kind", "payload", "language", "requested_by", "created_at", "status", "executed_at", "approved_by", "home"]) {
     await adbCommand(`CREATE PROPERTY PendingWrite.${prop} IF NOT EXISTS STRING`).catch(() => {});
   }
 }
@@ -485,19 +637,34 @@ async function queueWrite(entry) {
   // awaited: a write is only reported as queued once the record exists
   await adbCommand(
     "INSERT INTO PendingWrite SET id = :id, kind = :kind, payload = :payload, language = :lang, " +
-      "requested_by = :user, created_at = :created, status = 'pending'",
+      "requested_by = :user, created_at = :created, status = 'pending', home = :home",
     "sql",
-    { id, kind: entry.kind, payload, lang: language, user: entry.user, created },
+    { id, kind: entry.kind, payload, lang: language, user: entry.user, created, home: entry.home ?? null },
   );
   console.log(`[graph-rag] write queued by ${entry.user}: ${String(payload).slice(0, 80)} (${id})`);
   return { queued: true, pendingId: id };
 }
 
-async function listPending() {
-  return adbQuery("SELECT FROM PendingWrite WHERE status = 'pending' ORDER BY created_at DESC LIMIT 100");
+/** pending writes the approver may review (it must be able to see where each lands) */
+async function listPending(identity) {
+  const rows = await adbQuery("SELECT FROM PendingWrite WHERE status = 'pending' ORDER BY created_at DESC LIMIT 100");
+  return rows.filter((r) => mayReview(identity, r));
 }
 
-async function approvePending(id, approver) {
+function mayReview(identity, rec) {
+  if (!SCOPED || identity.open) return true;
+  if (!positionMap) return false;
+  const held = heldPositions(positionMap, identity.positions);
+  if (!canSee(positionMap, held, rec.home ?? undefined)) return false;
+  if (rec.kind === "rehome") {
+    const { to } = JSON.parse(rec.payload);
+    return canSee(positionMap, held, to);
+  }
+  return true;
+}
+
+async function approvePending(id, identity) {
+  const approver = identity.user;
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
   const rows = await adbQuery(
     "SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'",
@@ -505,6 +672,7 @@ async function approvePending(id, approver) {
   );
   const rec = rows[0];
   if (!rec) throw new Error(`no pending write ${id}`);
+  if (!mayReview(identity, rec)) throw new Error(`no pending write ${id}`);
   // upsert/backfill payloads are JSON for their handlers, not SQL
   const result = await executePending(rec);
   try {
@@ -520,8 +688,11 @@ async function approvePending(id, approver) {
   return { approved: true, result };
 }
 
-async function rejectPending(id, rejector) {
+async function rejectPending(id, identity) {
+  const rejector = identity.user;
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
+  const rows = await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id });
+  if (!rows[0] || !mayReview(identity, rows[0])) throw new Error(`no pending write ${id}`);
   await adbCommand(
     `UPDATE PendingWrite SET status = 'rejected', executed_at = '${esc(new Date().toISOString())}', approved_by = '${esc(rejector)}' WHERE id = '${esc(id)}'`,
   );
@@ -540,13 +711,21 @@ const facetDoc = Object.entries(FACETS)
 
 function createServer(identity) {
   const caps = identity.caps;
-  const need = (cap) => requireCap(caps, cap);
+  const scope = scopeOf(identity);
+  const need = (cap) => {
+    requireCap(caps, cap);
+    // raw queries bypass the home filter: only for the root of the tree
+    if (cap === "raw" && !scope.root) throw new Error("raw graph queries require the root position");
+  };
+  const homeNote = SCOPED
+    ? `\nEach entity has a home position; you only see entities homed at your positions or below them.`
+    : "";
   const server = new McpServer({ name: "graph-rag", version: "0.3.0" });
   // each identity is only shown the tools its capabilities allow (the
   // handlers check again: listing is not the boundary)
 
   // raw Cypher/SQL bypasses every read filter: only listed for raw identities
-  if (caps.raw === true) server.tool(
+  if (caps.raw === true && scope.root) server.tool(
     "query_graph",
     `Run a READ-ONLY query against the knowledge graph (openCypher or SQL). Use for exact identifiers, structure, and schema exploration. Returns JSON rows.`,
     {
@@ -566,7 +745,7 @@ function createServer(identity) {
 ${facetDoc}
 Custom facets created via upsert_entities are also searchable. Use for conceptual or
 paraphrased questions; temporal_filter (property + after/before ISO datetimes) narrows by
-a datetime property. Falls back to lexical matching if embeddings are unavailable.`,
+a datetime property. Falls back to lexical matching if embeddings are unavailable.${homeNote}`,
     {
       query: z.string().min(1),
       facets: z.array(z.string()).optional(),
@@ -581,7 +760,7 @@ a datetime property. Falls back to lexical matching if embeddings are unavailabl
     },
     async (args) => {
       need("read");
-      return { content: [{ type: "text", text: JSON.stringify(await searchGraph(args)) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await searchGraph(args, scope)) }] };
     },
   );
 
@@ -601,9 +780,12 @@ a datetime property. Falls back to lexical matching if embeddings are unavailabl
 facet texts — a concise natural-language sentence per facet capturing that aspect (facet
 list below). Provide only facets you have information for. Unknown facet names are allowed
 and indexed lazily. Include datetime facts BOTH as properties (for temporal_filter) and
-inside facet texts.
+inside facet texts.${SCOPED ? `
+Entities land at your position by default; \`home\` may name one of your positions or one above it
+(restricting who sees them), never one below or beside yours.` : ""}
 ${facetDoc}`,
     {
+      ...(SCOPED ? { home: z.string().optional() } : {}),
       entities: z
         .array(
           z.object({
@@ -617,15 +799,17 @@ ${facetDoc}`,
     },
     async (args) => {
       need("write");
+      const home = resolveWriteHome(scope, args.home);
+      const write = { entities: args.entities, home };
       if (caps.write === "queued") {
-        const pending = await queueWrite({ kind: "upsert", payload: JSON.stringify(args), user: identity.user });
+        const pending = await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home });
         return { content: [{ type: "text", text: JSON.stringify(pending) }] };
       }
-      return { content: [{ type: "text", text: JSON.stringify(await upsertEntities(args)) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await upsertEntities(write)) }] };
     },
   );
 
-  if (caps.raw === true) server.tool(
+  if (caps.raw === true && scope.root) server.tool(
     "execute_graph",
     "Execute a WRITE command against the knowledge graph (openCypher or SQL). Depending on your identity capabilities this executes immediately or is queued for review.",
     {
@@ -653,13 +837,29 @@ ${facetDoc}`,
     },
   );
 
+  if (SCOPED && caps.write !== "deny") server.tool(
+    "set_home",
+    `Move entities to another home position. Moving one up (to a position above its home) restricts
+who sees it and applies directly; moving it anywhere else widens who sees it and is queued for a
+person to approve. Identify each entity by name (and its current home if the name exists at several
+homes you can see).`,
+    {
+      entities: z.array(z.object({ name: z.string().min(1), home: z.string().optional() })).min(1).max(32),
+      to: z.string().min(1),
+    },
+    async (args) => {
+      need("write");
+      return { content: [{ type: "text", text: JSON.stringify(await setHome(args, identity, scope)) }] };
+    },
+  );
+
   if (caps.approve === true) server.tool(
     "list_pending_writes",
     "List queued graph writes awaiting approval (requires approve capability).",
     {},
     async () => {
       need("approve");
-      return { content: [{ type: "text", text: JSON.stringify({ pending: await listPending() }) }] };
+      return { content: [{ type: "text", text: JSON.stringify({ pending: await listPending(identity) }) }] };
     },
   );
 
@@ -669,7 +869,7 @@ ${facetDoc}`,
     { id: z.string().min(1) },
     async (args) => {
       need("approve");
-      return { content: [{ type: "text", text: JSON.stringify(await approvePending(args.id, identity.user)) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await approvePending(args.id, identity)) }] };
     },
   );
 
@@ -679,7 +879,7 @@ ${facetDoc}`,
     { id: z.string().min(1) },
     async (args) => {
       need("approve");
-      return { content: [{ type: "text", text: JSON.stringify(await rejectPending(args.id, identity.user)) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await rejectPending(args.id, identity)) }] };
     },
   );
 
@@ -723,12 +923,15 @@ function queueIdentity(req) {
 app.get("/api/queue", (req, res) => {
   const identity = queueIdentity(req);
   if (!identity) return res.status(403).json({ error: "requires approve capability" });
-  void listPending().then((pending) => res.json({ pending }));
+  void listPending(identity).then(
+    (pending) => res.json({ pending }),
+    (err) => res.status(500).json({ error: String(err).slice(0, 200) }),
+  );
 });
 app.post("/api/queue/:id/approve", (req, res) => {
   const identity = queueIdentity(req);
   if (!identity) return res.status(403).json({ error: "requires approve capability" });
-  void approvePending(req.params.id, identity.user).then(
+  void approvePending(req.params.id, identity).then(
     (result) => res.json({ result }),
     (err) => res.status(400).json({ error: String(err).slice(0, 200) }),
   );
@@ -736,7 +939,7 @@ app.post("/api/queue/:id/approve", (req, res) => {
 app.post("/api/queue/:id/reject", (req, res) => {
   const identity = queueIdentity(req);
   if (!identity) return res.status(403).json({ error: "requires approve capability" });
-  void rejectPending(req.params.id, identity.user).then(
+  void rejectPending(req.params.id, identity).then(
     (result) => res.json({ result }),
     (err) => res.status(400).json({ error: String(err).slice(0, 200) }),
   );
@@ -745,6 +948,13 @@ app.post("/api/queue/:id/reject", (req, res) => {
 /** boot: ensure advertised indexes + periodic identity sweep */
 async function boot() {
   loadTokenMap();
+  loadPositionMap();
+  if (SCOPED) {
+    watchFile(POSITION_MAP_PATH, { interval: 5000 }, () => {
+      console.log("[graph-rag] position map changed; reloading");
+      loadPositionMap();
+    });
+  }
   if (TOKEN_MAP_PATH) {
     watchFile(TOKEN_MAP_PATH, { interval: 5000 }, () => {
       console.log("[graph-rag] token map changed; reloading");
@@ -752,6 +962,9 @@ async function boot() {
     });
   }
   for (const facet of Object.keys(FACETS)) await ensureIndex(facet);
+  // declared, or SQL WHERE can't see it (see upsertEntities)
+  await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._home IF NOT EXISTS STRING`).catch(() => {});
+  await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_home) NOTUNIQUE`).catch(() => {});
   await ensurePendingSchema();
   console.log(`[graph-rag] indexes ready: ${[...knownIndexes].join(", ")}`);
   const sweep = async () => {

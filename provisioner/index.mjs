@@ -16,6 +16,7 @@
 //   TIER_GROUPS  "gw-admin:admin,gw-user:user"   role group -> tier
 //   SEED_TENANTS "admin,alice,bob"   pre-existing tenants (no object creation)
 //   KVM_GID, POLL_SECONDS            container tuning
+//   ORG_ROOT_GROUP (org)             root of the position tree (see below)
 //   OPENSHELL_*                      OpenShell tenancy (see openshell.mjs);
 //                                    OPENSHELL_TENANTS run on that runtime
 
@@ -40,6 +41,7 @@ const INSTANCES_DIR = "/data/instances";
 // needs the host-side paths of the shared files
 const HOST_BASE = (process.env.HOST_BASE ?? "/home/cyber/gwarestrin").replace(/\/+$/, "");
 const GRAPH_CONFIG_DIR = "/data/graph-rag-config";
+const ORG_ROOT_GROUP = process.env.ORG_ROOT_GROUP ?? "org";
 const TRAEFIK_DIR = "/data/traefik";
 
 const log = (...a) => console.log(new Date().toISOString(), "[provisioner]", ...a);
@@ -186,6 +188,53 @@ async function ensureTenantObjects(name, tier, flows, userId) {
   return { groupPk: group.pk };
 }
 
+// ---------- position tree (knowledge-graph scoping) ----------
+//
+// Positions are authentik groups with attributes.gw_position = true (and an
+// optional attributes.description); the root is ORG_ROOT_GROUP. A position's
+// parent is its one parent group that is also a position; none, or more than
+// one, hangs it off the root (only the root sees above it: fail upward).
+// Members of a position group hold that position; admin-tier tenants hold the
+// root. graph-rag reads the tree from position-map.json and each tenant's
+// positions from its token entry.
+
+async function ensurePositionTree() {
+  let groups = (await ak("GET", "/core/groups/?page_size=1000")).results ?? [];
+  let root = groups.find((g) => g.name === ORG_ROOT_GROUP);
+  if (!root) {
+    root = await ak("POST", "/core/groups/", {
+      name: ORG_ROOT_GROUP,
+      attributes: { gw_position: true, description: "The whole organization" },
+    });
+    log(`authentik: position root ${ORG_ROOT_GROUP} created`);
+    groups = [...groups, root];
+  }
+  const isPosition = (g) => g.pk === root.pk || g.attributes?.gw_position === true;
+  const positionGroups = groups.filter(isPosition);
+  const ids = new Set(positionGroups.map((g) => g.pk));
+  const positions = {};
+  const heldBy = new Map(); // tenant name -> position ids
+  for (const g of positionGroups) {
+    const parents = (g.parents ?? []).filter((p) => ids.has(p));
+    if (parents.length > 1) log(`positions: ${g.name} has several position parents; placing it under ${ORG_ROOT_GROUP}`);
+    positions[g.pk] = {
+      name: g.name,
+      parent: g.pk === root.pk ? null : parents.length === 1 ? parents[0] : root.pk,
+      ...(typeof g.attributes?.description === "string" ? { description: g.attributes.description } : {}),
+    };
+    for (const u of g.users_obj ?? []) {
+      const name = slug(u.username);
+      if (!heldBy.has(name)) heldBy.set(name, []);
+      heldBy.get(name).push(g.pk);
+    }
+  }
+  const doc = { version: 1, root: root.pk, positions };
+  if (writeIfChanged(`${GRAPH_CONFIG_DIR}/position-map.json`, JSON.stringify(doc, null, 1) + "\n")) {
+    log(`positions: map written (${positionGroups.length} position(s))`);
+  }
+  return { root: root.pk, heldBy };
+}
+
 // ---------- tokens + metadata + routes ----------
 
 function tierCaps(tier) {
@@ -194,13 +243,13 @@ function tierCaps(tier) {
   return { read: true, write: "queued" };
 }
 
-function ensureToken(name, tier) {
+function ensureToken(name, tier, positions) {
   const p = `${GRAPH_CONFIG_DIR}/token-map.json`;
   const map = readJson(p, { tokens: [] });
   let entry = map.tokens.find((t) => t.user === name);
   let changed = false;
   if (!entry) {
-    entry = { token: randomToken(), user: name, caps: tierCaps(tier) };
+    entry = { token: randomToken(), user: name, caps: tierCaps(tier), positions };
     map.tokens.push(entry);
     changed = true;
     log(`token: created for ${name} (${tier})`);
@@ -210,6 +259,11 @@ function ensureToken(name, tier) {
       entry.caps = caps;
       changed = true;
       log(`token: caps restored for ${name} (${tier})`);
+    }
+    if (JSON.stringify(entry.positions ?? []) !== JSON.stringify(positions)) {
+      entry.positions = positions;
+      changed = true;
+      log(`token: positions for ${name} -> ${positions.length} position(s)`);
     }
   }
   if (changed) writeIfChanged(p, JSON.stringify(map, null, 1));
@@ -404,6 +458,9 @@ async function reconcile() {
   }
 
   const flows = await ensureFlowPks();
+  const tree = await ensurePositionTree();
+  const positionsFor = (name, tier) =>
+    [...new Set([...(tier === "admin" ? [tree.root] : []), ...(tree.heldBy.get(name) ?? [])])].sort();
 
   for (const name of known) {
     const tier = desired.get(name);
@@ -415,7 +472,7 @@ async function reconcile() {
           const user = (await ak("GET", `/core/users/?username=${encodeURIComponent(name)}`)).results?.find((u) => u.username === name);
           await ensureTenantObjects(name, tier, flows, user?.pk);
         }
-        const token = ensureToken(name, tier);
+        const token = ensureToken(name, tier, positionsFor(name, tier));
         let oshValues;
         if (osh && onOpenShell(name)) {
           const current = readJson(`${INSTANCES_DIR}/${name}.json`, {})?.values?.openshell?.clientSecret;
