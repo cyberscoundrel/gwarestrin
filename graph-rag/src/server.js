@@ -419,7 +419,9 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
   const top = results.slice(0, 12).filter((r) => RID_RE.test(String(r.rid)));
   if (top.length > 0) {
     try {
-      const edges = await adbQuery(`SELECT @type AS rel, @out AS src, @in AS dst FROM (SELECT expand(bothE()) FROM [${top.map((r) => r.rid).join(",")}]) LIMIT 50`);
+      const raw = await adbQuery(`SELECT @rid AS rid, @type AS rel, @out AS src, @in AS dst FROM (SELECT expand(bothE()) FROM [${top.map((r) => r.rid).join(",")}]) LIMIT 50`);
+      // an edge between two top results comes back once per end
+      const edges = [...new Map(raw.map((e) => [String(e.rid), e])).values()];
       const ends = [...new Set(edges.flatMap((e) => [String(e.src), String(e.dst)]).filter((r) => RID_RE.test(r)))];
       const nodes = ends.length
         ? await adbQuery(`SELECT @rid AS rid, name FROM [${ends.join(",")}] WHERE name IS NOT NULL${visible}`)

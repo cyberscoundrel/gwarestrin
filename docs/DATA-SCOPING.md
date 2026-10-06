@@ -1,6 +1,8 @@
 # Data scoping
 
-Status: design, not built. Last discussed 2026-10-06.
+Status: the position tree, homes, filtered reads and set_home are built in
+graph-rag (2026-10-06); grants, semantic grading, derived-data labels and
+per-agent (profile) positions are not yet. Last discussed 2026-10-06.
 
 An agent is untrusted: prompt injection can make it ask for anything. So who
 may see what is enforced by the data source, against an identity the agent
@@ -79,6 +81,28 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   writes are homed at the writer's position. Raw Cypher/SQL tools stay
   root-only. The caller is identified per agent (person + profile position),
   injected as an OpenShell provider credential the agent never sees.
+
+## As built (graph-rag)
+- **Positions** are authentik groups with `attributes.gw_position: true` (and an
+  optional `attributes.description`); the root is the `org` group
+  (`ORG_ROOT_GROUP`). A position's parent is its one parent group that is a
+  position; none or several hangs it off the root. Members hold the position;
+  admin-tier tenants hold the root. The provisioner writes
+  `graph-rag-config/position-map.json` and each tenant's positions into its
+  token entry; graph-rag reloads both and fails closed while either is missing.
+- **Homes**: graph-rag stamps `_home` on every write; callers can't set it.
+  An entity is (name, home), so a write never touches a same-named entity at a
+  home the writer can't write. Default home = the writer's deepest position;
+  `upsert_entities.home` may name one of its positions or one above (restrict).
+- **Reads**: search (vector + lexical) and the 1-hop traversal only return
+  entities homed at the caller's positions or below; edges to hidden
+  entities are dropped. Raw query tools need the root position.
+- **Moves**: `set_home` restricts directly (direct writers) and queues every
+  widening for a person; approvers only see queued writes they can see.
+- **Legacy data** (no `_home`) is root-only until released with `set_home`.
+- Verified live with the test tree org > Operations (alice) > Production floor
+  (bob): 20/20 checks (manager's email invisible to the floor, same-name
+  entities kept apart, edges to hidden entities dropped, moves).
 
 ## Open questions
 1. **Do ancestors always see down?** Default yes; but e.g. a complaint about a
