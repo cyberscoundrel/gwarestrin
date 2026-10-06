@@ -181,10 +181,13 @@ services:
   arcadedb:
     image: arcadedata/arcadedb:latest
     mem_limit: 2g
-    # Studio + HTTP API published to the tailnet (auth: root + the password
-    # in the secret file below)
+    # Studio + HTTP API on the docker host's loopback only: root bypasses
+    # every graph-rag check, so it is not published to the tailnet. From a
+    # workstation: ssh -L 2480:127.0.0.1:2480 <host>, then http://localhost:2480
+    # Its built-in MCP is disabled (arcadedb-config/mcp-config.json):
+    # agents reach the graph only through graph-rag.
     ports:
-      - "2480:2480"
+      - "127.0.0.1:2480:2480"
     environment:
       # root password via secret file (not visible in process args); the
       # defaultDatabases setting creates an empty `gwarestrin` db at boot.

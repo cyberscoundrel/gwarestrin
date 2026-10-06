@@ -37,7 +37,14 @@ function mockLlm(opts: { toolName?: string; toolArgs?: Record<string, unknown>; 
 }
 
 // mock MCP streamable-HTTP endpoint: initialize, tools/list, tools/call
-function mockMcp() {
+const TOOL_DEFS: Record<string, { name: string; description: string; inputSchema: Record<string, unknown> }> = Object.fromEntries(
+  ["query_graph", "search_graph", "schema_graph", "upsert_entities", "approve_write"].map((name) => [
+    name,
+    { name, description: name, inputSchema: { type: "object", properties: { query: { type: "string" } } } },
+  ]),
+);
+
+function mockMcp(opts: { tools?: string[] } = {}) {
   const state = { calls: [] as Array<{ name: string; query: string }> };
   const server = createServer((req, res) => {
     let body = "";
@@ -60,10 +67,12 @@ function mockMcp() {
             jsonrpc: "2.0",
             id: msg.id,
             result: {
-              tools: [
-                { name: "query_graph", description: "read-only openCypher", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
-                { name: "search_graph", description: "semantic search", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
-              ],
+              tools: opts.tools
+                ? opts.tools.map((t) => TOOL_DEFS[t])
+                : [
+                    { name: "query_graph", description: "read-only openCypher", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+                    { name: "search_graph", description: "semantic search", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+                  ],
             },
           }),
         );
@@ -71,6 +80,12 @@ function mockMcp() {
       }
       if (msg.method === "tools/call") {
         const name = String(msg.params?.name ?? "");
+        if (opts.tools && !opts.tools.includes(name)) {
+          // like graph-rag for an identity the tool isn't listed for
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, error: { code: -32602, message: `Tool ${name} not found` } }));
+          return;
+        }
         const query = String(msg.params?.arguments?.query ?? "");
         state.calls.push({ name, query });
         res.writeHead(200, { "content-type": "application/json" });
@@ -129,6 +144,27 @@ describe("runContextEngine (graph-rag)", () => {
     expect(result.status).toBe("ok");
     expect(result.block).toBe("thinkcentre hosts gwarestrin, dab, arcadedb");
     expect(mcp.state.calls.every((c) => !/^\s*CREATE/i.test(c.query))).toBe(true);
+  });
+
+  it("offers only read tools and works for identities without raw queries", async () => {
+    const llm = mockLlm({ toolName: "search_graph", toolArgs: { query: "thinkcentre" } });
+    const offered: string[][] = [];
+    const llmServer = llm.server;
+    llmServer.prependListener("request", (req) => {
+      let b = "";
+      req.on("data", (c) => (b += c));
+      req.on("end", () => offered.push((JSON.parse(b).tools ?? []).map((t: { function: { name: string } }) => t.function.name)));
+    });
+    const mcp = mockMcp({ tools: ["search_graph", "schema_graph", "upsert_entities", "approve_write"] });
+    servers.push(llmServer, mcp.server);
+    const result = await runContextEngine(
+      { type: "graph-rag" },
+      { firstPrompt: "what depends on thinkcentre?" },
+      { llm: { llmUrl: await listen(llmServer), llmKey: "x", model: "m" }, mcpUrl: await listen(mcp.server) },
+    );
+    expect(result.status).toBe("ok");
+    expect(offered[0]).toEqual(["search_graph", "schema_graph"]);
+    expect(mcp.state.calls.map((c) => c.name)).toEqual(["search_graph"]);
   });
 
   it("reports failed when the llm endpoint is down", async () => {

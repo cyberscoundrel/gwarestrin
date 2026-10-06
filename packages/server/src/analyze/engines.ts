@@ -87,8 +87,15 @@ interface ChatMessage {
   tool_call_id?: string;
 }
 
+/**
+ * The analyst only ever reads: tools outside this list (upsert/execute/
+ * approve…) are never offered, whatever the instance token could do.
+ * query_graph is listed by graph-rag only for raw-capable identities.
+ */
+const READ_TOOLS = new Set(["search_graph", "schema_graph", "query_graph"]);
+
 async function resolveTools(mcp: McpHttpClient): Promise<ResolvedTool[]> {
-  const tools = await mcp.listTools();
+  const tools = (await mcp.listTools()).filter((t) => READ_TOOLS.has(t.name));
   return tools.map((t) => {
     const guard = TOOL_GUARDS[t.name];
     return {

@@ -189,7 +189,8 @@ async function ensureTenantObjects(name, tier, flows, userId) {
 // ---------- tokens + metadata + routes ----------
 
 function tierCaps(tier) {
-  if (tier === "admin") return { read: true, write: "direct", approve: true };
+  // raw Cypher/SQL bypasses every read filter: admin (root of the org tree) only
+  if (tier === "admin") return { read: true, write: "direct", approve: true, raw: true };
   return { read: true, write: "queued" };
 }
 

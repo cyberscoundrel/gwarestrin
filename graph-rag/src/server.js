@@ -32,37 +32,40 @@ const {
   SWEEP_INTERVAL_MS = "600000",
   PORT = "8000",
   TOKEN_MAP_PATH = "",
+  GRAPH_RAG_OPEN_MODE = "",
 } = process.env;
 
 /**
  * Identity model: callers present a bearer token (issued by the surrounding
  * infrastructure); the token map (infra-authored JSON) resolves it to
- * capabilities. No token map configured = open mode (full caps, anonymous) —
- * keeps standalone deployments friction-free.
+ * capabilities. Fails closed: a configured token map that is missing or
+ * unreadable denies everyone (a broken reload keeps the last good map). Open
+ * mode (anonymous, full caps) needs an explicit GRAPH_RAG_OPEN_MODE=1 and no
+ * token map: standalone development only.
  */
 
-const OPEN_CAPS = { read: true, write: "direct", approve: true };
-let tokenMap = null; // null = open mode
+const OPEN_CAPS = { read: true, write: "direct", approve: true, raw: true };
+const OPEN_MODE = !TOKEN_MAP_PATH && GRAPH_RAG_OPEN_MODE === "1";
+let tokenMap = new Map(); // empty = nobody authenticates
 
 function loadTokenMap() {
   if (!TOKEN_MAP_PATH) {
-    tokenMap = null;
+    if (!OPEN_MODE) console.warn("[graph-rag] no TOKEN_MAP_PATH and GRAPH_RAG_OPEN_MODE!=1: every request is refused");
     return;
   }
   try {
     const parsed = JSON.parse(readFileSync(TOKEN_MAP_PATH, "utf8"));
-    const entries = Array.isArray(parsed.tokens) ? parsed.tokens : [];
-    const byToken = new Map(entries.map((e) => [e.token, e]));
-    tokenMap = byToken;
-    console.log(`[graph-rag] token map loaded: ${byToken.size} token(s)`);
+    if (!Array.isArray(parsed.tokens)) throw new Error("token map has no tokens array");
+    tokenMap = new Map(parsed.tokens.filter((e) => typeof e?.token === "string" && e.token).map((e) => [e.token, e]));
+    console.log(`[graph-rag] token map loaded: ${tokenMap.size} token(s)`);
   } catch (err) {
-    console.warn(`[graph-rag] token map load failed: ${String(err).slice(0, 160)}`);
+    console.warn(`[graph-rag] token map load failed (keeping ${tokenMap.size} previously loaded token(s)): ${String(err).slice(0, 160)}`);
   }
 }
 
 /** resolve an Authorization header to capabilities; null = unauthenticated */
 function resolveIdentity(authorization) {
-  if (!tokenMap) return { user: "anonymous", caps: { ...OPEN_CAPS } };
+  if (OPEN_MODE) return { user: "anonymous", caps: { ...OPEN_CAPS } };
   const token = typeof authorization === "string" && authorization.startsWith("Bearer ")
     ? authorization.slice(7).trim()
     : null;
@@ -75,6 +78,8 @@ function resolveIdentity(authorization) {
       read: entry.caps?.read === true,
       write: entry.caps?.write ?? "deny",
       approve: entry.caps?.approve === true,
+      // raw Cypher/SQL bypasses every read filter: root-level identities only
+      raw: entry.caps?.raw === true,
     },
   };
 }
@@ -88,6 +93,7 @@ function requireCap(caps, cap) {
     }
   }
   if (cap === "approve" && caps.approve !== true) throw new Error("requires approve capability");
+  if (cap === "raw" && caps.raw !== true) throw new Error("raw graph queries require the raw capability");
 }
 
 const EMBED_DIM_N = Number(EMBED_DIM);
@@ -471,17 +477,18 @@ async function ensurePendingSchema() {
 const RID_RE = /^#\d+:\d+$/;
 const PENDING_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function queueWrite(entry) {
+async function queueWrite(entry) {
   const id = randomUUID();
   const created = new Date().toISOString();
   const payload = entry.payload ?? entry.command ?? "";
   const language = entry.language ?? "sql";
-  adbCommand(
+  // awaited: a write is only reported as queued once the record exists
+  await adbCommand(
     "INSERT INTO PendingWrite SET id = :id, kind = :kind, payload = :payload, language = :lang, " +
       "requested_by = :user, created_at = :created, status = 'pending'",
     "sql",
     { id, kind: entry.kind, payload, lang: language, user: entry.user, created },
-  ).catch((e) => log.warn(`pending write insert failed: ${String(e).slice(0, 120)}`));
+  );
   console.log(`[graph-rag] write queued by ${entry.user}: ${String(payload).slice(0, 80)} (${id})`);
   return { queued: true, pendingId: id };
 }
@@ -498,14 +505,14 @@ async function approvePending(id, approver) {
   );
   const rec = rows[0];
   if (!rec) throw new Error(`no pending write ${id}`);
-  const result = await adbCommand(rec.payload, rec.language ?? "sql");
+  // upsert/backfill payloads are JSON for their handlers, not SQL
+  const result = await executePending(rec);
   try {
     await adbCommand(
       "UPDATE PendingWrite SET status = 'approved', executed_at = :now, approved_by = :by WHERE id = :id",
       "sql",
       { now: new Date().toISOString(), by: approver, id },
     );
-    console.log(`[graph-rag] write ${id} approved by ${approver}`);
   } catch (e) {
     console.warn(`[graph-rag] approve status update failed for ${id}: ${String(e).slice(0, 300)}`);
   }
@@ -536,7 +543,8 @@ function createServer(identity) {
   const need = (cap) => requireCap(caps, cap);
   const server = new McpServer({ name: "graph-rag", version: "0.3.0" });
 
-  server.tool(
+  // raw Cypher/SQL bypasses every read filter: only listed for raw identities
+  if (caps.raw === true) server.tool(
     "query_graph",
     `Run a READ-ONLY query against the knowledge graph (openCypher or SQL). Use for exact identifiers, structure, and schema exploration. Returns JSON rows.`,
     {
@@ -545,6 +553,7 @@ function createServer(identity) {
     },
     async (args) => {
       need("read");
+      need("raw");
       return { content: [{ type: "text", text: JSON.stringify(await queryGraph(args)) }] };
     },
   );
@@ -614,7 +623,7 @@ ${facetDoc}`,
     },
   );
 
-  server.tool(
+  if (caps.raw === true) server.tool(
     "execute_graph",
     "Execute a WRITE command against the knowledge graph (openCypher or SQL). Depending on your identity capabilities this executes immediately or is queued for review.",
     {
@@ -623,6 +632,7 @@ ${facetDoc}`,
     },
     async (args) => {
       need("write");
+      need("raw");
       return { content: [{ type: "text", text: JSON.stringify(await executeGraph(args, identity)) }] };
     },
   );

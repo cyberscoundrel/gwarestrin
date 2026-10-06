@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "profile": "rag",
   "allowReads": true,
   "allowInsert": true,
@@ -7,5 +7,5 @@
   "allowDelete": false,
   "allowSchemaChange": false,
   "allowAdmin": false,
-  "allowedUsers": ["*"]
+  "allowedUsers": []
 }
