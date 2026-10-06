@@ -16,3 +16,30 @@ export function modelDisplayName(
   const base = modelId.split("/").filter(Boolean).pop();
   return base ?? modelId;
 }
+
+/**
+ * True for models a provider marks as free of charge. Only OpenRouter-style
+ * ":free" ids are recognised: discovered catalogues carry no prices (cost
+ * is all zeros), so anything else may be billed.
+ */
+export function isFreeModelId(modelId: string): boolean {
+  return /:free$/i.test(modelId);
+}
+
+/** UI name for a model tier: "On-prem" for self-hosted, "Cloud" otherwise. */
+export function tierName(tier: "local" | "cloud"): string {
+  return tier === "local" ? "On-prem" : "Cloud";
+}
+
+/**
+ * Where a provider's models run, for display: "On-prem" for local-tier
+ * providers, "Cloud: <provider id>" for hosted ones. Unknown providers are
+ * treated as cloud, matching the server's default tier.
+ */
+export function whereItRuns(
+  providerId: string,
+  providers: ProviderView[],
+): { tier: "local" | "cloud"; label: string } {
+  const tier = providers.find((p) => p.id === providerId)?.tier ?? "cloud";
+  return { tier, label: tier === "local" ? "On-prem" : `Cloud: ${providerId}` };
+}

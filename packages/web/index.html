@@ -1,9 +1,22 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <title>ground chat</title>
+    <script>
+      // follow the OS theme before first paint (pi-web-ui keys its dark
+      // variant off the .dark class, so a media query alone isn't enough)
+      (function () {
+        var mq = window.matchMedia("(prefers-color-scheme: dark)");
+        var apply = function () {
+          document.documentElement.classList.toggle("dark", mq.matches);
+        };
+        apply();
+        if (mq.addEventListener) mq.addEventListener("change", apply);
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { Download, Trash2 } from "lucide";
   import { api } from "../lib/api.js";
   import { store } from "../lib/stores.svelte.js";
+  import Dialog from "./Dialog.svelte";
+  import Icon from "./Icon.svelte";
 
   let { agentId, agentName, onclose }: { agentId: string; agentName: string; onclose: () => void } = $props();
 
@@ -21,7 +24,8 @@
       await api.deleteAgent(agentId, true);
       const wasSelected = store.selectedId === agentId;
       await store.refreshAgents();
-      if (wasSelected) store.select(store.agents[0]?.id ?? null);
+      // back to the composer rather than jumping into some other agent
+      if (wasSelected) store.select(null);
       onclose();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -30,39 +34,37 @@
   }
 </script>
 
-<div class="fixed inset-0 z-50 bg-black/55" role="presentation" onclick={onclose}></div>
-<div
-  class="fixed top-1/2 left-1/2 z-51 grid w-[min(28rem,92vw)] -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl
-    border border-edge2 bg-panel2 p-5"
-  role="alertdialog"
-  aria-modal="true"
->
-  <h3 class="m-0 tracking-wide">delete {agentName}?</h3>
-  <p class="m-0 text-sm text-muted">
-    this erases <span class="text-warn font-medium">all data</span> for this agent — workspace files, session
-    history, and configuration. this cannot be undone.
-  </p>
-  {#if error}
-    <p class="m-0 text-sm text-err">{error}</p>
-  {/if}
-  <div class="flex flex-wrap items-center justify-end gap-2">
+<Dialog {onclose} labelledby="delete-agent-title" role="alertdialog" dismissible={!busy}>
+  <div class="grid gap-3 p-5">
+    <div class="flex items-start gap-3">
+      <span class="grid h-8 w-8 shrink-0 place-items-center rounded-lg border border-err/30 bg-err-soft text-err">
+        <Icon icon={Trash2} size={15} />
+      </span>
+      <div class="grid min-w-0 gap-1">
+        <h3 id="delete-agent-title" class="m-0 text-base font-medium break-words text-fg">Delete {agentName}?</h3>
+        <p class="m-0 text-sm text-dim">
+          This permanently erases the agent's files, conversation history and configuration. It can't be undone.
+        </p>
+      </div>
+    </div>
+    {#if error}
+      <p class="m-0 text-sm text-err" role="alert">{error}</p>
+    {/if}
+  </div>
+  <div class="flex flex-wrap items-center gap-2 border-t border-edge bg-panel px-5 py-3">
     <button
-      class="cursor-pointer rounded-md border border-edge2 bg-transparent px-3 py-2 text-sm text-muted hover:text-fg"
+      class="btn btn-ghost btn-sm"
       onclick={exportTrace}
       disabled={busy}
-      title="download the conversation trace (session jsonl)"
+      title="Download the conversation history (jsonl) first"
     >
-      {exported ? "trace downloaded ✓" : "export trace"}
+      <Icon icon={Download} size={13} />
+      {exported ? "History downloaded" : "Export conversation"}
     </button>
-    <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-2 text-fg" onclick={onclose} disabled={busy}>
-      cancel
-    </button>
-    <button
-      class="cursor-pointer rounded-md bg-err px-4 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
-      onclick={() => void confirmDelete()}
-      disabled={busy}
-    >
-      {busy ? "deleting…" : "delete"}
+    <span class="ml-auto"></span>
+    <button class="btn btn-secondary btn-sm" onclick={onclose} disabled={busy}>Cancel</button>
+    <button class="btn btn-danger-solid btn-sm" onclick={() => void confirmDelete()} disabled={busy}>
+      {busy ? "Deleting…" : "Delete agent"}
     </button>
   </div>
-</div>
+</Dialog>

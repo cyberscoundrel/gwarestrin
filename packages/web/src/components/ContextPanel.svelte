@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api } from "../lib/api.js";
+  import { BookOpen, TriangleAlert } from "lucide";
+  import PanelHeader from "./PanelHeader.svelte";
+  import EmptyState from "./EmptyState.svelte";
+  import SkeletonRows from "./SkeletonRows.svelte";
 
   let { agentId, onclose }: { agentId: string; onclose?: () => void } = $props();
 
@@ -25,52 +28,50 @@
   });
 </script>
 
-<div class="flex h-full flex-col border-l border-edge bg-panel text-sm">
-  <div class="flex items-center gap-2 border-b border-edge px-3 py-2">
-    <span class="font-semibold tracking-wide">standing context</span>
-    <button
-      class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg"
-      onclick={() => onclose?.()}
-    >
-      ✕
-    </button>
+{#snippet fact(label: string, value: string, tone: string = "text-fg", mono: boolean = false)}
+  <div class="flex items-baseline justify-between gap-3 py-1.5">
+    <dt class="text-xs text-faint">{label}</dt>
+    <dd class="m-0 truncate text-right text-xs {tone} {mono ? 'font-mono' : ''}">{value}</dd>
   </div>
+{/snippet}
 
-  <div class="min-h-0 flex-1 overflow-y-auto p-3">
+<div class="flex h-full flex-col border-l border-edge bg-panel text-sm">
+  <PanelHeader title="Briefing" subtitle="What this agent keeps in mind on every turn." icon={BookOpen} {onclose} />
+
+  <div class="min-h-0 flex-1 overflow-y-auto">
     {#if error}
-      <p class="text-err">{error}</p>
+      <EmptyState icon={TriangleAlert} tone="err" title="Couldn't load the briefing" hint={error} />
     {:else if !info}
-      <p class="text-muted">loading…</p>
+      <SkeletonRows rows={3} />
     {:else}
-      <div class="mb-3 grid gap-1 text-xs text-muted">
-        <span>profile: <span class="text-fg">{info.profileName}</span></span>
-        <span>
-          engine:
-          {#if info.engine}
-            <span class="text-fg">{info.engine.type}</span>
-            {#if info.engine.prompt}
-              — <span class="italic">“{info.engine.prompt}”</span>
-            {/if}
-          {:else}
-            none (no generation step)
-          {/if}
-        </span>
-        <span>
-          status:
-          <span class={info.status === "ok" ? "text-ok" : info.status === "failed" ? "text-err" : "text-muted"}>
-            {info.status}
-          </span>
-        </span>
-      </div>
+      <dl class="m-0 divide-y divide-edge border-b border-edge px-4 py-1">
+        {@render fact("Agent profile", info.profileName)}
+        {@render fact("Built by", info.engine ? info.engine.type : "Nothing", info.engine ? "text-fg" : "text-faint", Boolean(info.engine))}
+        {@render fact(
+          "Status",
+          info.status === "ok" ? "Ready" : info.status === "failed" ? "Failed to build" : "Not built",
+          info.status === "ok" ? "text-ok" : info.status === "failed" ? "text-err" : "text-faint",
+        )}
+      </dl>
+      {#if info.engine?.prompt}
+        <div class="border-b border-edge px-4 py-3">
+          <p class="eyebrow m-0 mb-1">Focus</p>
+          <p class="m-0 text-xs text-dim">{info.engine.prompt}</p>
+        </div>
+      {/if}
       {#if info.block}
-        <pre class="m-0 overflow-x-auto whitespace-pre-wrap rounded-md border border-edge bg-[#12141b] p-3 text-xs text-fg">{info.block}</pre>
+        <div class="p-4">
+          <pre class="m-0 max-h-none overflow-x-auto rounded-lg border border-edge bg-inset p-3 font-mono text-xs leading-relaxed whitespace-pre-wrap text-fg">{info.block}</pre>
+        </div>
       {:else}
-        <p class="text-muted italic">no context block was generated for this agent</p>
+        <EmptyState
+          icon={BookOpen}
+          title="No briefing for this agent"
+          hint={info.engine
+            ? "The agent profile has a briefing, but none was built when this agent was created."
+            : "Turn on a briefing in the agent profile to give new agents standing knowledge from the graph."}
+        />
       {/if}
     {/if}
-  </div>
-
-  <div class="border-t border-edge px-3 py-1.5 text-xs text-muted">
-    injected into the system prompt on every turn (context-injection.md)
   </div>
 </div>
