@@ -123,6 +123,9 @@
             ? e.message
             : String(e);
       submitting = false;
+      // the server may have created the record before failing to start it
+      // (e.g. the concurrency cap); show it in the rail instead of hiding it
+      void store.refreshAgents();
     }
   }
 
