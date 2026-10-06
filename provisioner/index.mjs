@@ -199,7 +199,8 @@ async function ensureTenantObjects(name, tier, flows, userId) {
 // positions from its token entry.
 
 async function ensurePositionTree() {
-  let groups = (await ak("GET", "/core/groups/?page_size=1000")).results ?? [];
+  // without member lists: with them, the full listing outlasts the API timeout
+  let groups = (await ak("GET", "/core/groups/?page_size=1000&include_users=false&include_children=false")).results ?? [];
   let root = groups.find((g) => g.name === ORG_ROOT_GROUP);
   if (!root) {
     root = await ak("POST", "/core/groups/", {
@@ -222,7 +223,8 @@ async function ensurePositionTree() {
       parent: g.pk === root.pk ? null : parents.length === 1 ? parents[0] : root.pk,
       ...(typeof g.attributes?.description === "string" ? { description: g.attributes.description } : {}),
     };
-    for (const u of g.users_obj ?? []) {
+    const members = (await ak("GET", `/core/users/?groups_by_pk=${g.pk}&page_size=1000&include_groups=false`)).results ?? [];
+    for (const u of members) {
       const name = slug(u.username);
       if (!heldBy.has(name)) heldBy.set(name, []);
       heldBy.get(name).push(g.pk);
