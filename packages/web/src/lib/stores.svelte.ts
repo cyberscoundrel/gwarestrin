@@ -2,7 +2,7 @@ import { getAdapter } from "./rpc-agent-adapter.js";
 import { ws } from "./ws-client.js";
 import type { AgentEvent } from "./agent-types.js";
 import type { AgentRuntimeSummary, ProfileRecord } from "@gwarestrin/shared";
-import { SvelteMap } from "svelte/reactivity";
+import { SvelteMap, SvelteSet } from "svelte/reactivity";
 
 export interface AgentListItem {
   id: string;
@@ -53,6 +53,13 @@ class Store {
   private runtime = new SvelteMap<string, AgentRuntimeSummary>();
   /** the remembered agent is restored once, on the first agent list load */
   private initialSelectionDone = false;
+  private working = new SvelteSet<string>();
+
+  /** an agent turn is currently in flight */
+  isWorking(id: string): boolean {
+    return this.working.has(id);
+  }
+
   /** extension status text per agent (e.g. "sandbox: running"), shown in its header */
   private statusLines = new SvelteMap<string, string>();
 
@@ -73,6 +80,14 @@ class Store {
         this.runtime.set(msg.state.id, msg.state);
         this.syncAgentStatus(msg.state.id);
       }
+      // "working" = an agent turn is in flight (drives the only looping
+      // animation in the UI, so it must clear as soon as the turn settles)
+      if (msg.kind === "event") {
+        const t = msg.event.type;
+        if (t === "agent_start") this.working.add(msg.agentId);
+        else if (t === "agent_settled" || t === "agent_end") this.working.delete(msg.agentId);
+      }
+      if (msg.kind === "agent_state" && msg.state.status !== "running") this.working.delete(msg.state.id);
       if (msg.kind === "event" && msg.event.type !== "response") {
         this.bumpUnread(msg.agentId);
         // keep the selected agent's adapter fed (adapters also self-subscribe)
