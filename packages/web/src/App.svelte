@@ -101,7 +101,7 @@
             onclose={() => (store.editingProfileId = null)}
           />
         {/key}
-      {:else if store.showNewChat || store.agents.length === 0}
+      {:else if store.showNewChat || !store.selected}
         <NewChat preselectProfileId={createProfileId} />
       {:else if store.selected}
         <ChatView agentId={store.selected.id} agentName={store.selected.name} />
@@ -163,7 +163,7 @@
             onclose={() => (store.editingProfileId = null)}
           />
         {/key}
-      {:else if store.showNewChat || store.agents.length === 0}
+      {:else if store.showNewChat || !store.selected}
         <NewChat preselectProfileId={createProfileId} />
       {:else if store.selected}
         <ChatView agentId={store.selected.id} agentName={store.selected.name} />

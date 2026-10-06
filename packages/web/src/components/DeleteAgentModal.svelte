@@ -29,7 +29,8 @@
       await api.deleteAgent(agentId, true);
       const wasSelected = store.selectedId === agentId;
       await store.refreshAgents();
-      if (wasSelected) store.select(store.agents[0]?.id ?? null);
+      // back to the composer rather than jumping into some other agent
+      if (wasSelected) store.select(null);
       onclose();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
