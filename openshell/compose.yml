@@ -13,6 +13,9 @@ services:
       context: ./gateway
       network: host   # same WARP/DNS workaround as the main stack's builds
     image: gwarestrin-openshell-gateway:local
+    # tini as PID 1: the VM driver ties its lifetime to the gateway process
+    # (procguard), which it can't do when the gateway itself is PID 1
+    init: true
     devices:
       - /dev/kvm:/dev/kvm
     group_add:
