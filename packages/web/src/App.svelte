@@ -94,10 +94,13 @@
     <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
       {@render offlineBanner()}
       {#if store.editingProfileId}
-        <ProfileEditor
-          profileId={store.editingProfileId}
-          onclose={() => (store.editingProfileId = null)}
-        />
+        <!-- remount per profile: the editor seeds its form once -->
+        {#key store.editingProfileId}
+          <ProfileEditor
+            profileId={store.editingProfileId}
+            onclose={() => (store.editingProfileId = null)}
+          />
+        {/key}
       {:else if store.showNewChat || store.agents.length === 0}
         <NewChat preselectProfileId={createProfileId} />
       {:else if store.selected}
@@ -153,10 +156,13 @@
     <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
       {@render offlineBanner()}
       {#if store.editingProfileId}
-        <ProfileEditor
-          profileId={store.editingProfileId}
-          onclose={() => (store.editingProfileId = null)}
-        />
+        <!-- remount per profile: the editor seeds its form once -->
+        {#key store.editingProfileId}
+          <ProfileEditor
+            profileId={store.editingProfileId}
+            onclose={() => (store.editingProfileId = null)}
+          />
+        {/key}
       {:else if store.showNewChat || store.agents.length === 0}
         <NewChat preselectProfileId={createProfileId} />
       {:else if store.selected}

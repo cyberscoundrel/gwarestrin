@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { store } from "../lib/stores.svelte.js";
   import { api, mcpApi, type McpServerDef } from "../lib/api.js";
   import Dropdown from "./Dropdown.svelte";
@@ -12,8 +13,11 @@
     onclose?: () => void;
   } = $props();
 
-  const isNew = profileId === "new";
-  const existing = $derived(store.profiles.find((p) => p.id === profileId));
+  // The form is seeded once from the profile being edited; App remounts this
+  // component (keyed by profile id) when a different profile is opened, so
+  // reading the initial values untracked is intentional.
+  const isNew = untrack(() => profileId === "new");
+  const existing = untrack(() => (isNew ? undefined : store.profiles.find((p) => p.id === profileId)));
 
   let name = $state(isNew ? "" : (existing?.name ?? ""));
   let description = $state(isNew ? "" : (existing?.description ?? ""));
