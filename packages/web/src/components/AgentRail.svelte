@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { ChevronRight, Inbox, Pencil, Plus, UserPlus, X } from "lucide";
+  import { ChevronRight, Inbox, Pencil, Plus, Share2, UserPlus, X } from "lucide";
   import { store } from "../lib/stores.svelte.js";
   import { modelDisplayName } from "../lib/format.js";
   import DeleteAgentModal from "./DeleteAgentModal.svelte";
   import GraphQueuePanel from "./GraphQueuePanel.svelte";
+  import GrantsPanel from "./GrantsPanel.svelte";
   import Icon from "./Icon.svelte";
 
   let {
@@ -21,6 +22,7 @@
 
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
   let showReview = $state(false);
+  let showGrants = $state(false);
   let collapsed = $state<Record<string, boolean>>({});
 
   function statusDot(status: string): { cls: string; label: string } {
@@ -163,11 +165,18 @@
       <Icon icon={Inbox} size={14} />
       Approvals
     </button>
+    <button class={ghost} onclick={() => (showGrants = true)}>
+      <Icon icon={Share2} size={14} />
+      Shared access
+    </button>
   </div>
 </nav>
 
 {#if showReview}
   <GraphQueuePanel onclose={() => (showReview = false)} />
+{/if}
+{#if showGrants}
+  <GrantsPanel onclose={() => (showGrants = false)} />
 {/if}
 
 {#if deleteTarget}

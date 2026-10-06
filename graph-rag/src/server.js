@@ -1159,7 +1159,60 @@ app.get("/api/positions", (req, res) => {
   const positions = Object.entries(positionMap.positions)
     .filter(([id]) => reach === null || reach.has(id))
     .map(([id, p]) => ({ id, name: p.name, parent: p.parent, ...(p.description ? { description: p.description } : {}) }));
-  res.json({ scoped: true, root: positionMap.root, held, positions });
+  // the whole tree's names: grants may go to positions outside the caller's
+  // reach (that is their point); this says nothing about anyone's data
+  const tree = Object.entries(positionMap.positions).map(([id, p]) => ({ id, name: p.name, parent: p.parent }));
+  res.json({ scoped: true, root: positionMap.root, held, positions, tree, canGrantStanding: reach === null });
+});
+
+/** ---- grants + owned-entity search over HTTP (the people-facing UI) ---- */
+function httpScope(req, res) {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) {
+    res.status(401).json({ error: "unauthenticated" });
+    return null;
+  }
+  if (!SCOPED || !positionMap) {
+    res.status(409).json({ error: "the knowledge graph isn't divided into positions" });
+    return null;
+  }
+  return { identity, scope: scopeOf(identity) };
+}
+const httpError = (res, err) => res.status(400).json({ error: String(err instanceof Error ? err.message : err).slice(0, 300) });
+
+app.get("/api/grants", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (ctx) res.json({ ...listGrants(ctx.scope), canGrantStanding: ctx.scope.root });
+});
+app.post("/api/grants", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (!ctx) return;
+  if (ctx.identity.caps.write === "deny") return res.status(403).json({ error: "graph writes are denied for this identity" });
+  const b = req.body ?? {};
+  const args = {
+    ...(Array.isArray(b.entities) ? { entities: b.entities.slice(0, 32).map((e) => ({ name: String(e?.name ?? ""), ...(e?.home ? { home: String(e.home) } : {}) })) } : {}),
+    ...(typeof b.subtree === "string" ? { subtree: b.subtree } : {}),
+    to: String(b.to ?? ""),
+    reason: String(b.reason ?? ""),
+    ...(typeof b.until === "string" && b.until ? { until: b.until } : {}),
+  };
+  if (args.reason.trim().length < 3) return httpError(res, "give a reason");
+  void grantAccess(args, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/grants/:id/revoke", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (ctx) void revokeGrant({ id: req.params.id }, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
+});
+/** entities the caller owns (by home), for picking what to grant */
+app.get("/api/entities", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (!ctx) return;
+  const q = String(req.query.q ?? "").trim().slice(0, 80);
+  const match = q ? ` AND (name CONTAINS '${esc(q)}' OR text_identity CONTAINS '${esc(q)}')` : "";
+  void adbQuery(`SELECT name, _home FROM ${ENTITY_LABEL} WHERE name IS NOT NULL${match}${homeFilter(ctx.scope, { own: true })} ORDER BY name LIMIT 25`).then(
+    (rows) => res.json({ entities: rows.map((r) => ({ name: r.name, home: homeLabel(r._home) })) }),
+    (e) => httpError(res, e),
+  );
 });
 
 /** boot: ensure advertised indexes + periodic identity sweep */

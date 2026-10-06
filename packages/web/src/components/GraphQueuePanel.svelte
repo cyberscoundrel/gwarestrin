@@ -6,16 +6,57 @@
   import EmptyState from "./EmptyState.svelte";
   import SkeletonRows from "./SkeletonRows.svelte";
   import Icon from "./Icon.svelte";
+  import { api } from "../lib/api.js";
 
   let { onclose }: { onclose: () => void } = $props();
 
   interface Pending {
-    "@rid": string;
+    /** the queue's own id (what approve/reject take; not the record id) */
+    id: string;
+    kind: string;
+    home?: string;
     requested_by?: string;
     created_at?: string;
     payload?: string;
     language?: string;
   }
+
+  // position names, so proposals read in words
+  let names = $state(new Map<string, string>());
+  $effect(() => {
+    void api
+      .positions()
+      .then((t) => (names = new Map((t.tree ?? t.positions).map((p) => [p.id, p.parent === null ? "the whole organization" : p.name]))))
+      .catch(() => {});
+  });
+  const pos = (id: unknown) => (typeof id === "string" ? (names.get(id) ?? "an unknown position") : "the whole organization");
+
+  /** what a queued write would do, in a sentence (raw payload stays one click away) */
+  function describe(p: Pending): { title: string; detail?: string } | null {
+    let body: Record<string, unknown>;
+    try {
+      body = JSON.parse(p.payload ?? "");
+    } catch {
+      return null;
+    }
+    if (p.kind === "upsert") {
+      const list = (body.entities as Array<{ name?: string }> | undefined) ?? [];
+      const shown = list.slice(0, 4).map((e) => e.name).join(", ");
+      return { title: `Write ${list.length} ${list.length === 1 ? "entry" : "entries"} at ${pos(body.home)}`, detail: shown + (list.length > 4 ? ` and ${list.length - 4} more` : "") };
+    }
+    if (p.kind === "rehome") {
+      return { title: `Move ${String(body.name)} from ${pos(body.from)} to ${pos(body.to)}`, detail: "Changes who can see it." };
+    }
+    if (p.kind === "grant") {
+      const what = body.kind === "subtree" ? `everything under ${pos(body.target)}` : String(body.target_name);
+      const until = body.expires_at ? `until ${new Date(String(body.expires_at)).toLocaleDateString()}` : "with no end date";
+      return { title: `Share ${what} with ${pos(body.to_pos)} ${until}`, detail: `Why: ${String(body.reason ?? "")}` };
+    }
+    if (p.kind === "backfill") return { title: "Fill in missing search embeddings", detail: `Up to ${String(body.limit ?? 64)} entries.` };
+    return null;
+  }
+  let open = $state(new Set<string>());
+  const toggle = (id: string) => (open = open.has(id) ? new Set([...open].filter((x) => x !== id)) : new Set([...open, id]));
 
   let enabled = $state(true);
   let pending = $state<Pending[]>([]);
@@ -42,7 +83,9 @@
       const j = await r.json();
       enabled = j.enabled !== false;
       pending = (j.pending ?? []).map((p: Record<string, unknown>) => ({
-        "@rid": String(p["@rid"] ?? ""),
+        id: String(p.id ?? ""),
+        kind: String(p.kind ?? "command"),
+        ...(typeof p.home === "string" ? { home: p.home } : {}),
         requested_by: String(p.requested_by ?? "?"),
         created_at: String(p.created_at ?? ""),
         payload: String(p.payload ?? ""),
@@ -106,21 +149,33 @@
       <EmptyState icon={CircleCheck} title="All caught up" hint="Nothing is waiting for approval. New requests appear here as agents make them." />
     {:else}
       <ul class="m-0 grid list-none gap-3 p-5">
-        {#each pending as p (p["@rid"])}
+        {#each pending as p (p.id)}
+          {@const d = describe(p)}
           <li class="animate-enter grid gap-3 rounded-lg border border-edge bg-panel p-4">
             <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
               <span class="text-sm text-fg">Requested by <span class="font-medium">{p.requested_by}</span></span>
               <span class="text-xs text-faint" title={p.created_at}>{ago(p.created_at)}</span>
-              <span class="ml-auto font-mono text-2xs text-faint" title="record id">{p["@rid"]}</span>
+              <span class="ml-auto font-mono text-2xs text-faint" title="request id">{p.id.slice(0, 8)}</span>
             </div>
-            <pre
-              class="m-0 max-h-60 overflow-y-auto rounded-md border border-edge bg-inset p-3 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap text-fg">{p.payload}</pre>
+            {#if d}
+              <div class="grid gap-1">
+                <span class="text-sm text-fg">{d.title}</span>
+                {#if d.detail}<span class="text-xs text-dim">{d.detail}</span>{/if}
+              </div>
+              <button class="w-fit cursor-pointer text-2xs text-faint underline-offset-2 hover:text-dim hover:underline" onclick={() => toggle(p.id)}>
+                {open.has(p.id) ? "Hide details" : "Show details"}
+              </button>
+            {/if}
+            {#if !d || open.has(p.id)}
+              <pre
+                class="m-0 max-h-60 overflow-y-auto rounded-md border border-edge bg-inset p-3 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap text-fg">{p.payload}</pre>
+            {/if}
             <div class="flex justify-end gap-2">
-              <button class="btn btn-danger btn-sm" disabled={busy} onclick={() => void act("reject", p["@rid"])}>
+              <button class="btn btn-danger btn-sm" disabled={busy} onclick={() => void act("reject", p.id)}>
                 <Icon icon={X} size={13} />
                 Reject
               </button>
-              <button class="btn btn-primary btn-sm" disabled={busy} onclick={() => void act("approve", p["@rid"])}>
+              <button class="btn btn-primary btn-sm" disabled={busy} onclick={() => void act("approve", p.id)}>
                 <Icon icon={Check} size={13} />
                 Approve
               </button>
