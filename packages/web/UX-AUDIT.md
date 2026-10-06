@@ -147,10 +147,35 @@ The new `AgentHeader.svelte` sits above the chat toolbar and is shown whether th
 - **P-4 Vocabulary:** adopted in round 2.
 - **P-5 Optional name field in the composer.** It would be prefilled from the profile's name prefix, with the prompt-derived name as the placeholder. (Round 2 note: a profile prefix like `sql-` is prepended to the derived name, so an agent created from prompt "ux-scope …" was named `sql-ux-scope-list-files`.)
 - **P-6 Light theme.** It needs a light palette, removing the hard-coded `class="dark"`, and checking pi-web-ui's light styles.
-- **P-7 Tool-call copy.** Override pi-web-ui's "Running command..." for finished calls.
+- **P-7 Tool-call copy:** done in round 3. Our own renderers are registered through pi-web-ui's public `registerToolRenderer`, so no fork.
 - **P-8 One stop button.** The model bar's "stop" (interrupt the current reply) and the composer's square do the same thing. Round 2 added "stop agent" in the header (stop the sandbox), so the labels need to stay distinct, e.g. "interrupt" vs "stop agent".
 - **P-9 Approvals badge and readable items.** A pending count on the rail button, "requested by <agent> · 5 min ago", and a short summary of the write above the raw statement.
 - **P-10 Agent header:** implemented in round 2.
 - **P-11 Per-connection default and server-side allow-list enforcement** (backend), see "Tool-scope rule".
 - **P-12 Trust-strip data gaps** (provider display name / upstream vendor, sandbox network allow-list), see above.
-- **P-13 Phone toolbar density.** On a 375px screen the header, trust strip and toolbar together take about 190px. Collapse the model/thinking/conversation controls into one "⋯" menu below 600px.
+- **P-13 Phone toolbar density.** On a 375px screen the header, trust strip and toolbar together take about 190px. Collapse the model/thinking/conversation controls into one "⋯" menu below 600px. (Round 3 gave the model name its own full-width row so it is readable, which makes the toolbar one row taller.)
+- **P-14 Pricing data for models** (backend). OpenRouter's discovered catalogue has `cost` set to all zeros, so the UI can only treat `:free` ids as free. Every other model may be billed, but nothing says so. Fill `ModelView.cost` from the provider's pricing so the pickers can show price and warn before choosing a paid model.
+- **P-15 Landing selection.** With no running agent, the app selects the first agent in the list, which is often someone else's stopped one, and shows its big "start agent" button. Starting a VM by accident is easy. Land on the composer, or on the user's last agent, instead.
+
+## Round 3: real-backend findings (admin instance, main's backend)
+
+**Fixed on this branch:**
+- **Conversation rendered N times after a reload** (a regression from my bootstrap merge). Overlapping bootstraps each appended the whole snapshot again. Fixed with a generation token, explicit tracking of optimistic prompts, and structural dedupe. Covered by a vitest unit test (`npm test -w @gwarestrin/web`). Three reloads of a 28-message conversation rendered 28 messages each time.
+- **Sandbox status overlapped "approvals":** the "sandbox: running" text moved into the agent header and is now tracked per agent.
+- **464-model picker:** type-to-filter plus a "free only" toggle in the composer, profile-editor and chat pickers. The composer also now defaults to a `:free` model instead of the catalogue's first entry, which is billed.
+- **Phone model name** truncated to "nem…": the model bar now gets its own row.
+- **Profile editor:** the state warnings were a real bug, fixed. Opening ✎ after "+ new agent profile" showed an empty "new" form, and saving it would have created a new profile. Editing a second profile kept the first one's values.
+- **Tool cards:** write/read/edit now render readable cards instead of raw JSON, and bash says "Ran command" once it finishes.
+
+**Backend issues found (no web change; the server needs fixing):**
+- **B-1, the write tool stores file contents base64-encoded (data corruption).**
+  - The agent called `write` with `hello from ux test` (18 bytes). The tool reported "Successfully wrote 18 bytes", but the file on disk is the 24-byte base64 `aGVsbG8gZnJvbSB1eCB0ZXN0`.
+  - This is confirmed by `read`, `wc -c`, `ls -l`, the files API listing and a download.
+  - The files drawer's size label is correct; it shows the real (encoded) size. The 20-byte write that showed 28 B in the coordinator's check is consistent with this: base64 of 20 bytes is 28 characters.
+  - It is most likely in the write path that bridges file writes into the gondolin VM, where the payload is not decoded.
+- **B-2, `POST /api/agents/:id/stop` doesn't stop the agent: it restarts it.**
+  - Polling after a stop showed `stopped`, then `error`, then `running` within about 4 seconds, with "Gondolin VM ready" again.
+  - `manager.stop()` deletes the agent from `running` before killing it, and `onExit` only treats a SIGTERM/SIGKILL *signal* as deliberate. The VM wrapper apparently exits with a normal exit code, so the stop is counted as a crash and the auto-restart kicks in.
+  - The header's "stop agent" button is affected (main has no stop button, so this was latent). Until it is fixed the button gives a misleading result. Decision needed: hide it until the backend fix lands, or keep it.
+
+**Needs a decision or follow-up:** B-1 and B-2 (backend), P-14 and P-15 above.
