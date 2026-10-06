@@ -6,6 +6,8 @@
   import { isFreeModelId, modelDisplayName, whereItRuns } from "../lib/format.js";
   import type { ModelInfo } from "../lib/agent-types.js";
   import Dropdown from "./Dropdown.svelte";
+  import Icon from "./Icon.svelte";
+  import { Cpu } from "lucide";
 
   let { agentId }: { agentId: string } = $props();
 
@@ -31,7 +33,6 @@
   });
   let busy = $state(false);
   let error = $state<string | null>(null);
-  let streaming = $state(false);
   let stats = $state<{ context?: { tokens?: number | null; percent?: number | null } } | null>(null);
 
   // the adapter's state is not reactive (plain class field), so we mirror the
@@ -41,13 +42,8 @@
       currentModel = { provider: adapter.state.model.provider, modelId: adapter.state.model.id };
     }
     currentThinking = adapter.state.thinkingLevel;
-    streaming = Boolean(adapter.state.isStreaming);
   }
 
-  function stopAgent(): void {
-    streaming = false;
-    adapter.abort();
-  }
 
   $effect(() => {
     // record is the declared model; don't clobber a live adapter-provided one
@@ -178,21 +174,28 @@
   );
 </script>
 
-<div class="modelbar-root flex flex-1 flex-wrap items-center gap-2 py-1.5 text-sm">
+<div class="modelbar-root flex flex-1 flex-wrap items-center gap-2 py-1 text-sm">
   <button
-    class="select-compact max-w-[min(16rem,100%)] truncate"
+    class="select-compact inline-flex max-w-[min(18rem,100%)] items-center gap-1.5 font-mono text-2xs"
     title={effectiveModel ? `${effectiveModel.provider}/${effectiveModel.modelId}` : undefined}
+    aria-haspopup="listbox"
+    aria-expanded={openModel}
+    aria-label="model: {effectiveModel ? modelDisplayName(effectiveModel.provider, effectiveModel.modelId, store.providers) : 'none'}"
     disabled={busy}
     onclick={() => (openModel = !openModel)}
   >
-    {effectiveModel ? modelDisplayName(effectiveModel.provider, effectiveModel.modelId, store.providers) : "no model"}
+    <Icon icon={Cpu} size={13} class="text-faint" />
+    <span class="truncate">
+      {effectiveModel ? modelDisplayName(effectiveModel.provider, effectiveModel.modelId, store.providers) : "No model"}
+    </span>
   </button>
 
   {#if thinkingLevels.length > 1 || currentThinking !== "off"}
     <Dropdown
       compact
+      label="thinking"
       value={currentThinking}
-      options={thinkingLevels.map((l) => ({ value: l, label: l === "off" ? "no thinking" : `think ${l}` }))}
+      options={thinkingLevels.map((l) => ({ value: l, label: l === "off" ? "No thinking" : `Think: ${l}` }))}
       onchange={(l) => void chooseThinking(l)}
       disabled={busy}
     />
@@ -203,28 +206,25 @@
   {/if}
 
   {#if pct !== null && tok !== null}
-    <span class="ml-auto whitespace-nowrap text-xs {pct > 80 ? 'text-warn' : 'text-dim'}" title="context window usage">
-      ctx {Math.round(pct)}% ({(tok / 1000).toFixed(1)}k)
+    <!-- context window meter: quiet until it matters -->
+    <span
+      class="tabular ml-auto inline-flex items-center gap-2 font-mono text-2xs whitespace-nowrap {pct > 80 ? 'text-warn' : 'text-faint'}"
+      title="Context window used by this conversation"
+    >
+      <span class="h-1 w-12 overflow-hidden rounded-full bg-edge" aria-hidden="true">
+        <span class="block h-full rounded-full {pct > 80 ? 'bg-warn' : 'bg-faint'}" style="width: {Math.min(100, Math.max(2, pct))}%"></span>
+      </span>
+      {Math.round(pct)}% · {(tok / 1000).toFixed(1)}k
     </span>
   {:else}
     <span class="ml-auto"></span>
-  {/if}
-
-  {#if streaming}
-    <button
-      class="select-compact bg-none pr-2 !border-err !text-err animate-pulse"
-      title="interrupt the agent"
-      onclick={stopAgent}
-    >
-      stop
-    </button>
   {/if}
 </div>
 
 {#if openModel}
   <div
-    class="modelbar-root absolute z-30 mt-1 flex max-h-96 w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-lg border
-      border-edge2 bg-panel2 shadow-xl"
+    class="modelbar-root animate-pop absolute z-30 mt-1 flex max-h-96 w-80 max-w-[calc(100vw-1rem)] flex-col overflow-hidden rounded-lg border
+      border-edge2 bg-panel2 shadow-overlay"
   >
     {#if models.length > 8}
       <div class="flex items-center gap-2 border-b border-edge p-1.5">

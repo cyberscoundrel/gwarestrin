@@ -1,7 +1,10 @@
 <script lang="ts">
+  import { BookOpen, Cloud, Globe, Server, Square, Wrench } from "lucide";
   import { api } from "../lib/api.js";
   import { store } from "../lib/stores.svelte.js";
   import { modelDisplayName, whereItRuns } from "../lib/format.js";
+  import Icon from "./Icon.svelte";
+  import StatusChip from "./StatusChip.svelte";
 
   let {
     agentId,
@@ -16,9 +19,10 @@
   const runtime = $derived(store.runtimeFor(agentId));
   const status = $derived(runtime?.status ?? record?.status ?? "stopped");
   const profile = $derived(store.profiles.find((p) => p.id === (record?.profileId || "default")));
-  const live = $derived(status === "running" || status === "starting" || status === "streaming");
+  const live = $derived(status === "running" || status === "starting");
+  const working = $derived(status === "running" && store.isWorking(agentId));
 
-  // ---- trust strip: where the model runs, tool connections, briefing ----
+  // ---- trust strip: where the model runs, tools, briefing, egress ----
   // model: the agent's declared model, else the workspace default
   const model = $derived(
     record?.model ??
@@ -28,38 +32,37 @@
   );
   const where = $derived(model ? whereItRuns(model.provider, store.providers) : null);
   const tools = $derived(record?.mcpServers ?? []);
-  const briefing = $derived.by((): { label: string; tone: string; title: string } => {
+  const hosts = $derived(record?.allowedHosts);
+  const briefing = $derived.by((): { label: string; tone: "neutral" | "err" | "quiet"; title: string } => {
     const s = record?.contextStatus;
     const source = profile?.contextEngine?.type;
     if (s === "ok") {
-      return { label: "briefing", tone: "text-fg", title: `briefing built${source ? ` by ${source}` : ""} from the knowledge graph` };
+      return { label: "Briefing", tone: "neutral", title: `Briefing built${source ? ` by ${source}` : ""} from the knowledge graph` };
     }
     if (s === "failed") {
-      return { label: "briefing failed", tone: "text-err", title: "the briefing could not be built when this agent was created" };
+      return { label: "Briefing failed", tone: "err", title: "The briefing could not be built when this agent was created" };
     }
     if (source) {
-      return { label: "no briefing", tone: "text-dim", title: `the agent profile has a ${source} briefing, but none was built for this agent` };
+      return { label: "No briefing", tone: "quiet", title: `The agent profile has a ${source} briefing, but none was built for this agent` };
     }
-    return { label: "no briefing", tone: "text-dim", title: "this agent profile has no briefing" };
+    return { label: "No briefing", tone: "quiet", title: "This agent profile has no briefing" };
   });
-  const chip = "inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-xs";
   const canOpen = $derived(live && ondrawer !== undefined);
 
   let busy = $state(false);
   let error = $state<string | null>(null);
 
-  const statusView = $derived.by((): { label: string; dot: string } => {
+  const statusView = $derived.by((): { label: string; dot: string; text: string } => {
+    if (working) return { label: "Working", dot: "bg-signal animate-working", text: "text-signal" };
     switch (status) {
       case "running":
-        return { label: "running", dot: "bg-ok" };
-      case "streaming":
-        return { label: "working", dot: "bg-warn animate-pulse" };
+        return { label: "Running", dot: "bg-ok", text: "text-dim" };
       case "starting":
-        return { label: "starting…", dot: "bg-warn animate-pulse" };
+        return { label: "Starting", dot: "bg-warn animate-working", text: "text-warn" };
       case "error":
-        return { label: "error", dot: "bg-err" };
+        return { label: "Error", dot: "bg-err", text: "text-err" };
       default:
-        return { label: "stopped", dot: "bg-faint" };
+        return { label: "Stopped", dot: "bg-edge2", text: "text-faint" };
     }
   });
 
@@ -78,76 +81,81 @@
   }
 </script>
 
-<div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-edge bg-panel px-3 py-2">
-  <div class="flex min-w-0 items-center gap-2">
-    <span class="h-2 w-2 shrink-0 rounded-full {statusView.dot}" aria-hidden="true"></span>
+<header class="flex flex-col gap-2 border-b border-edge bg-bg px-4 pt-2.5 pb-2">
+  <!-- row 1: identity + the one start/stop control -->
+  <div class="flex min-h-7 items-center gap-2.5">
     <!-- the mobile app header already shows the agent name -->
-    <h2 class="m-0 truncate text-base font-semibold text-fg max-[900px]:hidden">{record?.name ?? agentId}</h2>
-    <span class="truncate text-xs text-dim" title={profile?.description ?? undefined}>
-      <span class="max-[900px]:hidden">·</span> agent profile <span class="text-fg">{profile?.name ?? record?.profileId ?? "Default"}</span>
+    <h2 class="m-0 truncate text-base font-medium text-fg max-[900px]:hidden">{record?.name ?? agentId}</h2>
+    <span class="flex shrink-0 items-center gap-1.5 text-xs {statusView.text}" role="status">
+      <span class="h-1.5 w-1.5 rounded-full {statusView.dot}" aria-hidden="true"></span>
+      {statusView.label}
     </span>
-    <span class="text-xs text-dim" role="status">· {statusView.label}</span>
+    <span class="truncate text-xs text-faint" title={profile?.description ?? undefined}>
+      <span class="sr-only">agent profile </span>{profile?.name ?? record?.profileId ?? "Default"}
+    </span>
     {#if store.statusLineFor(agentId)}
-      <span class="truncate text-xs text-dim" title={store.statusLineFor(agentId)}>· {store.statusLineFor(agentId)}</span>
+      <span class="hidden truncate font-mono text-2xs text-faint lg:inline" title={store.statusLineFor(agentId)}>
+        {store.statusLineFor(agentId)}
+      </span>
     {/if}
+    <div class="ml-auto flex shrink-0 items-center gap-2">
+      {#if error}
+        <span class="max-w-48 truncate text-xs text-err" title={error}>{error}</span>
+      {/if}
+      {#if live || busy}
+        <!-- stopped agents get their start action in the empty state below -->
+        <button
+          class="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-edge2 px-2.5 text-xs font-medium text-dim transition-colors
+            hover:border-err/50 hover:text-err disabled:cursor-default disabled:opacity-50"
+          disabled={busy}
+          title="Stop this agent's sandbox. Its files and conversations are kept."
+          onclick={() => void toggleRunning()}
+        >
+          <Icon icon={Square} size={12} />
+          {busy ? "Stopping…" : "Stop agent"}
+        </button>
+      {/if}
+    </div>
   </div>
 
-  <ul class="m-0 flex min-w-0 list-none flex-wrap items-center gap-1.5 p-0" aria-label="what this agent can reach">
-    <li class="min-w-0">
-      {#if where && model}
-        <span
-          class="{chip} {where.tier === 'local' ? 'border-ok/40 text-ok' : 'border-warn/40 text-warn'}"
-          title="{where.tier === 'local'
-            ? 'the model runs on your own infrastructure'
-            : `prompts and anything the agent reads are sent to ${model.provider}`} · {modelDisplayName(model.provider, model.modelId, store.providers)}"
-        >
-          <span class="truncate">{where.label}</span>
-        </span>
-      {:else}
-        <span class="{chip} border-edge2 text-dim" title="no model is set for this agent or the workspace">no model</span>
-      {/if}
-    </li>
-    <li>
-      {#if canOpen}
-        <button
-          class="{chip} cursor-pointer border-edge2 bg-transparent text-fg hover:border-signal"
-          title={tools.length ? `switched on: ${tools.join(", ")} (open tools)` : "no tool connections switched on (open tools)"}
-          onclick={() => ondrawer?.("mcp")}
-        >
-          {tools.length} tool connection{tools.length === 1 ? "" : "s"}
-        </button>
-      {:else}
-        <span class="{chip} border-edge2 text-fg" title={tools.length ? `switched on: ${tools.join(", ")}` : "no tool connections switched on"}>
-          {tools.length} tool connection{tools.length === 1 ? "" : "s"}
-        </span>
-      {/if}
-    </li>
-    <li>
-      {#if canOpen}
-        <button
-          class="{chip} cursor-pointer border-edge2 bg-transparent {briefing.tone} hover:border-signal"
-          title="{briefing.title} (open briefing)"
-          onclick={() => ondrawer?.("context")}
-        >
-          {briefing.label}
-        </button>
-      {:else}
-        <span class="{chip} border-edge2 {briefing.tone}" title={briefing.title}>{briefing.label}</span>
-      {/if}
-    </li>
-  </ul>
-
-  <div class="ml-auto flex items-center gap-2">
-    {#if error}
-      <span class="max-w-48 truncate text-xs text-err" title={error}>{error}</span>
+  <!-- row 2: trust strip (ops-style facts) -->
+  <div class="flex min-w-0 flex-wrap items-center gap-1.5" role="group" aria-label="what this agent can reach">
+    {#if where && model}
+      <StatusChip
+        icon={where.tier === "local" ? Server : Cloud}
+        label={where.label}
+        tone={where.tier === "local" ? "signal" : "warn"}
+        title="{where.tier === 'local'
+          ? 'The model runs on your own infrastructure'
+          : `Prompts and anything the agent reads are sent to ${model.provider}`}. Model: {modelDisplayName(model.provider, model.modelId, store.providers)}"
+      />
+    {:else}
+      <StatusChip icon={Cloud} label="No model" tone="quiet" title="No model is set for this agent or the workspace" />
     {/if}
-    <button
-      class="select-compact bg-none pr-2 disabled:opacity-50 {live ? '' : '!border-signal !text-signal'}"
-      disabled={busy}
-      title={live ? "stop this agent's sandbox (its files and conversations are kept)" : "start this agent's sandbox"}
-      onclick={() => void toggleRunning()}
-    >
-      {busy ? (live ? "stopping…" : "starting…") : live ? "stop agent" : "start agent"}
-    </button>
+    <StatusChip
+      icon={Wrench}
+      label="{tools.length} tool{tools.length === 1 ? '' : 's'}"
+      title={tools.length ? `Tool connections switched on: ${tools.join(", ")}` : "No tool connections switched on"}
+      onclick={canOpen ? () => ondrawer?.("mcp") : undefined}
+    />
+    <StatusChip
+      icon={BookOpen}
+      label={briefing.label}
+      tone={briefing.tone}
+      title={briefing.title}
+      onclick={canOpen ? () => ondrawer?.("context") : undefined}
+    />
+    {#if hosts}
+      <!-- egress: only the agent record's allow-list is exposed; the full
+           sandbox policy is not in the API yet (see UX-AUDIT P-12) -->
+      <StatusChip
+        icon={Globe}
+        label={hosts.length ? `${hosts.length} host${hosts.length === 1 ? "" : "s"}` : "No extra hosts"}
+        tone="quiet"
+        title={hosts.length
+          ? `Sandbox network allow-list: ${hosts.join(", ")}`
+          : "The sandbox's network allow-list adds no hosts. The full egress policy isn't exposed by the API yet."}
+      />
+    {/if}
   </div>
-</div>
+</header>

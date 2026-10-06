@@ -8,6 +8,8 @@
   import McpPanel from "./McpPanel.svelte";
   import ContextPanel from "./ContextPanel.svelte";
   import AgentHeader from "./AgentHeader.svelte";
+  import Icon from "./Icon.svelte";
+  import { BookOpen, FolderOpen, Moon, Play, TriangleAlert, Wrench, type IconNode } from "lucide";
 
   let { agentId, agentName }: { agentId: string; agentName: string } = $props();
 
@@ -33,10 +35,23 @@
   }
 </script>
 
+{#snippet drawerToggle(kind: "files" | "mcp" | "context", icon: IconNode, label: string, title: string)}
+  <button
+    class="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs transition-colors
+      {drawer === kind ? 'bg-selected text-fg' : 'text-dim hover:bg-hover hover:text-fg'}"
+    aria-pressed={drawer === kind}
+    {title}
+    onclick={() => (drawer = drawer === kind ? "closed" : kind)}
+  >
+    <Icon {icon} size={14} />
+    {label}
+  </button>
+{/snippet}
+
 <section class="flex min-h-0 flex-1 flex-col">
   <AgentHeader {agentId} ondrawer={(d) => (drawer = d)} />
   {#if runtime?.status === "running" || runtime?.status === "starting"}
-    <div class="relative flex flex-wrap items-center gap-2 border-b border-edge bg-panel px-2">
+    <div class="relative flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-edge bg-bg px-3 py-1">
       <!-- narrow screens: the model bar gets its own full-width row so the
            model name stays readable instead of truncating to a few letters -->
       <div class="flex min-w-0 flex-1 items-center max-[900px]:basis-full">
@@ -44,32 +59,12 @@
           <ModelBar {agentId} />
         </div>
       </div>
-      <div class="flex flex-wrap items-center gap-2">
+      <div class="flex items-center gap-0.5">
         <SessionPanel {agentId} />
-        <button
-          class="select-compact bg-none pr-2 {drawer === 'files' ? '!border-signal !text-signal' : ''}"
-          aria-pressed={drawer === "files"}
-          title="files in this agent's sandbox"
-          onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
-        >
-          files
-        </button>
-        <button
-          class="select-compact bg-none pr-2 {drawer === 'mcp' ? '!border-signal !text-signal' : ''}"
-          aria-pressed={drawer === "mcp"}
-          title="tool connections this agent can use"
-          onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
-        >
-          tools
-        </button>
-        <button
-          class="select-compact bg-none pr-2 {drawer === 'context' ? '!border-signal !text-signal' : ''}"
-          aria-pressed={drawer === "context"}
-          title="the briefing this agent keeps in mind"
-          onclick={() => (drawer = drawer === "context" ? "closed" : "context")}
-        >
-          briefing
-        </button>
+        <span class="mx-1 h-4 w-px bg-edge" aria-hidden="true"></span>
+        {@render drawerToggle("files", FolderOpen, "Files", "Files in this agent's sandbox")}
+        {@render drawerToggle("mcp", Wrench, "Tools", "Tool connections this agent can use")}
+        {@render drawerToggle("context", BookOpen, "Briefing", "The briefing this agent keeps in mind")}
       </div>
     </div>
 
@@ -80,7 +75,9 @@
       {#if drawer !== "closed"}
         <!-- side drawer on wide screens; overlays the chat on narrow ones so the
              transcript is not squeezed into a sliver -->
-        <div class="w-80 shrink-0 max-[900px]:absolute max-[900px]:inset-0 max-[900px]:z-20 max-[900px]:w-full">
+        <div
+          class="animate-drawer-right w-80 shrink-0 max-[900px]:absolute max-[900px]:inset-0 max-[900px]:z-20 max-[900px]:w-full"
+        >
           {#if drawer === "files"}
             <FilesPanel {agentId} />
           {:else if drawer === "mcp"}
@@ -92,32 +89,31 @@
       {/if}
     </div>
   {:else}
-    <div class="m-auto grid gap-3 text-center text-dim">
-      <p class="m-0 max-w-2xl">
-        {runtime?.status === "error"
-          ? `errored${runtime.error ? `: ${runtime.error.split("\n")[0]}` : ""}`
-          : "agent is not running"}
-      </p>
-      <div class="flex justify-center gap-2">
-        <button
-          class="cursor-pointer rounded-md bg-signal px-4 py-2 font-semibold text-on-signal disabled:cursor-default disabled:opacity-60"
-          disabled={busy}
-          onclick={start}
-        >
-          {busy ? "starting…" : "start agent"}
-        </button>
-        {#if runtime?.status === "error"}
-          <button
-            class="cursor-pointer rounded-md border border-edge2 bg-transparent px-4 py-2 text-fg"
-            disabled={busy}
-            onclick={start}
-          >
-            retry
-          </button>
+    <div class="animate-enter m-auto grid max-w-md justify-items-center gap-3 px-6 text-center">
+      <span class="grid h-10 w-10 place-items-center rounded-lg border border-edge bg-panel text-faint">
+        <Icon icon={runtime?.status === "error" ? TriangleAlert : Moon} size={18} />
+      </span>
+      <h3 class="m-0 text-base font-medium text-fg">
+        {runtime?.status === "error" ? "This agent stopped with an error" : "This agent is stopped"}
+      </h3>
+      <p class="m-0 text-sm text-dim">
+        {#if runtime?.status === "error" && runtime.error}
+          <span class="font-mono text-xs break-words text-err">{runtime.error.split("\n")[0]}</span>
+        {:else}
+          Its files and conversations are kept. Start its sandbox to continue.
         {/if}
-      </div>
+      </p>
+      <button
+        class="inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-md border border-signal/40 bg-signal-soft px-3 text-sm font-medium text-signal
+          transition-colors hover:border-signal disabled:cursor-default disabled:opacity-60"
+        disabled={busy}
+        onclick={start}
+      >
+        <Icon icon={Play} size={14} />
+        {busy ? "Starting…" : runtime?.status === "error" ? "Retry" : "Start agent"}
+      </button>
       {#if error}
-        <p class="m-0 max-w-2xl text-err">{error}</p>
+        <p class="m-0 text-sm text-err">{error}</p>
       {/if}
     </div>
   {/if}

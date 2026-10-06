@@ -166,6 +166,12 @@
   }
 }
 
+@keyframes gw-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @keyframes gw-shimmer {
   to {
     background-position: -200% 0;
@@ -277,6 +283,100 @@
     background-size: 0.7rem;
   }
 
+  /* ---- tool card (lib/tool-renderers.ts) ---- */
+  .gw-tool {
+    border: 1px solid var(--gw-line);
+    border-radius: var(--radius-lg);
+    background: var(--gw-raised);
+    overflow: hidden;
+  }
+  .gw-tool[data-state="error"] {
+    border-color: color-mix(in srgb, var(--gw-err) 35%, var(--gw-line));
+  }
+  .gw-tool-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 0 12px;
+    font-size: 13px;
+    color: var(--gw-fg2);
+    list-style: none;
+  }
+  summary.gw-tool-head {
+    cursor: pointer;
+    transition: background-color 150ms cubic-bezier(0.2, 0, 0, 1);
+  }
+  summary.gw-tool-head:hover {
+    background: var(--gw-hover);
+  }
+  summary.gw-tool-head::-webkit-details-marker {
+    display: none;
+  }
+  .gw-icon {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+  }
+  .gw-tool-icon {
+    color: var(--gw-fg3);
+  }
+  .gw-tool-title {
+    color: var(--gw-fg);
+    flex-shrink: 0;
+  }
+  .gw-tool-detail {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--gw-fg2);
+  }
+  .gw-tool-chevron {
+    margin-left: auto;
+    color: var(--gw-fg3);
+    transition: transform 150ms cubic-bezier(0.2, 0, 0, 1);
+  }
+  .gw-tool[open] .gw-tool-chevron {
+    transform: rotate(90deg);
+  }
+  .gw-tool-body {
+    display: grid;
+    gap: 8px;
+    padding: 0 12px 12px;
+  }
+  .gw-tool-body console-block pre {
+    max-height: 320px;
+    overflow: auto;
+  }
+  .gw-tool-note {
+    margin: 0;
+    font-size: 12px;
+    color: var(--gw-fg3);
+  }
+  .gw-tool-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 9999px;
+    flex-shrink: 0;
+    background: var(--gw-ok);
+  }
+  .gw-tool-dot[data-state="error"] {
+    background: var(--gw-err);
+  }
+  /* running: a thin ring, the only motion on a card, and only while running */
+  .gw-tool-spin {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    border-radius: 9999px;
+    border: 1.5px solid var(--gw-line-strong);
+    border-top-color: var(--gw-signal);
+    animation: gw-spin 0.8s linear infinite;
+  }
+
   /* loading placeholder: a calm shimmer, static under reduced motion */
   .skeleton {
     border-radius: var(--radius-md);
@@ -304,6 +404,86 @@
 
 /* pi-web-ui overrides — must stay UNLAYERED: their utilities live in
    @layer utilities, which beats layered base rules regardless of specificity */
+
+/* ---- conversation (pi-web-ui light DOM, themed through its classes) ---- */
+
+/* user turns: a quiet raised card instead of the orange glass gradient */
+agent-interface .user-message-container {
+  background: var(--gw-raised);
+  border: 1px solid var(--gw-line-strong);
+  border-radius: var(--radius-xl);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  transition: none;
+}
+
+/* a newly sent prompt rises in; settled history does not animate */
+agent-interface user-message {
+  animation: var(--animate-enter);
+}
+
+agent-interface markdown-block {
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+/* tool cards: hairline, no shadow, semantic state colours */
+agent-interface tool-message > div {
+  border-color: var(--gw-line);
+  border-radius: var(--radius-lg);
+  background: var(--gw-raised);
+  box-shadow: none;
+}
+
+agent-interface tool-message .text-green-600,
+agent-interface tool-message .dark\:text-green-500 {
+  color: var(--gw-ok);
+}
+
+agent-interface tool-message .text-destructive {
+  color: var(--gw-err);
+}
+
+agent-interface console-block > div {
+  border-color: var(--gw-line);
+  border-radius: var(--radius-md);
+}
+
+agent-interface console-block pre,
+agent-interface console-block code {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+agent-interface thinking-block .thinking-header {
+  font-size: 13px;
+}
+
+/* per-message token usage: small, tabular */
+agent-interface assistant-message .text-xs.text-muted-foreground,
+agent-interface .text-xs.text-muted-foreground.h-5 {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--gw-fg3);
+}
+
+/* composer: hairline card, accent edge on focus, no drop shadow */
+agent-interface message-editor > div {
+  background: var(--gw-raised);
+  border-color: var(--gw-line-strong);
+  border-radius: var(--radius-xl);
+  box-shadow: none;
+  transition: border-color 150ms var(--ease-out);
+}
+
+agent-interface message-editor > div:focus-within {
+  border-color: var(--gw-signal);
+}
+
+agent-interface message-editor textarea {
+  font-size: 14px;
+}
 
 /* wrap giant plain-text blobs (base64/hex dumps) instead of x-scrolling */
 agent-interface code.hljs.language-text {
