@@ -32,14 +32,11 @@ services:
       - 1.1.1.1
       - 1.0.0.1
 
-    # KVM for gondolin microvms. The container runs as the node user; the
-    # host's kvm group gid is added so /dev/kvm stays accessible:
-    #   KVM_GID=$(getent group kvm | cut -d: -f3)   # put this in .env
+    # agents run in the OpenShell gateway's microVMs, so no /dev/kvm here.
+    # (gondolin instead: drop the openshell env/mounts below, add
+    # devices: [/dev/kvm] + group_add: ["${KVM_GID:-993}"] and the
+    # gondolin-cache volume back.)
     user: node
-    devices:
-      - /dev/kvm:/dev/kvm
-    group_add:
-      - "${KVM_GID:-993}"
 
     environment:
       GWARESTRIN_MAX_AGENTS: ${GWARESTRIN_MAX_AGENTS:-4}
@@ -49,6 +46,7 @@ services:
       DOCKER_PROXY_URL: ${DOCKER_PROXY_URL:-http://docker-proxy:2375}
       # instance metadata (infra-authored; hot-reloaded; absent = open mode)
       GWARESTRIN_INSTANCE_METADATA: /etc/gwarestrin/instance.json
+      <<: *openshell-tenant-env
 
     # all provider API keys referenced by providers.json apiKeyEnv live here
     env_file:
@@ -61,15 +59,17 @@ services:
 
     volumes:
       - gwarestrin-state:/var/lib/gwarestrin
-      # guest image assets (~200MB), persistent across rebuilds
-      - gondolin-cache:/home/node/.cache/gondolin
       # multi-provider topology (see providers.example.json); copy to
       # ./providers.json next to this file on the deploy host
       - ./providers.json:/etc/gwarestrin/providers.json:ro
       - ./instances/admin.json:/etc/gwarestrin/instance.json:ro
+      # gateway transport credential (authorization is the OIDC identity)
+      - ./openshell/pki/ca.crt:/etc/gwarestrin/openshell-pki/ca.crt:ro
+      - ./openshell/pki/client:/etc/gwarestrin/openshell-pki/client:ro
 
     labels:
       gwarestrin.tenant: "admin"
+      gwarestrin.runtime: openshell
 
     networks:
       - default   # outbound (WARP-bypass marked bridge)
@@ -423,7 +423,7 @@ services:
       OPENSHELL_GATEWAY: https://openshell-gateway:17670
       OPENSHELL_PKI: /data/openshell-pki
       OPENSHELL_ISSUER_BASE: https://authentik-server:9443
-      OPENSHELL_TENANTS: alice,bob
+      OPENSHELL_TENANTS: admin,alice,bob
       NODE_EXTRA_CA_CERTS: /data/openshell-pki/ca.crt
     volumes:
       - ./instances:/data/instances

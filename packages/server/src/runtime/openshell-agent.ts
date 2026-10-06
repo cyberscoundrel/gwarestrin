@@ -7,8 +7,9 @@
  * them for the sandbox's network view, pushes them in, and turns every
  * credential into an OpenShell provider so the sandbox holds placeholders only.
  */
+import { spawn } from "node:child_process";
 import { lookup } from "node:dns/promises";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { isIP } from "node:net";
 import path from "node:path";
 import type { AgentRecord } from "@gwarestrin/shared";
@@ -177,6 +178,13 @@ export class OpenShellAgentLauncher {
     if (mcp) files.push([`${g.workspace}/.mcp.json`, JSON.stringify(mcp, null, 2) + "\n"]);
     for (const [file, content] of files) await this.writeFile(sandbox, file, content);
     await this.exec(sandbox, ["mkdir", "-p", g.sessions, g.workspace]);
+    // a new sandbox for an agent that already has files (e.g. it ran on the
+    // local runtime before): carry them over once
+    if (created) {
+      await this.seedWorkspace(sandbox, dirs.workspace, g.workspace).catch((err) =>
+        log.warn(`agent ${record.name}: workspace not carried into ${sandbox}: ${err instanceof Error ? err.message : String(err)}`),
+      );
+    }
 
     const ext = this.guest.extensionsDir;
     const argv = [
@@ -254,12 +262,28 @@ export class OpenShellAgentLauncher {
     }
   }
 
-  private async exec(sandbox: string, argv: string[], stdin?: string): Promise<void> {
+  /** copy the host workspace (minus the generated .mcp.json) into a fresh sandbox's */
+  private async seedWorkspace(sandbox: string, hostDir: string, guestDir: string): Promise<void> {
+    const entries = (await readdir(hostDir).catch(() => [] as string[])).filter((n) => n !== ".mcp.json");
+    if (entries.length === 0) return;
+    const archive = await tarOf(hostDir, entries);
+    if (archive.length > SEED_MAX_BYTES) throw new Error(`workspace archive is ${archive.length} bytes (cap ${SEED_MAX_BYTES})`);
+    const tmp = `${guestDir}/.gw-seed.tar`;
+    await this.exec(sandbox, ["sh", "-c", ': > "$1"', "sh", tmp]);
+    // the gateway caps one message at 1 MiB
+    for (let off = 0; off < archive.length; off += SEED_CHUNK_BYTES) {
+      await this.exec(sandbox, ["sh", "-c", 'cat >> "$1"', "sh", tmp], archive.subarray(off, off + SEED_CHUNK_BYTES));
+    }
+    await this.exec(sandbox, ["sh", "-c", 'tar -xf "$1" -C "$2" --no-same-owner && rm -f "$1"', "sh", tmp, guestDir]);
+    log.info(`workspace carried into ${sandbox}: ${entries.length} entr${entries.length === 1 ? "y" : "ies"}, ${archive.length} bytes`);
+  }
+
+  private async exec(sandbox: string, argv: string[], stdin?: string | Buffer): Promise<void> {
     const scope = this.deps.workspace ? { workspace: this.deps.workspace } : {};
     const res = await this.deps.sandbox.exec(sandbox, argv, {
       ...scope,
       noLoginShell: true,
-      ...(stdin !== undefined ? { stdin: Buffer.from(stdin, "utf8") } : {}),
+      ...(stdin !== undefined ? { stdin: typeof stdin === "string" ? Buffer.from(stdin, "utf8") : stdin } : {}),
     });
     if (res.exitCode !== 0) throw new Error(`sandbox exec ${argv[0]} failed (${res.exitCode}): ${res.stderr.toString("utf8").slice(0, 300)}`);
   }
@@ -267,4 +291,29 @@ export class OpenShellAgentLauncher {
   private async writeFile(sandbox: string, file: string, content: string): Promise<void> {
     await this.exec(sandbox, ["sh", "-c", 'mkdir -p "$(dirname "$1")" && cat > "$1"', "sh", file], content);
   }
+}
+
+const SEED_CHUNK_BYTES = 512 * 1024;
+const SEED_MAX_BYTES = 256 * 1024 * 1024;
+
+/** tar of `entries` under `dir` (the server image has tar; so does the agent image) */
+function tarOf(dir: string, entries: string[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("tar", ["-C", dir, "-cf", "-", "--", ...entries], { stdio: ["ignore", "pipe", "pipe"] });
+    const out: Buffer[] = [];
+    let err = "";
+    let size = 0;
+    child.stdout.on("data", (b: Buffer) => {
+      size += b.length;
+      if (size > SEED_MAX_BYTES) child.kill("SIGKILL");
+      else out.push(b);
+    });
+    child.stderr.on("data", (b: Buffer) => (err += b.toString("utf8")));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (size > SEED_MAX_BYTES) reject(new Error(`workspace is larger than ${SEED_MAX_BYTES} bytes`));
+      else if (code === 0) resolve(Buffer.concat(out));
+      else reject(new Error(`tar exited ${code}: ${err.slice(0, 200)}`));
+    });
+  });
 }
