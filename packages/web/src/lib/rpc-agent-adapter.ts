@@ -58,6 +58,10 @@ export class RpcAgentAdapter implements Agent {
   private blocks: ContentBlock[] = [];
   private disposed = false;
   private bootstrapped = false;
+  /** bumped per bootstrap; a stale (overlapped) bootstrap discards its result */
+  private bootGeneration = 0;
+  /** user messages appended locally by prompt() and not yet seen in a snapshot */
+  private optimistic = new Set<AgentMessage>();
 
   constructor(agentId: string) {
     this.agentId = agentId;
@@ -119,6 +123,7 @@ export class RpcAgentAdapter implements Agent {
       ...(atts?.length ? { attachments: atts } : {}),
     } as AgentMessage;
     this.state = { ...this.state, messages: [...this.state.messages, userMsg] };
+    this.optimistic.add(userMsg);
     this.emit({ type: "message_end", message: userMsg });
 
     const payload: Record<string, unknown> = { message };
@@ -180,14 +185,14 @@ export class RpcAgentAdapter implements Agent {
     this.partial = null;
     this.blocks = [];
     this.state = { ...emptyState(), messages: [] };
+    this.optimistic.clear();
     await this.bootstrap();
   }
 
   private async bootstrap(): Promise<void> {
-    // messages appended locally while the snapshot is in flight (e.g. the
-    // optimistic first prompt sent right after create) must survive it: the
-    // server answers get_messages before it has processed that prompt
-    const baseline = this.state.messages.length;
+    // bootstraps can overlap (constructor, socket (re)open, agent_state
+    // running); only the most recent one may write state
+    const gen = ++this.bootGeneration;
     try {
       const results = (await Promise.all([
         ws.rpc(this.agentId, "get_state"),
@@ -200,16 +205,21 @@ export class RpcAgentAdapter implements Agent {
         thinkingLevel?: AgentState["thinkingLevel"];
         isStreaming?: boolean;
       };
+      if (gen !== this.bootGeneration || this.disposed) return;
       const snapshot = ((messagesRes.data ?? {}) as { messages?: AgentMessage[] }).messages ?? [];
-      const localSince = this.state.messages
-        .slice(baseline)
-        .filter((m) => !snapshot.some((s) => s.role === m.role && s.content === m.content));
-      const messages = [...snapshot, ...localSince];
+      // keep optimistic prompts the server had not processed yet when it
+      // answered get_messages (the first prompt sent right after create);
+      // ones the snapshot already contains are confirmed and dropped
+      const { messages, stillPending } = mergeSnapshot(
+        snapshot,
+        this.state.messages.filter((m) => this.optimistic.has(m)),
+      );
+      this.optimistic = new Set(stillPending);
       this.state = {
         ...this.state,
         model: s.model ?? null,
         thinkingLevel: s.thinkingLevel ?? "off",
-        isStreaming: Boolean(s.isStreaming) || (localSince.length > 0 && this.state.isStreaming),
+        isStreaming: Boolean(s.isStreaming) || (stillPending.length > 0 && this.state.isStreaming),
         messages,
       };
       this.bootstrapped = true;
@@ -395,6 +405,46 @@ export class RpcAgentAdapter implements Agent {
     }
     this.state = { ...this.state, messages: [...this.state.messages, m] };
   }
+}
+
+/** structural identity of a message's visible content (strings and text blocks compare equal) */
+export function messageKey(m: AgentMessage): string {
+  const c = (m as { content?: unknown }).content;
+  const text =
+    typeof c === "string"
+      ? c
+      : Array.isArray(c)
+        ? c
+            .map((b) => (b && typeof b === "object" && "text" in b ? String((b as { text: unknown }).text) : JSON.stringify(b)))
+            .join("\n")
+        : JSON.stringify(c ?? null);
+  const role = m.role === "user-with-attachments" ? "user" : m.role;
+  return `${role}\u0000${text}`;
+}
+
+/**
+ * Merge a server message snapshot with optimistic user prompts that were
+ * appended locally. A pending prompt counts as confirmed when one of the
+ * snapshot's most recent user messages (as many as there are pending ones)
+ * has the same content; each snapshot message confirms at most one prompt.
+ * The snapshot is never duplicated.
+ */
+export function mergeSnapshot(
+  snapshot: AgentMessage[],
+  pending: AgentMessage[],
+): { messages: AgentMessage[]; stillPending: AgentMessage[] } {
+  if (pending.length === 0) return { messages: snapshot, stillPending: [] };
+  const recentUserKeys = snapshot
+    .filter((m) => m.role === "user" || m.role === "user-with-attachments")
+    .slice(-pending.length)
+    .map(messageKey);
+  const stillPending: AgentMessage[] = [];
+  for (const p of pending) {
+    const i = recentUserKeys.indexOf(messageKey(p));
+    if (i >= 0) recentUserKeys.splice(i, 1);
+    else stillPending.push(p);
+  }
+  return { messages: [...snapshot, ...stillPending], stillPending };
 }
 
 const adapters = new Map<string, RpcAgentAdapter>();
