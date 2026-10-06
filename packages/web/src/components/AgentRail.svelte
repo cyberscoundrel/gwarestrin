@@ -28,7 +28,7 @@
       case "error":
         return "bg-err";
       default:
-        return "bg-[#565f89]";
+        return "bg-faint";
     }
   }
 
@@ -58,9 +58,9 @@
       {@const members = store.agentsInProfile(profile.id)}
       {@const isCollapsed = collapsed[profile.id] ?? false}
       <div class="rounded-md">
-        <div class="group grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md px-2 py-1.5 hover:bg-[#1a1d26]">
+        <div class="group grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md px-2 py-1.5 hover:bg-hover">
           <button
-            class="cursor-pointer border-none bg-transparent p-0 text-[0.7rem] text-muted transition-transform {isCollapsed ? '' : 'rotate-90'}"
+            class="cursor-pointer border-none bg-transparent p-0 text-[0.7rem] text-dim transition-transform {isCollapsed ? '' : 'rotate-90'}"
             aria-label="show or hide agents in {profile.name}"
             onclick={() => (collapsed[profile.id] = !isCollapsed)}
           >
@@ -74,7 +74,7 @@
             {profile.name}
           </button>
           <button
-            class="cursor-pointer rounded border-none bg-transparent px-1 text-[0.7rem] text-muted hover:text-fg"
+            class="cursor-pointer rounded border-none bg-transparent px-1 text-[0.7rem] text-dim hover:text-fg"
             title="edit agent profile"
             aria-label="edit agent profile {profile.name}"
             onclick={() => oneditprofile?.(profile.id)}
@@ -84,15 +84,15 @@
         </div>
         {#if !isCollapsed}
           {#if members.length === 0}
-            <div class="px-6 py-1 text-[0.78rem] text-muted italic">no agents</div>
+            <div class="px-6 py-1 text-[0.78rem] text-dim italic">no agents</div>
           {/if}
           <ul class="m-0 list-none border-l border-edge/60 p-0 ml-4">
             {#each members as a (a.id)}
               <li class="group relative">
                 <button
                   class="grid w-full grid-cols-[10px_1fr_auto] items-center gap-2 rounded-md px-2.5 py-2 text-left pointer-coarse:pr-8
-                    text-[0.9rem] text-fg cursor-pointer border-none bg-transparent hover:bg-[#1a1d26]
-                    {a.id === store.selectedId && !store.editingProfileId ? 'bg-[#20242f]' : ''}"
+                    text-[0.9rem] text-fg cursor-pointer border-none bg-transparent hover:bg-hover
+                    {a.id === store.selectedId && !store.editingProfileId ? 'bg-selected' : ''}"
                   onclick={() => {
                     store.select(a.id);
                     onnavigate?.();
@@ -101,18 +101,18 @@
                   <span class="h-2 w-2 rounded-full {statusColor(a.status)}"></span>
                   <span class="truncate pr-4">{a.name}</span>
                   {#if a.unread > 0 && a.id !== store.selectedId}
-                    <span class="rounded-full bg-accent px-1.5 text-[0.7rem] font-bold text-[#0b0c10] group-hover:hidden">
+                    <span class="rounded-full bg-signal px-1.5 text-[0.7rem] font-bold text-on-signal group-hover:hidden">
                       {a.unread > 99 ? "99+" : a.unread}
                     </span>
                   {/if}
                   {#if a.model}
-                    <span class="col-start-2 truncate text-[0.7rem] text-muted" title={a.model.modelId}>
+                    <span class="col-start-2 truncate text-[0.7rem] text-dim" title={a.model.modelId}>
                       {modelDisplayName(a.model.provider, a.model.modelId, store.providers)}
                     </span>
                   {/if}
                 </button>
                 <button
-                  class="absolute top-1.5 right-1.5 hidden rounded px-1 text-xs text-muted hover:bg-[#2a1218] hover:text-err
+                  class="absolute top-1.5 right-1.5 hidden rounded px-1 text-xs text-dim hover:bg-err-soft hover:text-err
                     group-hover:block group-focus-within:block pointer-coarse:block pointer-coarse:px-2 pointer-coarse:py-1"
                   title="delete {a.name}"
                   aria-label="delete {a.name}"
@@ -133,21 +133,21 @@
 
   <div class="flex flex-col gap-1">
     <button
-      class="cursor-pointer rounded-md border border-dashed border-[#333845] bg-transparent px-4 py-2 text-muted
-        hover:border-accent hover:text-fg"
+      class="cursor-pointer rounded-md border border-dashed border-edge2 bg-transparent px-4 py-2 text-dim
+        hover:border-signal hover:text-fg"
       onclick={() => oncreate?.()}
     >
       + new agent
     </button>
     <button
-      class="cursor-pointer rounded-md border border-dashed border-[#333845] bg-transparent px-4 py-1 text-xs text-muted
-        hover:border-accent hover:text-fg"
+      class="cursor-pointer rounded-md border border-dashed border-edge2 bg-transparent px-4 py-1 text-xs text-dim
+        hover:border-signal hover:text-fg"
       onclick={() => oneditprofile?.("new")}
     >
       + new agent profile
     </button>
     <button
-      class="cursor-pointer rounded-md border-none bg-transparent px-4 py-1 text-xs text-muted hover:text-fg"
+      class="cursor-pointer rounded-md border-none bg-transparent px-4 py-1 text-xs text-dim hover:text-fg"
       onclick={() => (showReview = true)}
     >
       approvals

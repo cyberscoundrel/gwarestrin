@@ -48,7 +48,7 @@
   aria-labelledby="delete-agent-title"
 >
   <h3 id="delete-agent-title" class="m-0 tracking-wide">delete {agentName}?</h3>
-  <p class="m-0 text-sm text-muted">
+  <p class="m-0 text-sm text-dim">
     this erases <span class="text-warn font-medium">all data</span> for this agent — its files, conversation
     history, and configuration. this cannot be undone.
   </p>
@@ -57,18 +57,18 @@
   {/if}
   <div class="flex flex-wrap items-center justify-end gap-2">
     <button
-      class="cursor-pointer rounded-md border border-edge2 bg-transparent px-3 py-2 text-sm text-muted hover:text-fg"
+      class="cursor-pointer rounded-md border border-edge2 bg-transparent px-3 py-2 text-sm text-dim hover:text-fg"
       onclick={exportTrace}
       disabled={busy}
       title="download the conversation history (jsonl)"
     >
       {exported ? "history downloaded ✓" : "export conversation"}
     </button>
-    <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-2 text-fg" onclick={onclose} disabled={busy}>
+    <button class="cursor-pointer rounded-md border border-edge2 bg-transparent px-4 py-2 text-fg" onclick={onclose} disabled={busy}>
       cancel
     </button>
     <button
-      class="cursor-pointer rounded-md bg-err px-4 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
+      class="cursor-pointer rounded-md bg-err px-4 py-2 font-semibold text-on-signal disabled:cursor-default disabled:opacity-60"
       onclick={() => void confirmDelete()}
       disabled={busy}
     >

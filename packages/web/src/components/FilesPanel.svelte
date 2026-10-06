@@ -103,7 +103,7 @@
   class="flex h-full flex-col border-l border-edge bg-panel text-sm"
   class:outline-2={dragOver}
   class:outline-dashed={dragOver}
-  class:outline-accent={dragOver}
+  class:outline-signal={dragOver}
   ondragover={(e) => {
     e.preventDefault();
     dragOver = true;
@@ -115,8 +115,8 @@
 >
   <div class="flex items-center gap-2 border-b border-edge px-3 py-2">
     <span class="font-semibold tracking-wide">files</span>
-    <button class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg" onclick={mkdirPrompt}>+ folder</button>
-    <label class="rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg cursor-pointer">
+    <button class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-dim hover:text-fg" onclick={mkdirPrompt}>+ folder</button>
+    <label class="rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-dim hover:text-fg cursor-pointer">
       upload
       <input
         type="file"
@@ -130,7 +130,7 @@
     </label>
   </div>
 
-  <div class="flex items-center gap-1 border-b border-edge px-3 py-1.5 text-xs text-muted">
+  <div class="flex items-center gap-1 border-b border-edge px-3 py-1.5 text-xs text-dim">
     <button class="hover:text-fg" onclick={() => navigate("")}>root</button>
     {#each breadcrumbs as seg, i}
       <span>/</span>
@@ -142,22 +142,22 @@
     {#if error}
       <p class="px-3 py-2 text-err">{error}</p>
     {:else if !loaded}
-      <p class="px-3 py-2 text-muted">loading…</p>
+      <p class="px-3 py-2 text-dim">loading…</p>
     {:else if entries.length === 0}
-      <p class="px-3 py-2 text-muted">empty — drag files here to upload</p>
+      <p class="px-3 py-2 text-dim">empty — drag files here to upload</p>
     {:else}
       <ul class="m-0 list-none p-0">
         {#each entries as e (e.name)}
-          <li class="group flex items-center gap-2 px-3 py-1 hover:bg-[#1a1d26]">
-            <span class="w-4 text-muted">{e.type === "dir" ? "📁" : "📄"}</span>
+          <li class="group flex items-center gap-2 px-3 py-1 hover:bg-hover">
+            <span class="w-4 text-dim">{e.type === "dir" ? "📁" : "📄"}</span>
             {#if e.type === "dir"}
-              <button class="flex-1 truncate text-left hover:text-accent" onclick={() => openDir(e.name)}>{e.name}</button>
+              <button class="flex-1 truncate text-left hover:text-signal" onclick={() => openDir(e.name)}>{e.name}</button>
             {:else}
-              <a class="flex-1 truncate hover:text-accent" href={filesApi.downloadUrl(agentId, cwd ? `${cwd}/${e.name}` : e.name)}>{e.name}</a>
+              <a class="flex-1 truncate hover:text-signal" href={filesApi.downloadUrl(agentId, cwd ? `${cwd}/${e.name}` : e.name)}>{e.name}</a>
             {/if}
-            <span class="text-xs text-muted">{e.type === "file" ? fmtSize(e.size) : ""}</span>
+            <span class="text-xs text-dim">{e.type === "file" ? fmtSize(e.size) : ""}</span>
             <button
-              class="invisible rounded px-1 text-xs text-err hover:bg-[#2a1218] group-hover:visible group-focus-within:visible pointer-coarse:visible"
+              class="invisible rounded px-1 text-xs text-err hover:bg-err-soft group-hover:visible group-focus-within:visible pointer-coarse:visible"
               title="delete {e.name}"
               aria-label="delete {e.name}"
               onclick={() => void remove(e.name)}
@@ -171,6 +171,6 @@
   </div>
 
   {#if busy}
-    <div class="border-t border-edge px-3 py-1.5 text-xs text-muted">working…</div>
+    <div class="border-t border-edge px-3 py-1.5 text-xs text-dim">working…</div>
   {/if}
 </div>

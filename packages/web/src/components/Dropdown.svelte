@@ -89,7 +89,7 @@
       {#if showSearch}
         <div class="flex items-center gap-2 border-b border-edge p-1.5">
           <input
-            class="min-w-0 flex-1 rounded border border-edge2 bg-bg px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+            class="min-w-0 flex-1 rounded border border-edge2 bg-bg px-2 py-1 text-sm text-fg outline-none focus:border-signal"
             placeholder="type to filter ({options.length})"
             aria-label="filter {label ?? 'options'}"
             bind:value={query}
@@ -99,7 +99,7 @@
             }}
           />
           {#if quickFilter}
-            <label class="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-muted">
+            <label class="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-dim">
               <input type="checkbox" bind:checked={quickOn} />
               {quickFilter.label}
             </label>
@@ -110,7 +110,7 @@
         {#each visible as o (o.value)}
           <button
             class="block w-full whitespace-nowrap truncate px-3 py-1.5 text-left text-sm
-              {o.value === value ? 'text-accent' : 'text-fg'} hover:bg-[#1a1d26]"
+              {o.value === value ? 'text-signal' : 'text-fg'} hover:bg-hover"
             role="option"
             aria-selected={o.value === value}
             title={o.label !== o.value ? o.value : undefined}
@@ -119,7 +119,7 @@
             {o.label}
           </button>
         {:else}
-          <p class="m-0 px-3 py-2 text-sm text-muted">no matches</p>
+          <p class="m-0 px-3 py-2 text-sm text-dim">no matches</p>
         {/each}
       </div>
     </div>

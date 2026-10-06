@@ -38,9 +38,9 @@
       return { label: "briefing failed", tone: "text-err", title: "the briefing could not be built when this agent was created" };
     }
     if (source) {
-      return { label: "no briefing", tone: "text-muted", title: `the agent profile has a ${source} briefing, but none was built for this agent` };
+      return { label: "no briefing", tone: "text-dim", title: `the agent profile has a ${source} briefing, but none was built for this agent` };
     }
-    return { label: "no briefing", tone: "text-muted", title: "this agent profile has no briefing" };
+    return { label: "no briefing", tone: "text-dim", title: "this agent profile has no briefing" };
   });
   const chip = "inline-flex max-w-full items-center gap-1 rounded-full border px-2 py-0.5 text-xs";
   const canOpen = $derived(live && ondrawer !== undefined);
@@ -59,7 +59,7 @@
       case "error":
         return { label: "error", dot: "bg-err" };
       default:
-        return { label: "stopped", dot: "bg-[#565f89]" };
+        return { label: "stopped", dot: "bg-faint" };
     }
   });
 
@@ -83,12 +83,12 @@
     <span class="h-2 w-2 shrink-0 rounded-full {statusView.dot}" aria-hidden="true"></span>
     <!-- the mobile app header already shows the agent name -->
     <h2 class="m-0 truncate text-base font-semibold text-fg max-[900px]:hidden">{record?.name ?? agentId}</h2>
-    <span class="truncate text-xs text-muted" title={profile?.description ?? undefined}>
+    <span class="truncate text-xs text-dim" title={profile?.description ?? undefined}>
       <span class="max-[900px]:hidden">·</span> agent profile <span class="text-fg">{profile?.name ?? record?.profileId ?? "Default"}</span>
     </span>
-    <span class="text-xs text-muted" role="status">· {statusView.label}</span>
+    <span class="text-xs text-dim" role="status">· {statusView.label}</span>
     {#if store.statusLineFor(agentId)}
-      <span class="truncate text-xs text-muted" title={store.statusLineFor(agentId)}>· {store.statusLineFor(agentId)}</span>
+      <span class="truncate text-xs text-dim" title={store.statusLineFor(agentId)}>· {store.statusLineFor(agentId)}</span>
     {/if}
   </div>
 
@@ -104,13 +104,13 @@
           <span class="truncate">{where.label}</span>
         </span>
       {:else}
-        <span class="{chip} border-edge2 text-muted" title="no model is set for this agent or the workspace">no model</span>
+        <span class="{chip} border-edge2 text-dim" title="no model is set for this agent or the workspace">no model</span>
       {/if}
     </li>
     <li>
       {#if canOpen}
         <button
-          class="{chip} cursor-pointer border-edge2 bg-transparent text-fg hover:border-accent"
+          class="{chip} cursor-pointer border-edge2 bg-transparent text-fg hover:border-signal"
           title={tools.length ? `switched on: ${tools.join(", ")} (open tools)` : "no tool connections switched on (open tools)"}
           onclick={() => ondrawer?.("mcp")}
         >
@@ -125,7 +125,7 @@
     <li>
       {#if canOpen}
         <button
-          class="{chip} cursor-pointer border-edge2 bg-transparent {briefing.tone} hover:border-accent"
+          class="{chip} cursor-pointer border-edge2 bg-transparent {briefing.tone} hover:border-signal"
           title="{briefing.title} (open briefing)"
           onclick={() => ondrawer?.("context")}
         >
@@ -142,7 +142,7 @@
       <span class="max-w-48 truncate text-xs text-err" title={error}>{error}</span>
     {/if}
     <button
-      class="select-compact bg-none pr-2 disabled:opacity-50 {live ? '' : '!border-accent !text-accent'}"
+      class="select-compact bg-none pr-2 disabled:opacity-50 {live ? '' : '!border-signal !text-signal'}"
       disabled={busy}
       title={live ? "stop this agent's sandbox (its files and conversations are kept)" : "start this agent's sandbox"}
       onclick={() => void toggleRunning()}

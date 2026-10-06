@@ -147,9 +147,9 @@
   }
 
   function statusDot(name: string): { color: string; title: string } {
-    if (!isEnabled(name)) return { color: "text-muted", title: "not enabled for this agent" };
+    if (!isEnabled(name)) return { color: "text-dim", title: "not enabled for this agent" };
     const p = probes[name];
-    if (!p || p.reachable === null) return { color: "text-muted", title: "local command connection (no reachability check)" };
+    if (!p || p.reachable === null) return { color: "text-dim", title: "local command connection (no reachability check)" };
     if (p.reachable) return { color: "text-ok", title: `reachable${p.ms != null ? ` · ${p.ms}ms` : ""}` };
     return { color: "text-err", title: "unreachable" };
   }
@@ -159,7 +159,7 @@
   <div class="flex items-center gap-2 border-b border-edge px-3 py-2">
     <span class="font-semibold tracking-wide">tool connections</span>
     <button
-      class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-muted hover:text-fg"
+      class="ml-auto rounded border border-edge2 bg-transparent px-2 py-0.5 text-xs text-dim hover:text-fg"
       title="add a tool connection to the workspace"
       onclick={() => startEdit(null)}
     >
@@ -174,7 +174,7 @@
 
     {#if editing !== null}
       <div class="grid gap-2 border-b border-edge px-3 py-2">
-        <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="name" bind:value={formName} disabled={editing !== ""} />
+        <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="name" bind:value={formName} disabled={editing !== ""} />
         <Dropdown
           value={formTransport}
           options={[
@@ -184,24 +184,24 @@
           onchange={(t) => (formTransport = t as "stdio" | "http")}
         />
         {#if formTransport === "stdio"}
-          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="command (e.g. npx)" bind:value={formCommand} />
-          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="args (space separated)" bind:value={formArgs} />
+          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="command (e.g. npx)" bind:value={formCommand} />
+          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="args (space separated)" bind:value={formArgs} />
         {:else}
-          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="url (https://…/mcp)" bind:value={formUrl} />
-          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="bearer token env var (optional)" bind:value={formBearerEnv} />
+          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="url (https://…/mcp)" bind:value={formUrl} />
+          <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="bearer token env var (optional)" bind:value={formBearerEnv} />
         {/if}
-        <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-accent" placeholder="description (optional)" bind:value={formDescription} />
+        <input class="rounded border border-edge2 bg-bg px-2 py-1 text-fg outline-none focus:border-signal" placeholder="description (optional)" bind:value={formDescription} />
         <div class="flex justify-end gap-2">
-          <button class="rounded border border-edge2 bg-transparent px-2 py-1 text-xs text-muted hover:text-fg" onclick={() => (editing = null)}>cancel</button>
-          <button class="rounded bg-accent px-3 py-1 text-xs font-semibold text-[#0b0c10] disabled:opacity-50" disabled={busy} onclick={() => void save()}>save</button>
+          <button class="rounded border border-edge2 bg-transparent px-2 py-1 text-xs text-dim hover:text-fg" onclick={() => (editing = null)}>cancel</button>
+          <button class="rounded bg-signal px-3 py-1 text-xs font-semibold text-on-signal disabled:opacity-50" disabled={busy} onclick={() => void save()}>save</button>
         </div>
       </div>
     {/if}
 
     {#if !loaded && !error}
-      <p class="px-3 py-2 text-muted">loading…</p>
+      <p class="px-3 py-2 text-dim">loading…</p>
     {:else if Object.keys(registry).length === 0}
-      <p class="px-3 py-2 text-muted">no tool connections in this workspace yet — add one to make it available to agent profiles</p>
+      <p class="px-3 py-2 text-dim">no tool connections in this workspace yet — add one to make it available to agent profiles</p>
     {:else}
       <ul class="m-0 list-none p-0">
         {#each sortedEntries as [name, def] (name)}
@@ -222,21 +222,21 @@
                 />
                 <span class="truncate font-medium">{name}</span>
                 {#if !isGranted(name)}
-                  <span class="rounded border border-edge px-1 text-[0.65rem] text-muted" title="this agent's profile ({profileName}) does not allow this connection">not allowed</span>
+                  <span class="rounded border border-edge px-1 text-[0.65rem] text-dim" title="this agent's profile ({profileName}) does not allow this connection">not allowed</span>
                 {/if}
               </label>
               <button
-                class="rounded px-1 text-xs text-muted hover:text-fg"
+                class="rounded px-1 text-xs text-dim hover:text-fg"
                 title="edit {name} (workspace-wide, all agents)"
                 aria-label="edit tool connection {name} for the whole workspace"
                 onclick={() => startEdit(name)}>✎</button>
               <button
-                class="rounded px-1 text-xs text-err hover:bg-[#2a1218]"
+                class="rounded px-1 text-xs text-err hover:bg-err-soft"
                 title="remove {name} from the workspace (all agents)"
                 aria-label="remove tool connection {name} from the workspace"
                 onclick={() => void remove(name)}>✕</button>
             </div>
-            <div class="mt-0.5 truncate pl-6 text-xs text-muted" title={summarize(def)}>
+            <div class="mt-0.5 truncate pl-6 text-xs text-dim" title={summarize(def)}>
               {summarize(def)}{def.description ? ` — ${def.description}` : ""}
             </div>
           </li>
@@ -245,7 +245,7 @@
     {/if}
   </div>
 
-  <div class="border-t border-edge px-3 py-1.5 text-xs text-muted">
+  <div class="border-t border-edge px-3 py-1.5 text-xs text-dim">
     ticked = switched on for this agent; changing one restarts the agent.
     {#if allowedSet !== null}
       only connections allowed by <span class="text-fg">{profileName}</span> can be switched on — edit the agent

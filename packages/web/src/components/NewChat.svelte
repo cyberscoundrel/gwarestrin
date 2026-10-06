@@ -130,7 +130,7 @@ import Dropdown from "./Dropdown.svelte";
 <div class="grid h-full grid-cols-[minmax(0,1fr)] place-items-center overflow-y-auto p-6 max-sm:p-4">
   <div class="grid w-full max-w-2xl justify-items-center gap-6">
     <div class="grid justify-items-center gap-2 text-center">
-      <svg viewBox="0 0 24 24" class="h-10 w-10 text-muted" aria-hidden="true">
+      <svg viewBox="0 0 24 24" class="h-10 w-10 text-dim" aria-hidden="true">
         <path
           d="M12 3v9M7 14h10M8.5 17h7M10 20h4"
           stroke="currentColor"
@@ -140,12 +140,12 @@ import Dropdown from "./Dropdown.svelte";
         />
       </svg>
       <h1 class="m-0 text-2xl tracking-wide text-fg">{greeting()}</h1>
-      <p class="m-0 text-sm text-muted">start an agent — pick an agent profile, drop your first prompt</p>
+      <p class="m-0 text-sm text-dim">start an agent — pick an agent profile, drop your first prompt</p>
     </div>
 
     <div class="grid w-full gap-4 rounded-xl border border-edge bg-panel p-5 max-sm:p-4">
       <div class="grid gap-2">
-        <span class="text-xs tracking-wide text-muted uppercase">agent profile</span>
+        <span class="text-xs tracking-wide text-dim uppercase">agent profile</span>
         <div class="flex flex-wrap items-center gap-2">
           <div class="max-w-full">
             <Dropdown
@@ -157,9 +157,9 @@ import Dropdown from "./Dropdown.svelte";
           </div>
           {#if mcpChips.length > 0}
             <div class="flex flex-wrap items-center gap-1.5" title="tool connections this agent profile allows">
-              <span class="text-xs text-muted">tools:</span>
+              <span class="text-xs text-dim">tools:</span>
               {#each mcpChips as s (s)}
-                <span class="rounded-full border border-edge2 px-2 py-0.5 text-xs text-muted">{s}</span>
+                <span class="rounded-full border border-edge2 px-2 py-0.5 text-xs text-dim">{s}</span>
               {/each}
             </div>
           {/if}
@@ -167,7 +167,7 @@ import Dropdown from "./Dropdown.svelte";
       </div>
 
       <div class="grid gap-2">
-        <span class="text-xs tracking-wide text-muted uppercase">model</span>
+        <span class="text-xs tracking-wide text-dim uppercase">model</span>
         <div class="flex flex-wrap items-center gap-2">
           <div class="w-28">
             <Dropdown
@@ -208,7 +208,7 @@ import Dropdown from "./Dropdown.svelte";
       </div>
 
       <textarea
-        class="min-h-24 w-full resize-y rounded-lg border border-edge2 bg-bg px-4 py-3 text-base text-fg outline-none focus:border-accent"
+        class="min-h-24 w-full resize-y rounded-lg border border-edge2 bg-bg px-4 py-3 text-base text-fg outline-none focus:border-signal"
         placeholder={hasEngine ? "first prompt (optional — the briefing is built either way)" : "what should this agent work on first?"}
         bind:value={promptText}
         onkeydown={(e) => {
@@ -221,9 +221,9 @@ import Dropdown from "./Dropdown.svelte";
       {/if}
 
       <div class="flex items-center justify-between gap-2">
-        <span class="text-xs text-muted pointer-coarse:invisible">⌘/ctrl+enter to start</span>
+        <span class="text-xs text-dim pointer-coarse:invisible">⌘/ctrl+enter to start</span>
         <button
-          class="cursor-pointer rounded-md bg-accent px-5 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
+          class="cursor-pointer rounded-md bg-signal px-5 py-2 font-semibold text-on-signal disabled:cursor-default disabled:opacity-60"
           disabled={submitting || (!promptText.trim() && !hasEngine)}
           onclick={() => void submit()}
         >

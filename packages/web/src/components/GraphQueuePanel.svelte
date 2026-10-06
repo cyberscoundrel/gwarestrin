@@ -80,34 +80,34 @@
   aria-labelledby="graph-queue-title"
 >
   <div class="flex items-center justify-between">
-    <h3 id="graph-queue-title" class="m-0 tracking-wide">approvals <span class="text-sm font-normal text-muted">· changes agents want to write to the knowledge graph</span></h3>
-    <button class="cursor-pointer border-none bg-transparent text-muted hover:text-fg" aria-label="close" onclick={onclose}>✕</button>
+    <h3 id="graph-queue-title" class="m-0 tracking-wide">approvals <span class="text-sm font-normal text-dim">· changes agents want to write to the knowledge graph</span></h3>
+    <button class="cursor-pointer border-none bg-transparent text-dim hover:text-fg" aria-label="close" onclick={onclose}>✕</button>
   </div>
 
   {#if error}<p class="m-0 text-sm text-err">{error}</p>{/if}
   {#if !enabled}
-    <p class="m-0 text-sm text-muted">approvals aren't set up for this workspace.</p>
+    <p class="m-0 text-sm text-dim">approvals aren't set up for this workspace.</p>
   {:else if !error || pending.length > 0}
     {#if pending.length === 0}
-      <p class="m-0 py-6 text-center text-sm text-muted">nothing is waiting for approval.</p>
+      <p class="m-0 py-6 text-center text-sm text-dim">nothing is waiting for approval.</p>
     {:else}
       <div class="min-h-0 flex-1 overflow-y-auto">
         {#each pending as p (p["@rid"])}
           <div class="mb-2 rounded-lg border border-edge2 bg-bg p-3">
-            <div class="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted">
+            <div class="mb-1 flex flex-wrap items-center gap-2 text-xs text-dim">
               <span class="font-mono">{p["@rid"]}</span>
               <span>· {p.requested_by}</span>
               <span>· {p.created_at}</span>
               <span class="ml-auto flex gap-1">
                 <button
-                  class="cursor-pointer rounded-md bg-ok px-3 py-1 text-xs font-semibold text-[#0b0c10] disabled:opacity-50"
+                  class="cursor-pointer rounded-md bg-ok px-3 py-1 text-xs font-semibold text-on-signal disabled:opacity-50"
                   disabled={busy}
                   onclick={() => void act("approve", p["@rid"])}
                 >
                   approve
                 </button>
                 <button
-                  class="cursor-pointer rounded-md bg-err px-3 py-1 text-xs font-semibold text-[#0b0c10] disabled:opacity-50"
+                  class="cursor-pointer rounded-md bg-err px-3 py-1 text-xs font-semibold text-on-signal disabled:opacity-50"
                   disabled={busy}
                   onclick={() => void act("reject", p["@rid"])}
                 >

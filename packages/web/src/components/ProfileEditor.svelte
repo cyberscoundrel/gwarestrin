@@ -123,7 +123,7 @@
   <div class="mb-4 flex items-center gap-3">
     <h2 class="m-0 tracking-wide text-fg">{isNew ? "new agent profile" : `edit agent profile — ${name || profileId}`}</h2>
     <button
-      class="ml-auto cursor-pointer rounded border-none bg-transparent px-2 py-1 text-muted hover:text-fg"
+      class="ml-auto cursor-pointer rounded border-none bg-transparent px-2 py-1 text-dim hover:text-fg"
       aria-label="close editor"
       onclick={() => {
         store.editingProfileId = null;
@@ -136,24 +136,24 @@
 
   <div class="grid gap-4 rounded-lg border border-edge bg-panel p-5">
     <label class="grid gap-1">
-      <span class="text-xs tracking-wide text-muted uppercase">name</span>
-      <input class="rounded-md border border-edge bg-[#12141b] px-3 py-2 text-fg" bind:value={name} placeholder="e.g. sql-analyst" />
+      <span class="text-xs tracking-wide text-dim uppercase">name</span>
+      <input class="rounded-md border border-edge bg-inset px-3 py-2 text-fg" bind:value={name} placeholder="e.g. sql-analyst" />
     </label>
 
     <label class="grid gap-1">
-      <span class="text-xs tracking-wide text-muted uppercase">description</span>
-      <input class="rounded-md border border-edge bg-[#12141b] px-3 py-2 text-fg" bind:value={description} placeholder="what agents in this profile focus on" />
+      <span class="text-xs tracking-wide text-dim uppercase">description</span>
+      <input class="rounded-md border border-edge bg-inset px-3 py-2 text-fg" bind:value={description} placeholder="what agents in this profile focus on" />
     </label>
 
     <div class="grid gap-2">
-      <span class="text-xs tracking-wide text-muted uppercase">default model</span>
+      <span class="text-xs tracking-wide text-dim uppercase">default model</span>
       <div class="flex flex-wrap items-center gap-2">
         <div class="flex gap-2">
           <button
-            class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'local' ? 'border-accent text-fg' : 'border-edge text-muted'}"
+            class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'local' ? 'border-signal text-fg' : 'border-edge text-dim'}"
             onclick={() => pickTier("local")}>On-prem</button>
           <button
-            class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'cloud' ? 'border-accent text-fg' : 'border-edge text-muted'}"
+            class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {tier === 'cloud' ? 'border-signal text-fg' : 'border-edge text-dim'}"
             onclick={() => pickTier("cloud")}>Cloud</button>
         </div>
         {#if tier}
@@ -187,38 +187,38 @@
         {/if}
       </div>
       {#if !tier}
-        <span class="text-xs text-muted">no default model — the workspace default is used when an agent is created</span>
+        <span class="text-xs text-dim">no default model — the workspace default is used when an agent is created</span>
       {/if}
     </div>
 
     <label class="grid gap-1">
-      <span class="text-xs tracking-wide text-muted uppercase">agent name prefix (optional)</span>
-      <input class="rounded-md border border-edge bg-[#12141b] px-3 py-2 text-fg" bind:value={namePrefix} placeholder="e.g. sql-" />
+      <span class="text-xs tracking-wide text-dim uppercase">agent name prefix (optional)</span>
+      <input class="rounded-md border border-edge bg-inset px-3 py-2 text-fg" bind:value={namePrefix} placeholder="e.g. sql-" />
     </label>
 
     <div class="grid gap-2">
-      <span class="text-xs tracking-wide text-muted uppercase">allowed tool connections</span>
-      <p class="m-0 text-xs text-muted">
+      <span class="text-xs tracking-wide text-dim uppercase">allowed tool connections</span>
+      <p class="m-0 text-xs text-dim">
         agents in this profile can only use the connections allowed here. a new agent starts with every
         allowed connection switched on; each agent can then switch them off and on again in its tools
         drawer, but never beyond this list.
       </p>
       <div class="flex flex-wrap gap-2">
         <button
-          class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {mcpMode === 'all' ? 'border-accent text-fg' : 'border-edge text-muted'}"
+          class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {mcpMode === 'all' ? 'border-signal text-fg' : 'border-edge text-dim'}"
           onclick={() => (mcpMode = "all")}>allow all workspace connections</button>
         <button
-          class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {mcpMode === 'pick' ? 'border-accent text-fg' : 'border-edge text-muted'}"
+          class="cursor-pointer rounded-md border px-3 py-1.5 text-sm {mcpMode === 'pick' ? 'border-signal text-fg' : 'border-edge text-dim'}"
           onclick={() => (mcpMode = "pick")}>allow only selected…</button>
       </div>
       {#if mcpMode === "all"}
-        <span class="text-xs text-muted">includes connections added to the workspace later.</span>
+        <span class="text-xs text-dim">includes connections added to the workspace later.</span>
       {/if}
       {#if mcpMode === "pick"}
-        <div class="flex flex-wrap gap-2 rounded-md border border-edge bg-[#12141b] p-3" role="group" aria-label="allowed tool connections">
+        <div class="flex flex-wrap gap-2 rounded-md border border-edge bg-inset p-3" role="group" aria-label="allowed tool connections">
           {#each serverNames as s (s)}
             <button
-              class="cursor-pointer rounded-full border px-3 py-1 text-xs {pickedMcp.includes(s) ? 'border-accent bg-accent/10 text-fg' : 'border-edge text-muted'}"
+              class="cursor-pointer rounded-full border px-3 py-1 text-xs {pickedMcp.includes(s) ? 'border-signal bg-signal-soft text-fg' : 'border-edge text-dim'}"
               aria-pressed={pickedMcp.includes(s)}
               onclick={() => (pickedMcp = pickedMcp.includes(s) ? pickedMcp.filter((x) => x !== s) : [...pickedMcp, s])}
             >
@@ -231,11 +231,11 @@
 
     <div class="grid gap-2">
       <label class="flex items-center gap-2 text-sm text-fg">
-        <input type="checkbox" class="accent-[var(--accent)]" bind:checked={engineEnabled} />
+        <input type="checkbox" class="accent-signal" bind:checked={engineEnabled} />
         <span class="tracking-wide">briefing — when an agent is created, build a briefing from the knowledge graph</span>
       </label>
       {#if engineEnabled}
-        <div class="grid gap-3 rounded-md border border-edge bg-[#12141b] p-3">
+        <div class="grid gap-3 rounded-md border border-edge bg-inset p-3">
           <div>
             <Dropdown
               value={engineType}
@@ -247,30 +247,30 @@
             />
           </div>
           <textarea
-            class="min-h-20 rounded-md border border-edge bg-[#1a1d26] px-3 py-2 text-fg"
+            class="min-h-20 rounded-md border border-edge bg-inset px-3 py-2 text-fg"
             bind:value={enginePrompt}
             placeholder="what should the briefing focus on? (used even when the agent gets no first prompt)"
           ></textarea>
-          <div class="flex items-center gap-3 text-xs text-muted">
-            <label class="flex items-center gap-1">rounds <input type="number" min="1" max="20" class="w-16 rounded border border-edge bg-[#1a1d26] px-1.5 py-1 text-fg" bind:value={engineRounds} /></label>
-            <label class="flex items-center gap-1">timeout ms <input type="number" min="5000" step="5000" class="w-24 rounded border border-edge bg-[#1a1d26] px-1.5 py-1 text-fg" bind:value={engineTimeout} /></label>
+          <div class="flex items-center gap-3 text-xs text-dim">
+            <label class="flex items-center gap-1">rounds <input type="number" min="1" max="20" class="w-16 rounded border border-edge bg-inset px-1.5 py-1 text-fg" bind:value={engineRounds} /></label>
+            <label class="flex items-center gap-1">timeout ms <input type="number" min="5000" step="5000" class="w-24 rounded border border-edge bg-inset px-1.5 py-1 text-fg" bind:value={engineTimeout} /></label>
           </div>
         </div>
       {/if}
     </div>
 
     <label class="flex items-center gap-2 text-sm text-fg">
-      <input type="checkbox" class="accent-[var(--accent)]" bind:checked={sharedTools} />
+      <input type="checkbox" class="accent-signal" bind:checked={sharedTools} />
       <span class="tracking-wide">shared /tools directory — agents in this profile can share scripts with the rest of the workspace</span>
     </label>
 
     {#if error}
-      <div class="rounded-md border border-err/40 bg-[#2a1218] px-3 py-2 text-sm text-err">{error}</div>
+      <div class="rounded-md border border-err/40 bg-err-soft px-3 py-2 text-sm text-err">{error}</div>
     {/if}
 
     <div class="flex gap-2">
       <button
-        class="cursor-pointer rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] hover:brightness-110 disabled:opacity-50"
+        class="cursor-pointer rounded-md bg-signal px-4 py-2 font-semibold text-on-signal hover:brightness-110 disabled:opacity-50"
         disabled={saving}
         onclick={save}
       >
@@ -278,7 +278,7 @@
       </button>
       {#if !isNew}
         <button
-          class="cursor-pointer rounded-md border border-err/40 px-4 py-2 text-err hover:bg-[#2a1218]"
+          class="cursor-pointer rounded-md border border-err/40 px-4 py-2 text-err hover:bg-err-soft"
           onclick={remove}
         >
           delete

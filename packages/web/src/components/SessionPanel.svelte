@@ -79,18 +79,18 @@
     <div class="fixed inset-0 z-29" role="presentation" onclick={() => (open = false)}></div>
     <div class="absolute right-0 z-30 mt-1 w-72 rounded-lg border border-edge2 bg-panel2 shadow-xl">
       <div class="flex flex-col gap-0.5 p-1.5">
-        <button class="rounded px-2 py-1.5 text-left text-sm hover:bg-[#1a1d26]" onclick={() => void run("new_session")}>new conversation</button>
-        <button class="rounded px-2 py-1.5 text-left text-sm hover:bg-[#1a1d26]" onclick={() => void run("clone")}>clone conversation</button>
-        <button class="rounded px-2 py-1.5 text-left text-sm hover:bg-[#1a1d26]" onclick={() => void run("compact")}>compact conversation (summarise older messages)</button>
+        <button class="rounded px-2 py-1.5 text-left text-sm hover:bg-hover" onclick={() => void run("new_session")}>new conversation</button>
+        <button class="rounded px-2 py-1.5 text-left text-sm hover:bg-hover" onclick={() => void run("clone")}>clone conversation</button>
+        <button class="rounded px-2 py-1.5 text-left text-sm hover:bg-hover" onclick={() => void run("compact")}>compact conversation (summarise older messages)</button>
       </div>
-      <div class="border-t border-edge px-3 py-1.5 text-xs font-semibold text-muted">fork from message</div>
+      <div class="border-t border-edge px-3 py-1.5 text-xs font-semibold text-dim">fork from message</div>
       <div class="max-h-48 overflow-y-auto p-1.5">
         {#if forkMessages.length === 0}
-          <p class="px-2 py-1 text-xs text-muted">no messages to fork from yet</p>
+          <p class="px-2 py-1 text-xs text-dim">no messages to fork from yet</p>
         {:else}
           {#each forkMessages as fm (fm.entryId)}
             <button
-              class="block w-full truncate rounded px-2 py-1 text-left text-xs hover:bg-[#1a1d26]"
+              class="block w-full truncate rounded px-2 py-1 text-left text-xs hover:bg-hover"
               title={fm.text}
               onclick={() => void fork(fm.entryId)}
             >

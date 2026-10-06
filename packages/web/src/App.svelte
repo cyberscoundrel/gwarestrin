@@ -80,7 +80,7 @@
 
 {#snippet offlineBanner()}
   {#if offline}
-    <div role="status" class="border-b border-err/40 bg-[#2a1218] px-3 py-1.5 text-center text-xs text-err">
+    <div role="status" class="border-b border-err/40 bg-err-soft px-3 py-1.5 text-center text-xs text-err">
       can't reach the workspace server — retrying. agents and settings shown may be out of date.
     </div>
   {/if}
@@ -131,7 +131,7 @@
       <aside class="fixed top-0 bottom-0 left-0 z-40 flex w-[min(280px,80vw)] flex-col border-r border-edge bg-panel">
         <div class="flex justify-end px-3 pt-2">
           <button
-            class="cursor-pointer rounded border-none bg-transparent px-1.5 text-muted hover:text-fg"
+            class="cursor-pointer rounded border-none bg-transparent px-1.5 text-dim hover:text-fg"
             aria-label="close menu"
             onclick={() => (drawerOpen = false)}
           >

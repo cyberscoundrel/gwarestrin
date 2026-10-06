@@ -1,25 +1,190 @@
 @import "@earendil-works/pi-web-ui/app.css";
 @import "tailwindcss";
 
-@theme {
-  --color-bg: #0f1115;
-  --color-panel: #14161c;
-  --color-panel2: #171a21;
-  --color-edge: #23262f;
-  --color-edge2: #2a2e3a;
-  --color-fg: #e6e8ee;
-  --color-muted: #8b90a0;
-  --color-accent: #7aa2f7;
-  --color-ok: #9ece6a;
-  --color-warn: #e0af68;
-  --color-err: #f7768e;
+/* ==========================================================================
+   Graphite design tokens. Components use ONLY these (via the Tailwind names
+   below); see DESIGN.md. Dark is the default look; light follows the OS.
+   The `.dark` class on <html> is set from prefers-color-scheme (index.html)
+   because pi-web-ui's own components key their dark variant off it.
+   ========================================================================== */
+
+:root {
+  /* surfaces */
+  --gw-canvas: #f6f5f2;
+  --gw-raised: #fbfaf8;
+  --gw-overlay: #ffffff;
+  --gw-hover: #eeece7;
+  --gw-selected: #e7e5df;
+  --gw-inset: #f1efeb;
+  /* hairlines */
+  --gw-line: #e3e1db;
+  --gw-line-strong: #d3d0c8;
+  /* text (all AA on every surface above) */
+  --gw-fg: #1b1c1e;
+  --gw-fg2: #4f5157;
+  --gw-fg3: #5f6167;
+  /* the one accent: state + focus only */
+  --gw-signal: #0b6f64;
+  --gw-signal-soft: #0b6f6414;
+  --gw-on-signal: #ffffff;
+  /* semantics */
+  --gw-ok: #1f7045;
+  --gw-warn: #8a570c;
+  --gw-err: #b0373d;
+  --gw-ok-soft: #1f704514;
+  --gw-warn-soft: #8a570c14;
+  --gw-err-soft: #b0373d12;
+  /* elevation: one shadow, floating overlays only */
+  --gw-shadow-overlay: 0 8px 24px -8px #1b1c1e29, 0 0 0 1px #1b1c1e0a;
+  --gw-scrim: #1b1c1e47;
+  --gw-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.75L6 7.75l3-3' fill='none' stroke='%235f6167' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  color-scheme: light;
+}
+
+:root.dark {
+  --gw-canvas: #0f1012;
+  --gw-raised: #151619;
+  --gw-overlay: #1a1c1f;
+  --gw-hover: #1e2024;
+  --gw-selected: #222428;
+  --gw-inset: #121315;
+  --gw-line: #222428;
+  --gw-line-strong: #2c2e33;
+  --gw-fg: #e8e8ea;
+  --gw-fg2: #9a9ca2;
+  --gw-fg3: #8b8d94;
+  --gw-signal: #2dd4bf;
+  --gw-signal-soft: #2dd4bf1a;
+  --gw-on-signal: #0f1012;
+  --gw-ok: #5cc28a;
+  --gw-warn: #d9a957;
+  --gw-err: #ec7f84;
+  --gw-ok-soft: #5cc28a17;
+  --gw-warn-soft: #d9a95717;
+  --gw-err-soft: #ec7f8417;
+  --gw-shadow-overlay: 0 12px 32px -12px #000000b3, 0 0 0 1px #ffffff0a;
+  --gw-scrim: #00000080;
+  --gw-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M3 4.75L6 7.75l3-3' fill='none' stroke='%239a9ca2' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  color-scheme: dark;
+}
+
+/* Tailwind names -> tokens (inline: utilities reference the live var) */
+@theme inline {
+  --color-bg: var(--gw-canvas);
+  --color-panel: var(--gw-raised);
+  --color-panel2: var(--gw-overlay);
+  --color-hover: var(--gw-hover);
+  --color-selected: var(--gw-selected);
+  --color-inset: var(--gw-inset);
+  --color-edge: var(--gw-line);
+  --color-edge2: var(--gw-line-strong);
+  --color-fg: var(--gw-fg);
+  --color-dim: var(--gw-fg2);
+  --color-faint: var(--gw-fg3);
+  --color-signal: var(--gw-signal);
+  --color-signal-soft: var(--gw-signal-soft);
+  --color-on-signal: var(--gw-on-signal);
+  --color-ok: var(--gw-ok);
+  --color-warn: var(--gw-warn);
+  --color-err: var(--gw-err);
+  --color-ok-soft: var(--gw-ok-soft);
+  --color-warn-soft: var(--gw-warn-soft);
+  --color-err-soft: var(--gw-err-soft);
+  --color-scrim: var(--gw-scrim);
+
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* type scale: 11 / 12 / 13 / 14 / 16 / 20 */
+  --text-2xs: 11px;
+  --text-2xs--line-height: 16px;
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 13px;
+  --text-sm--line-height: 20px;
+  --text-base: 14px;
+  --text-base--line-height: 22px;
+  --text-lg: 16px;
+  --text-lg--line-height: 24px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 20px;
+  --text-2xl--line-height: 28px;
+
+  /* radii: 6 controls/rows, 8 cards, 10 drawers/dialogs */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+
+  --shadow-overlay: var(--gw-shadow-overlay);
+
+  /* motion: short ease-out; collapses to instant under reduced motion */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --default-transition-duration: 150ms;
+  --default-transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  --animate-enter: gw-enter 180ms cubic-bezier(0.2, 0, 0, 1) both;
+  --animate-pop: gw-pop 140ms cubic-bezier(0.2, 0, 0, 1) both;
+  --animate-shimmer: gw-shimmer 1.4s linear infinite;
+  --animate-working: gw-working 1.6s ease-in-out infinite;
+}
+
+@keyframes gw-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes gw-pop {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.99);
+  }
+}
+
+@keyframes gw-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* status dot while an agent is actually working (never while idle) */
+@keyframes gw-working {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* pi-web-ui's shadcn-style variables, re-pointed at Graphite tokens so its
+   Lit components (messages, editor, console blocks) match the shell */
+:root,
+:root.dark {
+  --background: var(--gw-canvas);
+  --foreground: var(--gw-fg);
+  --card: var(--gw-raised);
+  --card-foreground: var(--gw-fg);
+  --popover: var(--gw-overlay);
+  --popover-foreground: var(--gw-fg);
+  --primary: var(--gw-fg);
+  --primary-foreground: var(--gw-canvas);
+  --secondary: var(--gw-overlay);
+  --secondary-foreground: var(--gw-fg);
+  --muted: var(--gw-raised);
+  --muted-foreground: var(--gw-fg2);
+  --accent: var(--gw-hover);
+  --accent-foreground: var(--gw-fg);
+  --destructive: var(--gw-err);
+  --destructive-foreground: var(--gw-canvas);
+  --border: var(--gw-line);
+  --input: var(--gw-line-strong);
+  --ring: var(--gw-signal);
+  --radius: 0.5rem;
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 @layer base {
-  :root {
-    color-scheme: dark;
-  }
-
   html,
   body,
   #app {
@@ -28,13 +193,32 @@
   }
 
   body {
-    @apply bg-bg text-fg;
-    font-family:
-      ui-sans-serif,
-      system-ui,
-      -apple-system,
-      "Segoe UI",
-      sans-serif;
+    @apply bg-bg font-sans text-base text-fg antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  ::selection {
+    background: var(--gw-signal-soft);
+  }
+
+  /* one focus treatment everywhere: accent ring, 2px offset */
+  :focus-visible {
+    outline: 2px solid var(--gw-signal);
+    outline-offset: 2px;
+  }
+
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
   }
 
   /* pi-web-ui renders light DOM: keep code blocks contained horizontally */
@@ -45,14 +229,14 @@
 }
 
 @layer components {
-  /* shared dropdown look: native selects and fake dropdown toggles all use
-     the same radius/border/bg/chevron so controls match across bars and modals */
+  /* shared dropdown look: fake dropdown toggles all use the same
+     radius/border/bg/chevron so controls match across bars and modals */
   .select,
   .select-compact {
-    @apply cursor-pointer rounded-md border border-edge2 bg-bg text-fg outline-none hover:border-accent focus:border-accent disabled:cursor-default disabled:opacity-50;
-    /* replace the native select chevron with the same one the fake toggles draw */
+    @apply cursor-pointer rounded-md border border-edge2 bg-panel text-fg transition-colors outline-none hover:border-faint
+      focus-visible:border-signal disabled:cursor-default disabled:opacity-50;
     appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%238b90a0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-image: var(--gw-chevron);
     background-repeat: no-repeat;
     background-position: right 0.5rem center;
   }
@@ -60,7 +244,7 @@
   /* padding-right reserves room for the chevron; it must come after the px-*
      shorthand or the label runs underneath the chevron */
   .select {
-    @apply px-2.5 py-2 text-base;
+    @apply px-2.5 py-1.5 text-sm;
     padding-right: 1.75rem;
   }
 
@@ -69,16 +253,34 @@
     padding-right: 1.5rem;
     background-size: 0.7rem;
   }
+
+  /* loading placeholder: a calm shimmer, static under reduced motion */
+  .skeleton {
+    border-radius: var(--radius-md);
+    background: linear-gradient(90deg, var(--gw-hover) 25%, var(--gw-selected) 50%, var(--gw-hover) 75%);
+    background-size: 200% 100%;
+    animation: var(--animate-shimmer);
+  }
+}
+
+/* tabular figures for counts, tokens, sizes */
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* pi-web-ui overrides — must stay UNLAYERED: their utilities live in
    @layer utilities, which beats layered base rules regardless of specificity */
-
-/* our tailwind emits .bg-muted with our palette; pi-web-ui components
-   (e.g. console header) expect their own --muted from the .dark theme */
-agent-interface .bg-muted {
-  background-color: var(--muted);
-}
 
 /* wrap giant plain-text blobs (base64/hex dumps) instead of x-scrolling */
 agent-interface code.hljs.language-text {

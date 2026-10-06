@@ -47,7 +47,7 @@
       <div class="flex flex-wrap items-center gap-2">
         <SessionPanel {agentId} />
         <button
-          class="select-compact bg-none pr-2 {drawer === 'files' ? '!border-accent !text-accent' : ''}"
+          class="select-compact bg-none pr-2 {drawer === 'files' ? '!border-signal !text-signal' : ''}"
           aria-pressed={drawer === "files"}
           title="files in this agent's sandbox"
           onclick={() => (drawer = drawer === "files" ? "closed" : "files")}
@@ -55,7 +55,7 @@
           files
         </button>
         <button
-          class="select-compact bg-none pr-2 {drawer === 'mcp' ? '!border-accent !text-accent' : ''}"
+          class="select-compact bg-none pr-2 {drawer === 'mcp' ? '!border-signal !text-signal' : ''}"
           aria-pressed={drawer === "mcp"}
           title="tool connections this agent can use"
           onclick={() => (drawer = drawer === "mcp" ? "closed" : "mcp")}
@@ -63,7 +63,7 @@
           tools
         </button>
         <button
-          class="select-compact bg-none pr-2 {drawer === 'context' ? '!border-accent !text-accent' : ''}"
+          class="select-compact bg-none pr-2 {drawer === 'context' ? '!border-signal !text-signal' : ''}"
           aria-pressed={drawer === "context"}
           title="the briefing this agent keeps in mind"
           onclick={() => (drawer = drawer === "context" ? "closed" : "context")}
@@ -92,7 +92,7 @@
       {/if}
     </div>
   {:else}
-    <div class="m-auto grid gap-3 text-center text-muted">
+    <div class="m-auto grid gap-3 text-center text-dim">
       <p class="m-0 max-w-2xl">
         {runtime?.status === "error"
           ? `errored${runtime.error ? `: ${runtime.error.split("\n")[0]}` : ""}`
@@ -100,7 +100,7 @@
       </p>
       <div class="flex justify-center gap-2">
         <button
-          class="cursor-pointer rounded-md bg-accent px-4 py-2 font-semibold text-[#0b0c10] disabled:cursor-default disabled:opacity-60"
+          class="cursor-pointer rounded-md bg-signal px-4 py-2 font-semibold text-on-signal disabled:cursor-default disabled:opacity-60"
           disabled={busy}
           onclick={start}
         >
@@ -108,7 +108,7 @@
         </button>
         {#if runtime?.status === "error"}
           <button
-            class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-2 text-fg"
+            class="cursor-pointer rounded-md border border-edge2 bg-transparent px-4 py-2 text-fg"
             disabled={busy}
             onclick={start}
           >

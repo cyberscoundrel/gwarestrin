@@ -94,52 +94,52 @@
   <div class="fixed inset-0 z-60 bg-black/55" role="presentation"></div>
   <div class="fixed top-1/2 left-1/2 z-61 grid w-[min(36rem,92vw)] -translate-x-1/2 -translate-y-1/2 gap-3 rounded-xl border border-edge2 bg-panel2 p-5" role="dialog" aria-modal="true">
     <div class="grid gap-0.5 pr-6">
-      <span class="truncate text-xs text-muted">
+      <span class="truncate text-xs text-dim">
         request from agent <span class="text-fg">{store.agents.find((a) => a.id === d!.agentId)?.name ?? d!.agentId}</span>
       </span>
       <h3 class="m-0">{d!.title ?? d!.method}</h3>
     </div>
     {#if d!.message}
-      <p class="m-0 text-sm text-muted">{d!.message}</p>
+      <p class="m-0 text-sm text-dim">{d!.message}</p>
     {/if}
 
     {#if d!.method === "select"}
       <div class="flex flex-wrap gap-2">
         {#each d!.options ?? [] as opt}
-          <button class="rounded-md bg-accent px-3 py-1.5 font-medium text-[#0b0c10]" onclick={() => answer(d, { value: opt })}>{opt}</button>
+          <button class="rounded-md bg-signal px-3 py-1.5 font-medium text-on-signal" onclick={() => answer(d, { value: opt })}>{opt}</button>
         {/each}
       </div>
     {:else if d!.method === "confirm"}
       <div class="flex justify-end gap-2">
-        <button class="rounded-md border border-[#333845] bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { confirmed: false })}>no</button>
-        <button class="rounded-md bg-accent px-4 py-1.5 font-semibold text-[#0b0c10]" onclick={() => answer(d, { confirmed: true })}>yes</button>
+        <button class="rounded-md border border-edge2 bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { confirmed: false })}>no</button>
+        <button class="rounded-md bg-signal px-4 py-1.5 font-semibold text-on-signal" onclick={() => answer(d, { confirmed: true })}>yes</button>
       </div>
     {:else if d!.method === "input"}
       <input
-        class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-fg outline-none focus:border-accent"
+        class="rounded-md border border-edge2 bg-bg px-2.5 py-2 text-fg outline-none focus:border-signal"
         placeholder={d!.placeholder ?? ""}
         bind:value={inputValue}
         autofocus
         onkeydown={(e) => e.key === "Enter" && answer(d, { value: inputValue })}
       />
       <div class="flex justify-end gap-2">
-        <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { cancelled: true })}>cancel</button>
-        <button class="cursor-pointer rounded-md bg-accent px-4 py-1.5 font-semibold text-[#0b0c10]" onclick={() => answer(d, { value: inputValue })}>ok</button>
+        <button class="cursor-pointer rounded-md border border-edge2 bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { cancelled: true })}>cancel</button>
+        <button class="cursor-pointer rounded-md bg-signal px-4 py-1.5 font-semibold text-on-signal" onclick={() => answer(d, { value: inputValue })}>ok</button>
       </div>
     {:else if d!.method === "editor"}
       <textarea
-        class="min-h-40 rounded-md border border-edge2 bg-bg px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-accent"
+        class="min-h-40 rounded-md border border-edge2 bg-bg px-2.5 py-2 font-mono text-sm text-fg outline-none focus:border-signal"
         bind:value={editorValue}
         autofocus
       ></textarea>
       <div class="flex justify-end gap-2">
-        <button class="cursor-pointer rounded-md border border-[#333845] bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { cancelled: true })}>cancel</button>
-        <button class="cursor-pointer rounded-md bg-accent px-4 py-1.5 font-semibold text-[#0b0c10]" onclick={() => answer(d, { value: editorValue })}>done</button>
+        <button class="cursor-pointer rounded-md border border-edge2 bg-transparent px-4 py-1.5 text-fg" onclick={() => answer(d, { cancelled: true })}>cancel</button>
+        <button class="cursor-pointer rounded-md bg-signal px-4 py-1.5 font-semibold text-on-signal" onclick={() => answer(d, { value: editorValue })}>done</button>
       </div>
     {/if}
 
     <button
-      class="absolute top-3 right-3 rounded px-1.5 text-muted hover:text-fg"
+      class="absolute top-3 right-3 rounded px-1.5 text-dim hover:text-fg"
       aria-label="dismiss"
       onclick={() => answer(d, { cancelled: true })}
     >
@@ -151,7 +151,7 @@
 <div class="pointer-events-none fixed right-3 bottom-3 z-70 grid gap-2">
   {#each toasts as t (t.id)}
     <div class="rounded-lg border px-3 py-2 text-sm shadow-lg
-      {t.kind === 'error' ? 'border-err bg-[#2a1218] text-err' : t.kind === 'warning' ? 'border-warn bg-[#26200f] text-warn' : 'border-edge bg-panel2 text-fg'}">
+      {t.kind === 'error' ? 'border-err bg-err-soft text-err' : t.kind === 'warning' ? 'border-warn bg-warn-soft text-warn' : 'border-edge bg-panel2 text-fg'}">
       {t.message}
     </div>
   {/each}

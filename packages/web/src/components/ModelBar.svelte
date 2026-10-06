@@ -203,7 +203,7 @@
   {/if}
 
   {#if pct !== null && tok !== null}
-    <span class="ml-auto whitespace-nowrap text-xs {pct > 80 ? 'text-warn' : 'text-muted'}" title="context window usage">
+    <span class="ml-auto whitespace-nowrap text-xs {pct > 80 ? 'text-warn' : 'text-dim'}" title="context window usage">
       ctx {Math.round(pct)}% ({(tok / 1000).toFixed(1)}k)
     </span>
   {:else}
@@ -229,7 +229,7 @@
     {#if models.length > 8}
       <div class="flex items-center gap-2 border-b border-edge p-1.5">
         <input
-          class="min-w-0 flex-1 rounded border border-edge2 bg-bg px-2 py-1 text-sm text-fg outline-none focus:border-accent"
+          class="min-w-0 flex-1 rounded border border-edge2 bg-bg px-2 py-1 text-sm text-fg outline-none focus:border-signal"
           placeholder="type to filter ({models.length})"
           aria-label="filter models"
           bind:value={modelQuery}
@@ -240,7 +240,7 @@
           }}
         />
         {#if models.some((m) => isFreeModelId(m.id))}
-          <label class="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-muted">
+          <label class="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-dim">
             <input type="checkbox" bind:checked={freeOnly} />
             free only
           </label>
@@ -249,22 +249,22 @@
     {/if}
     <div class="min-h-0 overflow-y-auto">
     {#if models.length === 0}
-      <p class="px-3 py-2 text-sm text-muted">no models (agent not running?)</p>
+      <p class="px-3 py-2 text-sm text-dim">no models (agent not running?)</p>
     {:else if grouped.length === 0}
-      <p class="px-3 py-2 text-sm text-muted">no matches</p>
+      <p class="px-3 py-2 text-sm text-dim">no matches</p>
     {:else}
       {#each grouped as [where, list]}
-        <div class="px-3 pt-2 text-xs font-semibold tracking-wide text-muted">{where}</div>
+        <div class="px-3 pt-2 text-xs font-semibold tracking-wide text-dim">{where}</div>
         {#each list as m (m.id)}
           <button
-            class="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-[#1a1d26]
-              {effectiveModel?.provider === m.provider && effectiveModel?.modelId === m.id ? 'text-accent' : 'text-fg'}"
+            class="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-hover
+              {effectiveModel?.provider === m.provider && effectiveModel?.modelId === m.id ? 'text-signal' : 'text-fg'}"
             title="{m.provider}/{m.id}"
             onclick={() => void chooseModel(m.provider, m.id)}
           >
             <!-- same label as the button and rail (no raw file paths) -->
             {m.name && m.name !== m.id ? m.name : modelDisplayName(m.provider, m.id, store.providers)}
-            {#if m.reasoning}<span class="ml-1 text-xs text-muted">reasoning</span>{/if}
+            {#if m.reasoning}<span class="ml-1 text-xs text-dim">reasoning</span>{/if}
           </button>
         {/each}
       {/each}
