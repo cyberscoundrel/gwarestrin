@@ -227,6 +227,9 @@ services:
       GWARESTRIN_STATE: /var/lib/gwarestrin
       GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
       GWARESTRIN_INSTANCE_METADATA: /etc/gwarestrin/instance.json
+      # labeled-sidecar MCP discovery (graph-rag scopes by tenant token; dab
+      # has no per-tenant auth, so this tenant sees the whole SQL database)
+      DOCKER_PROXY_URL: http://docker-proxy:2375
       # OpenShell runtime: drop this line (and the openshell-pki mounts, and
       # restore /dev/kvm + the gondolin cache) to go back to gondolin
       <<: *openshell-tenant-env
@@ -262,6 +265,9 @@ services:
       GWARESTRIN_STATE: /var/lib/gwarestrin
       GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
       GWARESTRIN_INSTANCE_METADATA: /etc/gwarestrin/instance.json
+      # labeled-sidecar MCP discovery (graph-rag scopes by tenant token; dab
+      # has no per-tenant auth, so this tenant sees the whole SQL database)
+      DOCKER_PROXY_URL: http://docker-proxy:2375
       # OpenShell runtime: drop this line (and the openshell-pki mounts, and
       # restore /dev/kvm + the gondolin cache) to go back to gondolin
       <<: *openshell-tenant-env
