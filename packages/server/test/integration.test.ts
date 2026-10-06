@@ -144,4 +144,47 @@ describe("integration: pi agent over mock provider", { timeout: 120_000 }, () =>
     await manager.stop(record.id);
     expect(manager.getRunning(record.id)).toBeUndefined();
   });
+
+  it("a requested stop stays stopped (no crash handling, no auto-restart)", async () => {
+    const record = await manager.createAgent({ name: "stop-stays-stopped", gondolin: { enabled: false } });
+    await manager.start(record.id);
+    const agent = manager.getRunning(record.id)!;
+    expect(agent).toBeDefined();
+
+    await manager.stop(record.id);
+    // wait past the first auto-restart delay (2s) so a misclassified exit
+    // would have restarted the agent by now
+    await new Promise((r) => setTimeout(r, 6_000));
+
+    expect(agent.exited).toBe(true);
+    expect(store.get(record.id)!.status).toBe("stopped");
+    expect(manager.getRunning(record.id)).toBeUndefined();
+    expect(manager.listSummaries().find((s) => s.id === record.id)?.status).toBe("stopped");
+  });
+
+  it("restart() ends with the agent running", async () => {
+    const record = await manager.createAgent({ name: "restart", gondolin: { enabled: false } });
+    await manager.start(record.id);
+    const before = manager.getRunning(record.id)!;
+
+    const summary = await manager.restart(record.id);
+    expect(summary.status).toBe("running");
+
+    // let the old process's exit land; it must not clobber the new instance
+    const deadline = Date.now() + 10_000;
+    while (!before.exited && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    expect(before.exited).toBe(true);
+    await new Promise((r) => setTimeout(r, 500));
+
+    const after = manager.getRunning(record.id);
+    expect(after).toBeDefined();
+    expect(after).not.toBe(before);
+    expect(after!.exited).toBe(false);
+    expect(store.get(record.id)!.status).toBe("running");
+    const ping = await after!.send("get_state");
+    expect(ping.success).toBe(true);
+
+    await manager.stop(record.id);
+    expect(store.get(record.id)!.status).toBe("stopped");
+  });
 });
