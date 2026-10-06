@@ -103,7 +103,9 @@ describe("integration: pi agent over mock provider", { timeout: 120_000 }, () =>
   });
 
   it("boots pi, registers mock provider, drives a prompt to completion", async () => {
-    const record = await manager.createAgent({ name: "integration" });
+    // model loop only, no tools: skip the gondolin VM so this runs without
+    // the extension's deps or KVM
+    const record = await manager.createAgent({ name: "integration", gondolin: { enabled: false } });
     // unset model now defaults to the registry default provider/model
     expect(record.model).toEqual({ provider: "mock", modelId: "mock-1" });
 
