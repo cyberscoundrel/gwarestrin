@@ -53,7 +53,10 @@ import Dropdown from "./Dropdown.svelte";
   });
   $effect(() => {
     if (provider && models.length > 0 && !models.some((m) => m.id === modelId)) {
-      const def = models.find((m) => m.id === store.defaultModel) ?? models[0]!;
+      // workspace default, else a free model if the provider has any (an
+      // unpriced catalogue's first entry may be billed), else the first
+      const def =
+        models.find((m) => m.id === store.defaultModel) ?? models.find((m) => isFreeModelId(m.id)) ?? models[0]!;
       modelId = def.id;
     }
   });
