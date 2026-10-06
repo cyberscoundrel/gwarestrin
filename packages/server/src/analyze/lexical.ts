@@ -11,9 +11,16 @@ const CACHE_MS = 60_000;
 /** entity dictionary: label+name pairs from the graph, cached for 60s */
 export async function entityDictionary(mcp: McpHttpClient): Promise<Array<{ label: string; name: string }>> {
   if (cache && Date.now() - cache.at < CACHE_MS) return cache.names;
-  const text = await mcp.callTool("query_graph", {
-    query: "MATCH (n) WHERE n.name IS NOT NULL RETURN labels(n)[0] AS label, n.name AS name LIMIT 500",
-  });
+  let text: string;
+  try {
+    text = await mcp.callTool("query_graph", {
+      query: "MATCH (n) WHERE n.name IS NOT NULL RETURN labels(n)[0] AS label, n.name AS name LIMIT 500",
+    });
+  } catch {
+    // raw queries are for raw-capable identities only; without the dictionary
+    // the analyst still has semantic search (not cached: may be transient)
+    return [];
+  }
   const names: Array<{ label: string; name: string }> = [];
   try {
     const rows = JSON.parse(text) as Array<{ label?: string; name?: string }>;

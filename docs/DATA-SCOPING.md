@@ -91,14 +91,17 @@ allowed to use it; otherwise defining a profile would escalate privileges.
    notes" vs "for this deal". Both, with standing grants admin-only?
 4. **Per-organization defaults**: which of the above are settings per client?
 
-## Prerequisites (independent of the model)
-Today graph-rag scopes per instance token only, and nothing stops a raw query.
-These need closing first:
-- graph-rag fails *open* when its token map is missing or unreadable at boot;
-- ArcadeDB's HTTP API/Studio is published on host port 2480 with root login,
-  and its built-in MCP accepts any user;
-- raw `query_graph` / `execute_graph` are available to every reader/writer;
-- approving a queued upsert/backfill sends JSON to ArcadeDB as SQL (bug);
-- the context engine gets every graph tool, including writes;
-- DAB runs in development mode (Simulator auth, `anonymous: *`): fine only
-  once each DAB's SQL login is the real boundary.
+## Prerequisites (closed 2026-10-06)
+- graph-rag fails closed: a configured token map that is missing or unreadable
+  denies everyone; open mode needs `GRAPH_RAG_OPEN_MODE=1` and no token map.
+- ArcadeDB's HTTP API/Studio is bound to the docker host's loopback (SSH
+  tunnel for Studio); its built-in MCP is disabled.
+- Raw `query_graph` / `execute_graph` need the `raw` capability (admin tier
+  only) and are not even listed for other identities.
+- Approving a queued upsert/backfill runs its handler (it used to send the
+  JSON payload to ArcadeDB as SQL); a write is only reported queued once the
+  queue record exists.
+- The context engine is offered read tools only (search, schema, and raw
+  query for raw-capable identities).
+- Still open: DAB runs in development mode (Simulator auth, `anonymous: *`),
+  acceptable only once each DAB's SQL login is the real boundary.
