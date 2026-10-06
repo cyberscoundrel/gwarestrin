@@ -21,7 +21,15 @@ import { scoped } from "../util/log.js";
 import { errorCode } from "@nvidia/openshell-sdk";
 import { HttpPathError } from "../util/paths.js";
 import { SandboxFs } from "./openshell-fs.js";
-import { inferenceProfile, mcpProfile, providerNameFor, sandboxPolicy } from "./openshell-policy.js";
+import {
+  agentProviderNameFor,
+  agentSuffix,
+  inferenceProfile,
+  instanceProviderPrefix,
+  mcpProfile,
+  providerNameFor,
+  sandboxPolicy,
+} from "./openshell-policy.js";
 import { type OpenShellProviders, type OpenShellRuntime, sandboxNameFor } from "./openshell.js";
 
 const log = scoped("openshell-agent");
@@ -59,8 +67,8 @@ export interface Launch {
 
 export interface LauncherDeps {
   runtime: Pick<OpenShellRuntime, "ensureSandbox" | "transport" | "deleteSandbox">;
-  providers: Pick<OpenShellProviders, "ensureProfile" | "ensureProvider">;
-  sandbox: Pick<SandboxClient, "exec" | "execStream" | "setPolicy" | "attachProvider">;
+  providers: Pick<OpenShellProviders, "ensureProfile" | "ensureProvider" | "deleteProvider">;
+  sandbox: Pick<SandboxClient, "exec" | "execStream" | "setPolicy" | "attachProvider" | "detachProvider" | "listAllProviders">;
   /** gwarestrin instance (tenant) name; scopes provider instances */
   instance: string;
   workspace?: string;
@@ -143,7 +151,8 @@ export class OpenShellAgentLauncher {
       const token = def.auth === "bearer" && def.bearerTokenEnv ? inp.resolveSecret(def.bearerTokenEnv) : undefined;
       if (def.bearerTokenEnv && token) {
         const profile = mcpProfile({ name: server, url: def.url }, def.bearerTokenEnv);
-        const name = providerNameFor(this.deps.instance, "mcp", server);
+        // per agent: the graph token carries this agent's positions
+        const name = agentProviderNameFor(this.deps.instance, server, record.id);
         await providers.ensureProfile(profile);
         await providers.ensureProvider(name, profile.id!, { [def.bearerTokenEnv]: token });
         providerNames.push(name);
@@ -219,8 +228,21 @@ export class OpenShellAgentLauncher {
   }
 
   async deleteSandbox(agentId: string): Promise<void> {
-    this.workspaceRoots.delete(sandboxNameFor(agentId));
+    const sandbox = sandboxNameFor(agentId);
+    this.workspaceRoots.delete(sandbox);
+    const own = await this.attached(sandbox)
+      .then((names) => names.filter((n) => n.endsWith(`-${agentSuffix(agentId)}`)))
+      .catch(() => [] as string[]);
     await this.deps.runtime.deleteSandbox(agentId);
+    // this agent's own credentials (its graph token) go with it
+    for (const name of own) {
+      await this.deps.providers.deleteProvider(name).catch((err) => log.warn(`provider ${name} not deleted: ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+
+  private async attached(sandbox: string): Promise<string[]> {
+    const scope = this.deps.workspace ? { workspace: this.deps.workspace } : {};
+    return (await this.deps.sandbox.listAllProviders(sandbox, scope)).map((p) => p.name);
   }
 
   /** File access to the agent's workspace inside its sandbox (the files API on this runtime). */
@@ -259,6 +281,18 @@ export class OpenShellAgentLauncher {
         const msg = err instanceof Error ? err.message : String(err);
         if (!/already/i.test(msg)) log.warn(`attach ${name} to ${sandbox} failed: ${msg}`);
       }
+    }
+    // drop this instance's providers the agent should no longer have (e.g. the
+    // shared instance graph token from before per-agent tokens)
+    try {
+      const prefix = instanceProviderPrefix(this.deps.instance);
+      const stale = (await this.attached(sandbox)).filter((n) => n.startsWith(prefix) && !providerNames.includes(n));
+      for (const name of stale) {
+        await this.deps.sandbox.detachProvider(sandbox, name, scope);
+        log.info(`detached ${name} from ${sandbox}`);
+      }
+    } catch (err) {
+      log.warn(`provider cleanup for ${sandbox} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

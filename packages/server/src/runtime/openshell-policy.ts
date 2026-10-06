@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * Builders for the OpenShell objects an agent sandbox needs:
  *  - provider profiles + instances that hold real credentials (model API keys,
@@ -46,6 +47,21 @@ export function profileIdFor(kind: "llm" | "mcp", name: string): string {
 export function providerNameFor(instance: string, kind: "llm" | "mcp", name: string): string {
   return `gw-${slug(instance)}-${kind}-${slug(name)}`;
 }
+
+/**
+ * MCP credentials are per agent (an agent's graph token carries its profile's
+ * positions), so their providers are too: attached to that agent's sandbox only.
+ */
+export function agentProviderNameFor(instance: string, name: string, agentId: string): string {
+  return `${providerNameFor(instance, "mcp", name)}-${agentSuffix(agentId)}`;
+}
+
+export function agentSuffix(agentId: string): string {
+  return createHash("sha256").update(agentId).digest("hex").slice(0, 8);
+}
+
+/** every provider this instance manages starts with this */
+export const instanceProviderPrefix = (instance: string): string => `gw-${slug(instance)}-`;
 
 function isPrivateIp(host: string): boolean {
   const v = isIP(host);
