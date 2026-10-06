@@ -37,7 +37,9 @@
   <AgentHeader {agentId} ondrawer={(d) => (drawer = d)} />
   {#if runtime?.status === "running" || runtime?.status === "starting"}
     <div class="relative flex flex-wrap items-center gap-2 border-b border-edge bg-panel px-2">
-      <div class="flex min-w-0 flex-1 items-center">
+      <!-- narrow screens: the model bar gets its own full-width row so the
+           model name stays readable instead of truncating to a few letters -->
+      <div class="flex min-w-0 flex-1 items-center max-[900px]:basis-full">
         <div class="relative min-w-0 flex-1">
           <ModelBar {agentId} />
         </div>
