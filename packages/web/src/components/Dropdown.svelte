@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { Check } from "lucide";
+  import Icon from "./Icon.svelte";
+
   let {
     value,
     options,
@@ -84,13 +87,13 @@
   {#if open}
     <div
       class="absolute {align === 'right' ? 'right-0' : 'left-0'} z-30 mt-1 flex max-h-80 w-max min-w-full max-w-[min(32rem,calc(100vw-2rem))]
-        flex-col overflow-hidden rounded-lg border border-edge2 bg-panel2 shadow-xl"
+        flex-col overflow-hidden rounded-xl border border-edge2 bg-panel2 p-1 shadow-overlay animate-pop"
     >
       {#if showSearch}
         <div class="flex items-center gap-2 border-b border-edge p-1.5">
           <input
-            class="min-w-0 flex-1 rounded border border-edge2 bg-bg px-2 py-1 text-sm text-fg outline-none focus:border-accent"
-            placeholder="type to filter ({options.length})"
+            class="input h-7"
+            placeholder="Filter {options.length}"
             aria-label="filter {label ?? 'options'}"
             bind:value={query}
             use:focusOnMount
@@ -99,7 +102,7 @@
             }}
           />
           {#if quickFilter}
-            <label class="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-muted">
+            <label class="flex shrink-0 cursor-pointer items-center gap-1 text-xs text-dim">
               <input type="checkbox" bind:checked={quickOn} />
               {quickFilter.label}
             </label>
@@ -109,17 +112,18 @@
       <div class="min-h-0 overflow-y-auto" role="listbox">
         {#each visible as o (o.value)}
           <button
-            class="block w-full whitespace-nowrap truncate px-3 py-1.5 text-left text-sm
-              {o.value === value ? 'text-accent' : 'text-fg'} hover:bg-[#1a1d26]"
+            class="flex w-full cursor-pointer items-center gap-2 truncate rounded-md px-2 py-1.5 text-left text-sm whitespace-nowrap transition-colors
+              {o.value === value ? 'text-fg' : 'text-dim'} hover:bg-hover hover:text-fg"
             role="option"
             aria-selected={o.value === value}
             title={o.label !== o.value ? o.value : undefined}
             onclick={() => choose(o.value)}
           >
-            {o.label}
+            <span class="w-3.5 shrink-0">{#if o.value === value}<Icon icon={Check} size={14} class="text-signal" />{/if}</span>
+            <span class="truncate">{o.label}</span>
           </button>
         {:else}
-          <p class="m-0 px-3 py-2 text-sm text-muted">no matches</p>
+          <p class="m-0 px-3 py-2 text-sm text-faint">No matches</p>
         {/each}
       </div>
     </div>

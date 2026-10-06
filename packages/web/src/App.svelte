@@ -7,6 +7,8 @@
   import NewChat from "./components/NewChat.svelte";
   import ExtensionDialogs from "./components/ExtensionDialogs.svelte";
   import ProfileEditor from "./components/ProfileEditor.svelte";
+  import Icon from "./components/Icon.svelte";
+  import { Menu, X } from "lucide";
 
   let drawerOpen = $state(false);
   let createProfileId = $state<string | null>(null);
@@ -78,99 +80,91 @@
   });
 </script>
 
+
 {#snippet offlineBanner()}
   {#if offline}
-    <div role="status" class="border-b border-err/40 bg-[#2a1218] px-3 py-1.5 text-center text-xs text-err">
-      can't reach the workspace server — retrying. agents and settings shown may be out of date.
+    <div role="status" class="flex items-center justify-center gap-2 border-b border-edge bg-err-soft px-3 py-1.5 text-xs text-err">
+      <span class="h-1.5 w-1.5 rounded-full bg-err" aria-hidden="true"></span>
+      Can't reach the workspace server. Retrying; what you see may be out of date.
     </div>
   {/if}
 {/snippet}
 
+{#snippet mainView()}
+  {@render offlineBanner()}
+  {#if store.editingProfileId}
+    <!-- remount per profile: the editor seeds its form once -->
+    {#key store.editingProfileId}
+      <ProfileEditor profileId={store.editingProfileId} onclose={() => (store.editingProfileId = null)} />
+    {/key}
+  {:else if store.showNewChat || !store.selected}
+    <NewChat preselectProfileId={createProfileId} />
+  {:else if store.selected}
+    <ChatView agentId={store.selected.id} agentName={store.selected.name} />
+  {/if}
+{/snippet}
+
 {#if !mobile}
-  <div class="grid h-screen grid-cols-[240px_1fr] grid-rows-[minmax(0,1fr)] overflow-hidden">
-    <aside class="min-h-0 overflow-y-auto border-r border-edge bg-panel">
+  <div class="grid h-screen grid-cols-[248px_minmax(0,1fr)] grid-rows-[minmax(0,1fr)] overflow-hidden bg-bg">
+    <aside class="min-h-0 border-r border-edge bg-panel">
       <AgentRail oncreate={() => openCreate()} oneditprofile={(id) => openProfileEditor(id)} />
     </aside>
     <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
-      {@render offlineBanner()}
-      {#if store.editingProfileId}
-        <!-- remount per profile: the editor seeds its form once -->
-        {#key store.editingProfileId}
-          <ProfileEditor
-            profileId={store.editingProfileId}
-            onclose={() => (store.editingProfileId = null)}
-          />
-        {/key}
-      {:else if store.showNewChat || !store.selected}
-        <NewChat preselectProfileId={createProfileId} />
-      {:else if store.selected}
-        <ChatView agentId={store.selected.id} agentName={store.selected.name} />
-      {/if}
+      {@render mainView()}
     </main>
   </div>
 {:else}
-  <div class="grid h-dvh grid-rows-[48px_minmax(0,1fr)] overflow-hidden">
-    <header class="flex items-center gap-3 border-b border-edge bg-panel px-3">
+  <div class="grid h-dvh grid-rows-[48px_minmax(0,1fr)] overflow-hidden bg-bg">
+    <header class="flex items-center gap-2 border-b border-edge bg-panel px-2">
       <button
-        class="cursor-pointer border-none bg-transparent px-2 py-1 text-xl text-fg"
+        class="grid h-8 w-8 cursor-pointer place-items-center rounded-md text-dim transition-colors hover:bg-hover hover:text-fg"
         aria-label="menu"
+        aria-expanded={drawerOpen}
         onclick={() => (drawerOpen = true)}
       >
-        ☰
+        <Icon icon={Menu} size={18} />
       </button>
-      <span class="min-w-0 truncate font-semibold {mobileTitle ? '' : 'tracking-widest'}">{mobileTitle ?? "ground chat"}</span>
+      <span class="min-w-0 truncate text-sm font-medium text-fg {mobileTitle ? '' : 'font-semibold tracking-[0.06em]'}">
+        {mobileTitle ?? "ground chat"}
+      </span>
       <span
-        class="ml-auto h-2 w-2 rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
+        class="mr-2 ml-auto h-1.5 w-1.5 rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
         role="img"
         aria-label={store.wsStatus === "open" ? "connected" : "disconnected"}
-        title={store.wsStatus === "open" ? "connected" : "disconnected"}
+        title={store.wsStatus === "open" ? "Connected" : "Disconnected"}
       ></span>
     </header>
     {#if drawerOpen}
-      <div class="fixed inset-0 z-39 bg-black/50" onclick={() => (drawerOpen = false)} role="presentation"></div>
-      <aside class="fixed top-0 bottom-0 left-0 z-40 flex w-[min(280px,80vw)] flex-col border-r border-edge bg-panel">
-        <div class="flex justify-end px-3 pt-2">
-          <button
-            class="cursor-pointer rounded border-none bg-transparent px-1.5 text-muted hover:text-fg"
-            aria-label="close menu"
-            onclick={() => (drawerOpen = false)}
-          >
-            ✕
-          </button>
-        </div>
-        <div class="min-h-0 flex-1">
-          <AgentRail
-            oncreate={() => {
-              openCreate();
-              drawerOpen = false;
-            }}
-            oneditprofile={(id) => {
-              openProfileEditor(id);
-              drawerOpen = false;
-            }}
-            onnavigate={() => (drawerOpen = false)}
-          />
-        </div>
+      <div class="animate-fade fixed inset-0 z-39 bg-scrim" onclick={() => (drawerOpen = false)} role="presentation"></div>
+      <aside
+        class="animate-drawer fixed top-0 bottom-0 left-0 z-40 w-[min(288px,84vw)] border-r border-edge bg-panel shadow-overlay"
+        aria-label="navigation"
+      >
+        <button
+          class="absolute top-2 right-2 z-10 grid h-8 w-8 cursor-pointer place-items-center rounded-md text-dim transition-colors hover:bg-hover hover:text-fg"
+          aria-label="close menu"
+          onclick={() => (drawerOpen = false)}
+        >
+          <Icon icon={X} size={16} />
+        </button>
+        <AgentRail
+          inDrawer
+          oncreate={() => {
+            openCreate();
+            drawerOpen = false;
+          }}
+          oneditprofile={(id) => {
+            openProfileEditor(id);
+            drawerOpen = false;
+          }}
+          onnavigate={() => (drawerOpen = false)}
+        />
       </aside>
     {/if}
     <main class="flex min-h-0 min-w-0 flex-col overflow-hidden">
-      {@render offlineBanner()}
-      {#if store.editingProfileId}
-        <!-- remount per profile: the editor seeds its form once -->
-        {#key store.editingProfileId}
-          <ProfileEditor
-            profileId={store.editingProfileId}
-            onclose={() => (store.editingProfileId = null)}
-          />
-        {/key}
-      {:else if store.showNewChat || !store.selected}
-        <NewChat preselectProfileId={createProfileId} />
-      {:else if store.selected}
-        <ChatView agentId={store.selected.id} agentName={store.selected.name} />
-      {/if}
+      {@render mainView()}
     </main>
   </div>
 {/if}
-
 
 <ExtensionDialogs />

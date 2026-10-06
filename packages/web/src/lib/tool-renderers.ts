@@ -1,11 +1,15 @@
 /**
- * Readable cards for pi's built-in file/shell tools, registered through
- * pi-web-ui's public renderer registry (no fork). Without these, `write`,
- * `read` and `edit` fall back to a raw "Tool Call" JSON card, and pi-web-ui's
- * bash card keeps saying "Running command..." after the command finished.
+ * Graphite tool cards for pi's built-in shell/file tools, registered through
+ * pi-web-ui's public registerToolRenderer (no fork).
+ *
+ * One card shape for every tool: a summary row (state glyph, tool icon, what
+ * happened, the command/path in mono) and, when there is output, a native
+ * <details> body - collapsible without JS and the open/closed state survives
+ * Lit re-renders. Mono is used only for the command/path and the output.
  */
-import { registerToolRenderer, renderHeader } from "@earendil-works/pi-web-ui";
-import { html } from "lit";
+import { registerToolRenderer } from "@earendil-works/pi-web-ui";
+import { html, svg, type TemplateResult } from "lit";
+import { ChevronRight, FilePen, FileText, Pencil, SquareTerminal, type IconNode } from "lucide";
 
 type State = "inprogress" | "complete" | "error";
 interface ToolResultLike {
@@ -13,20 +17,36 @@ interface ToolResultLike {
   content?: Array<{ type: string; text?: string }>;
 }
 
-// simple line icons (lucide-style IconNode: [tag, attrs][])
-const TerminalIcon = [
-  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2" }],
-  ["path", { d: "M7 9l3 3-3 3" }],
-  ["path", { d: "M12 15h5" }],
-];
-const FileIcon = [
-  ["path", { d: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" }],
-  ["path", { d: "M14 3v6h6" }],
-];
-const PenIcon = [
-  ["path", { d: "M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" }],
-  ["path", { d: "M18.5 2.5a2.1 2.1 0 0 1 3 3L13 14l-4 1 1-4z" }],
-];
+function iconTpl(node: IconNode, cls = ""): TemplateResult {
+  return html`<svg
+    class="gw-icon ${cls}"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="1.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    aria-hidden="true"
+  >
+    ${node.map(([tag, attrs]) => {
+      const a = attrs as Record<string, string>;
+      switch (tag) {
+        case "path":
+          return svg`<path d=${a.d ?? ""} />`;
+        case "rect":
+          return svg`<rect x=${a.x ?? 0} y=${a.y ?? 0} width=${a.width ?? 0} height=${a.height ?? 0} rx=${a.rx ?? 0} />`;
+        case "circle":
+          return svg`<circle cx=${a.cx ?? 0} cy=${a.cy ?? 0} r=${a.r ?? 0} />`;
+        case "line":
+          return svg`<line x1=${a.x1 ?? 0} y1=${a.y1 ?? 0} x2=${a.x2 ?? 0} y2=${a.y2 ?? 0} />`;
+        case "polyline":
+          return svg`<polyline points=${a.points ?? ""} />`;
+        default:
+          return svg``;
+      }
+    })}
+  </svg>`;
+}
 
 /** tool-call arguments arrive as an object, or as a JSON string while streaming */
 function args(params: unknown): Record<string, unknown> {
@@ -54,18 +74,45 @@ function outputText(result: ToolResultLike | undefined): string {
     .join("\n");
 }
 
-function clip(text: string, maxLines = 40): string {
+function clip(text: string, maxLines = 400): string {
   const lines = text.split("\n");
   return lines.length > maxLines ? `${lines.slice(0, maxLines).join("\n")}\n… (${lines.length - maxLines} more lines)` : text;
 }
 
-const card = (header: unknown, body?: unknown) => ({
-  content: html`<div class="space-y-3">${header}${body ?? ""}</div>`,
-  isCustom: false,
-});
+function glyph(state: State): TemplateResult {
+  if (state === "inprogress") return html`<span class="gw-tool-spin" aria-label="running"></span>`;
+  return html`<span class="gw-tool-dot" data-state=${state} aria-label=${state === "error" ? "failed" : "done"}></span>`;
+}
+
+function card(opts: {
+  state: State;
+  icon: IconNode;
+  title: string;
+  detail?: string | undefined;
+  body?: TemplateResult | undefined;
+  open?: boolean;
+}) {
+  const head = html`${glyph(opts.state)}${iconTpl(opts.icon, "gw-tool-icon")}
+    <span class="gw-tool-title">${opts.title}</span>
+    ${opts.detail ? html`<code class="gw-tool-detail" title=${opts.detail}>${opts.detail}</code>` : ""}`;
+  const content = opts.body
+    ? html`<details class="gw-tool" data-state=${opts.state} ?open=${opts.open ?? false}>
+        <summary class="gw-tool-head">${head}${iconTpl(ChevronRight, "gw-tool-chevron")}</summary>
+        <div class="gw-tool-body">${opts.body}</div>
+      </details>`
+    : html`<div class="gw-tool" data-state=${opts.state}><div class="gw-tool-head">${head}</div></div>`;
+  return { content, isCustom: true };
+}
+
+const consoleOut = (text: string, state: State) =>
+  html`<console-block .content=${clip(text)} .variant=${state === "error" ? "error" : "default"}></console-block>`;
 
 function label(state: State, running: string, done: string, failed: string): string {
   return state === "inprogress" ? running : state === "error" ? failed : done;
+}
+
+function pathOf(a: Record<string, unknown>): string | undefined {
+  return typeof a.path === "string" ? a.path : typeof a.file_path === "string" ? a.file_path : undefined;
 }
 
 export function registerGwToolRenderers(): void {
@@ -73,13 +120,15 @@ export function registerGwToolRenderers(): void {
     render(params: unknown, result: ToolResultLike | undefined, isStreaming?: boolean) {
       const a = args(params);
       const state = stateOf(result, isStreaming);
-      const command = typeof a.command === "string" ? a.command : "";
       const out = outputText(result);
-      const text = command ? (out ? `> ${command}\n\n${out}` : `> ${command}`) : out;
-      return card(
-        renderHeader(state, TerminalIcon, label(state, "Running command…", "Ran command", "Command failed")),
-        text ? html`<console-block .content=${text} .variant=${state === "error" ? "error" : "default"}></console-block>` : "",
-      );
+      return card({
+        state,
+        icon: SquareTerminal,
+        title: label(state, "Running", "Ran", "Failed"),
+        detail: typeof a.command === "string" ? a.command : undefined,
+        body: out ? consoleOut(out, state) : undefined,
+        open: true,
+      });
     },
   });
 
@@ -87,14 +136,18 @@ export function registerGwToolRenderers(): void {
     render(params: unknown, result: ToolResultLike | undefined, isStreaming?: boolean) {
       const a = args(params);
       const state = stateOf(result, isStreaming);
-      const path = typeof a.path === "string" ? a.path : "file";
       const content = typeof a.content === "string" ? a.content : "";
       const out = outputText(result);
-      return card(
-        renderHeader(state, PenIcon, label(state, `Writing ${path}…`, `Wrote ${path}`, `Couldn't write ${path}`)),
-        html`${content ? html`<console-block .content=${clip(content)}></console-block>` : ""}
-          ${out ? html`<div class="text-xs ${state === "error" ? "text-destructive" : "text-muted-foreground"}">${out}</div>` : ""}`,
-      );
+      return card({
+        state,
+        icon: FilePen,
+        title: label(state, "Writing", "Wrote", "Couldn't write"),
+        detail: pathOf(a),
+        body:
+          content || out
+            ? html`${content ? consoleOut(content, state) : ""}${out ? html`<p class="gw-tool-note">${out}</p>` : ""}`
+            : undefined,
+      });
     },
   });
 
@@ -102,12 +155,14 @@ export function registerGwToolRenderers(): void {
     render(params: unknown, result: ToolResultLike | undefined, isStreaming?: boolean) {
       const a = args(params);
       const state = stateOf(result, isStreaming);
-      const path = typeof a.path === "string" ? a.path : "file";
       const out = outputText(result);
-      return card(
-        renderHeader(state, FileIcon, label(state, `Reading ${path}…`, `Read ${path}`, `Couldn't read ${path}`)),
-        out ? html`<console-block .content=${clip(out)} .variant=${state === "error" ? "error" : "default"}></console-block>` : "",
-      );
+      return card({
+        state,
+        icon: FileText,
+        title: label(state, "Reading", "Read", "Couldn't read"),
+        detail: pathOf(a),
+        body: out ? consoleOut(out, state) : undefined,
+      });
     },
   });
 
@@ -115,12 +170,14 @@ export function registerGwToolRenderers(): void {
     render(params: unknown, result: ToolResultLike | undefined, isStreaming?: boolean) {
       const a = args(params);
       const state = stateOf(result, isStreaming);
-      const path = typeof a.path === "string" ? a.path : "file";
       const out = outputText(result);
-      return card(
-        renderHeader(state, PenIcon, label(state, `Editing ${path}…`, `Edited ${path}`, `Couldn't edit ${path}`)),
-        out ? html`<console-block .content=${clip(out)} .variant=${state === "error" ? "error" : "default"}></console-block>` : "",
-      );
+      return card({
+        state,
+        icon: Pencil,
+        title: label(state, "Editing", "Edited", "Couldn't edit"),
+        detail: pathOf(a),
+        body: out ? consoleOut(out, state) : undefined,
+      });
     },
   });
 }

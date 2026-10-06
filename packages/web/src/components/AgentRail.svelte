@@ -1,14 +1,19 @@
 <script lang="ts">
+  import { ChevronRight, Inbox, Pencil, Plus, UserPlus, X } from "lucide";
   import { store } from "../lib/stores.svelte.js";
   import { modelDisplayName } from "../lib/format.js";
   import DeleteAgentModal from "./DeleteAgentModal.svelte";
   import GraphQueuePanel from "./GraphQueuePanel.svelte";
+  import Icon from "./Icon.svelte";
 
   let {
     oncreate,
     onnavigate,
     oneditprofile,
+    inDrawer = false,
   }: {
+    /** rendered in the mobile drawer (leaves room for its close button) */
+    inDrawer?: boolean;
     oncreate?: () => void;
     onnavigate?: () => void;
     oneditprofile?: (id: string) => void;
@@ -18,17 +23,18 @@
   let showReview = $state(false);
   let collapsed = $state<Record<string, boolean>>({});
 
-  function statusColor(status: string): string {
+  function statusDot(status: string): { cls: string; label: string } {
     switch (status) {
       case "running":
-        return "bg-ok";
+        return { cls: "bg-ok", label: "running" };
       case "streaming":
+        return { cls: "bg-signal animate-working", label: "working" };
       case "starting":
-        return "bg-warn animate-pulse";
+        return { cls: "bg-warn animate-working", label: "starting" };
       case "error":
-        return "bg-err";
+        return { cls: "bg-err", label: "error" };
       default:
-        return "bg-[#565f89]";
+        return { cls: "bg-edge2", label: "stopped" };
     }
   }
 
@@ -37,120 +43,125 @@
       ? store.profiles
       : [{ id: "default", name: "Default" } as import("@gwarestrin/shared").ProfileRecord],
   );
+
+  const ghost =
+    "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm text-dim transition-colors hover:bg-hover hover:text-fg";
 </script>
 
-<nav class="flex h-full flex-col gap-3 px-2 py-3">
-  <div class="flex items-center gap-2 px-2">
+<nav class="flex h-full flex-col" aria-label="agents">
+  <!-- wordmark -->
+  <div class="flex h-12 shrink-0 items-center gap-2 px-4 {inDrawer ? 'pr-12' : ''}">
     <svg viewBox="0 0 24 24" class="h-4 w-4 text-fg" aria-hidden="true">
-      <path d="M12 3v9M7 14h10M8.5 17h7M10 20h4" stroke="currentColor" stroke-width="1.7" fill="none" stroke-linecap="round" />
+      <path d="M12 3v9M7 14h10M8.5 17h7M10 20h4" stroke="currentColor" stroke-width="1.75" fill="none" stroke-linecap="round" />
     </svg>
-    <span class="font-bold tracking-[0.12em]">ground chat</span>
+    <span class="text-sm font-semibold tracking-[0.06em] text-fg">ground chat</span>
     <span
-      class="h-[7px] w-[7px] rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
+      class="ml-auto h-1.5 w-1.5 rounded-full {store.wsStatus === 'open' ? 'bg-ok' : 'bg-err'}"
       role="img"
       aria-label={store.wsStatus === "open" ? "connected" : "disconnected"}
-      title={store.wsStatus === "open" ? "connected to server" : "disconnected from server"}
+      title={store.wsStatus === "open" ? "Connected to the workspace server" : "Disconnected from the workspace server"}
     ></span>
   </div>
 
-  <div class="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
+  <!-- agent profiles > agents -->
+  <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pt-1 pb-4">
     {#each groupedProfiles as profile (profile.id)}
       {@const members = store.agentsInProfile(profile.id)}
       {@const isCollapsed = collapsed[profile.id] ?? false}
-      <div class="rounded-md">
-        <div class="group grid grid-cols-[14px_1fr_auto] items-center gap-1 rounded-md px-2 py-1.5 hover:bg-[#1a1d26]">
+      <section class="flex flex-col gap-0.5">
+        <div class="group flex items-center gap-1 pr-1">
           <button
-            class="cursor-pointer border-none bg-transparent p-0 text-[0.7rem] text-muted transition-transform {isCollapsed ? '' : 'rotate-90'}"
-            aria-label="show or hide agents in {profile.name}"
+            class="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs font-medium text-faint transition-colors hover:text-fg"
+            aria-expanded={!isCollapsed}
+            title={profile.description ?? profile.name}
             onclick={() => (collapsed[profile.id] = !isCollapsed)}
           >
-            ▶
+            <Icon icon={ChevronRight} size={12} class="transition-transform duration-150 {isCollapsed ? '' : 'rotate-90'}" />
+            <span class="truncate">{profile.name}</span>
+            <span class="tabular ml-auto text-2xs text-faint">{members.length}</span>
           </button>
           <button
-            class="cursor-pointer overflow-hidden truncate border-none bg-transparent p-0 text-left text-[0.85rem] font-semibold tracking-wide text-fg"
-            title={profile.description ?? profile.name}
-            onclick={() => oneditprofile?.(profile.id)}
-          >
-            {profile.name}
-          </button>
-          <button
-            class="cursor-pointer rounded border-none bg-transparent px-1 text-[0.7rem] text-muted hover:text-fg"
-            title="edit agent profile"
+            class="grid h-6 w-6 cursor-pointer place-items-center rounded-md text-faint opacity-0 transition hover:bg-hover hover:text-fg
+              group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100"
+            title="Edit agent profile"
             aria-label="edit agent profile {profile.name}"
             onclick={() => oneditprofile?.(profile.id)}
           >
-            ✎
+            <Icon icon={Pencil} size={13} />
           </button>
         </div>
+
         {#if !isCollapsed}
           {#if members.length === 0}
-            <div class="px-6 py-1 text-[0.78rem] text-muted italic">no agents</div>
+            <p class="m-0 px-2 py-1 pl-7 text-xs text-faint">No agents yet</p>
           {/if}
-          <ul class="m-0 list-none border-l border-edge/60 p-0 ml-4">
+          <ul class="m-0 flex list-none flex-col gap-px p-0">
             {#each members as a (a.id)}
+              {@const dot = statusDot(store.isWorking(a.id) && a.status === "running" ? "streaming" : a.status)}
+              {@const selected = a.id === store.selectedId && !store.editingProfileId && !store.showNewChat}
               <li class="group relative">
                 <button
-                  class="grid w-full grid-cols-[10px_1fr_auto] items-center gap-2 rounded-md px-2.5 py-2 text-left pointer-coarse:pr-8
-                    text-[0.9rem] text-fg cursor-pointer border-none bg-transparent hover:bg-[#1a1d26]
-                    {a.id === store.selectedId && !store.editingProfileId ? 'bg-[#20242f]' : ''}"
+                  class="grid w-full cursor-pointer grid-cols-[16px_1fr_auto] items-center gap-x-1.5 rounded-md py-1.5 pr-2 pl-1.5 text-left
+                    transition-colors pointer-coarse:pr-9 {selected ? 'bg-selected text-fg' : 'text-fg hover:bg-hover'}"
+                  aria-current={selected ? "page" : undefined}
                   onclick={() => {
                     store.select(a.id);
                     onnavigate?.();
                   }}
                 >
-                  <span class="h-2 w-2 rounded-full {statusColor(a.status)}"></span>
-                  <span class="truncate pr-4">{a.name}</span>
+                  <span class="mx-auto h-1.5 w-1.5 rounded-full {dot.cls}" role="img" aria-label={dot.label} title={dot.label}></span>
+                  <span class="truncate text-sm">{a.name}</span>
                   {#if a.unread > 0 && a.id !== store.selectedId}
-                    <span class="rounded-full bg-accent px-1.5 text-[0.7rem] font-bold text-[#0b0c10] group-hover:hidden">
+                    <span
+                      class="tabular rounded-full bg-signal-soft px-1.5 text-2xs font-medium text-signal group-hover:invisible"
+                      aria-label="{a.unread} unread"
+                    >
                       {a.unread > 99 ? "99+" : a.unread}
                     </span>
                   {/if}
                   {#if a.model}
-                    <span class="col-start-2 truncate text-[0.7rem] text-muted" title={a.model.modelId}>
+                    <span class="col-start-2 truncate font-mono text-2xs text-faint" title="{a.model.provider}/{a.model.modelId}">
                       {modelDisplayName(a.model.provider, a.model.modelId, store.providers)}
                     </span>
                   {/if}
                 </button>
                 <button
-                  class="absolute top-1.5 right-1.5 hidden rounded px-1 text-xs text-muted hover:bg-[#2a1218] hover:text-err
-                    group-hover:block group-focus-within:block pointer-coarse:block pointer-coarse:px-2 pointer-coarse:py-1"
-                  title="delete {a.name}"
+                  class="absolute top-1.5 right-1.5 grid h-6 w-6 cursor-pointer place-items-center rounded-md text-faint opacity-0 transition
+                    hover:bg-err-soft hover:text-err group-hover:opacity-100 focus-visible:opacity-100 pointer-coarse:opacity-100"
+                  title="Delete {a.name}"
                   aria-label="delete {a.name}"
                   onclick={(e) => {
                     e.stopPropagation();
                     deleteTarget = { id: a.id, name: a.name };
                   }}
                 >
-                  ✕
+                  <Icon icon={X} size={13} />
                 </button>
               </li>
             {/each}
           </ul>
         {/if}
-      </div>
+      </section>
     {/each}
   </div>
 
-  <div class="flex flex-col gap-1">
+  <!-- actions: one primary, two quiet -->
+  <div class="flex shrink-0 flex-col gap-0.5 border-t border-edge p-2">
     <button
-      class="cursor-pointer rounded-md border border-dashed border-[#333845] bg-transparent px-4 py-2 text-muted
-        hover:border-accent hover:text-fg"
+      class="mb-1 flex w-full cursor-pointer items-center justify-center gap-2 rounded-md border border-edge2 bg-panel2 px-3 py-1.5 text-sm font-medium text-fg
+        transition-colors hover:border-faint {store.showNewChat ? 'border-signal' : ''}"
       onclick={() => oncreate?.()}
     >
-      + new agent
+      <Icon icon={Plus} size={14} />
+      New agent
     </button>
-    <button
-      class="cursor-pointer rounded-md border border-dashed border-[#333845] bg-transparent px-4 py-1 text-xs text-muted
-        hover:border-accent hover:text-fg"
-      onclick={() => oneditprofile?.("new")}
-    >
-      + new agent profile
+    <button class={ghost} onclick={() => oneditprofile?.("new")}>
+      <Icon icon={UserPlus} size={14} />
+      New agent profile
     </button>
-    <button
-      class="cursor-pointer rounded-md border-none bg-transparent px-4 py-1 text-xs text-muted hover:text-fg"
-      onclick={() => (showReview = true)}
-    >
-      approvals
+    <button class={ghost} onclick={() => (showReview = true)}>
+      <Icon icon={Inbox} size={14} />
+      Approvals
     </button>
   </div>
 </nav>
