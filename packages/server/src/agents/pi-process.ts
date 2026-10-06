@@ -1,7 +1,7 @@
-import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { createLfLineSplitter } from "../util/lf-splitter.js";
 import { scoped } from "../util/log.js";
+import { type LocalSpawnOptions, type PiExitInfo, type PiTransport, type PiTransportFactory, localTransport } from "./pi-transport.js";
 
 const log = scoped("pi-process");
 
@@ -20,21 +20,23 @@ export interface PiProcessEvents {
   line: [line: PiLine];
   response: [response: RpcResponse];
   event: [event: PiLine];
-  exit: [info: { code: number | null; signal: NodeJS.Signals | null; crashed: boolean }];
+  exit: [info: PiExitInfo];
   stderr: [text: string];
 }
 
-export interface SpawnOptions {
-  cliPath: string;
-  args: string[];
-  cwd: string;
-  env: Record<string, string>;
+export interface SpawnOptions extends LocalSpawnOptions {
+  /** response timeout per command (ms) */
+  requestTimeoutMs?: number;
+}
+
+export interface TransportOptions {
+  transport: PiTransportFactory;
   /** response timeout per command (ms) */
   requestTimeoutMs?: number;
 }
 
 /**
- * Child `pi --mode rpc` process with:
+ * `pi --mode rpc` over a PiTransport (host child process by default) with:
  *  - strict LF-only JSONL framing (rpc.md: readline is non-compliant, it
  *    splits on U+2028/U+2029 which are legal inside JSON strings)
  *  - id-correlated request/response with timeouts
@@ -42,7 +44,7 @@ export interface SpawnOptions {
  */
 export class PiProcess extends EventEmitter<PiProcessEvents> {
   readonly pid: number | undefined;
-  private child: ChildProcess;
+  private transport: PiTransport;
   private pending = new Map<string, { resolve: (r: RpcResponse) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
   private nextId = 1;
   private stderrTail = "";
@@ -51,33 +53,22 @@ export class PiProcess extends EventEmitter<PiProcessEvents> {
   private stdinQueue: string[] = [];
   private stdinBusy = false;
 
-  constructor(opts: SpawnOptions) {
+  constructor(opts: SpawnOptions | TransportOptions) {
     super();
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 60_000;
-    this.child = spawn(process.execPath, [opts.cliPath, ...opts.args], {
-      cwd: opts.cwd,
-      env: { ...process.env, ...opts.env },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    this.pid = this.child.pid;
+    const factory = "transport" in opts ? opts.transport : localTransport(opts);
 
     const splitter = createLfLineSplitter((line) => this.handleLine(line));
-    this.child.stdout!.on("data", (chunk: Buffer) => splitter.feed(chunk));
-    this.child.stdout!.on("end", () => splitter.flush());
-
-    this.child.stderr!.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf8");
-      this.stderrTail = (this.stderrTail + text).slice(-8192);
-      this.emit("stderr", text);
+    this.transport = factory({
+      stdout: (chunk) => splitter.feed(chunk),
+      stdoutEnd: () => splitter.flush(),
+      stderr: (text) => {
+        this.stderrTail = (this.stderrTail + text).slice(-8192);
+        this.emit("stderr", text);
+      },
+      exit: (info) => this.setExited(info),
     });
-
-    this.child.on("error", (err) => {
-      log.error(`spawn error pid=${this.pid}`, err);
-      this.setExited({ code: null, signal: null, crashed: true });
-    });
-    this.child.on("exit", (code, signal) => {
-      this.setExited({ code, signal, crashed: code !== 0 && code !== null ? true : signal !== null });
-    });
+    this.pid = this.transport.pid;
   }
 
   get hasExited(): boolean {
@@ -119,14 +110,11 @@ export class PiProcess extends EventEmitter<PiProcessEvents> {
     try {
       while (this.stdinQueue.length > 0) {
         const next = this.stdinQueue[0]!;
-        if (this.exited || !this.child.stdin!.writable) {
+        if (this.exited || !this.transport.writable) {
           this.stdinQueue.length = 0;
           break;
         }
-        const ok = this.child.stdin!.write(next);
-        if (!ok) {
-          await new Promise<void>((resolve) => this.child.stdin!.once("drain", resolve));
-        }
+        await this.transport.write(next);
         this.stdinQueue.shift();
       }
     } finally {
@@ -135,13 +123,7 @@ export class PiProcess extends EventEmitter<PiProcessEvents> {
   }
 
   kill(signal: NodeJS.Signals = "SIGTERM"): void {
-    if (!this.exited) {
-      try {
-        this.child.kill(signal);
-      } catch {
-        /* already dead */
-      }
-    }
+    if (!this.exited) this.transport.kill(signal);
   }
 
   private handleLine(line: string): void {
@@ -169,7 +151,7 @@ export class PiProcess extends EventEmitter<PiProcessEvents> {
     this.emit("line", parsed);
   }
 
-  private setExited(info: { code: number | null; signal: NodeJS.Signals | null; crashed: boolean }): void {
+  private setExited(info: PiExitInfo): void {
     if (this.exited) return;
     this.exited = true;
     const err = new Error(`pi process exited (code=${info.code} signal=${info.signal})`);

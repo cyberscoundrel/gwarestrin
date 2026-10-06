@@ -427,6 +427,18 @@ CloudflareWARP iface) → homelab firewall → containers.
 - Don't hand-edit iptables/nft while diagnosing: warp-svc reacts to firewall
   changes by resetting the tunnel (kills established ssh). Use tcpdump +
   nft counters passively first.
+- **Symptom "host-process ports (22, gateway) work, every docker-published port
+  (80/3000/…) times out over WARP"** (2026-10-05): `docker-warp-bypass` marks all
+  bridge ingress (0x99 -> table 200, default via wlp2s0), so container *replies*
+  to a WARP peer (100.96.x) leave over wifi instead of the tunnel. Fix (persisted
+  in `/usr/local/bin/docker-warp-bypass.sh` after the `default via` line):
+  `ip route replace 100.64.0.0/10 dev CloudflareWARP table 200`. Check with
+  `ip route get 100.96.0.5 mark 0x99` -> must say `dev CloudflareWARP`.
+  The script's units are `docker-warp-bypass.service` and
+  `docker-warp-bypass-assert.timer` (not `warp-nft-assert.timer`).
+- The wired NIC's gateway ARP is dead (see the bypass script header), so all
+  container egress depends on wlp2s0: don't disable wifi as a freeze fix until
+  wired networking works.
 - Fallback when WARP-to-WARP misbehaves: ssh port-forward over the proven
   :22 path — `ssh -L 8080:localhost:80 cyber@100.96.0.10`, then browse
   `http://admin.gw.home:8080`-style via a hosts override or
@@ -445,6 +457,40 @@ CloudflareWARP iface) → homelab firewall → containers.
 - **Debug generated context**: `GET /api/agents/:id/context` returns the
   profile, engine config, generation status and the full block; the web UI
   exposes it as the `context` drawer in the chat header.
+
+## 3k. OpenShell runtime (experimental branch)
+
+Agents can run as OpenShell microVMs instead of host pi + gondolin
+(`GWARESTRIN_RUNTIME=openshell`). Deployment, architecture and server settings:
+[`openshell/README.md`](../openshell/README.md). It is its own compose project
+(`gwarestrin-openshell`) on the external `gwarestrin_backend` network, so it
+never touches the main stack.
+
+```bash
+cd ~/gw-openshell    # worktree of experimental/openshell
+docker compose -f openshell/compose.yml up -d openshell-gateway openshell-registry
+openshell/scripts/publish-agent.sh dev       # after changing the agent image stage
+docker compose -f openshell/compose.yml --profile trial up -d gw-osh   # trial instance :3200
+```
+
+- **Inspect sandboxes / audit log:** the gateway isn't published. Use the CLI
+  inside its container (copy the client registration in once per container):
+  `G=$(docker compose -f openshell/compose.yml ps -q openshell-gateway)`,
+  `docker cp ~/.config/openshell/gateways/openshell/. $G:/home/node/.config/openshell/gateways/openshell/`,
+  then `docker exec $G openshell -g openshell sandbox list` /
+  `openshell -g openshell logs <sandbox> | grep OCSF`.
+- **Gateway restart:** VMs are restored from `/state` (volume
+  `gwarestrin-openshell_openshell-state`); running pi sessions drop and the
+  server's crash handling restarts the agent (workspace and sessions survive).
+- **Per-agent cost:** idle VM ~260 MB (`mem_mib` in `openshell/gateway/gateway.toml`
+  is a ceiling); first boot of a new image ~30-45 s (image prep, cached after),
+  then ~6 s.
+- **Credentials:** model keys and MCP bearer tokens are OpenShell providers
+  (`gw-<instance>-llm-<id>`, `gw-<instance>-mcp-<server>`); sandboxes only ever
+  see placeholders.
+- **Retired 2026-10-06:** the host-installed Docker-driver gateway (systemd user
+  unit removed; its state `~/.local/state/openshell/gateway` and PKI
+  `~/.local/state/openshell/pki` are kept for rollback, providers deleted).
 
 ## 4. Troubleshooting
 

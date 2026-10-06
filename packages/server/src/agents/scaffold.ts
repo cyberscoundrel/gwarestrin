@@ -130,6 +130,19 @@ export function agentConfigPath(agentHomeDir: string): string {
   return path.join(agentHomeDir, "agent-config.json");
 }
 
+/**
+ * Real value behind a secret env name an agent config references: the
+ * per-instance graph token comes from instance metadata, everything else
+ * from the server's own environment.
+ */
+export function secretForEnv(envName: string): string | undefined {
+  if (envName === "GWARESTRIN_GRAPH_TOKEN") {
+    const values = getInstanceMetadata()?.values as Record<string, { token?: string }> | undefined;
+    if (values?.graph?.token) return values.graph.token;
+  }
+  return process.env[envName];
+}
+
 /** Build the env for the pi child process. Secrets only via env vars. */
 export function piEnvFor(
   dirs: AgentDirs,

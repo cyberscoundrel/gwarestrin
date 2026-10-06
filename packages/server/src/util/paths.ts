@@ -14,8 +14,13 @@ export interface SafePathOptions {
   input: string;
 }
 
-/** resolve a client path to a real fs path, enforcing containment */
-export async function resolveSafe({ root, input }: SafePathOptions): Promise<{ abs: string; rel: string }> {
+/**
+ * Lexical half of the containment rules: a client path normalized to a
+ * workspace-relative POSIX path ("." for the root), rejecting absolute
+ * paths, escapes and agent-internal top-level dirs. Shared by the host
+ * files API and the sandbox one (which runs the symlink half in-sandbox).
+ */
+export function normalizeRel(input: string): string {
   const cleaned = input.replace(/\\/g, "/");
   if (cleaned.startsWith("/") || cleaned.startsWith("~")) {
     throw new HttpPathError(400, "absolute paths not allowed");
@@ -26,6 +31,12 @@ export async function resolveSafe({ root, input }: SafePathOptions): Promise<{ a
   }
   const top = rel.split("/")[0] ?? "";
   if (DENY_TOP.has(top)) throw new HttpPathError(403, `path not accessible: ${top}`);
+  return rel;
+}
+
+/** resolve a client path to a real fs path, enforcing containment */
+export async function resolveSafe({ root, input }: SafePathOptions): Promise<{ abs: string; rel: string }> {
+  const rel = normalizeRel(input);
 
   const abs = path.resolve(root, rel === "." ? "" : rel);
 

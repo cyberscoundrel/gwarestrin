@@ -1,0 +1,96 @@
+# OpenShell runtime for gwarestrin, as a compose project of its own that joins
+# the main stack's backend network (external), so `up`/`down` here never
+# touches the main stack. See openshell/README.md.
+#
+#   docker compose -f openshell/compose.yml up -d openshell-gateway openshell-registry
+#   openshell/scripts/publish-agent.sh dev
+#   docker compose -f openshell/compose.yml --profile trial up -d gw-osh
+name: gwarestrin-openshell
+
+services:
+  openshell-gateway:
+    build:
+      context: ./gateway
+      network: host   # same WARP/DNS workaround as the main stack's builds
+    image: gwarestrin-openshell-gateway:local
+    # tini as PID 1: the VM driver ties its lifetime to the gateway process
+    # (procguard), which it can't do when the gateway itself is PID 1
+    init: true
+    devices:
+      - /dev/kvm:/dev/kvm
+    group_add:
+      - "${KVM_GID:-993}"
+    volumes:
+      - openshell-state:/state
+      - ./gateway/gateway.toml:/etc/openshell/gateway.toml:ro
+      # deployment PKI (openshell/scripts/pki.sh); never the CA private key
+      - ./pki/ca.crt:/etc/openshell/pki/ca.crt:ro
+      - ./pki/server:/etc/openshell/pki/server:ro
+      - ./pki/client:/etc/openshell/pki/client:ro
+      - ./pki/jwt:/etc/openshell/pki/jwt:ro
+    # no published ports: only containers on the backend network reach it
+    networks:
+      - backend
+    restart: unless-stopped
+
+  openshell-registry:
+    image: registry:2
+    environment:
+      REGISTRY_HTTP_ADDR: 0.0.0.0:5443
+      REGISTRY_HTTP_TLS_CERTIFICATE: /certs/tls.crt
+      REGISTRY_HTTP_TLS_KEY: /certs/tls.key
+    volumes:
+      - openshell-registry:/var/lib/registry
+      - ./pki/registry:/certs:ro
+    networks:
+      backend:
+        aliases:
+          - registry
+    restart: unless-stopped
+
+  # trial gwarestrin instance on the OpenShell runtime (`--profile trial`)
+  gw-osh:
+    profiles: ["trial"]
+    image: gwarestrin:openshell-dev
+    env_file:
+      - ../.env
+    environment:
+      GWARESTRIN_MAX_AGENTS: "1"
+      GWARESTRIN_STATE: /var/lib/gwarestrin
+      GWARESTRIN_PROVIDERS_FILE: /etc/gwarestrin/providers.json
+      GWARESTRIN_INSTANCE: osh
+      DOCKER_PROXY_URL: http://docker-proxy:2375
+      GWARESTRIN_RUNTIME: openshell
+      GWARESTRIN_OPENSHELL_GATEWAY: https://openshell-gateway:17670
+      GWARESTRIN_OPENSHELL_PKI: /etc/gwarestrin/openshell-pki
+      GWARESTRIN_OPENSHELL_IMAGE: registry:5443/gwarestrin-agent:dev
+      # the gateway shares the compose network: keep service names, no IP rewriting
+      GWARESTRIN_OPENSHELL_RESOLVE: names
+    volumes:
+      - gw-osh-state:/var/lib/gwarestrin
+      - ../providers.json:/etc/gwarestrin/providers.json:ro
+      - ./pki/ca.crt:/etc/gwarestrin/openshell-pki/ca.crt:ro
+      - ./pki/client:/etc/gwarestrin/openshell-pki/client:ro
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    ports:
+      - "3200:3000"
+    labels:
+      gwarestrin.tenant: osh-trial
+    networks:
+      - backend
+    depends_on:
+      - openshell-gateway
+    restart: unless-stopped
+
+volumes:
+  openshell-state:
+  openshell-registry:
+  gw-osh-state:
+    external: true
+
+networks:
+  backend:
+    external: true
+    name: gwarestrin_backend

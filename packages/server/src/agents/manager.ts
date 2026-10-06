@@ -10,7 +10,10 @@ import { buildGeneratedProviders } from "../providers/generate.js";
 import { scoped } from "../util/log.js";
 import { RpcAgent } from "./rpc-agent.js";
 import { PiProcess } from "./pi-process.js";
-import { dirsFor, piEnvFor, scaffoldAgent } from "./scaffold.js";
+import { dirsFor, piEnvFor, scaffoldAgent, secretForEnv } from "./scaffold.js";
+import { getInstanceMetadata } from "../instance/metadata.js";
+import { OpenShellAgentLauncher } from "../runtime/openshell-agent.js";
+import { OpenShellProviders, OpenShellRuntime, connectOpenShell } from "../runtime/openshell.js";
 import { AgentStore } from "./store.js";
 import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.js";
 
@@ -59,6 +62,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   /** instances killed by a failed start(); their exit must keep status error */
   private startFailed = new WeakSet<RpcAgent>();
   private extensionsRoot: string;
+  private launcher: Promise<OpenShellAgentLauncher> | undefined;
 
   constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore, profiles?: ProfileStore) {
     super();
@@ -95,6 +99,43 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       dir = path.dirname(dir);
     }
     throw new Error("cannot locate pi-mcp-adapter package (looked for " + rel + " upward)");
+  }
+
+  /** Lazily connected OpenShell launcher (runtime=openshell only); retried after a failed connect. */
+  private openShellLauncher(): Promise<OpenShellAgentLauncher> {
+    const cfg = this.config.openshell;
+    if (!cfg) throw new Error("openshell runtime selected but not configured");
+    this.launcher ??= (async () => {
+      const client = await connectOpenShell({
+        gateway: cfg.gateway,
+        caCertPath: path.join(cfg.pkiDir, "ca.crt"),
+        clientCertPath: path.join(cfg.pkiDir, "client", "tls.crt"),
+        clientKeyPath: path.join(cfg.pkiDir, "client", "tls.key"),
+        image: cfg.image,
+      });
+      log.info(`openshell runtime: gateway ${cfg.gateway}, workspace ${cfg.workspace}, image ${cfg.image}, resolve ${cfg.resolve}`);
+      return new OpenShellAgentLauncher({
+        runtime: new OpenShellRuntime(client, { workspace: cfg.workspace, image: cfg.image }),
+        providers: new OpenShellProviders(client.raw, cfg.workspace),
+        sandbox: client,
+        instance: getInstanceMetadata()?.instance.name ?? process.env.GWARESTRIN_INSTANCE ?? "default",
+        workspace: cfg.workspace,
+        rewriteHosts: cfg.resolve !== "names",
+      });
+    })().catch((err) => {
+      this.launcher = undefined;
+      throw err;
+    });
+    return this.launcher;
+  }
+
+  get onOpenShell(): boolean {
+    return this.config.runtime === "openshell";
+  }
+
+  /** the agent's workspace inside its OpenShell sandbox (runtime=openshell only) */
+  async workspaceFs(id: string): Promise<import("../runtime/openshell-fs.js").SandboxFs> {
+    return (await this.openShellLauncher()).workspaceFs(id);
   }
 
   /** default provider endpoint for server-side LLM calls (analysis agent) */
@@ -204,6 +245,10 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const record = this.store.delete(id);
     if (!record) throw new Error(`no such agent: ${id}`);
     if (purge) {
+      if (this.onOpenShell) {
+        // the sandbox holds the agent's workspace and sessions on this runtime
+        await (await this.openShellLauncher()).deleteSandbox(id).catch((err) => log.error(`sandbox delete for ${id} failed`, err));
+      }
       const { rm } = await import("node:fs/promises");
       await rm(dirsFor(this.config.stateDir, record).root, { recursive: true, force: true });
     }
@@ -226,37 +271,27 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       sharedTools: profile.sharedTools === false ? { enabled: false, hostDir: "" } : { enabled: true, hostDir: this.sharedToolsDir() },
     });
 
-    const args: string[] = [
-      // rpc-entry implies --mode rpc
-      "--no-extensions",
-      "--no-context-files",
-      "--session-dir", dirs.sessions,
-      "-e", path.join(this.extensionsRoot, "provider-bridge", "index.js"),
-      // injects <home>/context-injection.md when present (no-op otherwise)
-      "-e", path.join(this.extensionsRoot, "graph-context", "index.ts"),
-    ];
-    if (record.gondolin.enabled !== false) {
-      args.push("-e", path.join(this.extensionsRoot, "gondolin-vm", "index.ts"));
+    let proc: PiProcess;
+    if (this.onOpenShell) {
+      try {
+        const launch = await (await this.openShellLauncher()).prepare({
+          record,
+          dirs,
+          resolveKey: (providerId) => this.registry.resolveKey(providerId),
+          resolveSecret: secretForEnv,
+        });
+        proc = new PiProcess({ transport: launch.transport });
+      } catch (err) {
+        this.store.setStatus(id, "error");
+        throw err;
+      }
+    } else {
+      proc = this.localProcess(record, dirs);
     }
-    if (record.mcpServers.length > 0) {
-      args.push("-e", this.mcpAdapterPath());
-    }
-    if (record.sessionFile) {
-      args.push("--session", record.sessionFile);
-    }
-    if (record.enabledModels?.length) {
-      args.push("--models", record.enabledModels.join(","));
-    }
-
-    const proc = new PiProcess({
-      cliPath: this.cliPath(),
-      args,
-      cwd: dirs.workspace,
-      env: piEnvFor(dirs, this.registry, record),
-    });
     const agent = new RpcAgent(id, proc);
     this.running.set(id, agent);
 
+    if (this.onOpenShell) agent.noteVm("running");
     agent.on("event", (event) => this.emit("agentEvent", { agentId: id, event }));
     agent.on("sessionFile", (file) => {
       this.store.setSessionFile(id, file);
@@ -293,6 +328,39 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       proc.kill("SIGKILL");
       throw err;
     }
+  }
+
+
+  /** pi as a host child process (local runtime; tools optionally in gondolin) */
+  private localProcess(record: AgentRecord, dirs: ReturnType<typeof dirsFor>): PiProcess {
+    const args: string[] = [
+      // rpc-entry implies --mode rpc
+      "--no-extensions",
+      "--no-context-files",
+      "--session-dir", dirs.sessions,
+      "-e", path.join(this.extensionsRoot, "provider-bridge", "index.js"),
+      // injects <home>/context-injection.md when present (no-op otherwise)
+      "-e", path.join(this.extensionsRoot, "graph-context", "index.ts"),
+    ];
+    if (record.gondolin.enabled !== false) {
+      args.push("-e", path.join(this.extensionsRoot, "gondolin-vm", "index.ts"));
+    }
+    if (record.mcpServers.length > 0) {
+      args.push("-e", this.mcpAdapterPath());
+    }
+    if (record.sessionFile) {
+      args.push("--session", record.sessionFile);
+    }
+    if (record.enabledModels?.length) {
+      args.push("--models", record.enabledModels.join(","));
+    }
+
+    return new PiProcess({
+      cliPath: this.cliPath(),
+      args,
+      cwd: dirs.workspace,
+      env: piEnvFor(dirs, this.registry, record),
+    });
   }
 
   async stop(id: string): Promise<void> {

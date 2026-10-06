@@ -27,3 +27,6 @@ coverage/
 ux-tests/node_modules/
 ux-tests/artifacts/
 instances/
+
+# OpenShell deployment PKI (private keys)
+openshell/pki/

@@ -8,6 +8,8 @@ COPY package.json package-lock.json ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
+# vendored @nvidia/openshell-sdk (GitHub Packages only upstream)
+COPY vendor vendor
 RUN npm ci
 
 # gondolin-vm extension is versioned outside the npm workspaces
@@ -30,6 +32,25 @@ RUN npm run build
 
 # prune to production dependencies for the runtime stage
 RUN npm prune --omit=dev
+
+# ---- agent stage (GWARESTRIN_RUNTIME=openshell) ------------------------------
+# Image each OpenShell agent sandbox runs: pi + MCP adapter + the gwarestrin
+# pi extensions. Build with `--target agent`. Layout must match
+# DEFAULT_GUEST_LAYOUT in packages/server/src/runtime/openshell-agent.ts, and
+# everything stays world-readable under /usr (OpenShell's default policy
+# grants /usr read-only; /opt is not readable).
+FROM node:22-bookworm-slim AS agent
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends ca-certificates curl git procps \
+  && rm -rf /var/lib/apt/lists/* \
+  && npm install -g --omit=dev @earendil-works/pi-coding-agent@0.84.2 pi-mcp-adapter@2.27.0 \
+  && npm cache clean --force
+COPY packages/pi-extensions/provider-bridge/index.js /usr/local/lib/gwarestrin/pi-extensions/provider-bridge/index.js
+COPY packages/pi-extensions/graph-context/index.ts /usr/local/lib/gwarestrin/pi-extensions/graph-context/index.ts
+RUN chmod -R a+rX /usr/local/lib/gwarestrin /usr/local/lib/node_modules
+ENV PI_OFFLINE=1 \
+    PI_SKIP_VERSION_CHECK=1
+USER node
 
 # ---- runtime stage ---------------------------------------------------------
 # qemu for the gondolin microvm backend; node 22 pinned (gondolin QEMU HTTP
