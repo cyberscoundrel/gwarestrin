@@ -26,7 +26,7 @@ COPY packages/shared packages/shared
 COPY packages/server packages/server
 COPY packages/web packages/web
 COPY packages/pi-extensions/provider-bridge packages/pi-extensions/provider-bridge
-COPY packages/pi-extensions/gondolin-vm/index.ts packages/pi-extensions/gondolin-vm/index.ts
+COPY packages/pi-extensions/gondolin-vm/*.ts packages/pi-extensions/gondolin-vm/
 COPY packages/pi-extensions/graph-context packages/pi-extensions/graph-context
 RUN npm run build
 
