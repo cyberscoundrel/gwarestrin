@@ -2,6 +2,7 @@
   import { store } from "../lib/stores.svelte.js";
   import { api, mcpApi, type McpServerDef } from "../lib/api.js";
   import Dropdown from "./Dropdown.svelte";
+  import { isFreeModelId } from "../lib/format.js";
 
   let {
     profileId,
@@ -171,6 +172,8 @@
               <Dropdown
                 full
                 label="default model"
+                searchable
+                quickFilter={modelOptions.some((m) => isFreeModelId(m.id)) ? { label: "free only", match: isFreeModelId } : undefined}
                 value={modelId}
                 options={modelOptions.map((m) => ({ value: m.id, label: m.id }))}
                 onchange={(id) => (modelId = id)}

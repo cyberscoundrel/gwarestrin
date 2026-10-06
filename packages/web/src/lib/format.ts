@@ -17,6 +17,15 @@ export function modelDisplayName(
   return base ?? modelId;
 }
 
+/**
+ * True for models a provider marks as free of charge. Only OpenRouter-style
+ * ":free" ids are recognised: discovered catalogues carry no prices (cost
+ * is all zeros), so anything else may be billed.
+ */
+export function isFreeModelId(modelId: string): boolean {
+  return /:free$/i.test(modelId);
+}
+
 /** UI name for a model tier: "On-prem" for self-hosted, "Cloud" otherwise. */
 export function tierName(tier: "local" | "cloud"): string {
   return tier === "local" ? "On-prem" : "Cloud";

@@ -2,7 +2,7 @@
 import { onMount } from "svelte";
 import { store } from "../lib/stores.svelte.js";
 import { getAdapter } from "../lib/rpc-agent-adapter.js";
-import { modelDisplayName, tierName } from "../lib/format.js";
+import { isFreeModelId, modelDisplayName, tierName } from "../lib/format.js";
 import Dropdown from "./Dropdown.svelte";
 
   let { preselectProfileId }: { preselectProfileId?: string | null } = $props();
@@ -194,6 +194,8 @@ import Dropdown from "./Dropdown.svelte";
             <Dropdown
               full
               label="model"
+              searchable
+              quickFilter={models.some((m) => isFreeModelId(m.id)) ? { label: "free only", match: isFreeModelId } : undefined}
               value={modelId}
               options={models.map((m) => ({ value: m.id, label: modelDisplayName(providerId, m.id, store.providers) }))}
               onchange={(id) => (modelId = id)}
