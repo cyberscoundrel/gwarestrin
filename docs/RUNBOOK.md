@@ -514,6 +514,24 @@ docker compose up -d provisioner gwarestrin gw-alice gw-bob
   the `gw-osh` trial instance (volume `gw-osh-state` kept; its sandbox and
   providers in the `default` workspace deleted).
 
+## 3l. Knowledge-graph positions
+
+Who sees what in the knowledge graph follows the position tree
+([`docs/DATA-SCOPING.md`](DATA-SCOPING.md)).
+
+- **Define positions** in authentik: a group with attributes
+  `{"gw_position": true, "description": "what this position's work covers"}`,
+  its parent set to the position above it (default: under `org`). Add people as
+  members. The provisioner picks changes up within 30 s.
+- **Who holds what:** `python3 -c 'import json;…'` on
+  `graph-rag-config/token-map.json` (`positions` per tenant) and
+  `graph-rag-config/position-map.json`; graph-rag logs `position map loaded`.
+- **Legacy entities** (written before positions) are root-only. Release them
+  with `set_home` from an admin agent, or the review queue approves the
+  queued widening.
+- A tenant whose user holds no position sees nothing in the graph and cannot
+  write to it.
+
 ## 4. Troubleshooting
 
 | Symptom | Check |

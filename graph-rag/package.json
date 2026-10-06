@@ -8,5 +8,8 @@
     "express": "^4.21.0",
     "neo4j-driver": "^5.28.0",
     "zod": "^3.24.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
   }
 }
