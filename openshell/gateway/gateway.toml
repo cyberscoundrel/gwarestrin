@@ -1,5 +1,8 @@
-# OpenShell gateway for gwarestrin: microVM driver, mTLS (clients present a
-# certificate signed by the deployment CA; see openshell/scripts/pki.sh).
+# OpenShell gateway for gwarestrin: microVM driver. Callers present a client
+# certificate signed by the deployment CA (transport gate, see
+# openshell/scripts/pki.sh) AND an OIDC access token from authentik: the token's
+# subject + groups decide what they may do (per-tenant workspaces). The
+# certificate alone grants nothing (mTLS user auth is off).
 # Paths are inside the container; openshell/compose.yml mounts them.
 [openshell]
 version = 2
@@ -25,8 +28,20 @@ public_key_path = "/etc/openshell/pki/jwt/public.pem"
 kid_path = "/etc/openshell/pki/jwt/kid"
 gateway_id = "openshell"
 
+# off: with it on, a certificate holder is a local Platform Admin
 [openshell.gateway.mtls_auth]
-enabled = true
+enabled = false
+
+# authentik's internal HTTPS listener (deployment-CA cert, trusted through
+# SSL_CERT_FILE in entrypoint.sh). Tokens come from client_credentials grants on
+# the `openshell` OAuth2 provider; the provisioner creates the groups, the
+# provider and one service account per tenant.
+[openshell.gateway.oidc]
+issuer = "https://authentik-server:9443/application/o/openshell/"
+audience = "openshell-gateway"
+roles_claim = "groups"
+admin_role = "openshell-admin"
+user_role = "openshell-user"
 
 [openshell.drivers.vm]
 grpc_endpoint = "https://127.0.0.1:17670"

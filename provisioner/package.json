@@ -4,5 +4,8 @@
   "type": "module",
   "scripts": {
     "start": "node index.mjs"
+  },
+  "dependencies": {
+    "@nvidia/openshell-sdk": "file:../vendor/nvidia-openshell-sdk-0.1.2.tgz"
   }
 }

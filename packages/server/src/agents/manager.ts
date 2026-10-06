@@ -14,6 +14,7 @@ import { dirsFor, piEnvFor, scaffoldAgent, secretForEnv } from "./scaffold.js";
 import { getInstanceMetadata } from "../instance/metadata.js";
 import { OpenShellAgentLauncher } from "../runtime/openshell-agent.js";
 import { OpenShellProviders, OpenShellRuntime, connectOpenShell } from "../runtime/openshell.js";
+import { openShellIdentity } from "../runtime/openshell-identity.js";
 import { AgentStore } from "./store.js";
 import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.js";
 
@@ -110,20 +111,25 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const cfg = this.config.openshell;
     if (!cfg) throw new Error("openshell runtime selected but not configured");
     this.launcher ??= (async () => {
+      const identity = openShellIdentity(cfg);
       const client = await connectOpenShell({
         gateway: cfg.gateway,
         caCertPath: path.join(cfg.pkiDir, "ca.crt"),
         clientCertPath: path.join(cfg.pkiDir, "client", "tls.crt"),
         clientKeyPath: path.join(cfg.pkiDir, "client", "tls.key"),
         image: cfg.image,
+        ...(identity.tokenProvider ? { tokenProvider: identity.tokenProvider } : {}),
       });
-      log.info(`openshell runtime: gateway ${cfg.gateway}, workspace ${cfg.workspace}, image ${cfg.image}, resolve ${cfg.resolve}`);
+      const { workspace } = identity;
+      log.info(
+        `openshell runtime: gateway ${cfg.gateway}, workspace ${workspace}, image ${cfg.image}, resolve ${cfg.resolve}, auth ${cfg.oidc ? "oidc" : "mtls"}`,
+      );
       return new OpenShellAgentLauncher({
-        runtime: new OpenShellRuntime(client, { workspace: cfg.workspace, image: cfg.image }),
-        providers: new OpenShellProviders(client.raw, cfg.workspace),
+        runtime: new OpenShellRuntime(client, { workspace, image: cfg.image }),
+        providers: new OpenShellProviders(client.raw, workspace),
         sandbox: client,
         instance: getInstanceMetadata()?.instance.name ?? process.env.GWARESTRIN_INSTANCE ?? "default",
-        workspace: cfg.workspace,
+        workspace,
         rewriteHosts: cfg.resolve !== "names",
       });
     })().catch((err) => {

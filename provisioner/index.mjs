@@ -16,8 +16,11 @@
 //   TIER_GROUPS  "gw-admin:admin,gw-user:user"   role group -> tier
 //   SEED_TENANTS "admin,alice,bob"   pre-existing tenants (no object creation)
 //   KVM_GID, POLL_SECONDS            container tuning
+//   OPENSHELL_*                      OpenShell tenancy (see openshell.mjs);
+//                                    OPENSHELL_TENANTS run on that runtime
 
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import * as openshell from "./openshell.mjs";
 
 const AUTH_URL = (process.env.AUTHENTIK_URL ?? "http://authentik-server:9000").replace(/\/+$/, "");
 const AUTH_TOKEN = process.env.AUTHENTIK_TOKEN ?? "";
@@ -40,6 +43,9 @@ const GRAPH_CONFIG_DIR = "/data/graph-rag-config";
 const TRAEFIK_DIR = "/data/traefik";
 
 const log = (...a) => console.log(new Date().toISOString(), "[provisioner]", ...a);
+// agent sandbox image the OpenShell gateway pulls (in-compose registry)
+const OPENSHELL_IMAGE = process.env.OPENSHELL_IMAGE ?? "registry:5443/gwarestrin-agent:dev";
+const onOpenShell = (name) => openshell.enabled() && openshell.TENANTS.has(name);
 
 async function ak(method, path, body) {
   const res = await fetch(`${AUTH_URL}/api/v3${path}`, {
@@ -79,6 +85,7 @@ async function akFind(path, match) {
   return (res.results ?? []).find(match);
 }
 const readJson = (p, fallback) => (existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : fallback);
+const osh = openshell.enabled() ? openshell.createOpenShell({ ak, akFind, log }) : null;
 const writeIfChanged = (p, content) => {
   if (existsSync(p) && readFileSync(p, "utf8") === content) return false;
   writeFileSync(p, content);
@@ -221,12 +228,13 @@ function lockToken(name) {
   }
 }
 
-function ensureMetadata(name, tier, token) {
+function ensureMetadata(name, tier, token, oshValues) {
   const doc = {
     version: 1,
     instance: { name, displayName: `${name} instance` },
     owner: { id: name, displayName: name },
-    values: { graph: { token } },
+    // openshell: the instance's gateway identity (never substituted into agent config)
+    values: { graph: { token }, ...(oshValues ? { openshell: oshValues } : {}) },
   };
   if (tier === "admin") {
     doc.presentation = { queue: { label: "Graph review", url: "http://graph-rag:8000/api/queue", tokenRef: "values.graph.token" } };
@@ -241,17 +249,37 @@ async function tenantContainers() {
   const map = new Map(); // tenant -> {id, state, compose}
   for (const c of json ?? []) {
     const tenant = c.Labels?.["gwarestrin.tenant"];
-    if (tenant) map.set(tenant, { id: c.Id, state: c.State, names: c.Names?.[0] ?? "" });
+    if (tenant) {
+      map.set(tenant, {
+        id: c.Id,
+        state: c.State,
+        names: c.Names?.[0] ?? "",
+        runtime: c.Labels?.["gwarestrin.runtime"] ?? "local",
+        compose: Boolean(c.Labels?.["com.docker.compose.project"]),
+      });
+    }
   }
   return map;
 }
 
 function tenantContainerSpec(name, tier) {
+  const sandboxed = onOpenShell(name);
   const env = [
     "GWARESTRIN_MAX_AGENTS=2",
     "GWARESTRIN_STATE=/var/lib/gwarestrin",
     "GWARESTRIN_PROVIDERS_FILE=/etc/gwarestrin/providers.json",
     "GWARESTRIN_INSTANCE_METADATA=/etc/gwarestrin/instance.json",
+    ...(sandboxed
+      ? [
+          "GWARESTRIN_RUNTIME=openshell",
+          `GWARESTRIN_OPENSHELL_GATEWAY=${process.env.OPENSHELL_GATEWAY}`,
+          "GWARESTRIN_OPENSHELL_PKI=/etc/gwarestrin/openshell-pki",
+          `GWARESTRIN_OPENSHELL_IMAGE=${OPENSHELL_IMAGE}`,
+          "GWARESTRIN_OPENSHELL_RESOLVE=names",
+          `GWARESTRIN_OPENSHELL_OIDC_ISSUER=${openshell.ISSUER}`,
+          "NODE_EXTRA_CA_CERTS=/etc/gwarestrin/openshell-pki/ca.crt",
+        ]
+      : []),
   ];
   // provider api keys from the host .env, same as compose env_file
   if (existsSync("/data/.env")) {
@@ -262,17 +290,25 @@ function tenantContainerSpec(name, tier) {
   }
   return {
     Image: "gwarestrin:local",
-    Labels: { "gwarestrin.tenant": name },
+    Labels: { "gwarestrin.tenant": name, "gwarestrin.runtime": sandboxed ? "openshell" : "local" },
     Env: env,
     HostConfig: {
       Mounts: [
         { Type: "volume", Source: `gw-${name}-state`, Target: "/var/lib/gwarestrin" },
-        { Type: "volume", Source: `gw-${name}-gondolin`, Target: "/home/node/.cache/gondolin" },
         { Type: "bind", Source: `${HOST_BASE}/providers.json`, Target: "/etc/gwarestrin/providers.json", ReadOnly: true },
         { Type: "bind", Source: `${HOST_BASE}/instances/${name}.json`, Target: "/etc/gwarestrin/instance.json", ReadOnly: true },
+        ...(sandboxed
+          ? [
+              // transport credential only (the gateway authorizes the OIDC identity)
+              { Type: "bind", Source: `${HOST_BASE}/openshell/pki/ca.crt`, Target: "/etc/gwarestrin/openshell-pki/ca.crt", ReadOnly: true },
+              { Type: "bind", Source: `${HOST_BASE}/openshell/pki/client`, Target: "/etc/gwarestrin/openshell-pki/client", ReadOnly: true },
+            ]
+          : [{ Type: "volume", Source: `gw-${name}-gondolin`, Target: "/home/node/.cache/gondolin" }]),
       ],
-      Devices: [{ PathOnHost: "/dev/kvm", PathInContainer: "/dev/kvm", CgroupPermissions: "rwm" }],
-      GroupAdd: [KVM_GID],
+      // KVM only for gondolin; OpenShell agents run in the gateway's microVMs
+      ...(sandboxed
+        ? {}
+        : { Devices: [{ PathOnHost: "/dev/kvm", PathInContainer: "/dev/kvm", CgroupPermissions: "rwm" }], GroupAdd: [KVM_GID] }),
       Dns: ["1.1.1.1", "1.0.0.1"],
       ExtraHosts: ["host.docker.internal:host-gateway"],
       RestartPolicy: { Name: "unless-stopped" },
@@ -284,7 +320,15 @@ function tenantContainerSpec(name, tier) {
 }
 
 async function ensureContainer(name, tier, containers) {
-  const existing = containers.get(name);
+  let existing = containers.get(name);
+  const runtime = onOpenShell(name) ? "openshell" : "local";
+  if (existing && !existing.compose && existing.runtime !== runtime) {
+    // runtime switch: recreate on the new spec (state volume is kept)
+    await docker("DELETE", `/containers/${existing.id}?force=true`);
+    log(`docker: container for ${name} removed for runtime ${existing.runtime} -> ${runtime}`);
+    containers.delete(name);
+    existing = undefined;
+  }
   if (existing) {
     if (existing.state !== "running") {
       await docker("POST", `/containers/${existing.id}/start`);
@@ -369,7 +413,14 @@ async function reconcile() {
           await ensureTenantObjects(name, tier, flows, user?.pk);
         }
         const token = ensureToken(name, tier);
-        ensureMetadata(name, tier, token);
+        let oshValues;
+        if (osh && onOpenShell(name)) {
+          const current = readJson(`${INSTANCES_DIR}/${name}.json`, {})?.values?.openshell?.clientSecret;
+          const { workspace, clientSecret, subject } = await osh.ensureTenant(name, current);
+          oshValues = { workspace, clientSecret };
+          rec.openshell = { subject };
+        }
+        ensureMetadata(name, tier, token, oshValues);
         await ensureContainer(name, tier, containers);
         if (rec.status === "locked") log(`tenant ${name}: unlocked (${tier})`);
         rec.tier = tier;
@@ -378,6 +429,7 @@ async function reconcile() {
         // revoke: preserve everything, deny access
         await lockContainer(name, containers);
         lockToken(name);
+        if (osh && rec.openshell) await osh.lockTenant(name, rec.openshell.subject);
         if (!SEED.has(name)) {
           // drop tenant-group membership (access policy then denies)
           const group = (await ak("GET", `/core/groups/?name=gw-${name}`)).results?.find((g) => g.name === `gw-${name}`);
@@ -398,7 +450,10 @@ async function reconcile() {
   writeIfChanged(`${INSTANCES_DIR}/.provisioner-state.json`, JSON.stringify(state, null, 1));
 }
 
-log(`provisioner up — tiers ${JSON.stringify(TIERS)}, seed [${[...SEED].join(",")}]`);
+log(
+  `provisioner up — tiers ${JSON.stringify(TIERS)}, seed [${[...SEED].join(",")}]` +
+    (openshell.enabled() ? `, openshell [${[...openshell.TENANTS].join(",")}] via ${process.env.OPENSHELL_GATEWAY}` : ""),
+);
 const tick = async () => {
   try {
     await reconcile();
