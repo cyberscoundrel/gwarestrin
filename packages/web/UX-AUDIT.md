@@ -1,4 +1,4 @@
-# gwarestrin web console: UX audit (rounds 1 and 2)
+# gwarestrin web console: UX audit (rounds 1–5)
 
 Round 2 adopted the vocabulary and the tool-scope rule, and added the chat header with the trust strip. Those parts are in the sections at the end. The findings table below is round 1, with the statuses updated.
 
@@ -142,18 +142,18 @@ The new `AgentHeader.svelte` sits above the chat toolbar and is shown whether th
 ## Open proposals (need a decision; not implemented)
 
 - **P-1 Trust strip:** implemented in round 2, see above. Gaps are in P-12.
-- **P-2 Rail interaction.** Clicking an agent profile header should collapse or expand the group; only ✎ opens the editor. Optionally add "+ agent in this profile" on hover. This changes existing behaviour.
+- **P-2 Rail interaction (done in round 5).** Clicking an agent profile header should collapse or expand the group; only ✎ opens the editor. Optionally add "+ agent in this profile" on hover. This changes existing behaviour.
 - **P-3 Split tool scope:** the copy is done in round 2. Still open: move workspace-wide add/edit/remove of tool connections out of the per-agent drawer into an admin screen. Today ✎/✕ are only labelled "workspace-wide, all agents".
 - **P-4 Vocabulary:** adopted in round 2.
-- **P-5 Optional name field in the composer.** It would be prefilled from the profile's name prefix, with the prompt-derived name as the placeholder. (Round 2 note: a profile prefix like `sql-` is prepended to the derived name, so an agent created from prompt "ux-scope …" was named `sql-ux-scope-list-files`.)
-- **P-6 Light theme.** It needs a light palette, removing the hard-coded `class="dark"`, and checking pi-web-ui's light styles.
+- **P-5 Optional name field in the composer (done in round 5).** It would be prefilled from the profile's name prefix, with the prompt-derived name as the placeholder. (Round 2 note: a profile prefix like `sql-` is prepended to the derived name, so an agent created from prompt "ux-scope …" was named `sql-ux-scope-list-files`.)
+- **P-6 Light theme (done in round 5).** It needs a light palette, removing the hard-coded `class="dark"`, and checking pi-web-ui's light styles.
 - **P-7 Tool-call copy:** done in round 3. Our own renderers are registered through pi-web-ui's public `registerToolRenderer`, so no fork.
-- **P-8 One stop button.** The model bar's "stop" (interrupt the current reply) and the composer's square do the same thing. Round 2 added "stop agent" in the header (stop the sandbox), so the labels need to stay distinct, e.g. "interrupt" vs "stop agent".
+- **P-8 One stop button (done in round 5).** The model bar's "stop" (interrupt the current reply) and the composer's square do the same thing. Round 2 added "stop agent" in the header (stop the sandbox), so the labels need to stay distinct, e.g. "interrupt" vs "stop agent".
 - **P-9 Approvals badge and readable items.** A pending count on the rail button, "requested by <agent> · 5 min ago", and a short summary of the write above the raw statement.
 - **P-10 Agent header:** implemented in round 2.
 - **P-11 Per-connection default and server-side allow-list enforcement** (backend), see "Tool-scope rule".
 - **P-12 Trust-strip data gaps** (provider display name / upstream vendor, sandbox network allow-list), see above.
-- **P-13 Phone toolbar density.** On a 375px screen the header, trust strip and toolbar together take about 190px. Collapse the model/thinking/conversation controls into one "⋯" menu below 600px. (Round 3 gave the model name its own full-width row so it is readable, which makes the toolbar one row taller.)
+- **P-13 Phone toolbar density (done in round 5).** On a 375px screen the header, trust strip and toolbar together take about 190px. Collapse the model/thinking/conversation controls into one "⋯" menu below 600px. (Round 3 gave the model name its own full-width row so it is readable, which makes the toolbar one row taller.)
 - **P-14 Pricing data for models** (backend). OpenRouter's discovered catalogue has `cost` set to all zeros, so the UI can only treat `:free` ids as free. Every other model may be billed, but nothing says so. Fill `ModelView.cost` from the provider's pricing so the pickers can show price and warn before choosing a paid model.
 - **P-15 Landing selection:** done in round 4. The app now lands on the composer unless this browser previously opened an agent that still exists (remembered in localStorage). The 15s poll never auto-selects. Deleting the open agent returns to the composer. There is no URL deep-linking in the app; rail selection works as before.
 
@@ -183,3 +183,36 @@ The new `AgentHeader.svelte` sits above the chat toolbar and is shown whether th
 - The header's "stop agent" button stays, by decision. Re-check stop against the backend once `fix/main-bugs` lands.
 - P-15 is done (see above).
 - P-14 (model pricing data) is still open.
+
+## Round 5: Graphite redesign
+
+The visual language is documented in `DESIGN.md`. Everything was checked against the OpenShell trial instance (`:3200`) at desktop, 768 and 375, in light and dark.
+
+**Resolved this round:**
+- **P-2 (rail interaction):** clicking a profile header collapses the group; edit is a separate pencil icon.
+- **P-5 (agent name):** the composer shows "Will be called <name>" with a Rename affordance.
+- **P-6 (light theme):** a deliberate warm-neutral light theme that follows `prefers-color-scheme`. The hard-coded `class="dark"` is gone.
+- **P-8 (stop buttons):** one stop per meaning. The composer's square interrupts a reply; "Stop agent" in the header stops the sandbox. The model bar's red "stop" is gone. A stopped agent shows its start action only in its empty state.
+- **P-13 (phone toolbar):** below 640px the toolbar folds into one "more" menu.
+- **Earlier P2 items:**
+  - The ⚙ and emoji are replaced by lucide icons.
+  - Tool cards are rebuilt.
+  - Every drawer, dialog and list has loading, empty and error states.
+  - The agent tools drawer keeps per-agent switches apart from the workspace-wide catalogue (the visual half of P-3; a separate admin screen is still open).
+- **Feedback "creation panes look clunky":**
+  - The composer is one focused card with rich ProfilePicker/ModelPicker controls, a name preview and inline progress.
+  - The profile editor is a sectioned two-column document with a sticky Save/Cancel footer, a dirty state, inline validation and a Duplicate/Delete overflow menu.
+- **A new finding, fixed:** on the OpenShell instance a create can hit the concurrency cap. The server creates the record, then refuses to start it, so the composer now refreshes the rail on failure and the half-created agent is visible.
+
+**Gaps / proposals from this round:**
+- **P-11:** the profile editor shows the per-connection "On by default" switch locked to today's behaviour, because every allowed connection starts on. It needs `ProfileRecord.mcpDefaults` (or `mcpServers: [{name, defaultOn}]`) plus server-side allow-list enforcement on `PATCH /api/agents/:id`.
+- **P-12 (egress/policy):**
+  - The trust strip shows the agent record's `gondolin.allowedHosts` as the only egress fact ("No extra hosts" / "N hosts").
+  - The OpenShell sandbox policy (which network egress, filesystem and credentials it allows) is not in the API.
+  - Proposal: add a `policy` summary to `AgentRuntimeSummary` or `AgentRecord`, e.g. `{ egress: "deny-all" | "allow-list", hosts: [...], credentials: [...] }`. The strip has a slot for it.
+  - Still open: a display name / upstream vendor per provider.
+- **P-16, create progress:** the composer's steps (Preparing sandbox / Building briefing / Sending first task) show the expected order with the first step active. `POST /api/agents` is a single request with no progress events. A streamed or polled create status would let each step tick off truthfully.
+- **P-17, profile model scope:** the profile model default uses the workspace's provider catalogue. Some providers list hundreds of models, so a per-profile allow-list of models would keep pickers short. This needs a backend field.
+- **Not verified visually:**
+  - The inline create-progress state only shows for the length of the create request. On `:3200` the request failed fast because `ux-osh-2` held the single concurrency slot, so I saw only the error state, not the progress list.
+  - Reduced motion is handled by a global CSS rule but couldn't be emulated in the browser pane.
