@@ -218,6 +218,10 @@ services:
   # alice: graph read + writes queued for review
   gw-alice:
     image: gwarestrin:local
+    # provider keys, as the provisioner gives its tenants; on the OpenShell
+    # runtime they go to the gateway's provider store, never into a sandbox
+    env_file:
+      - .env
     environment:
       GWARESTRIN_MAX_AGENTS: "2"
       GWARESTRIN_STATE: /var/lib/gwarestrin
@@ -249,6 +253,10 @@ services:
   # bob: read-only graph (writes denied)
   gw-bob:
     image: gwarestrin:local
+    # provider keys, as the provisioner gives its tenants; on the OpenShell
+    # runtime they go to the gateway's provider store, never into a sandbox
+    env_file:
+      - .env
     environment:
       GWARESTRIN_MAX_AGENTS: "2"
       GWARESTRIN_STATE: /var/lib/gwarestrin
