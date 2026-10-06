@@ -542,6 +542,8 @@ function createServer(identity) {
   const caps = identity.caps;
   const need = (cap) => requireCap(caps, cap);
   const server = new McpServer({ name: "graph-rag", version: "0.3.0" });
+  // each identity is only shown the tools its capabilities allow (the
+  // handlers check again: listing is not the boundary)
 
   // raw Cypher/SQL bypasses every read filter: only listed for raw identities
   if (caps.raw === true) server.tool(
@@ -593,7 +595,7 @@ a datetime property. Falls back to lexical matching if embeddings are unavailabl
     },
   );
 
-  server.tool(
+  if (caps.write !== "deny") server.tool(
     "upsert_entities",
     `Create or update graph entities with per-facet semantic indexes. For each entity provide
 facet texts — a concise natural-language sentence per facet capturing that aspect (facet
@@ -637,7 +639,7 @@ ${facetDoc}`,
     },
   );
 
-  server.tool(
+  if (caps.write !== "deny") server.tool(
     "embed_backfill",
     "Embed the identity facet for graph nodes written without embeddings. Requires write capability; queued-mode identities store it for approval.",
     { limit: z.number().int().min(1).max(256).optional() },
@@ -651,7 +653,7 @@ ${facetDoc}`,
     },
   );
 
-  server.tool(
+  if (caps.approve === true) server.tool(
     "list_pending_writes",
     "List queued graph writes awaiting approval (requires approve capability).",
     {},
@@ -661,7 +663,7 @@ ${facetDoc}`,
     },
   );
 
-  server.tool(
+  if (caps.approve === true) server.tool(
     "approve_write",
     "Approve and execute a queued graph write.",
     { id: z.string().min(1) },
@@ -671,7 +673,7 @@ ${facetDoc}`,
     },
   );
 
-  server.tool(
+  if (caps.approve === true) server.tool(
     "reject_write",
     "Reject a queued graph write without executing it.",
     { id: z.string().min(1) },
