@@ -726,9 +726,9 @@ async function revokeGrant({ id }, identity, scope) {
   const rows = await adbQuery("SELECT FROM AccessGrant WHERE id = :id AND status = 'active'", { id });
   const g = rows[0];
   if (!g || !(g.granted_by === identity.user || ownsHome(scope, g.target_home))) throw new Error(`no grant ${id} you can revoke`);
-  await adbCommand("UPDATE AccessGrant SET status = 'revoked', revoked_at = :now, revoked_by = :by WHERE id = :id", "sql", {
+  await adbCommand("UPDATE AccessGrant SET status = 'revoked', revoked_at = :now, revoked_by = :actor WHERE id = :id", "sql", {
     now: new Date().toISOString(),
-    by: identity.user,
+    actor: identity.user,
     id,
   });
   log.info(`grant ${id} revoked by ${identity.user}`);
@@ -817,36 +817,46 @@ function mayReview(identity, rec) {
 async function approvePending(id, identity) {
   const approver = identity.user;
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
-  const rows = await adbQuery(
-    "SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'",
-    { id },
-  );
+  const rows = await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id });
   const rec = rows[0];
-  if (!rec) throw new Error(`no pending write ${id}`);
-  if (!mayReview(identity, rec)) throw new Error(`no pending write ${id}`);
-  // upsert/backfill payloads are JSON for their handlers, not SQL
-  const result = await executePending(rec);
+  if (!rec || !mayReview(identity, rec)) throw new Error(`no pending write ${id}`);
+  // claim it first: a write runs once, even with two approvals racing
+  // (note: "by" is reserved in ArcadeDB SQL, so parameters avoid it)
+  const claimed = await adbCommand(
+    "UPDATE PendingWrite SET status = 'executing', approved_by = :actor WHERE id = :id AND status = 'pending'",
+    "sql",
+    { actor: approver, id },
+  );
+  if (Number(claimed?.[0]?.count ?? 0) !== 1) throw new Error(`pending write ${id} was already handled`);
+  let result;
   try {
-    await adbCommand(
-      "UPDATE PendingWrite SET status = 'approved', executed_at = :now, approved_by = :by WHERE id = :id",
-      "sql",
-      { now: new Date().toISOString(), by: approver, id },
-    );
-  } catch (e) {
-    console.warn(`[graph-rag] approve status update failed for ${id}: ${String(e).slice(0, 300)}`);
+    // upsert/backfill payloads are JSON for their handlers, not SQL
+    result = await executePending(rec);
+  } catch (err) {
+    await adbCommand("UPDATE PendingWrite SET status = 'failed', executed_at = :now WHERE id = :id", "sql", {
+      now: new Date().toISOString(),
+      id,
+    }).catch(() => {});
+    throw err;
   }
+  await adbCommand("UPDATE PendingWrite SET status = 'approved', executed_at = :now WHERE id = :id", "sql", {
+    now: new Date().toISOString(),
+    id,
+  });
   console.log(`[graph-rag] write ${id} approved by ${approver}`);
   return { approved: true, result };
 }
-
 async function rejectPending(id, identity) {
   const rejector = identity.user;
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
   const rows = await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id });
   if (!rows[0] || !mayReview(identity, rows[0])) throw new Error(`no pending write ${id}`);
-  await adbCommand(
-    `UPDATE PendingWrite SET status = 'rejected', executed_at = '${esc(new Date().toISOString())}', approved_by = '${esc(rejector)}' WHERE id = '${esc(id)}'`,
+  const done = await adbCommand(
+    "UPDATE PendingWrite SET status = 'rejected', executed_at = :now, approved_by = :actor WHERE id = :id AND status = 'pending'",
+    "sql",
+    { now: new Date().toISOString(), actor: rejector, id },
   );
+  if (Number(done?.[0]?.count ?? 0) !== 1) throw new Error(`pending write ${id} was already handled`);
   return { rejected: true };
 }
 
