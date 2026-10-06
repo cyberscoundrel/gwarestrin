@@ -28,8 +28,19 @@
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   });
+
+  /**
+   * Render at the document root: opened from inside a transformed container
+   * (the phone rail drawer), `position: fixed` would otherwise be relative to
+   * that container and the dialog would sit half off-screen.
+   */
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return { destroy: () => node.remove() };
+  }
 </script>
 
+<div class="contents" use:portal>
 <div
   class="animate-fade fixed inset-0 bg-scrim"
   style="z-index: {z}"
@@ -45,4 +56,5 @@
   aria-labelledby={labelledby}
 >
   {@render children()}
+</div>
 </div>

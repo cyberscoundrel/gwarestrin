@@ -24,7 +24,38 @@ export interface PositionsView {
   root?: string;
   /** positions the user holds */
   held: string[];
+  /** positions the user reaches (theirs and below) */
   positions: PositionView[];
+  /** the whole tree's names (grants may go anywhere in it) */
+  tree?: Array<{ id: string; name: string; parent: string | null }>;
+  /** the user holds the root: may grant standing access */
+  canGrantStanding?: boolean;
+}
+
+export interface GrantView {
+  id: string;
+  kind: "entity" | "subtree";
+  /** entity name, or the position whose branch is shared */
+  target: string;
+  target_home: string;
+  to: string;
+  reason: string;
+  granted_by: string;
+  expires_at: string | null;
+  direction: "outgoing" | "incoming";
+}
+
+export interface NewGrant {
+  entities?: Array<{ name: string; home?: string }>;
+  subtree?: string;
+  to: string;
+  reason: string;
+  until?: string;
+}
+
+/** per target: granted at once, or proposed (queued for a person to approve) */
+export interface GrantResult {
+  results: Array<{ target: string; to: string; granted?: boolean; proposed?: boolean; expires_at?: string | null }>;
 }
 
 export const api = {
@@ -97,6 +128,24 @@ export const api = {
   /** positions this workspace's user reaches (theirs and below) */
   async positions(): Promise<PositionsView> {
     return json(await fetch("/api/positions"));
+  },
+  async grants(): Promise<{ grants: GrantView[]; canGrantStanding: boolean }> {
+    return json(await fetch("/api/grants"));
+  },
+  async createGrant(input: NewGrant): Promise<GrantResult> {
+    return json(
+      await fetch("/api/grants", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }),
+    );
+  },
+  async revokeGrant(id: string): Promise<void> {
+    await json(await fetch(`/api/grants/${encodeURIComponent(id)}/revoke`, { method: "POST" }));
+  },
+  /** entities the user owns (by home), for picking what to share */
+  async ownedEntities(q: string): Promise<Array<{ name: string; home?: { id: string; name: string } }>> {
+    const r = await json<{ entities: Array<{ name: string; home?: { id: string; name: string } }> }>(
+      await fetch(`/api/knowledge/entities?q=${encodeURIComponent(q)}`),
+    );
+    return r.entities;
   },
   // ---------- agent profiles ----------
   async listProfiles(): Promise<ProfileRecord[]> {
