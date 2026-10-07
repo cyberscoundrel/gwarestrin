@@ -380,7 +380,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
     // may see (the visibility and temporal predicates ride in the same
     // query). Earlier this fetched the first k*8 rows and ranked only those,
     // which misses the right entities once a graph outgrows a few dozen.
-    const innerK = Math.max(temporal_filter ? Math.min(k * 3, 96) : k, 12);
+    const innerK = temporal_filter ? Math.min(k * 3, 96) : k;
     const vec = `[${embedding.map((x) => (Number.isFinite(x) ? x : 0)).join(",")}]`;
     const best = new Map(); // rid -> { score, facets }
     for (const facet of facetList) {
@@ -405,7 +405,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
         best.set(rid, b);
       }
     }
-    const top = [...best].sort((a, b) => b[1].score - a[1].score).slice(0, Math.max(k, 12));
+    const top = [...best].sort((a, b) => b[1].score - a[1].score).slice(0, k);
     if (top.length) {
       const rows = await adbQuery(`SELECT FROM [${top.map(([rid]) => rid).join(",")}]`);
       const byId = new Map(rows.map((r) => [String(r["@rid"]), r]));
@@ -454,7 +454,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
   // neighbours the caller may see (an edge must not reveal a hidden node)
   let relationships = [];
   const neighbourHomes = [];
-  const top = results.slice(0, 12).filter((r) => RID_RE.test(String(r.rid)));
+  const top = results.slice(0, k).filter((r) => RID_RE.test(String(r.rid)));
   if (top.length > 0) {
     try {
       const raw = await adbQuery(`SELECT @rid AS rid, @type AS rel, @out AS src, @in AS dst FROM (SELECT expand(bothE()) FROM [${top.map((r) => r.rid).join(",")}]) LIMIT 50`);
@@ -475,10 +475,11 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
   }
 
   // what the caller has now seen (derived-data tracking; not returned)
-  readHomes.push(...results.slice(0, 12).map((r) => r.home?.id), ...neighbourHomes.map((h) => (SCOPED && positionMap ? effectiveHome(positionMap, h) : h)));
+  readHomes.push(...results.slice(0, k).map((r) => r.home?.id), ...neighbourHomes.map((h) => (SCOPED && positionMap ? effectiveHome(positionMap, h) : h)));
   return {
     query,
-    results: results.slice(0, 12).map(({ rid: _rid, ...r }) => r),
+    // exactly k results (the schema allows 1..32, default 8)
+    results: results.slice(0, k).map(({ rid: _rid, ...r }) => r),
     relationships,
     ...(embedFailed ? { note: "embedding backend unavailable; lexical fallback used" } : {}),
   };
