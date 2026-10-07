@@ -4,7 +4,8 @@ import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { AgentRecord } from "@gwarestrin/shared";
 import { ProviderRegistry } from "../src/providers/registry.js";
-import { agentConfigPath, dirsFor, piEnvFor, scaffoldAgent } from "../src/agents/scaffold.js";
+import { agentConfigPath, dirsFor, piEnvFor, scaffoldAgent, STANDING_INSTRUCTIONS_FILE } from "../src/agents/scaffold.js";
+import { McpRegistryStore } from "../src/mcp/registry-store.js";
 
 let stateDir: string;
 let registry: ProviderRegistry;
@@ -52,6 +53,21 @@ describe("scaffoldAgent", () => {
     const dirs = await scaffoldAgent(stateDir, record, registry, path.join(stateDir, "ext"));
     const cfg = JSON.parse(await readFile(agentConfigPath(dirs.home), "utf8")) as { gondolin: { enabled?: boolean } };
     expect(cfg.gondolin.enabled).toBe(false);
+  });
+});
+
+describe("standing instructions", () => {
+  it("agents with the knowledge graph get the sharing steps; others don't", async () => {
+    const mcp = new McpRegistryStore(stateDir);
+    await mcp.load();
+    await mcp.put("graph-rag", { url: "http://graph-rag:8000/mcp" });
+    await mcp.put("mssql", { url: "http://dab:5000/mcp" });
+    const withGraph = await scaffoldAgent(stateDir, agent({ id: "a-graph", mcpServers: ["graph-rag", "mssql"] }), registry, stateDir, mcp);
+    const text = await readFile(path.join(withGraph.home, STANDING_INSTRUCTIONS_FILE), "utf8");
+    expect(text).toContain("graph-rag_find_shareable");
+    expect(text).toContain("Never say that something has been shared");
+    const without = await scaffoldAgent(stateDir, agent({ id: "a-sql", mcpServers: ["mssql"] }), registry, stateDir, mcp);
+    await expect(readFile(path.join(without.home, STANDING_INSTRUCTIONS_FILE), "utf8")).rejects.toThrow();
   });
 });
 
