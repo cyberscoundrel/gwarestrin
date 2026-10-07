@@ -156,16 +156,26 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   (bob): 20/20 checks (manager's email invisible to the floor, same-name
   entities kept apart, edges to hidden entities dropped, moves).
 
-## Open questions
-1. **Do ancestors always see down?** Default yes; but e.g. a complaint about a
-   manager must not be visible to that manager. Per-item "not visible to
-   ancestors X", or a separate compartment hung off the root?
-2. **Items that belong to several positions** (an order touching Sales and
-   Production): home at the lowest common ancestor (strict) or several homes
-   (wider)?
-3. ~~Standing vs temporary grants~~: built as both; standing grants are
-   root-only, everyone else's expire within 90 days.
-4. **Per-organization defaults**: which of the above are settings per client?
+## Decisions and open questions
+1. **Ancestors always see down** (decided 2026-10-07). A position sees
+   everything homed at or below it; there are no per-item "hidden from
+   ancestors" exceptions. Something a manager must not see (e.g. a complaint
+   about them) belongs at a position above them.
+2. **Items that belong to several positions**: undecided. As built, an item
+   has one home (its writer's position, raised by grading or derived-data
+   limits) and reaches other branches only through grants. Revisit with a
+   real client's data before adding multiple homes.
+3. ~~Standing vs temporary grants~~: both; standing grants are root-only,
+   everyone else's expire within 90 days.
+4. **Per-organization settings**: extract into per-instance configuration
+   with an admin dashboard closer to deploy (planned for the ~3 weeks before
+   the 2026-10-28 deploy target). Candidates, today env vars or constants:
+   `DERIVED_WINDOW_HOURS` (12), the 90-day grant limit (`MAX_GRANT_DAYS` in
+   graph-rag/src/grants.js), the grading confidence threshold
+   (`CONFIDENCE_MIN` 0.6 in graph-rag/src/grading.js), `GRADER_MODEL`
+   (grading on/off), root-only standing grants, `ORG_ROOT_GROUP`, and the
+   litellm routes for `grader` and `embed-minilm` (local models at deploy:
+   the inference machine has no embedding model yet).
 
 ## Prerequisites (closed 2026-10-06)
 - graph-rag fails closed: a configured token map that is missing or unreadable
