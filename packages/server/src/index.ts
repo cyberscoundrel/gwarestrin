@@ -10,6 +10,7 @@ import { ProfileStore } from "./agents/profiles.js";
 import { registerFileRoutes } from "./http/files.js";
 import { registerGraphQueueRoutes } from "./http/graph-queue.js";
 import { registerKnowledgeRoutes } from "./http/knowledge.js";
+import { registerInstanceRoutes } from "./http/instances.js";
 import { registerMcpRoutes } from "./http/mcp.js";
 import { registerProviderRoutes } from "./http/providers.js";
 import { McpRegistryStore } from "./mcp/registry-store.js";
@@ -17,7 +18,7 @@ import { ProviderRegistry } from "./providers/registry.js";
 import { scoped } from "./util/log.js";
 import { registerWs } from "./ws/connection.js";
 import { startSidecarDiscovery } from "./discovery/sidecars.js";
-import { startInstanceMetadata } from "./instance/metadata.js";
+import { onInstanceMetadataChange, startInstanceMetadata } from "./instance/metadata.js";
 
 const log = scoped("server");
 
@@ -57,6 +58,7 @@ async function main(): Promise<void> {
   await registerFileRoutes(app, config, manager);
   await registerGraphQueueRoutes(app);
   await registerKnowledgeRoutes(app, manager);
+  await registerInstanceRoutes(app);
   await registerMcpRoutes(app, mcpRegistry);
   await registerWs(app, config, manager);
   startSidecarDiscovery(process.env.DOCKER_PROXY_URL, mcpRegistry);
@@ -64,6 +66,8 @@ async function main(): Promise<void> {
     ...(process.env.GWARESTRIN_INSTANCE_METADATA ? { metadataPath: process.env.GWARESTRIN_INSTANCE_METADATA } : {}),
     stateDir: config.stateDir,
   });
+  // instance settings apply to running agents too
+  onInstanceMetadataChange(() => manager.applyInstanceSettings());
 
   if (existsSync(config.webDistDir)) {
     await app.register(fastifyStatic, {

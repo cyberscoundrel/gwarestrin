@@ -34,7 +34,16 @@ export function startInstanceMetadata(config: { metadataPath?: string; stateDir:
       const changed = JSON.stringify(current) !== JSON.stringify(parsed);
       current = parsed;
       persistCopy();
-      if (changed) log.info(`instance metadata applied: ${current.instance.name}`);
+      if (changed) {
+        log.info(`instance metadata applied: ${current.instance.name}`);
+        for (const fn of listeners) {
+          try {
+            fn(parsed);
+          } catch (err) {
+            log.warn(`metadata listener failed: ${String(err).slice(0, 160)}`);
+          }
+        }
+      }
     } catch (err) {
       if (!current) log.warn(`metadata load failed (${String(err).slice(0, 160)}); staying in legacy open mode`);
       else log.warn(`metadata reload failed; keeping previous: ${String(err).slice(0, 120)}`);
@@ -60,13 +69,19 @@ export function getInstanceMetadata(): InstanceMetadata | undefined {
   return current;
 }
 
+const listeners: Array<(md: InstanceMetadata) => void> = [];
+/** called after each change to the metadata (not on unchanged reloads) */
+export function onInstanceMetadataChange(fn: (md: InstanceMetadata) => void): void {
+  listeners.push(fn);
+}
+
 /**
  * Metadata the instance itself uses and nothing may substitute into agent
  * config: values.openshell holds this instance's gateway credential (an agent
  * could change its own sandbox policy), values.graph.delegationKey signs agent
  * graph tokens (an agent could place itself anywhere its user reaches).
  */
-const PRIVATE_PATHS = [/^values\.openshell(\.|$)/, /^values\.graph\.delegationKey$/];
+const PRIVATE_PATHS = [/^values\.openshell(\.|$)/, /^values\.graph\.delegationKey$/, /^values\.ops(\.|$)/];
 
 /**
  * Substitute ${a.b.c} paths (resolved against the instance metadata) inside

@@ -23,6 +23,18 @@ export const instanceMetadataSchema = Type.Object(
         displayName: Type.Optional(Type.String()),
       }),
     ),
+    /**
+     * per-instance settings the organization's admin sets (provisioner-issued,
+     * enforced live by the server): concurrency cap, allowed tool connections,
+     * allowed model providers. Absent = no restriction beyond the server's own.
+     */
+    settings: Type.Optional(
+      Type.Object({
+        maxAgents: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
+        mcp: Type.Optional(Type.Union([Type.Literal("all"), Type.Array(Type.String())])),
+        providers: Type.Optional(Type.Union([Type.Literal("all"), Type.Array(Type.String())])),
+      }),
+    ),
     /** substitution bag: MCP defs reference values via ${values.a.b} paths */
     values: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     /** optional UI surfaces (all enforcement happens in the backing service) */

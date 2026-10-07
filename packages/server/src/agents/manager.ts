@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { instanceSettings, mcpAllowed, providerAllowed } from "../instance/settings.js";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -172,9 +173,32 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     return { provider: gen.defaultProvider, modelId: gen.defaultModel };
   }
 
-  /** registry server names — default MCP enablement for new agents */
+  /** registry server names this workspace allows — default MCP enablement for new agents */
   defaultMcpServers(): string[] {
-    return this.mcpRegistry ? Object.keys(this.mcpRegistry.list()) : [];
+    return this.mcpRegistry ? Object.keys(this.mcpRegistry.list()).filter((n) => mcpAllowed(n)) : [];
+  }
+
+  /**
+   * Instance settings changed (metadata hot reload): restrictions apply to
+   * running agents too. An agent on a provider no longer allowed is stopped;
+   * one with a tool connection no longer allowed is restarted without it.
+   * A lower agent limit stops nothing; it only blocks new starts.
+   */
+  applyInstanceSettings(): void {
+    for (const [id, agent] of this.running) {
+      const record = this.store.get(id);
+      if (!record) continue;
+      if (record.model && !providerAllowed(record.model.provider)) {
+        log.warn(`agent ${record.name}: model provider ${record.model.provider} is no longer allowed here; stopping it`);
+        void this.stop(id).catch((err) => log.error(`stop ${id} failed`, err));
+        agent.noteError(`stopped: model provider ${record.model.provider} isn't allowed in this workspace any more`);
+        continue;
+      }
+      if (record.mcpServers.some((n) => !mcpAllowed(n))) {
+        log.info(`agent ${record.name}: a tool connection is no longer allowed here; restarting it without it`);
+        void this.restart(id).catch((err) => log.error(`restart ${id} failed`, err));
+      }
+    }
   }
 
   listSummaries(): AgentRuntimeSummary[] {
@@ -200,8 +224,12 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const profile = this.profiles.resolve(input.profileId);
     const defaults: CreateAgentInput = { ...input, profileId: profile.id };
 
+    if (input.model && !providerAllowed(input.model.provider)) {
+      throw new Error(`model provider ${input.model.provider} isn't allowed in this workspace`);
+    }
     const profileModel = profile.defaults.model ?? undefined;
-    if (!defaults.model && profileModel) defaults.model = profileModel;
+    // a profile's model on a provider this workspace doesn't allow falls back to the default
+    if (!defaults.model && profileModel && providerAllowed(profileModel.provider)) defaults.model = profileModel;
     if (!defaults.model) {
       const m = this.defaultModel();
       if (m) defaults.model = m;
@@ -271,9 +299,13 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     if (this.running.has(id)) return this.running.get(id)!.summary();
     this.cancelPendingRestart(id);
 
+    if (record.model && !providerAllowed(record.model.provider)) {
+      throw new Error(`model provider ${record.model.provider} isn't allowed in this workspace; pick another model`);
+    }
     const runningCount = this.running.size;
-    if (runningCount >= this.config.maxAgents) {
-      throw new Error(`concurrency cap reached (${this.config.maxAgents}); stop an agent first`);
+    const cap = instanceSettings().maxAgents ?? this.config.maxAgents;
+    if (runningCount >= cap) {
+      throw new Error(`concurrency cap reached (${cap}); stop an agent first`);
     }
 
     this.store.setStatus(id, "starting");

@@ -1,4 +1,5 @@
 import { writeFile } from "node:fs/promises";
+import { providerAllowed } from "../instance/settings.js";
 import path from "node:path";
 import type { ProviderRegistry } from "./registry.js";
 
@@ -36,7 +37,9 @@ export function envVarForProviderKey(providerId: string): string {
 
 export function buildGeneratedProviders(registry: ProviderRegistry, allow?: string[]): GeneratedProvidersFile {
   const providers: Record<string, GeneratedProviderEntry> = {};
-  for (const p of registry.forAgent(allow)) {
+  // the instance's allowed providers (settings) bound every agent's list
+  const allowed = registry.forAgent(allow).filter((p) => providerAllowed(p.id));
+  for (const p of allowed) {
     providers[p.id] = {
       type: p.type,
       baseUrl: p.baseUrl,
@@ -53,7 +56,7 @@ export function buildGeneratedProviders(registry: ProviderRegistry, allow?: stri
       })),
     };
   }
-  const defaults = registry.forAgent(allow);
+  const defaults = allowed;
   const defaultProvider =
     registry.defaultProvider && providers[registry.defaultProvider]
       ? registry.defaultProvider

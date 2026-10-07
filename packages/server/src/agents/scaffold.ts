@@ -1,4 +1,5 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mcpAllowed } from "../instance/settings.js";
 import path from "node:path";
 import type { AgentRecord } from "@gwarestrin/shared";
 import { mcpSubset } from "@gwarestrin/shared";
@@ -105,7 +106,8 @@ export async function scaffoldAgent(
   // MCP subset for pi-mcp-adapter (reads .mcp.json from cwd = workspace).
   // hostConfigDiscovery defaults to "off" in the adapter — no ambient config.
   if (mcpRegistry) {
-    const subset = mcpSubset(mcpRegistry.list(), agent.mcpServers);
+    // only the tool connections this workspace allows (instance settings)
+    const subset = mcpSubset(mcpRegistry.list(), agent.mcpServers.filter((n) => mcpAllowed(n)));
     const resolved: Record<string, Omit<(typeof subset)[string], "description">> = {};
     for (const [name, def] of Object.entries(subset)) {
       // instance metadata substitutes ${values.*} credential references;
@@ -168,6 +170,7 @@ export function piEnvFor(
   };
   const gen = buildGeneratedProviders(registry);
   for (const id of Object.keys(gen.providers)) {
+    // gen is already limited to allowed providers: no key for the others
     const key = registry.resolveKey(id);
     if (key) env[`GWARESTRIN_KEY_${id.replace(/[^a-zA-Z0-9]+/g, "_").toUpperCase()}`] = key;
   }
