@@ -10,6 +10,10 @@ never sees or chooses; never by the prompt or by which tools an agent is shown.
 
 ## Relational data (mssql through DAB): the database's own permissions
 
+As built (2026-10-07): which tool connections a workspace may use is a
+per-workspace setting (admin's *Workspaces* panel), enforced by its server
+for every agent; so is which model providers it may use.
+
 A modern RDBMS already has a mature permission system, and an ERP/CRM schema is
 rigid and owned by its application, not by agents. So gwarestrin adds no
 privilege model inside SQL:

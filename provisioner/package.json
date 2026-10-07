@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node index.mjs"
+    "start": "node index.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@nvidia/openshell-sdk": "file:../vendor/nvidia-openshell-sdk-0.1.2.tgz"

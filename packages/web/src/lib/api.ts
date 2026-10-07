@@ -52,6 +52,31 @@ export interface PolicyView {
   infra: { scoped: boolean; positions: number; graderModel: string | null; embedModel: string };
 }
 
+export interface WorkspaceSettings {
+  maxAgents: number;
+  mcp: "all" | string[];
+  providers: "all" | string[];
+}
+
+export interface WorkspaceView {
+  name: string;
+  tier: string;
+  status: string;
+  runtime: string;
+  container: string;
+  managedBy: string;
+  positions: string[];
+  settings: WorkspaceSettings;
+}
+
+export interface WorkspacesView {
+  enabled?: boolean;
+  instances: WorkspaceView[];
+  defaults?: WorkspaceSettings;
+  choices?: { providers: string[]; mcp: string[] };
+  history?: Array<{ at: string; by: string; name: string; prev: WorkspaceSettings; next: WorkspaceSettings }>;
+}
+
 export interface GrantView {
   id: string;
   kind: "entity" | "subtree";
@@ -154,6 +179,19 @@ export const api = {
   },
   async savePolicy(changes: Partial<OrgPolicy>): Promise<{ policy: OrgPolicy }> {
     return json(await fetch("/api/policy", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));
+  },
+  /** the organization's workspaces (admins only; enabled: false elsewhere) */
+  async workspaces(): Promise<WorkspacesView> {
+    return json(await fetch("/api/instances"));
+  },
+  async saveWorkspace(name: string, changes: Partial<WorkspaceSettings>): Promise<{ name: string; settings: WorkspaceSettings }> {
+    return json(
+      await fetch(`/api/instances/${encodeURIComponent(name)}/settings`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(changes),
+      }),
+    );
   },
   async grants(): Promise<{ grants: GrantView[]; canGrantStanding: boolean }> {
     return json(await fetch("/api/grants"));

@@ -17,11 +17,16 @@
 //   SEED_TENANTS "admin,alice,bob"   pre-existing tenants (no object creation)
 //   KVM_GID, POLL_SECONDS            container tuning
 //   ORG_ROOT_GROUP (org)             root of the position tree (see below)
+//   OPS_PORT (8081)                  operations API for the admin's dashboard
+//                                    (backend network only; see ops.mjs)
+//   TENANT_MAX_AGENTS (2)            default per-workspace agent limit
 //   OPENSHELL_*                      OpenShell tenancy (see openshell.mjs);
 //                                    OPENSHELL_TENANTS run on that runtime
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { appendFileSync, chmodSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import * as openshell from "./openshell.mjs";
+import { applySettingsUpdate, defaultSettings, normalizeSettings } from "./instance-settings.mjs";
+import { startOpsServer } from "./ops.mjs";
 
 const AUTH_URL = (process.env.AUTHENTIK_URL ?? "http://authentik-server:9000").replace(/\/+$/, "");
 const AUTH_TOKEN = process.env.AUTHENTIK_TOKEN ?? "";
@@ -234,8 +239,31 @@ async function ensurePositionTree() {
   if (writeIfChanged(`${GRAPH_CONFIG_DIR}/position-map.json`, JSON.stringify(doc, null, 1) + "\n")) {
     log(`positions: map written (${positionGroups.length} position(s))`);
   }
-  return { root: root.pk, heldBy };
+  return { root: root.pk, heldBy, names: new Map(positionGroups.map((g) => [g.pk, g.pk === root.pk ? "Whole organization" : g.name])) };
 }
+
+// ---------- per-workspace settings (instance-settings.mjs) ----------
+//
+// Set by the organization's admin in the app (through the ops API), delivered
+// in each instance's metadata (`settings`) and enforced there live.
+
+const SETTINGS_FILE = `${INSTANCES_DIR}/.instance-settings.json`;
+const SETTINGS_LOG = `${INSTANCES_DIR}/.instance-settings-log.jsonl`;
+const OPS_TOKEN_FILE = `${INSTANCES_DIR}/.ops-token`;
+const OPS_PORT = Number(process.env.OPS_PORT ?? 8081);
+const SETTINGS_DEFAULTS = defaultSettings();
+
+const settingsFor = (name) => normalizeSettings(readJson(SETTINGS_FILE, { tenants: {} }).tenants?.[name], SETTINGS_DEFAULTS);
+
+function opsToken() {
+  if (!existsSync(OPS_TOKEN_FILE)) {
+    writeFileSync(OPS_TOKEN_FILE, randomToken() + randomToken() + "\n", { mode: 0o600 });
+    chmodSync(OPS_TOKEN_FILE, 0o600);
+    log("ops: token issued");
+  }
+  return readFileSync(OPS_TOKEN_FILE, "utf8").trim();
+}
+const OPS_TOKEN = opsToken();
 
 // ---------- tokens + metadata + routes ----------
 
@@ -299,7 +327,14 @@ function ensureMetadata(name, tier, { token, delegationKey }, oshValues) {
     // openshell: the instance's gateway identity (never substituted into agent config)
     // graph.delegationKey: signs this instance's agent tokens (never substituted
     // into agent config, like openshell: the instance's own credentials)
-    values: { graph: { token, delegationKey }, ...(oshValues ? { openshell: oshValues } : {}) },
+    values: {
+      graph: { token, delegationKey },
+      ...(oshValues ? { openshell: oshValues } : {}),
+      // admins manage the organization's workspaces (never substituted into agent config)
+      ...(tier === "admin" ? { ops: { token: OPS_TOKEN, url: `http://provisioner:${OPS_PORT}` } } : {}),
+    },
+    // what this workspace may do (the admin's settings), enforced by its server
+    settings: settingsFor(name),
   };
   if (tier === "admin") {
     doc.presentation = { queue: { label: "Graph review", url: "http://graph-rag:8000/api/queue", tokenRef: "values.graph.token" } };
@@ -518,18 +553,74 @@ async function reconcile() {
 
   ensureRoutes(known, containers);
   writeIfChanged(`${INSTANCES_DIR}/.provisioner-state.json`, JSON.stringify(state, null, 1));
+
+  // what the admin's dashboard shows
+  const positionName = (id) => tree.names?.get(id) ?? id;
+  workspaces = [...known].sort().map((name) => {
+    const rec = state.tenants[name] ?? {};
+    const c = containers.get(name);
+    return {
+      name,
+      tier: rec.tier ?? "user",
+      status: rec.status ?? "unknown",
+      runtime: c?.runtime ?? (onOpenShell(name) ? "openshell" : "local"),
+      container: c?.state ?? "missing",
+      managedBy: c?.compose ? "docker-compose" : "provisioner",
+      positions: positionsFor(name, rec.tier ?? "user").map(positionName),
+    };
+  });
+}
+
+// ---------- ops API (the admin's workspace dashboard) ----------
+
+let workspaces = [];
+
+/** tool connections that exist: the labeled sidecars */
+async function mcpChoices() {
+  const { json } = await docker("GET", `/containers/json?all=true&filters=${encodeURIComponent(JSON.stringify({ label: ["gwarestrin.mcp.enable=true"] }))}`);
+  return [...new Set((json ?? []).map((c) => c.Labels?.["gwarestrin.mcp.name"] ?? c.Labels?.["com.docker.compose.service"]).filter(Boolean))].sort();
+}
+
+async function listWorkspaces() {
+  const providers = Object.keys(readJson("/data/providers.json", { providers: {} }).providers ?? {}).sort();
+  const history = existsSync(SETTINGS_LOG)
+    ? readFileSync(SETTINGS_LOG, "utf8").trim().split("\n").filter(Boolean).slice(-20).reverse().map((l) => JSON.parse(l))
+    : [];
+  return {
+    instances: workspaces.map((w) => ({ ...w, settings: settingsFor(w.name) })),
+    defaults: SETTINGS_DEFAULTS,
+    choices: { providers, mcp: await mcpChoices().catch(() => []) },
+    history,
+  };
+}
+
+async function updateWorkspace(name, input, actor) {
+  if (!workspaces.some((w) => w.name === name)) throw Object.assign(new Error(`no workspace ${name}`), { status: 404 });
+  const prev = settingsFor(name);
+  const next = applySettingsUpdate(prev, input);
+  const all = readJson(SETTINGS_FILE, { tenants: {} });
+  all.tenants = { ...(all.tenants ?? {}), [name]: next };
+  writeFileSync(SETTINGS_FILE, JSON.stringify(all, null, 1) + "\n");
+  appendFileSync(SETTINGS_LOG, JSON.stringify({ at: new Date().toISOString(), by: actor, name, prev, next }) + "\n");
+  log(`settings: ${name} changed by ${actor}: ${JSON.stringify(input)}`);
+  await tick(); // writes the metadata now; the instance applies it within seconds
+  return { name, settings: settingsFor(name) };
 }
 
 log(
   `provisioner up — tiers ${JSON.stringify(TIERS)}, seed [${[...SEED].join(",")}]` +
     (openshell.enabled() ? `, openshell [${[...openshell.TENANTS].join(",")}] via ${process.env.OPENSHELL_GATEWAY}` : ""),
 );
-const tick = async () => {
-  try {
-    await reconcile();
-  } catch (err) {
-    log(`reconcile failed: ${err.message}`);
-  }
-};
+// one reconcile at a time (the timer and a settings change may coincide)
+let chain = Promise.resolve();
+const tick = () =>
+  (chain = chain.then(async () => {
+    try {
+      await reconcile();
+    } catch (err) {
+      log(`reconcile failed: ${err.message}`);
+    }
+  }));
 await tick();
-setInterval(tick, POLL * 1000);
+setInterval(() => void tick(), POLL * 1000);
+startOpsServer({ port: OPS_PORT, token: OPS_TOKEN, list: listWorkspaces, update: updateWorkspace, log });

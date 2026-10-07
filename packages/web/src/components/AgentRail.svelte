@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { ChevronRight, Inbox, Pencil, Plus, Share2, ShieldCheck, UserPlus, X } from "lucide";
+  import { Building2, ChevronRight, Inbox, Pencil, Plus, Share2, ShieldCheck, UserPlus, X } from "lucide";
   import { store } from "../lib/stores.svelte.js";
   import { modelDisplayName } from "../lib/format.js";
   import DeleteAgentModal from "./DeleteAgentModal.svelte";
   import GraphQueuePanel from "./GraphQueuePanel.svelte";
   import GrantsPanel from "./GrantsPanel.svelte";
   import OrgSettingsPanel from "./OrgSettingsPanel.svelte";
+  import WorkspacesPanel from "./WorkspacesPanel.svelte";
   import { api } from "../lib/api.js";
   import Icon from "./Icon.svelte";
 
@@ -26,6 +27,15 @@
   let showReview = $state(false);
   let showGrants = $state(false);
   let showSettings = $state(false);
+  let showWorkspaces = $state(false);
+  // admins manage the organization's workspaces (the instance holds the ops credential)
+  let canManageWorkspaces = $state(false);
+  $effect(() => {
+    void api
+      .workspaces()
+      .then((w) => (canManageWorkspaces = w.enabled !== false))
+      .catch(() => (canManageWorkspaces = false));
+  });
   // only the organization's root edits its settings; nobody else sees the entry
   let canEditSettings = $state(false);
   $effect(() => {
@@ -186,6 +196,12 @@
         Organization settings
       </button>
     {/if}
+    {#if canManageWorkspaces}
+      <button class={ghost} onclick={() => (showWorkspaces = true)}>
+        <Icon icon={Building2} size={14} />
+        Workspaces
+      </button>
+    {/if}
   </div>
 </nav>
 
@@ -197,6 +213,9 @@
 {/if}
 {#if showSettings}
   <OrgSettingsPanel onclose={() => (showSettings = false)} />
+{/if}
+{#if showWorkspaces}
+  <WorkspacesPanel onclose={() => (showWorkspaces = false)} />
 {/if}
 
 {#if deleteTarget}

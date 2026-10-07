@@ -531,6 +531,16 @@ Who sees what in the knowledge graph follows the position tree
   queued widening.
 - A tenant whose user holds no position sees nothing in the graph and cannot
   write to it.
+- **Workspaces** (admin's rail): per workspace, the agent limit, the tool
+  connections its agents may use (e.g. which DAB) and the model providers
+  (e.g. local inference only). The provisioner stores them
+  (`instances/.instance-settings.json`, log `.instance-settings-log.jsonl`)
+  and writes them into each instance's metadata (`settings`); servers apply
+  them within seconds: agents on a provider no longer allowed are stopped,
+  agents with a connection no longer allowed restart without it. The
+  provisioner's ops API (`:8081`, backend network only) needs the token in
+  `instances/.ops-token`, which only admin-tier instances receive
+  (`values.ops`). Runtime, tier and positions stay deploy-time.
 - **Organization settings** (admin's rail): share limits, standing shares,
   people sharing directly or through review, grading on/off and confidence,
   the derived-data window. Stored in ArcadeDB (`OrgPolicy`, changes in

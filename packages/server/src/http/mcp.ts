@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { mcpAllowed } from "../instance/settings.js";
 import { mcpServerDefSchema, type McpServerDef } from "@gwarestrin/shared";
 import { Value } from "typebox/value";
 import type { McpRegistryStore } from "../mcp/registry-store.js";
@@ -6,13 +7,15 @@ import type { McpRegistryStore } from "../mcp/registry-store.js";
 const nameRe = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 
 export async function registerMcpRoutes(app: FastifyInstance, registry: McpRegistryStore): Promise<void> {
-  app.get("/api/mcp", async () => ({ servers: registry.list() }));
+  // only the tool connections this workspace allows (instance settings)
+  const allowedList = () => Object.fromEntries(Object.entries(registry.list()).filter(([name]) => mcpAllowed(name)));
+  app.get("/api/mcp", async () => ({ servers: allowedList() }));
 
   // liveness probe per registry server: any HTTP response (even 4xx) means
   // the endpoint is up; network/timeout errors mean it is not. stdio servers
   // have no url and report reachable: null.
   app.get("/api/mcp/status", async () => {
-    const entries = Object.entries(registry.list());
+    const entries = Object.entries(allowedList());
     const servers = await Promise.all(
       entries.map(async ([name, def]) => {
         if (!def.url) return { name, reachable: null };

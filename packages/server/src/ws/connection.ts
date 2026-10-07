@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { providerAllowed } from "../instance/settings.js";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
 import {
@@ -125,6 +126,13 @@ export class WsConnection {
     const agent = this.manager.getRunning(agentId);
     if (!agent) {
       this.sendError(agentId, "agent not running");
+      return;
+    }
+    // a model switch must stay within the providers this workspace allows
+    // (pi only knows those anyway; this says so plainly)
+    const provider = (msg as { provider?: unknown }).provider;
+    if (type === "set_model" && typeof provider === "string" && !providerAllowed(provider)) {
+      this.sendError(agentId, `model provider ${provider} isn't allowed in this workspace`);
       return;
     }
     // strip envelope fields; pass the rest through as the RPC payload
