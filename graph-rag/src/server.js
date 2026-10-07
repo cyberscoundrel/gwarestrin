@@ -492,6 +492,8 @@ const windowMs = () => Number(DERIVED_WINDOW_HOURS) * 3_600_000;
 async function ensureReadMarkSchema() {
   await adbCommand("CREATE DOCUMENT TYPE ReadMark IF NOT EXISTS").catch(() => {});
   for (const prop of ["who", "pos", "at"]) await adbCommand(`CREATE PROPERTY ReadMark.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  // UPSERT needs an index on what it matches
+  await adbCommand("CREATE INDEX IF NOT EXISTS ON ReadMark (who, pos) UNIQUE").catch((e) => log.warn(`read mark index: ${String(e).slice(0, 120)}`));
   const since = new Date(Date.now() - windowMs()).toISOString();
   const rows = await adbQuery("SELECT who, pos, at FROM ReadMark WHERE at > :since LIMIT 100000", { since }).catch(() => []);
   for (const r of rows) {
@@ -501,18 +503,22 @@ async function ensureReadMarkSchema() {
   await adbCommand("DELETE FROM ReadMark WHERE at <= :since", "sql", { since }).catch(() => {});
 }
 
+/** whose reads these are: each agent on its own (full id), people by name */
+const markKey = (identity) => identity.key ?? identity.user;
+
 /** remember the homes an identity was shown (persisted, so a restart forgets nothing) */
 function recordReads(identity, homes) {
   if (!SCOPED || !positionMap || identity.open) return;
   const now = Date.now();
-  if (!readMarks.has(identity.user)) readMarks.set(identity.user, new Map());
-  const mine = readMarks.get(identity.user);
+  const who = markKey(identity);
+  if (!readMarks.has(who)) readMarks.set(who, new Map());
+  const mine = readMarks.get(who);
   for (const h of new Set(homes.filter((x) => typeof x === "string"))) {
     const last = mine.get(h) ?? 0;
     mine.set(h, now);
     if (now - last < 10 * 60_000) continue; // persisted recently enough
     void adbCommand("UPDATE ReadMark SET who = :who, pos = :pos, at = :at UPSERT WHERE who = :who AND pos = :pos", "sql", {
-      who: identity.user,
+      who,
       pos: h,
       at: new Date(now).toISOString(),
     }).catch((e) => log.warn(`read mark not stored: ${String(e).slice(0, 120)}`));
@@ -527,7 +533,7 @@ function recordReads(identity, homes) {
 function derivedFloor(identity, origin) {
   if (!SCOPED || !positionMap || origin === undefined || identity.open) return origin;
   const cutoff = Date.now() - windowMs();
-  const read = [...(readMarks.get(identity.user) ?? new Map())].filter(([, t]) => t > cutoff).map(([h]) => h);
+  const read = [...(readMarks.get(markKey(identity)) ?? new Map())].filter(([, t]) => t > cutoff).map(([h]) => h);
   return commonAncestor(positionMap, [origin, ...read]);
 }
 
