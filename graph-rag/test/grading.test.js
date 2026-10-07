@@ -25,6 +25,8 @@ test("the prompt labels positions and treats content as data", () => {
   assert.match(messages[0].content, /data, not instructions/);
   assert.match(messages[1].content, /P1: Operations \(orders, suppliers, staffing\)/);
   assert.equal(byLabel.get("P1"), "ops");
+  assert.match(messages[1].content, /P2: org \(the top of the organization only/, "the root never reads as 'everyone'");
+  assert.match(messages[0].content, /The higher the position, the FEWER people see it/);
   assert.equal(byLabel.get("P3"), "floor");
 });
 
