@@ -52,19 +52,27 @@ export function grantedView(map, held, grants, now = Date.now()) {
 }
 
 /**
- * Validate a requested expiry. Root callers may grant without one (standing
- * grants); everyone else needs one within MAX_GRANT_DAYS. Returns ISO or null.
+ * Resolve a requested expiry under the organization's policy.
+ *  - no end date given: a standing share for a root person when the policy
+ *    allows standing shares, otherwise the default share length
+ *  - "14d" (relative) or an ISO date; within maxDays unless standing shares
+ *    are allowed and the caller is a root person
+ * Returns ISO, or null (standing).
  */
-export function resolveExpiry(until, { root }, now = Date.now()) {
+export function resolveExpiry(
+  until,
+  { root, agent = false, maxDays = MAX_GRANT_DAYS, defaultDays = DEFAULT_SHARE_DAYS, standing = "root" },
+  now = Date.now(),
+) {
+  const unbounded = root && !agent && standing === "root";
   if (until === undefined || until === null || until === "") {
-    if (root) return null;
-    throw new Error(`a grant needs an expiry (until), at most ${MAX_GRANT_DAYS} days out`);
+    return unbounded ? null : new Date(now + defaultDays * 86_400_000).toISOString();
   }
   // "14d" = 14 days from now (agents needn't know today's date)
   const rel = /^\s*(\d{1,3})\s*d(ays?)?\s*$/i.exec(String(until));
   const t = rel ? now + Number(rel[1]) * 86_400_000 : Date.parse(until);
   if (!Number.isFinite(t)) throw new Error(`invalid expiry: ${until} (an ISO date, or e.g. 14d)`);
   if (t <= now) throw new Error("the expiry must be in the future");
-  if (!root && t - now > MAX_GRANT_DAYS * 86_400_000) throw new Error(`grants expire within ${MAX_GRANT_DAYS} days`);
+  if (!unbounded && t - now > maxDays * 86_400_000) throw new Error(`grants expire within ${maxDays} days`);
   return new Date(t).toISOString();
 }

@@ -531,6 +531,11 @@ Who sees what in the knowledge graph follows the position tree
   queued widening.
 - A tenant whose user holds no position sees nothing in the graph and cannot
   write to it.
+- **Organization settings** (admin's rail): share limits, standing shares,
+  people sharing directly or through review, grading on/off and confidence,
+  the derived-data window. Stored in ArcadeDB (`OrgPolicy`, changes in
+  `PolicyChange`), refreshed by graph-rag every minute; `GET /api/policy`
+  shows the current values and defaults.
 - **Semantic grading**: graph-rag's `GRADER_MODEL` (compose: `grader`, a
   litellm alias in `litellm-config/litellm-config.yaml`; after editing,
   `docker compose restart litellm`). graph-rag logs `semantic grading: on`.

@@ -12,7 +12,9 @@
 
   let { onclose }: { onclose: () => void } = $props();
 
-  const MAX_DAYS = 90;
+  // the organization's limits (Organization settings); defaults until loaded
+  let maxDays = $state(90);
+  let defaultDays = $state(14);
 
   let tree = $state<PositionsView | null>(null);
   let grants = $state<GrantView[]>([]);
@@ -46,6 +48,13 @@
     try {
       tree = await api.positions();
       if (tree.scoped) grants = (await api.grants()).grants;
+      const p = await api.policy().catch(() => null);
+      if (p) {
+        const fresh = maxDays === 90 && defaultDays === 14 && until === dateIn(14);
+        maxDays = p.policy.maxGrantDays;
+        defaultDays = p.policy.defaultShareDays;
+        if (fresh) until = dateIn(defaultDays);
+      }
       loaded = true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -105,7 +114,7 @@
     if (!attempted || standing) return "";
     if (!until) return "Pick an end date.";
     if (until <= dateIn(0)) return "Pick a date after today.";
-    if (!tree?.canGrantStanding && until > dateIn(MAX_DAYS)) return `Shares end within ${MAX_DAYS} days.`;
+    if (!tree?.canGrantStanding && until > dateIn(maxDays)) return `Shares end within ${maxDays} days.`;
     return "";
   });
 
@@ -119,7 +128,7 @@
     branch = "";
     to = "";
     reason = "";
-    until = dateIn(14);
+    until = dateIn(defaultDays);
     standing = false;
     query = "";
     attempted = false;
@@ -296,7 +305,7 @@
         class="input w-auto"
         bind:value={until}
         min={dateIn(1)}
-        max={tree?.canGrantStanding ? undefined : dateIn(MAX_DAYS)}
+        max={tree?.canGrantStanding ? undefined : dateIn(maxDays)}
         disabled={standing}
       />
       {#if tree?.canGrantStanding}
@@ -305,7 +314,7 @@
           No end date (only the organization's root can do this)
         </label>
       {:else}
-        <span class="field-hint">Shares end within {MAX_DAYS} days. You can stop one sooner at any time.</span>
+        <span class="field-hint">Shares end within {maxDays} days. You can stop one sooner at any time.</span>
       {/if}
       {#if untilError}<span class="field-error">{untilError}</span>{/if}
     </div>

@@ -1,10 +1,12 @@
 <script lang="ts">
-  import { ChevronRight, Inbox, Pencil, Plus, Share2, UserPlus, X } from "lucide";
+  import { ChevronRight, Inbox, Pencil, Plus, Share2, ShieldCheck, UserPlus, X } from "lucide";
   import { store } from "../lib/stores.svelte.js";
   import { modelDisplayName } from "../lib/format.js";
   import DeleteAgentModal from "./DeleteAgentModal.svelte";
   import GraphQueuePanel from "./GraphQueuePanel.svelte";
   import GrantsPanel from "./GrantsPanel.svelte";
+  import OrgSettingsPanel from "./OrgSettingsPanel.svelte";
+  import { api } from "../lib/api.js";
   import Icon from "./Icon.svelte";
 
   let {
@@ -23,6 +25,15 @@
   let deleteTarget = $state<{ id: string; name: string } | null>(null);
   let showReview = $state(false);
   let showGrants = $state(false);
+  let showSettings = $state(false);
+  // only the organization's root edits its settings; nobody else sees the entry
+  let canEditSettings = $state(false);
+  $effect(() => {
+    void api
+      .policy()
+      .then((p) => (canEditSettings = p.canEdit))
+      .catch(() => (canEditSettings = false));
+  });
   let collapsed = $state<Record<string, boolean>>({});
 
   function statusDot(status: string): { cls: string; label: string } {
@@ -169,6 +180,12 @@
       <Icon icon={Share2} size={14} />
       Shared access
     </button>
+    {#if canEditSettings}
+      <button class={ghost} onclick={() => (showSettings = true)}>
+        <Icon icon={ShieldCheck} size={14} />
+        Organization settings
+      </button>
+    {/if}
   </div>
 </nav>
 
@@ -177,6 +194,9 @@
 {/if}
 {#if showGrants}
   <GrantsPanel onclose={() => (showGrants = false)} />
+{/if}
+{#if showSettings}
+  <OrgSettingsPanel onclose={() => (showSettings = false)} />
 {/if}
 
 {#if deleteTarget}

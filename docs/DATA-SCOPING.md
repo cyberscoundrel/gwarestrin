@@ -183,15 +183,15 @@ allowed to use it; otherwise defining a profile would escalate privileges.
    real client's data before adding multiple homes.
 3. ~~Standing vs temporary grants~~: both; standing grants are root-only,
    everyone else's expire within 90 days.
-4. **Per-organization settings**: extract into per-instance configuration
-   with an admin dashboard closer to deploy (planned for the ~3 weeks before
-   the 2026-10-28 deploy target). Candidates, today env vars or constants:
-   `DERIVED_WINDOW_HOURS` (12), the 90-day grant limit (`MAX_GRANT_DAYS` in
-   graph-rag/src/grants.js), the grading confidence threshold
-   (`CONFIDENCE_MIN` 0.6 in graph-rag/src/grading.js), `GRADER_MODEL`
-   (grading on/off), root-only standing grants, `ORG_ROOT_GROUP`, and the
-   litellm routes for `grader` and `embed-minilm` (local models at deploy:
-   the inference machine has no embedding model yet).
+4. **Per-organization settings**: built (2026-10-07) as the organization
+   policy, edited in the app under *Organization settings* (shown only to a
+   root person; agents can't change it). graph-rag stores and enforces it,
+   logging every change (who, when, before/after); env vars only set the
+   defaults (`MAX_GRANT_DAYS` 90, `DEFAULT_SHARE_DAYS` 14, `STANDING_GRANTS`
+   root, `PEOPLE_SHARE_DIRECTLY` true, `GRADING_ENABLED` true,
+   `GRADING_CONFIDENCE` 0.6, `DERIVED_WINDOW_HOURS` 12). Still set at
+   deploy, shown read-only there: `GRADER_MODEL`, the litellm routes for
+   `grader` and `embed-minilm` (local models at deploy), `ORG_ROOT_GROUP`.
 
 ## Prerequisites (closed 2026-10-06)
 - graph-rag fails closed: a configured token map that is missing or unreadable

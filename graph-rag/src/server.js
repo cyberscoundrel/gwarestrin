@@ -31,6 +31,7 @@ import {
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
 import { grantedView, isActive, resolveExpiry } from "./grants.js";
 import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
+import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -52,8 +53,9 @@ const {
   // semantic grading of new writes against the position tree (empty = off)
   GRADER_MODEL = "",
   GRADER_TIMEOUT_MS = "30000",
-  // how long what an identity read bounds where its writes may land
-  DERIVED_WINDOW_HOURS = "12",
+  // policy defaults (MAX_GRANT_DAYS, DEFAULT_SHARE_DAYS, STANDING_GRANTS,
+  // PEOPLE_SHARE_DIRECTLY, GRADING_ENABLED, GRADING_CONFIDENCE,
+  // DERIVED_WINDOW_HOURS) are read by policy.js
 } = process.env;
 
 /**
@@ -488,7 +490,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
 /** ---- derived data: what an identity read bounds where its writes land ---- */
 
 const readMarks = new Map(); // identity -> Map(home -> last read ms)
-const windowMs = () => Number(DERIVED_WINDOW_HOURS) * 3_600_000;
+const windowMs = () => policy.derivedWindowHours * 3_600_000;
 
 async function ensureReadMarkSchema() {
   await adbCommand("CREATE DOCUMENT TYPE ReadMark IF NOT EXISTS").catch(() => {});
@@ -532,7 +534,7 @@ function recordReads(identity, homes) {
  * visible. What was read through a grant pulls this above the grantee.
  */
 function derivedFloor(identity, origin) {
-  if (!SCOPED || !positionMap || origin === undefined || identity.open) return origin;
+  if (!SCOPED || !positionMap || origin === undefined || identity.open || policy.derivedWindowHours === 0) return origin;
   const cutoff = Date.now() - windowMs();
   const read = [...(readMarks.get(markKey(identity)) ?? new Map())].filter(([, t]) => t > cutoff).map(([h]) => h);
   return commonAncestor(positionMap, [origin, ...read]);
@@ -592,13 +594,14 @@ async function placeEntities(entities, origin, floor) {
       ),
     ),
   );
-  if (!GRADER_MODEL || origin === positionMap.root) {
+  const grading = Boolean(GRADER_MODEL) && policy.gradingEnabled;
+  if (!grading || origin === positionMap.root) {
     return entities.map((_, i) =>
-      applyFloor({ home: existing[i] ?? origin, note: GRADER_MODEL ? "at the root: nothing to grade" : "not graded (grading off)" }, origin, floor),
+      applyFloor({ home: existing[i] ?? origin, note: grading ? "at the root: nothing to grade" : "not graded (grading off)" }, origin, floor),
     );
   }
   const verdicts = await gradeBatch(origin, entities);
-  return entities.map((_, i) => applyFloor(decide(positionMap, origin, verdicts[i], existing[i]), origin, floor));
+  return entities.map((_, i) => applyFloor(decide(positionMap, origin, verdicts[i], existing[i], policy.gradingConfidence), origin, floor));
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
@@ -819,7 +822,7 @@ async function grantAccess({ entities, subtree: subtreeRef, to, reason, until },
   if (!SCOPED || !positionMap) throw new Error("position scoping is not enabled");
   if (!!entities === !!subtreeRef) throw new Error("grant either entities or a subtree, not both");
   const toPos = positionId(to);
-  const expires_at = resolveExpiry(until, { root: scope.root });
+  const expires_at = resolveExpiry(until, expiryRules(identity, scope));
   const base = { to_pos: toPos, reason: String(reason).slice(0, 500), granted_by: identity.user, expires_at };
   const targets = [];
   if (subtreeRef) {
@@ -863,14 +866,15 @@ async function grantAccess({ entities, subtree: subtreeRef, to, reason, until },
         payload: JSON.stringify(grant),
         user: identity.user,
         home: t.target_home,
-        status: identity.agent ? "waiting" : "confirmed",
+        status: identity.agent || !(policy.peopleShareDirectly || scope.root) ? "waiting" : "confirmed",
       });
       results.push({ proposed: true, waits_for_write: t.after, target: t.target_name, to: positionName(toPos), ...q });
       continue;
     }
     // people share what they own directly (it's theirs to share; time-limited
-    // and recorded); agents only propose, and a person confirms
-    if (!identity.agent) {
+    // and recorded) unless the organization routes shares through review;
+    // agents only propose, and a person confirms
+    if (!identity.agent && (policy.peopleShareDirectly || scope.root)) {
       await storeGrant(grant);
       results.push({ granted: true, id: grant.id, target: t.target_name, to: positionName(toPos), expires_at });
     } else {
@@ -976,6 +980,15 @@ async function resolveWaitingShares(writeId) {
       continue;
     }
     const resolved = { ...g, target: String(ent.rid), target_home: effectiveHome(positionMap, ent._home), after: undefined };
+    if (rec.status === "confirmed" && !(policy.peopleShareDirectly || owner.root)) {
+      // shares go through review: an ordinary request in Approvals now
+      await adbCommand("UPDATE PendingWrite SET status = 'pending', payload = :payload, note = :note WHERE id = :id", "sql", {
+        payload: JSON.stringify(resolved),
+        note: "said yes; waiting for review",
+        id: rec.id,
+      });
+      continue;
+    }
     if (rec.status === "confirmed") {
       try {
         await storeGrant({ ...resolved, granted_by: rec.approved_by || personOf(rec.requested_by) });
@@ -1024,6 +1037,7 @@ function proposalView(rec, g) {
     // waiting/confirmed: the entry's write isn't approved yet
     ...(g.after ? { waits_for_write: true } : {}),
     ...(rec.note ? { note: rec.note } : {}),
+    max_days: policy.maxGrantDays,
     target: g.kind === "subtree" ? `everything under ${positionName(g.target)}` : g.target_name,
     to: positionName(g.to_pos),
     reason: g.reason,
@@ -1046,11 +1060,21 @@ async function confirmProposal(id, { until, to } = {}, identity, scope) {
   const g = rec && ownProposal(identity, scope, rec);
   if (!g) throw new Error(`no pending share proposal ${id} of yours`);
   const grant = { ...g, granted_by: identity.user };
-  if (until !== undefined) grant.expires_at = resolveExpiry(until, { root: scope.root });
+  if (until !== undefined) grant.expires_at = resolveExpiry(until, expiryRules(identity, scope));
   if (to !== undefined) {
     grant.to_pos = positionId(to);
     const toView = visibleHomes(positionMap, [grant.to_pos]);
     if (toView === null || toView.has(grant.target_home)) throw new Error(`${positionName(grant.to_pos)} already sees it`);
+  }
+  if (!policy.peopleShareDirectly && !scope.root) {
+    // the organization routes people's shares through review: the person's yes
+    // is recorded; an approver makes it (it stays in Approvals)
+    await adbCommand("UPDATE PendingWrite SET payload = :payload, note = :note WHERE id = :id AND status IN ['pending', 'waiting']", "sql", {
+      payload: JSON.stringify(grant),
+      note: `${identity.user} said yes; waiting for review`,
+      id,
+    });
+    return proposalView({ ...rec, note: `${identity.user} said yes; waiting for review` }, grant);
   }
   if (rec.status === "waiting") {
     // the entry isn't written yet: remember the yes; it applies on approval
@@ -1382,8 +1406,8 @@ said", "share the line 2 plan with the floor"):
 2. Otherwise call find_shareable with a short description and pick the matching entries; mention
    related entries only if the person seems to want them too.
 3. Match who they named to one of the returned positions.
-4. Propose with grant_access: the entries, that position, a one-sentence reason in the person's
-   words, and until "14d" unless they said how long.
+4. Propose with grant_access: the entries, that position and a one-sentence reason in the person's
+   words; leave "until" out unless they said how long (the organization's default applies).
 5. Tell them the share is waiting for their confirmation in the chat. Nothing is shared until they
    confirm.`,
     { query: z.string().min(1), k: z.number().int().min(1).max(32).optional() },
@@ -1396,8 +1420,8 @@ said", "share the line 2 plan with the floor"):
   if (SCOPED && caps.write !== "deny") server.tool(
     "grant_access",
     `Show data you own to another position for a while: either named entities or a whole subtree
-(a position and everything below it). Give a reason and an expiry (until: "14d", or an ISO date;
-at most 90 days unless you hold the root). People share what they own at once; agents propose and
+(a position and everything below it). Give a reason; "until" ("14d" or an ISO date) is optional,
+the organization's default length applies without it, and its maximum always does. People share what they own at once; agents propose and
 the person confirms (a card in their chat). Data you only see through a grant can't be granted
 onward. To find what to share, use find_shareable.`,
     {
@@ -1542,7 +1566,102 @@ app.get("/api/positions", (req, res) => {
   // the whole tree's names: grants may go to positions outside the caller's
   // reach (that is their point); this says nothing about anyone's data
   const tree = Object.entries(positionMap.positions).map(([id, p]) => ({ id, name: p.name, parent: p.parent }));
-  res.json({ scoped: true, root: positionMap.root, held, positions, tree, canGrantStanding: reach === null });
+  res.json({ scoped: true, root: positionMap.root, held, positions, tree, canGrantStanding: reach === null && !identity.agent && policy.standingGrants === "root" });
+});
+
+/** ---- organization policy (Organization settings; see policy.js) ---- */
+
+const policyDefaults = defaultPolicy();
+let policy = policyDefaults;
+let policyMeta = { updated_by: null, updated_at: null };
+
+const expiryRules = (identity, scope) => ({
+  root: scope.root,
+  agent: Boolean(identity.agent),
+  maxDays: policy.maxGrantDays,
+  defaultDays: policy.defaultShareDays,
+  standing: policy.standingGrants,
+});
+
+async function ensurePolicySchema() {
+  await adbCommand("CREATE DOCUMENT TYPE OrgPolicy IF NOT EXISTS").catch(() => {});
+  await adbCommand("CREATE DOCUMENT TYPE PolicyChange IF NOT EXISTS").catch(() => {});
+  for (const prop of ["scope", "json", "updated_by", "updated_at"]) await adbCommand(`CREATE PROPERTY OrgPolicy.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  // (no "by"/"before"/"after": reserved words in ArcadeDB SQL)
+  for (const prop of ["changed_at", "changed_by", "prev_json", "next_json"]) await adbCommand(`CREATE PROPERTY PolicyChange.${prop} IF NOT EXISTS STRING`).catch(() => {});
+}
+
+async function loadPolicy() {
+  try {
+    const row = (await adbQuery("SELECT FROM OrgPolicy WHERE scope = 'org' LIMIT 1"))[0];
+    policy = row ? normalizeStored(JSON.parse(row.json), policyDefaults) : policyDefaults;
+    policyMeta = { updated_by: row?.updated_by ?? null, updated_at: row?.updated_at ?? null };
+  } catch (e) {
+    log.warn(`policy load failed (keeping the current one): ${String(e).slice(0, 120)}`);
+  }
+}
+
+/** a root person changes the policy; every change is recorded */
+async function savePolicy(input, identity) {
+  const next = applyPolicyUpdate(policy, input);
+  const now = new Date().toISOString();
+  const updated = await adbCommand("UPDATE OrgPolicy SET json = :json, updated_by = :by_user, updated_at = :now WHERE scope = 'org'", "sql", {
+    json: JSON.stringify(next),
+    by_user: identity.user,
+    now,
+  });
+  if (Number(updated?.[0]?.count ?? 0) === 0) {
+    await adbCommand("INSERT INTO OrgPolicy SET scope = 'org', json = :json, updated_by = :by_user, updated_at = :now", "sql", {
+      json: JSON.stringify(next),
+      by_user: identity.user,
+      now,
+    });
+  }
+  await adbCommand("INSERT INTO PolicyChange SET changed_at = :now, changed_by = :by_user, prev_json = :prev, next_json = :next", "sql", {
+    now,
+    by_user: identity.user,
+    prev: JSON.stringify(policy),
+    next: JSON.stringify(next),
+  }).catch((e) => log.warn(`policy change not logged: ${String(e).slice(0, 120)}`));
+  log.info(`organization policy changed by ${identity.user}: ${JSON.stringify(input)}`);
+  policy = next;
+  policyMeta = { updated_by: identity.user, updated_at: now };
+  return policy;
+}
+
+const canEditPolicy = (identity, scope) => !identity.agent && !identity.open && scope.root && SCOPED;
+
+app.get("/api/policy", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  const scope = scopeOf(identity);
+  void adbQuery("SELECT changed_at, changed_by, prev_json, next_json FROM PolicyChange ORDER BY changed_at DESC LIMIT 10")
+    .catch(() => [])
+    .then((history) =>
+      res.json({
+        policy,
+        defaults: policyDefaults,
+        ...policyMeta,
+        canEdit: canEditPolicy(identity, scope),
+        history: canEditPolicy(identity, scope) ? history : [],
+        // set at deploy, not here
+        infra: {
+          scoped: SCOPED,
+          positions: positionMap ? Object.keys(positionMap.positions).length : 0,
+          graderModel: GRADER_MODEL || null,
+          embedModel: EMBED_MODEL,
+        },
+      }),
+    );
+});
+app.put("/api/policy", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root can change these settings" });
+  void savePolicy(req.body, identity).then(
+    (p) => res.json({ policy: p, ...policyMeta }),
+    (e) => res.status(400).json({ error: String(e instanceof Error ? e.message : e).slice(0, 300) }),
+  );
 });
 
 /** ---- grants + owned-entity search over HTTP (the people-facing UI) ---- */
@@ -1562,7 +1681,7 @@ const httpError = (res, err) => res.status(400).json({ error: String(err instanc
 
 app.get("/api/grants", (req, res) => {
   const ctx = httpScope(req, res);
-  if (ctx) res.json({ ...listGrants(ctx.scope), canGrantStanding: ctx.scope.root });
+  if (ctx) res.json({ ...listGrants(ctx.scope), canGrantStanding: ctx.scope.root && !ctx.identity.agent && policy.standingGrants === "root" });
 });
 app.post("/api/grants", (req, res) => {
   const ctx = httpScope(req, res);
@@ -1640,7 +1759,10 @@ async function boot() {
     await adbCommand(`UPDATE ${ENTITY_LABEL} SET _origin = _home WHERE _origin IS NULL AND _home IS NOT NULL`).catch((e) => log.warn(`origin migration: ${e}`));
     await adbCommand(`UPDATE ${ENTITY_LABEL} SET _origin = :root WHERE _origin IS NULL`, "sql", { root: positionMap.root }).catch((e) => log.warn(`origin migration: ${e}`));
   }
-  if (SCOPED) log.info(`semantic grading: ${GRADER_MODEL ? `on (${GRADER_MODEL})` : "off"}`);
+  await ensurePolicySchema();
+  await loadPolicy();
+  setInterval(() => void loadPolicy(), 60_000);
+  if (SCOPED) log.info(`semantic grading: ${GRADER_MODEL && policy.gradingEnabled ? `on (${GRADER_MODEL}, confidence ${policy.gradingConfidence})` : "off"}`);
   if (SCOPED) await ensureReadMarkSchema();
   if (SCOPED) {
     await ensureGrantSchema();

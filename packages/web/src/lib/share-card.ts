@@ -12,13 +12,14 @@ interface ProposalView {
   /** waiting / confirmed: the entry's own write isn't approved yet */
   status: "waiting" | "confirmed" | "pending" | "executing" | "approved" | "rejected" | "failed" | string;
   note?: string;
+  /** the organization's longest share */
+  max_days?: number;
   target: string;
   to: string;
   reason: string;
   expires_at: string | null;
 }
 
-const MAX_DAYS = 90;
 
 function day(iso: string | null | undefined, offsetDays = 0): string {
   const d = iso ? new Date(iso) : new Date(Date.now() + offsetDays * 86_400_000);
@@ -70,7 +71,8 @@ export class GwShareCard extends LitElement {
     void this.load();
     // a share waiting on its entry's approval changes without the person
     this.poll = setInterval(() => {
-      if (this.view?.status === "waiting" || this.view?.status === "confirmed") void this.load();
+      const s = this.view?.status;
+      if (s === "waiting" || s === "confirmed" || (s === "pending" && /waiting for review/.test(this.view?.note ?? ""))) void this.load();
     }, 15_000);
   }
 
@@ -125,6 +127,13 @@ export class GwShareCard extends LitElement {
         <div class="text-xs ${this.error ? "text-err" : "text-faint"}">${this.error || "Loading…"}</div>
       </div>`;
     }
+    if (v.status === "pending" && /waiting for review/.test(v.note ?? "")) {
+      // the organization routes shares through review: the yes is recorded
+      return html`<div class="gw-share-card grid gap-1.5 rounded-lg border border-edge bg-panel p-3.5" data-status="review">
+        ${head}
+        <div class="text-xs text-dim">You said yes. It's waiting for an approver; it will last until ${pretty(v.expires_at)}.</div>
+      </div>`;
+    }
     if (v.status === "confirmed") {
       return html`<div class="gw-share-card grid gap-2 rounded-lg border border-edge2 bg-panel p-3.5" data-status="confirmed">
         ${head}
@@ -161,7 +170,7 @@ export class GwShareCard extends LitElement {
             class="input w-auto py-1 text-xs"
             .value=${this.until}
             min=${day(null, 1)}
-            max=${day(null, MAX_DAYS)}
+            max=${day(null, v.max_days ?? 90)}
             ?disabled=${this.busy}
             @change=${(e: Event) => (this.until = (e.target as HTMLInputElement).value)}
           />
