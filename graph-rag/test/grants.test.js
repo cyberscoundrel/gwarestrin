@@ -48,9 +48,14 @@ test("expired and revoked grants count for nothing; the root needs none", () => 
   assert.equal(root.homes.size + root.rids.size, 0);
 });
 
-test("expiries: required and bounded below the root, optional for it", () => {
-  assert.throws(() => resolveExpiry(undefined, { root: false }, NOW), /needs an expiry/);
+test("expiries: a default length below the root, standing for a root person", () => {
+  assert.equal(resolveExpiry(undefined, { root: false }, NOW), new Date(NOW + 14 * 86_400_000).toISOString());
+  assert.equal(resolveExpiry(undefined, { root: false, defaultDays: 7 }, NOW), new Date(NOW + 7 * 86_400_000).toISOString());
   assert.equal(resolveExpiry(undefined, { root: true }, NOW), null);
+  assert.notEqual(resolveExpiry(undefined, { root: true, agent: true }, NOW), null, "a root person's agent doesn't make standing shares");
+  assert.notEqual(resolveExpiry(undefined, { root: true, standing: "nobody" }, NOW), null, "policy: nobody shares without an end date");
+  assert.throws(() => resolveExpiry("200d", { root: true, standing: "nobody" }, NOW), /within 90 days/);
+  assert.throws(() => resolveExpiry("40d", { root: false, maxDays: 30 }, NOW), /within 30 days/);
   assert.equal(resolveExpiry("2026-10-08", { root: false }, NOW), "2026-10-08T00:00:00.000Z");
   assert.throws(() => resolveExpiry("2026-10-01", { root: false }, NOW), /future/);
   assert.throws(() => resolveExpiry(new Date(NOW + (MAX_GRANT_DAYS + 1) * 86_400_000).toISOString(), { root: false }, NOW), /within 90 days/);

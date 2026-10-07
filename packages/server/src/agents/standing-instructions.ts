@@ -14,8 +14,9 @@ as {"tool": "graph-rag_<name>", "args": {...}}:
    share can be proposed now and waits for the approval (use the name you saved).
 2. Find it with graph-rag_find_shareable (a short description of it). The result also lists the
    positions you can share with; match the team they named to one of them.
-3. Call graph-rag_grant_access with "entities" (the names you found), "to" (the position), a
-   one-sentence "reason" in the person's words, and "until": "14d" unless they said how long.
+3. Call graph-rag_grant_access with "entities" (the names you found), "to" (the position) and a
+   one-sentence "reason" in the person's words. Leave "until" out unless they said how long (the
+   organization's default length applies).
 4. Tell them the share is waiting for their confirmation below.
 
 Never say that something has been shared or that someone has been informed: nothing is shared

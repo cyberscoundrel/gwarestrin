@@ -57,6 +57,12 @@ test("new entities: restrict or keep when sure; one level up and a review when n
   assert.equal(decide(map, "org", null).home, "org", "nothing is above the root");
 });
 
+test("the confidence threshold comes from policy", () => {
+  assert.equal(decide(map, "ops", { home: "org", confidence: 0.7, reason: "x" }, undefined, 0.8).home, "org", "unsure at 0.8: held one level up (ops -> org)");
+  assert.ok(decide(map, "ops", { home: "org", confidence: 0.7, reason: "x" }, undefined, 0.8).review, "and a review is queued");
+  assert.equal(decide(map, "ops", { home: "ops", confidence: 0.7, reason: "x" }, undefined, 0.5).home, "ops");
+});
+
 test("updates never widen: grading may only restrict an existing entity further", () => {
   assert.equal(decide(map, "floor", { home: "ops", confidence: 0.9, reason: "now has pricing" }, "floor").home, "ops");
   assert.equal(decide(map, "floor", { home: "floor", confidence: 0.9, reason: "routine" }, "ops").home, "ops", "a person's restriction stays");

@@ -96,8 +96,8 @@ export function parseVerdicts(text, byLabel, map, origin, names) {
  * update never widens: grading can restrict it further, nothing else).
  * Returns { home, review?: {to, reason}, release?: {to, reason}, note }.
  */
-export function decide(map, origin, verdict, current) {
-  const sure = verdict && verdict.confidence >= CONFIDENCE_MIN;
+export function decide(map, origin, verdict, current, threshold = CONFIDENCE_MIN) {
+  const sure = verdict && verdict.confidence >= threshold;
   if (current !== undefined) {
     // only content judged more sensitive than its writer's level re-restricts
     // an entity: a person's earlier release (or restriction) otherwise stands

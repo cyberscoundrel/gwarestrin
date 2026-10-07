@@ -16,7 +16,7 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
     return token && mcpUrl ? { token, base: mcpUrl } : null;
   };
 
-  const proxy = async (reply: FastifyReply, path: string, init: { method?: "GET" | "POST"; body?: unknown } = {}) => {
+  const proxy = async (reply: FastifyReply, path: string, init: { method?: "GET" | "POST" | "PUT"; body?: unknown } = {}) => {
     const t = target();
     if (!t) return reply.code(409).send({ error: "this workspace has no knowledge graph" });
     try {
@@ -56,6 +56,9 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
     const { id } = req.params as { id: string };
     return proxy(reply, `/api/grants/proposals/${encodeURIComponent(id)}/decline`, { method: "POST", body: {} });
   });
+  // the organization's data-scoping policy (graph-rag lets only a root person change it)
+  app.get("/api/policy", async (_req, reply) => proxy(reply, "/api/policy"));
+  app.put("/api/policy", async (req, reply) => proxy(reply, "/api/policy", { method: "PUT", body: req.body ?? {} }));
   app.get("/api/knowledge/entities", async (req, reply) => {
     const q = String((req.query as { q?: string }).q ?? "").slice(0, 80);
     return proxy(reply, `/api/entities?q=${encodeURIComponent(q)}`);

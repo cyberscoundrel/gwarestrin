@@ -32,6 +32,26 @@ export interface PositionsView {
   canGrantStanding?: boolean;
 }
 
+export interface OrgPolicy {
+  maxGrantDays: number;
+  defaultShareDays: number;
+  standingGrants: "root" | "nobody";
+  peopleShareDirectly: boolean;
+  gradingEnabled: boolean;
+  gradingConfidence: number;
+  derivedWindowHours: number;
+}
+
+export interface PolicyView {
+  policy: OrgPolicy;
+  defaults: OrgPolicy;
+  updated_by: string | null;
+  updated_at: string | null;
+  canEdit: boolean;
+  history: Array<{ changed_at: string; changed_by: string; prev_json: string; next_json: string }>;
+  infra: { scoped: boolean; positions: number; graderModel: string | null; embedModel: string };
+}
+
 export interface GrantView {
   id: string;
   kind: "entity" | "subtree";
@@ -128,6 +148,12 @@ export const api = {
   /** positions this workspace's user reaches (theirs and below) */
   async positions(): Promise<PositionsView> {
     return json(await fetch("/api/positions"));
+  },
+  async policy(): Promise<PolicyView> {
+    return json(await fetch("/api/policy"));
+  },
+  async savePolicy(changes: Partial<OrgPolicy>): Promise<{ policy: OrgPolicy }> {
+    return json(await fetch("/api/policy", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));
   },
   async grants(): Promise<{ grants: GrantView[]; canGrantStanding: boolean }> {
     return json(await fetch("/api/grants"));
