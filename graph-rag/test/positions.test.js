@@ -78,3 +78,13 @@ test("ancestors and a broken tree", () => {
   // a parent that isn't a position hangs the node off the root
   assert.equal(parsePositionMap({ root: "org", positions: { org: { name: "o" }, a: { name: "a", parent: "nope" } } }).positions.a.parent, "org");
 });
+
+test("commonAncestor: the lowest point that sees every source", async () => {
+  const { commonAncestor } = await import("../src/positions.js");
+  assert.equal(commonAncestor(map, ["floor", "eng"]), "ops");
+  assert.equal(commonAncestor(map, ["floor", "floor"]), "floor");
+  assert.equal(commonAncestor(map, ["floor", "ops"]), "ops");
+  assert.equal(commonAncestor(map, ["floor", "reps"]), "org", "across branches only the root sees both");
+  assert.equal(commonAncestor(map, ["floor", undefined]), "org", "an unhomed source counts as root");
+  assert.equal(commonAncestor(map, []), "org");
+});
