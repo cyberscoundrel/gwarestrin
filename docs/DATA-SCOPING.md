@@ -151,8 +151,12 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   date); the person's click confirms it through
   `/api/grants/proposals/:id/confirm`, which only works for proposals made by
   that person's own agents on data they own. Agents still never grant on
-  their own. Limitation: for people whose writes are queued, sharing pasted
-  text waits until its write is approved.
+  their own. For people whose writes are queued, a share of an entry that
+  only exists in their own pending write waits on it (not shown in
+  Approvals; the card offers "Share once approved"): on approval it applies
+  if they said yes, or becomes an ordinary proposal; if grading filed the
+  entry above them it fails with that reason; if the write is rejected the
+  share goes with it.
 - **Review queue**: an approval claims the queued write before running it, so
   it runs once; approved and rejected writes leave the queue.
 - **Agents** each have their own graph token, signed by their instance with a

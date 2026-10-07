@@ -836,7 +836,16 @@ async function grantAccess({ entities, subtree: subtreeRef, to, reason, until },
         { name: ref.name },
       );
       const hits = rows.filter((r) => from === undefined || effectiveHome(positionMap, r._home) === from);
-      if (hits.length === 0) throw new Error(`no entity ${ref.name} you own${from ? ` at ${ref.home}` : ""} (granted entities can't be granted onward)`);
+      if (hits.length === 0) {
+        // not written yet? a share may wait on the person's own pending write
+        const pend = await pendingEntityWrite(identity, ref.name);
+        if (pend) {
+          if (visibleHomes(positionMap, [toPos])?.has(pend.origin) ?? true) throw new Error(`${positionName(toPos)} already sees ${ref.name}`);
+          targets.push({ kind: "entity", target: null, target_name: ref.name, target_home: pend.origin, origin: pend.origin, after: pend.id });
+          continue;
+        }
+        throw new Error(`no entity ${ref.name} you own${from ? ` at ${ref.home}` : ""} (granted entities can't be granted onward)`);
+      }
       if (hits.length > 1) throw new Error(`${ref.name} exists at several homes you own; pass its home`);
       const home = effectiveHome(positionMap, hits[0]._home);
       if (visibleHomes(positionMap, [toPos])?.has(home) ?? true) throw new Error(`${positionName(toPos)} already sees ${ref.name}`);
@@ -846,6 +855,19 @@ async function grantAccess({ entities, subtree: subtreeRef, to, reason, until },
   const results = [];
   for (const t of targets) {
     const grant = { id: randomUUID(), ...base, ...t };
+    if (t.after) {
+      // waits on the entity's pending write: a person's own share is confirmed
+      // already (applies on approval); an agent's waits for the person too
+      const q = await queueWrite({
+        kind: "grant",
+        payload: JSON.stringify(grant),
+        user: identity.user,
+        home: t.target_home,
+        status: identity.agent ? "waiting" : "confirmed",
+      });
+      results.push({ proposed: true, waits_for_write: t.after, target: t.target_name, to: positionName(toPos), ...q });
+      continue;
+    }
     // people share what they own directly (it's theirs to share; time-limited
     // and recorded); agents only propose, and a person confirms
     if (!identity.agent) {
@@ -914,6 +936,74 @@ function listGrants(scope) {
   return { grants: out };
 }
 
+/** the person behind an identity ("alice" for alice and her agents) */
+const personOf = (user) => String(user ?? "").split("/agent:")[0];
+
+/** a pending upsert by the same person (or their agents) that would create `name` */
+async function pendingEntityWrite(identity, name) {
+  const person = personOf(identity.user);
+  const rows = await adbQuery("SELECT id, payload, requested_by FROM PendingWrite WHERE kind = 'upsert' AND status = 'pending' ORDER BY created_at DESC LIMIT 200");
+  for (const r of rows) {
+    if (personOf(r.requested_by) !== person) continue;
+    try {
+      const p = JSON.parse(r.payload);
+      if (p.home && (p.entities ?? []).some((e) => e?.name === name)) return { id: r.id, origin: p.home };
+    } catch {
+      /* not an upsert payload */
+    }
+  }
+  return null;
+}
+
+/**
+ * A write was approved: shares waiting on it now point at the real entity.
+ * Grading may have homed it above the person; then it isn't theirs to share.
+ */
+async function resolveWaitingShares(writeId) {
+  const rows = await adbQuery(
+    "SELECT FROM PendingWrite WHERE kind = 'grant' AND status IN ['waiting', 'confirmed'] AND payload LIKE :pat",
+    { pat: `%"after":"${writeId}"%` },
+  );
+  for (const rec of rows) {
+    const g = JSON.parse(rec.payload);
+    const ent = (await adbQuery(`SELECT @rid AS rid, _home FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: g.target_name, origin: g.origin }))[0];
+    const entry = entriesByUser.get(personOf(rec.requested_by));
+    const owner = entry ? scopeOf({ user: entry.user, positions: entry.positions ?? [], caps: {} }) : null;
+    if (!ent || !owner || !ownsHome(owner, ent._home)) {
+      const why = !ent ? "the entry wasn't written" : "the entry was filed above the person, so it isn't theirs to share";
+      await adbCommand("UPDATE PendingWrite SET status = 'failed', executed_at = :now, note = :why WHERE id = :id", "sql", { now: new Date().toISOString(), why, id: rec.id });
+      log.info(`share ${rec.id} not made: ${why}`);
+      continue;
+    }
+    const resolved = { ...g, target: String(ent.rid), target_home: effectiveHome(positionMap, ent._home), after: undefined };
+    if (rec.status === "confirmed") {
+      try {
+        await storeGrant({ ...resolved, granted_by: rec.approved_by || personOf(rec.requested_by) });
+        await adbCommand("UPDATE PendingWrite SET status = 'approved', payload = :payload, executed_at = :now WHERE id = :id", "sql", {
+          payload: JSON.stringify(resolved),
+          now: new Date().toISOString(),
+          id: rec.id,
+        });
+      } catch (e) {
+        await adbCommand("UPDATE PendingWrite SET status = 'failed' WHERE id = :id", "sql", { id: rec.id }).catch(() => {});
+        log.warn(`share ${rec.id} failed: ${String(e).slice(0, 120)}`);
+      }
+    } else {
+      // the person hasn't decided yet: an ordinary proposal now
+      await adbCommand("UPDATE PendingWrite SET status = 'pending', payload = :payload WHERE id = :id", "sql", { payload: JSON.stringify(resolved), id: rec.id });
+    }
+  }
+}
+
+/** a write was rejected: shares waiting on it go with it */
+async function dropWaitingShares(writeId) {
+  await adbCommand(
+    "UPDATE PendingWrite SET status = 'rejected', executed_at = :now WHERE kind = 'grant' AND status IN ['waiting', 'confirmed'] AND payload LIKE :pat",
+    "sql",
+    { now: new Date().toISOString(), pat: `%"after":"${writeId}"%` },
+  );
+}
+
 /** a share proposed by one of this person's own agents, on data the person owns */
 function ownProposal(identity, scope, rec) {
   if (identity.agent || rec?.kind !== "grant") return null;
@@ -931,6 +1021,9 @@ function proposalView(rec, g) {
   return {
     id: rec.id,
     status: rec.status,
+    // waiting/confirmed: the entry's write isn't approved yet
+    ...(g.after ? { waits_for_write: true } : {}),
+    ...(rec.note ? { note: rec.note } : {}),
     target: g.kind === "subtree" ? `everything under ${positionName(g.target)}` : g.target_name,
     to: positionName(g.to_pos),
     reason: g.reason,
@@ -949,7 +1042,7 @@ async function proposalStatus(id, identity, scope) {
 /** the person confirms (optionally with another end date or recipient) */
 async function confirmProposal(id, { until, to } = {}, identity, scope) {
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid id");
-  const rec = (await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id }))[0];
+  const rec = (await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status IN ['pending', 'waiting']", { id }))[0];
   const g = rec && ownProposal(identity, scope, rec);
   if (!g) throw new Error(`no pending share proposal ${id} of yours`);
   const grant = { ...g, granted_by: identity.user };
@@ -958,6 +1051,16 @@ async function confirmProposal(id, { until, to } = {}, identity, scope) {
     grant.to_pos = positionId(to);
     const toView = visibleHomes(positionMap, [grant.to_pos]);
     if (toView === null || toView.has(grant.target_home)) throw new Error(`${positionName(grant.to_pos)} already sees it`);
+  }
+  if (rec.status === "waiting") {
+    // the entry isn't written yet: remember the yes; it applies on approval
+    const done = await adbCommand(
+      "UPDATE PendingWrite SET status = 'confirmed', approved_by = :actor, payload = :payload WHERE id = :id AND status = 'waiting'",
+      "sql",
+      { actor: identity.user, payload: JSON.stringify(grant), id },
+    );
+    if (Number(done?.[0]?.count ?? 0) !== 1) throw new Error("this share was already handled");
+    return proposalView({ ...rec, status: "confirmed" }, grant);
   }
   const claimed = await adbCommand(
     "UPDATE PendingWrite SET status = 'executing', approved_by = :actor WHERE id = :id AND status = 'pending'",
@@ -977,10 +1080,10 @@ async function confirmProposal(id, { until, to } = {}, identity, scope) {
 
 async function declineProposal(id, identity, scope) {
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid id");
-  const rec = (await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id }))[0];
+  const rec = (await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status IN ['pending', 'waiting', 'confirmed']", { id }))[0];
   const g = rec && ownProposal(identity, scope, rec);
   if (!g) throw new Error(`no pending share proposal ${id} of yours`);
-  await adbCommand("UPDATE PendingWrite SET status = 'rejected', executed_at = :now, approved_by = :actor WHERE id = :id AND status = 'pending'", "sql", {
+  await adbCommand("UPDATE PendingWrite SET status = 'rejected', executed_at = :now, approved_by = :actor WHERE id = :id AND status IN ['pending', 'waiting', 'confirmed']", "sql", {
     now: new Date().toISOString(),
     actor: identity.user,
     id,
@@ -1018,7 +1121,7 @@ async function schemaGraph() {
 
 async function ensurePendingSchema() {
   await adbCommand("CREATE DOCUMENT TYPE PendingWrite").catch(() => {});
-  for (const prop of ["id", "kind", "payload", "language", "requested_by", "created_at", "status", "executed_at", "approved_by", "home"]) {
+  for (const prop of ["id", "kind", "payload", "language", "requested_by", "created_at", "status", "executed_at", "approved_by", "home", "note"]) {
     await adbCommand(`CREATE PROPERTY PendingWrite.${prop} IF NOT EXISTS STRING`).catch(() => {});
   }
 }
@@ -1034,9 +1137,9 @@ async function queueWrite(entry) {
   // awaited: a write is only reported as queued once the record exists
   await adbCommand(
     "INSERT INTO PendingWrite SET id = :id, kind = :kind, payload = :payload, language = :lang, " +
-      "requested_by = :user, created_at = :created, status = 'pending', home = :home",
+      "requested_by = :user, created_at = :created, status = :status, home = :home",
     "sql",
-    { id, kind: entry.kind, payload, lang: language, user: entry.user, created, home: entry.home ?? null },
+    { id, kind: entry.kind, payload, lang: language, user: entry.user, created, home: entry.home ?? null, status: entry.status ?? "pending" },
   );
   console.log(`[graph-rag] write queued by ${entry.user}: ${String(payload).slice(0, 80)} (${id})`);
   return { queued: true, pendingId: id };
@@ -1090,6 +1193,8 @@ async function approvePending(id, identity) {
     id,
   });
   console.log(`[graph-rag] write ${id} approved by ${approver}`);
+  // shares that waited on this write can now point at its entities
+  if (rec.kind === "upsert") await resolveWaitingShares(id).catch((e) => log.warn(`waiting shares for ${id}: ${String(e).slice(0, 160)}`));
   return { approved: true, result };
 }
 async function rejectPending(id, identity) {
@@ -1103,6 +1208,7 @@ async function rejectPending(id, identity) {
     { now: new Date().toISOString(), actor: rejector, id },
   );
   if (Number(done?.[0]?.count ?? 0) !== 1) throw new Error(`pending write ${id} was already handled`);
+  if (rows[0].kind === "upsert") await dropWaitingShares(id).catch((e) => log.warn(`waiting shares for ${id}: ${String(e).slice(0, 160)}`));
   return { rejected: true };
 }
 
