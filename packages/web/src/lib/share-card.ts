@@ -9,7 +9,9 @@ import { LitElement, html, nothing } from "lit";
 
 interface ProposalView {
   id: string;
-  status: "pending" | "executing" | "approved" | "rejected" | "failed" | string;
+  /** waiting / confirmed: the entry's own write isn't approved yet */
+  status: "waiting" | "confirmed" | "pending" | "executing" | "approved" | "rejected" | "failed" | string;
+  note?: string;
   target: string;
   to: string;
   reason: string;
@@ -61,9 +63,20 @@ export class GwShareCard extends LitElement {
     return this; // light DOM: app styles
   }
 
+  private poll: ReturnType<typeof setInterval> | undefined;
+
   override connectedCallback(): void {
     super.connectedCallback();
     void this.load();
+    // a share waiting on its entry's approval changes without the person
+    this.poll = setInterval(() => {
+      if (this.view?.status === "waiting" || this.view?.status === "confirmed") void this.load();
+    }, 15_000);
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    clearInterval(this.poll);
   }
 
   private async load(): Promise<void> {
@@ -71,8 +84,9 @@ export class GwShareCard extends LitElement {
       const r = await fetch(`/api/grants/proposals/${encodeURIComponent(this.pendingId)}`);
       const j = (await r.json()) as ProposalView & { error?: string };
       if (!r.ok) throw new Error(j.error ?? `couldn't load the share (${r.status})`);
+      const first = this.view === null;
       this.view = j;
-      this.until = day(j.expires_at, 14);
+      if (first) this.until = day(j.expires_at, 14);
     } catch (e) {
       this.error = e instanceof Error ? e.message : String(e);
     }
@@ -111,7 +125,18 @@ export class GwShareCard extends LitElement {
         <div class="text-xs ${this.error ? "text-err" : "text-faint"}">${this.error || "Loading…"}</div>
       </div>`;
     }
-    if (v.status !== "pending") {
+    if (v.status === "confirmed") {
+      return html`<div class="gw-share-card grid gap-2 rounded-lg border border-edge2 bg-panel p-3.5" data-status="confirmed">
+        ${head}
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs text-dim">Will be shared once the entry is approved (until ${pretty(v.expires_at)}).</span>
+          <span class="ml-auto"></span>
+          <button class="btn btn-ghost btn-sm" ?disabled=${this.busy} @click=${() => void this.act("decline")}>Don't share</button>
+        </div>
+        ${this.error ? html`<div class="text-xs text-err" role="alert">${this.error}</div>` : nothing}
+      </div>`;
+    }
+    if (v.status !== "pending" && v.status !== "waiting") {
       const done =
         v.status === "approved"
           ? `Shared until ${pretty(v.expires_at)}. You can stop it any time in Shared access.`
@@ -119,13 +144,13 @@ export class GwShareCard extends LitElement {
             ? "Not shared."
             : v.status === "executing"
               ? "Sharing…"
-              : "This share couldn't be made.";
+              : `This share couldn't be made${v.note ? `: ${v.note}` : "."}`;
       return html`<div class="gw-share-card grid gap-1.5 rounded-lg border border-edge bg-panel p-3.5" data-status=${v.status}>
         ${head}
         <div class="text-xs ${v.status === "approved" ? "text-dim" : "text-faint"}">${done}</div>
       </div>`;
     }
-    return html`<div class="gw-share-card grid gap-2.5 rounded-lg border border-edge2 bg-panel p-3.5" data-status="pending">
+    return html`<div class="gw-share-card grid gap-2.5 rounded-lg border border-edge2 bg-panel p-3.5" data-status=${v.status}>
       ${head}
       ${v.reason ? html`<div class="text-xs leading-relaxed text-dim">${v.reason}</div>` : nothing}
       <div class="flex flex-wrap items-center gap-2">
@@ -144,11 +169,15 @@ export class GwShareCard extends LitElement {
         <span class="ml-auto"></span>
         <button class="btn btn-ghost btn-sm" ?disabled=${this.busy} @click=${() => void this.act("decline")}>Don't share</button>
         <button class="btn btn-primary btn-sm" ?disabled=${this.busy} @click=${() => void this.act("confirm")}>
-          ${this.busy ? "Sharing…" : "Share"}
+          ${this.busy ? "Saving…" : v.status === "waiting" ? "Share once approved" : "Share"}
         </button>
       </div>
       ${this.error ? html`<div class="text-xs text-err" role="alert">${this.error}</div>` : nothing}
-      <div class="text-2xs text-faint">Nothing is shared until you press Share.</div>
+      <div class="text-2xs text-faint">
+        ${v.status === "waiting"
+          ? "This entry is waiting for approval. Nothing is shared until it's approved and you've said yes."
+          : "Nothing is shared until you press Share."}
+      </div>
     </div>`;
   }
 }
