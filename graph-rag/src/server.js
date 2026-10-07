@@ -28,6 +28,7 @@ import {
 } from "./positions.js";
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
 import { grantedView, isActive, resolveExpiry } from "./grants.js";
+import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -46,6 +47,9 @@ const {
   TOKEN_MAP_PATH = "",
   GRAPH_RAG_OPEN_MODE = "",
   POSITION_MAP_PATH = "",
+  // semantic grading of new writes against the position tree (empty = off)
+  GRADER_MODEL = "",
+  GRADER_TIMEOUT_MS = "30000",
 } = process.env;
 
 /**
@@ -311,7 +315,7 @@ async function embedBatch(texts) {
 function publicProps(props) {
   const out = {};
   for (const [k, v] of Object.entries(props ?? {})) {
-    if (k.startsWith("embed_") || k === "_home") continue;
+    if (k.startsWith("embed_") || k.startsWith("_")) continue;
     out[k] = v;
   }
   return out;
@@ -472,14 +476,60 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
   };
 }
 
+/** one grading call (chunks of up to 16 entities); null per entity when it fails */
+async function gradeBatch(origin, entities) {
+  const out = [];
+  for (let i = 0; i < entities.length; i += 16) {
+    const chunk = entities.slice(i, i + 16);
+    const { messages, byLabel } = gradingPrompt(positionMap, origin, chunk);
+    let text = null;
+    try {
+      const res = await fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${LITELLM_API_KEY}` },
+        body: JSON.stringify({ model: GRADER_MODEL, messages, temperature: 0 }),
+        signal: AbortSignal.timeout(Number(GRADER_TIMEOUT_MS)),
+      });
+      if (!res.ok) throw new Error(`grader HTTP ${res.status}`);
+      text = (await res.json()).choices?.[0]?.message?.content ?? null;
+    } catch (e) {
+      log.warn(`grading failed (entities held one level up): ${String(e).slice(0, 160)}`);
+    }
+    out.push(...(text === null ? chunk.map(() => null) : parseVerdicts(text, byLabel, positionMap, origin, chunk.map((e) => e.name))));
+  }
+  return out;
+}
+
+/**
+ * Where each entity of a scoped write lands. `origin` is the writer's
+ * resolved position (provenance); an existing entity is (name, origin).
+ * Without a grader: new entities at the origin, existing ones where they are.
+ */
+async function placeEntities(entities, origin) {
+  const existing = await Promise.all(
+    entities.map((e) =>
+      adbQuery(`SELECT _home FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin }).then(
+        (rows) => (rows[0] ? effectiveHome(positionMap, rows[0]._home) : undefined),
+      ),
+    ),
+  );
+  if (!GRADER_MODEL || origin === positionMap.root) {
+    return entities.map((_, i) => ({ home: existing[i] ?? origin, note: GRADER_MODEL ? "at the root: nothing to grade" : "not graded (grading off)" }));
+  }
+  const verdicts = await gradeBatch(origin, entities);
+  return entities.map((_, i) => decide(positionMap, origin, verdicts[i], existing[i]));
+}
+
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
 async function upsertEntities({ entities, home }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
+  // scoped: `home` is the origin; grading decides where each entity is seen from
+  const placements = home === undefined || !positionMap ? null : await placeEntities(entities, home);
 
   let merged = 0;
   const jobs = []; // {name, facet, text}
-  for (const e of entities) {
+  for (const [idx, e] of entities.entries()) {
     if (!e?.name || typeof e.name !== "string") throw new Error("entity.name required");
     const labels = (e.labels ?? []).map(String).filter((l) => l !== ENTITY_LABEL && /^[A-Za-z_][A-Za-z0-9_]*$/.test(l));
     const props = {};
@@ -497,12 +547,14 @@ async function upsertEntities({ entities, home }) {
         await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${k} IF NOT EXISTS ${type}`).catch(() => {});
       }
       const labelClause = labels.map((l) => `SET n:\`${l}\``).join(" ");
-    // an entity is (name, home): a write never touches a same-named entity
-    // homed where the writer may not write
-    const key = home === undefined ? `{name: '${esc(e.name)}'}` : `{name: '${esc(e.name)}', \`_home\`: '${esc(home)}'}`;
+    // an entity is (name, origin): a write never touches a same-named entity
+    // written from another position; where it is seen from is _home
+    const key = home === undefined ? `{name: '${esc(e.name)}'}` : `{name: '${esc(e.name)}', \`_origin\`: '${esc(home)}'}`;
+    const place = placements?.[idx];
+    const placeSql = place ? `, n.\`_home\` = '${esc(place.home)}', n.\`_grade\` = '${esc(place.note)}'` : "";
     await adbCommand(
       `MERGE (n:${ENTITY_LABEL} ${key}) ` +
-        `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""} ${labelClause}`,
+        `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""}${placeSql} ${labelClause}`,
       "cypher",
     );
     merged++;
@@ -520,7 +572,7 @@ async function upsertEntities({ entities, home }) {
     const vecs = await embedBatch(jobs.map((j) => j.text));
     for (let i = 0; i < jobs.length; i++) {
       const { name, facet, text } = jobs[i];
-      const homeCond = home === undefined ? "" : ` AND _home = '${esc(home)}'`;
+      const homeCond = home === undefined ? "" : ` AND _origin = '${esc(home)}'`;
       await adbCommand(
         `UPDATE (SELECT FROM ${ENTITY_LABEL} WHERE name = '${esc(name)}'${homeCond}) ` +
           `SET embed_${facet} = [${vecs[i].join(",")}], text_${facet} = '${esc(text)}'`,
@@ -529,7 +581,25 @@ async function upsertEntities({ entities, home }) {
     }
   }
 
-  return { merged, embedded, facets_indexed: [...knownIndexes] };
+  // grading's proposals go to a person: release lower, or review an unsure call
+  const placed = [];
+  if (placements) {
+    for (const [i, e] of entities.entries()) {
+      const p = placements[i];
+      placed.push({ name: e.name, home: positionMap.positions[p.home]?.name, note: p.note });
+      const ask = p.release ?? p.review;
+      if (!ask) continue;
+      const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin: home });
+      if (!rows[0]) continue;
+      await queueWrite({
+        kind: "rehome",
+        payload: JSON.stringify({ rid: String(rows[0].rid), name: e.name, from: p.home, to: ask.to, reason: ask.reason }),
+        user: "graph-rag grader",
+        home: p.home,
+      }).catch((err) => log.warn(`grading proposal for ${e.name} not queued: ${String(err).slice(0, 120)}`));
+    }
+  }
+  return { merged, embedded, facets_indexed: [...knownIndexes], ...(placements ? { placed } : {}) };
 }
 
 async function backfillIdentity(limit = 64) {
@@ -618,8 +688,6 @@ async function setHome({ entities, to }, identity, scope) {
       results.push({ name: ref.name, unchanged: true });
       continue;
     }
-    const clash = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE name = :name AND _home = :to`, { name: ref.name, to: target });
-    if (clash.length) throw new Error(`${ref.name} already exists at ${positionMap.positions[target].name}`);
     const move = { rid: String(node.rid), name: ref.name, from: current, to: target };
     const kind = moveKind(positionMap, current, target);
     if (kind === "restrict" && identity.caps.write === "direct") {
@@ -1239,6 +1307,14 @@ async function boot() {
   // declared, or SQL WHERE can't see it (see upsertEntities)
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._home IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_home) NOTUNIQUE`).catch(() => {});
+  for (const prop of ["_origin", "_grade"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (name, _origin) NOTUNIQUE`).catch(() => {});
+  if (SCOPED && positionMap) {
+    // entities from before origins: their origin is where they are (legacy, unhomed ones: the root)
+    await adbCommand(`UPDATE ${ENTITY_LABEL} SET _origin = _home WHERE _origin IS NULL AND _home IS NOT NULL`).catch((e) => log.warn(`origin migration: ${e}`));
+    await adbCommand(`UPDATE ${ENTITY_LABEL} SET _origin = :root WHERE _origin IS NULL`, "sql", { root: positionMap.root }).catch((e) => log.warn(`origin migration: ${e}`));
+  }
+  if (SCOPED) log.info(`semantic grading: ${GRADER_MODEL ? `on (${GRADER_MODEL})` : "off"}`);
   if (SCOPED) {
     await ensureGrantSchema();
     await refreshGrants();

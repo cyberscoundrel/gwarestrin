@@ -161,6 +161,9 @@ services:
       # hot-reloaded; graph-rag fails closed while either is missing)
       TOKEN_MAP_PATH: /app/config/token-map.json
       POSITION_MAP_PATH: /app/config/position-map.json
+      # semantic grading of new writes (litellm model alias; empty = off).
+      # Entity text goes to whatever this routes to: keep it local for real data.
+      GRADER_MODEL: grader
     volumes:
       # the directory, not single files: a file that doesn't exist yet would
       # become an empty directory mount
