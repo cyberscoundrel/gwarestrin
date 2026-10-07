@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentRecord } from "@gwarestrin/shared";
 import { mcpSubset } from "@gwarestrin/shared";
@@ -8,6 +8,10 @@ import type { ProviderRegistry } from "../providers/registry.js";
 import { buildGeneratedProviders, generatedProvidersPath, writeGeneratedProviders } from "../providers/generate.js";
 import { scoped } from "../util/log.js";
 import { graphTokenFor } from "./graph-token.js";
+import { SHARING_INSTRUCTIONS } from "./standing-instructions.js";
+
+/** read by the graph-context extension at every turn */
+export const STANDING_INSTRUCTIONS_FILE = "standing-instructions.md";
 import { agentDir } from "./store.js";
 
 const log = scoped("scaffold");
@@ -118,6 +122,10 @@ export async function scaffoldAgent(
       JSON.stringify({ mcpServers: resolved }, null, 2) + "\n",
       "utf8",
     );
+    // agents with the knowledge graph get the sharing steps on every turn
+    const instructions = path.join(dirs.home, STANDING_INSTRUCTIONS_FILE);
+    if (Object.keys(resolved).includes("graph-rag")) await writeFile(instructions, SHARING_INSTRUCTIONS + "\n", "utf8");
+    else await rm(instructions, { force: true });
   }
 
   // extensions dir marker (loaded explicitly via -e by the manager)

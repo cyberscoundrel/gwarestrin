@@ -184,6 +184,9 @@ export class OpenShellAgentLauncher {
     ];
     const context = await readFile(path.join(dirs.home, "context-injection.md"), "utf8").catch(() => null);
     if (context !== null) files.push([`${g.home}/context-injection.md`, context]);
+    const standing = await readFile(path.join(dirs.home, "standing-instructions.md"), "utf8").catch(() => null);
+    // always written: an empty file clears instructions a reused sandbox had
+    files.push([`${g.home}/standing-instructions.md`, standing ?? ""]);
     if (mcp) files.push([`${g.workspace}/.mcp.json`, JSON.stringify(mcp, null, 2) + "\n"]);
     for (const [file, content] of files) await this.writeFile(sandbox, file, content);
     await this.exec(sandbox, ["mkdir", "-p", g.sessions, g.workspace]);

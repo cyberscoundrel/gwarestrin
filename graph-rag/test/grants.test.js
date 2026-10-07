@@ -56,4 +56,7 @@ test("expiries: required and bounded below the root, optional for it", () => {
   assert.throws(() => resolveExpiry(new Date(NOW + (MAX_GRANT_DAYS + 1) * 86_400_000).toISOString(), { root: false }, NOW), /within 90 days/);
   assert.ok(resolveExpiry(new Date(NOW + 400 * 86_400_000).toISOString(), { root: true }, NOW));
   assert.throws(() => resolveExpiry("next tuesday", { root: false }, NOW), /invalid/);
+  assert.equal(resolveExpiry("14d", { root: false }, NOW), new Date(NOW + 14 * 86_400_000).toISOString());
+  assert.equal(resolveExpiry("3 days", { root: false }, NOW), new Date(NOW + 3 * 86_400_000).toISOString());
+  assert.throws(() => resolveExpiry("120d", { root: false }, NOW), /within 90 days/);
 });

@@ -846,8 +846,9 @@ async function grantAccess({ entities, subtree: subtreeRef, to, reason, until },
   const results = [];
   for (const t of targets) {
     const grant = { id: randomUUID(), ...base, ...t };
-    // only people grant directly: agents (and queued writers) propose
-    if (identity.caps.write === "direct" && !identity.agent) {
+    // people share what they own directly (it's theirs to share; time-limited
+    // and recorded); agents only propose, and a person confirms
+    if (!identity.agent) {
       await storeGrant(grant);
       results.push({ granted: true, id: grant.id, target: t.target_name, to: positionName(toPos), expires_at });
     } else {
@@ -911,6 +912,99 @@ function listGrants(scope) {
     });
   }
   return { grants: out };
+}
+
+/** a share proposed by one of this person's own agents, on data the person owns */
+function ownProposal(identity, scope, rec) {
+  if (identity.agent || rec?.kind !== "grant") return null;
+  if (!String(rec.requested_by ?? "").startsWith(`${identity.user}/agent:`)) return null;
+  let g;
+  try {
+    g = JSON.parse(rec.payload);
+  } catch {
+    return null;
+  }
+  return ownsHome(scope, g.target_home) ? g : null;
+}
+
+function proposalView(rec, g) {
+  return {
+    id: rec.id,
+    status: rec.status,
+    target: g.kind === "subtree" ? `everything under ${positionName(g.target)}` : g.target_name,
+    to: positionName(g.to_pos),
+    reason: g.reason,
+    expires_at: g.expires_at ?? null,
+  };
+}
+
+async function proposalStatus(id, identity, scope) {
+  if (!PENDING_ID_RE.test(id)) throw new Error("invalid id");
+  const rec = (await adbQuery("SELECT FROM PendingWrite WHERE id = :id", { id }))[0];
+  const g = rec && ownProposal(identity, scope, rec);
+  if (!g) throw new Error(`no share proposal ${id} of yours`);
+  return proposalView(rec, g);
+}
+
+/** the person confirms (optionally with another end date or recipient) */
+async function confirmProposal(id, { until, to } = {}, identity, scope) {
+  if (!PENDING_ID_RE.test(id)) throw new Error("invalid id");
+  const rec = (await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id }))[0];
+  const g = rec && ownProposal(identity, scope, rec);
+  if (!g) throw new Error(`no pending share proposal ${id} of yours`);
+  const grant = { ...g, granted_by: identity.user };
+  if (until !== undefined) grant.expires_at = resolveExpiry(until, { root: scope.root });
+  if (to !== undefined) {
+    grant.to_pos = positionId(to);
+    const toView = visibleHomes(positionMap, [grant.to_pos]);
+    if (toView === null || toView.has(grant.target_home)) throw new Error(`${positionName(grant.to_pos)} already sees it`);
+  }
+  const claimed = await adbCommand(
+    "UPDATE PendingWrite SET status = 'executing', approved_by = :actor WHERE id = :id AND status = 'pending'",
+    "sql",
+    { actor: identity.user, id },
+  );
+  if (Number(claimed?.[0]?.count ?? 0) !== 1) throw new Error("this share was already handled");
+  try {
+    await storeGrant(grant);
+  } catch (err) {
+    await adbCommand("UPDATE PendingWrite SET status = 'failed' WHERE id = :id", "sql", { id }).catch(() => {});
+    throw err;
+  }
+  await adbCommand("UPDATE PendingWrite SET status = 'approved', executed_at = :now WHERE id = :id", "sql", { now: new Date().toISOString(), id });
+  return proposalView({ ...rec, status: "approved" }, grant);
+}
+
+async function declineProposal(id, identity, scope) {
+  if (!PENDING_ID_RE.test(id)) throw new Error("invalid id");
+  const rec = (await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id }))[0];
+  const g = rec && ownProposal(identity, scope, rec);
+  if (!g) throw new Error(`no pending share proposal ${id} of yours`);
+  await adbCommand("UPDATE PendingWrite SET status = 'rejected', executed_at = :now, approved_by = :actor WHERE id = :id AND status = 'pending'", "sql", {
+    now: new Date().toISOString(),
+    actor: identity.user,
+    id,
+  });
+  return proposalView({ ...rec, status: "rejected" }, g);
+}
+
+/** semantic search over what the caller owns (what it may share) */
+async function findShareable({ query, k = 8 }, identity, scope) {
+  const own = { ...scope, granted: undefined };
+  const read = [];
+  const res = await searchGraph({ query, k }, own, read);
+  recordReads(identity, read);
+  return {
+    results: res.results.map((r) => ({
+      name: r.name,
+      home: r.home?.name,
+      snippet: String(r.properties?.text_identity ?? "").slice(0, 240),
+      score: r.score,
+    })),
+    related: res.relationships,
+    // where things can be shared to (match the person's wording to these)
+    positions: Object.values(positionMap?.positions ?? {}).filter((p) => p.parent !== null).map((p) => p.name),
+  };
 }
 
 async function schemaGraph() {
@@ -1170,12 +1264,36 @@ homes you can see).`,
     },
   );
 
+  if (SCOPED) server.tool(
+    "find_shareable",
+    `Find knowledge-graph entries you own (and so may share) by describing them; also lists the
+positions things can be shared with.
+
+When the person asks you to let a position know about something ("let Sales know what this email
+said", "share the line 2 plan with the floor"):
+1. Work out what "this" is from the conversation. If it isn't in the knowledge graph yet (e.g. text
+   pasted into the chat), save it first with upsert_entities, then use the name you saved.
+2. Otherwise call find_shareable with a short description and pick the matching entries; mention
+   related entries only if the person seems to want them too.
+3. Match who they named to one of the returned positions.
+4. Propose with grant_access: the entries, that position, a one-sentence reason in the person's
+   words, and until "14d" unless they said how long.
+5. Tell them the share is waiting for their confirmation in the chat. Nothing is shared until they
+   confirm.`,
+    { query: z.string().min(1), k: z.number().int().min(1).max(32).optional() },
+    async (args) => {
+      need("read");
+      return { content: [{ type: "text", text: JSON.stringify(await findShareable(args, identity, scope)) }] };
+    },
+  );
+
   if (SCOPED && caps.write !== "deny") server.tool(
     "grant_access",
     `Show data you own to another position for a while: either named entities or a whole subtree
-(a position and everything below it). Give a reason and an expiry (until, ISO date; at most 90
-days unless you hold the root). People with direct write rights grant at once; agents and queued
-writers propose, and a person approves. Data you only see through a grant can't be granted onward.`,
+(a position and everything below it). Give a reason and an expiry (until: "14d", or an ISO date;
+at most 90 days unless you hold the root). People share what they own at once; agents propose and
+the person confirms (a card in their chat). Data you only see through a grant can't be granted
+onward. To find what to share, use find_shareable.`,
     {
       entities: z.array(z.object({ name: z.string().min(1), home: z.string().optional() })).min(1).max(32).optional(),
       subtree: z.string().min(1).optional(),
@@ -1359,6 +1477,23 @@ app.post("/api/grants/:id/revoke", (req, res) => {
   const ctx = httpScope(req, res);
   if (ctx) void revokeGrant({ id: req.params.id }, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
 });
+/** shares proposed by this person's agents: status, confirm, decline (the chat card) */
+app.get("/api/grants/proposals/:id", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (ctx) void proposalStatus(req.params.id, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/grants/proposals/:id/confirm", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (!ctx) return;
+  const b = req.body ?? {};
+  const changes = { ...(typeof b.until === "string" && b.until ? { until: b.until } : {}), ...(typeof b.to === "string" && b.to ? { to: b.to } : {}) };
+  void confirmProposal(req.params.id, changes, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/grants/proposals/:id/decline", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (ctx) void declineProposal(req.params.id, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
+});
+
 /** entities the caller owns (by home), for picking what to grant */
 app.get("/api/entities", (req, res) => {
   const ctx = httpScope(req, res);

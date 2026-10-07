@@ -141,6 +141,18 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   computed by the model litellm routes `embed-minilm` to. On the homelab both
   are hosted (OpenRouter); for real organizational data route both to local
   models, or nothing in the knowledge graph stays on-premises.
+- **Natural-language sharing** (decided 2026-10-07: people share what they
+  own without an admin; shares from a conversation last 14 days unless
+  stated). Agents with graph-rag get standing instructions every turn: save
+  pasted text first, find the entries with `find_shareable` (semantic search
+  over what the caller owns, plus the positions to share with), propose with
+  `grant_access` (`until: "14d"`), and never claim something is shared. The
+  proposal renders in the chat as a card (Share / Don't share, editable end
+  date); the person's click confirms it through
+  `/api/grants/proposals/:id/confirm`, which only works for proposals made by
+  that person's own agents on data they own. Agents still never grant on
+  their own. Limitation: for people whose writes are queued, sharing pasted
+  text waits until its write is approved.
 - **Review queue**: an approval claims the queued write before running it, so
   it runs once; approved and rejected writes leave the queue.
 - **Agents** each have their own graph token, signed by their instance with a

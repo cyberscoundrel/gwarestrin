@@ -31,7 +31,7 @@
   let branch = $state("");
   let to = $state("");
   let reason = $state("");
-  let until = $state(dateIn(7));
+  let until = $state(dateIn(14));
   let standing = $state(false);
   let attempted = $state(false);
   let saving = $state(false);
@@ -119,7 +119,7 @@
     branch = "";
     to = "";
     reason = "";
-    until = dateIn(7);
+    until = dateIn(14);
     standing = false;
     query = "";
     attempted = false;
