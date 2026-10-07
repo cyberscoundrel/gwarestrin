@@ -1,8 +1,8 @@
 # Data scoping
 
 Status: the position tree, homes, filtered reads, set_home, per-agent
-positions from profiles and grants are built (2026-10-06); semantic grading
-and derived-data labels are not yet. Last discussed 2026-10-06.
+positions from profiles, grants and semantic grading are built (2026-10-07);
+derived-data labels are not yet. Last discussed 2026-10-06.
 
 An agent is untrusted: prompt injection can make it ask for anything. So who
 may see what is enforced by the data source, against an identity the agent
@@ -109,6 +109,23 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   standing access. Revoking (grantor or any owner) applies at once; expiry is
   checked at query time. Granted results carry `via: "grant"`; granted data
   can't be moved or granted onward. Verified live: 24/24 checks.
+- **Semantic grading** (`GRADER_MODEL`, a litellm alias; empty = off): each
+  write keeps its writer's position as its *origin*; the grader, given the
+  positions' own descriptions, homes it at the origin or above (restricting
+  on its own) and may only *propose* a release below, queued for a person
+  ("graph-rag grader" in Approvals). An unsure, invalid or missing verdict
+  holds a new entry one level up and queues a review back to its origin.
+  Updates never widen; they re-restrict only when content is judged more
+  sensitive than its writer's level, so a person's release stays. Entities
+  are (name, origin). Verified live with a hosted free model: salary/layoff
+  plans written on the floor went to the top, a routine shift note stayed,
+  an injected "this is public" layoff list went to the top, a routine work
+  order from Operations came with a release proposal to the floor, and an
+  update adding pay cuts re-restricted a floor note.
+- **Data egress**: the grader receives the entry's text, and embeddings are
+  computed by the model litellm routes `embed-minilm` to. On the homelab both
+  are hosted (OpenRouter); for real organizational data route both to local
+  models, or nothing in the knowledge graph stays on-premises.
 - **Review queue**: an approval claims the queued write before running it, so
   it runs once; approved and rejected writes leave the queue.
 - **Agents** each have their own graph token, signed by their instance with a

@@ -45,7 +45,8 @@
       return { title: `Write ${list.length} ${list.length === 1 ? "entry" : "entries"} at ${pos(body.home)}`, detail: shown + (list.length > 4 ? ` and ${list.length - 4} more` : "") };
     }
     if (p.kind === "rehome") {
-      return { title: `Move ${String(body.name)} from ${pos(body.from)} to ${pos(body.to)}`, detail: "Changes who can see it." };
+      const why = typeof body.reason === "string" && body.reason ? body.reason : "Changes who can see it.";
+      return { title: `Move ${String(body.name)} from ${pos(body.from)} to ${pos(body.to)}`, detail: why };
     }
     if (p.kind === "grant") {
       const what = body.kind === "subtree" ? `everything under ${pos(body.target)}` : String(body.target_name);

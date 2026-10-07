@@ -22,6 +22,13 @@ model_list:
   # hosted embeddings via OpenRouter. CONVENTION: embedding models MUST be
   # aliased `embed-*` — gwarestrin's autoDiscover filters `embed-*` out of
   # chat model pickers (LiteLLM's /models carries no modality metadata).
+  # semantic grading for graph-rag (who may see a new knowledge-graph entry).
+  # The entry's text is sent to this model: point it at a local model for
+  # real organizational data; a free hosted model is fine for test data.
+  - model_name: grader
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+      api_key: os.environ/OPENROUTER_API_KEY
   - model_name: embed-minilm
     litellm_params:
       model: openrouter/sentence-transformers/all-minilm-l6-v2

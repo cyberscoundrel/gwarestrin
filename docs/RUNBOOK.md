@@ -531,6 +531,12 @@ Who sees what in the knowledge graph follows the position tree
   queued widening.
 - A tenant whose user holds no position sees nothing in the graph and cannot
   write to it.
+- **Semantic grading**: graph-rag's `GRADER_MODEL` (compose: `grader`, a
+  litellm alias in `litellm-config/litellm-config.yaml`; after editing,
+  `docker compose restart litellm`). graph-rag logs `semantic grading: on`.
+  Each approved/direct write reports where grading placed it (`placed`);
+  grader proposals appear in Approvals as "graph-rag grader". If the grader
+  is down, new entries are held one level up and queued for review.
 
 ## 4. Troubleshooting
 
