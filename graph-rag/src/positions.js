@@ -122,3 +122,20 @@ export function moveKind(map, from, to) {
   if (to === f || ancestors(map, f).includes(to)) return "restrict";
   return "widen";
 }
+
+/**
+ * The deepest position that is at or above every given home: the lowest
+ * point from which all of them are visible. Unknown/missing homes count as
+ * the root. Used for derived data: an entry built from several sources may
+ * only be seen by positions that can see all of them.
+ */
+export function commonAncestor(map, homes) {
+  const list = [...homes].map((h) => effectiveHome(map, h));
+  if (list.length === 0) return map.root;
+  let chain = [list[0], ...ancestors(map, list[0])];
+  for (const h of list.slice(1)) {
+    const up = new Set([h, ...ancestors(map, h)]);
+    chain = chain.filter((p) => up.has(p));
+  }
+  return chain[0] ?? map.root;
+}

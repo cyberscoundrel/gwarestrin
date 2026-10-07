@@ -17,7 +17,9 @@ import express from "express";
 import { readFileSync, watchFile } from "node:fs";
 import { randomUUID } from "node:crypto";
 import {
+  ancestors,
   canSee,
+  commonAncestor,
   defaultHome,
   effectiveHome,
   heldPositions,
@@ -50,6 +52,8 @@ const {
   // semantic grading of new writes against the position tree (empty = off)
   GRADER_MODEL = "",
   GRADER_TIMEOUT_MS = "30000",
+  // how long what an identity read bounds where its writes may land
+  DERIVED_WINDOW_HOURS = "12",
 } = process.env;
 
 /**
@@ -334,7 +338,7 @@ function identityText(name, labels, props) {
 
 /** ---- tool implementations ---- */
 
-async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { homes: null }) {
+async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { homes: null }, readHomes = []) {
   console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter })}`);
   const facetList = (facets?.length ? facets : Object.keys(FACETS)).map((f) => {
     if (typeof f !== "string" || !FACET_RE.test(f)) throw new Error(`invalid facet: ${f}`);
@@ -449,6 +453,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
   // 1-hop relationships for the top results: by record id, and only to
   // neighbours the caller may see (an edge must not reveal a hidden node)
   let relationships = [];
+  const neighbourHomes = [];
   const top = results.slice(0, 12).filter((r) => RID_RE.test(String(r.rid)));
   if (top.length > 0) {
     try {
@@ -457,9 +462,10 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
       const edges = [...new Map(raw.map((e) => [String(e.rid), e])).values()];
       const ends = [...new Set(edges.flatMap((e) => [String(e.src), String(e.dst)]).filter((r) => RID_RE.test(r)))];
       const nodes = ends.length
-        ? await adbQuery(`SELECT @rid AS rid, name FROM [${ends.join(",")}] WHERE name IS NOT NULL${visible}`)
+        ? await adbQuery(`SELECT @rid AS rid, name, _home FROM [${ends.join(",")}] WHERE name IS NOT NULL${visible}`)
         : [];
       const nameOf = new Map(nodes.map((n) => [String(n.rid), n.name]));
+      for (const n of nodes) neighbourHomes.push(n._home);
       relationships = edges
         .filter((e) => nameOf.has(String(e.src)) && nameOf.has(String(e.dst)))
         .map((e) => ({ from: nameOf.get(String(e.src)), rel: e.rel, to: nameOf.get(String(e.dst)) }));
@@ -468,11 +474,83 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
     }
   }
 
+  // what the caller has now seen (derived-data tracking; not returned)
+  readHomes.push(...results.slice(0, 12).map((r) => r.home?.id), ...neighbourHomes.map((h) => (SCOPED && positionMap ? effectiveHome(positionMap, h) : h)));
   return {
     query,
     results: results.slice(0, 12).map(({ rid: _rid, ...r }) => r),
     relationships,
     ...(embedFailed ? { note: "embedding backend unavailable; lexical fallback used" } : {}),
+  };
+}
+
+/** ---- derived data: what an identity read bounds where its writes land ---- */
+
+const readMarks = new Map(); // identity -> Map(home -> last read ms)
+const windowMs = () => Number(DERIVED_WINDOW_HOURS) * 3_600_000;
+
+async function ensureReadMarkSchema() {
+  await adbCommand("CREATE DOCUMENT TYPE ReadMark IF NOT EXISTS").catch(() => {});
+  for (const prop of ["who", "pos", "at"]) await adbCommand(`CREATE PROPERTY ReadMark.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  // UPSERT needs an index on what it matches
+  await adbCommand("CREATE INDEX IF NOT EXISTS ON ReadMark (who, pos) UNIQUE").catch((e) => log.warn(`read mark index: ${String(e).slice(0, 120)}`));
+  const since = new Date(Date.now() - windowMs()).toISOString();
+  const rows = await adbQuery("SELECT who, pos, at FROM ReadMark WHERE at > :since LIMIT 100000", { since }).catch(() => []);
+  for (const r of rows) {
+    if (!readMarks.has(r.who)) readMarks.set(r.who, new Map());
+    readMarks.get(r.who).set(r.pos, Date.parse(r.at));
+  }
+  await adbCommand("DELETE FROM ReadMark WHERE at <= :since", "sql", { since }).catch(() => {});
+}
+
+/** whose reads these are: each agent on its own (full id), people by name */
+const markKey = (identity) => identity.key ?? identity.user;
+
+/** remember the homes an identity was shown (persisted, so a restart forgets nothing) */
+function recordReads(identity, homes) {
+  if (!SCOPED || !positionMap || identity.open) return;
+  const now = Date.now();
+  const who = markKey(identity);
+  if (!readMarks.has(who)) readMarks.set(who, new Map());
+  const mine = readMarks.get(who);
+  for (const h of new Set(homes.filter((x) => typeof x === "string"))) {
+    const last = mine.get(h) ?? 0;
+    mine.set(h, now);
+    if (now - last < 10 * 60_000) continue; // persisted recently enough
+    void adbCommand("UPDATE ReadMark SET who = :who, pos = :pos, at = :at UPSERT WHERE who = :who AND pos = :pos", "sql", {
+      who,
+      pos: h,
+      at: new Date(now).toISOString(),
+    }).catch((e) => log.warn(`read mark not stored: ${String(e).slice(0, 120)}`));
+  }
+}
+
+/**
+ * The lowest home a write by this identity may get: the deepest position from
+ * which both its own origin and everything it read in the window are
+ * visible. What was read through a grant pulls this above the grantee.
+ */
+function derivedFloor(identity, origin) {
+  if (!SCOPED || !positionMap || origin === undefined || identity.open) return origin;
+  const cutoff = Date.now() - windowMs();
+  const read = [...(readMarks.get(markKey(identity)) ?? new Map())].filter(([, t]) => t > cutoff).map(([h]) => h);
+  return commonAncestor(positionMap, [origin, ...read]);
+}
+
+/**
+ * Apply a derived-data floor to a placement. The floor is at or above the
+ * origin, so it and the placement lie on one line through the origin. The
+ * entry goes at least as high as the floor, and nothing is proposed below it
+ * (a release or a review back to the origin would widen derived data).
+ */
+function applyFloor(place, origin, floor) {
+  if (!floor || floor === origin) return place;
+  const { release: _release, review: _review, ...rest } = place;
+  const raises = floor !== place.home && ancestors(positionMap, place.home).includes(floor);
+  if (!raises) return rest;
+  return {
+    home: floor,
+    note: `held at ${positionMap.positions[floor]?.name}: built from what its writer read there or below (${place.note})`,
   };
 }
 
@@ -505,7 +583,7 @@ async function gradeBatch(origin, entities) {
  * resolved position (provenance); an existing entity is (name, origin).
  * Without a grader: new entities at the origin, existing ones where they are.
  */
-async function placeEntities(entities, origin) {
+async function placeEntities(entities, origin, floor) {
   const existing = await Promise.all(
     entities.map((e) =>
       adbQuery(`SELECT _home FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin }).then(
@@ -514,18 +592,20 @@ async function placeEntities(entities, origin) {
     ),
   );
   if (!GRADER_MODEL || origin === positionMap.root) {
-    return entities.map((_, i) => ({ home: existing[i] ?? origin, note: GRADER_MODEL ? "at the root: nothing to grade" : "not graded (grading off)" }));
+    return entities.map((_, i) =>
+      applyFloor({ home: existing[i] ?? origin, note: GRADER_MODEL ? "at the root: nothing to grade" : "not graded (grading off)" }, origin, floor),
+    );
   }
   const verdicts = await gradeBatch(origin, entities);
-  return entities.map((_, i) => decide(positionMap, origin, verdicts[i], existing[i]));
+  return entities.map((_, i) => applyFloor(decide(positionMap, origin, verdicts[i], existing[i]), origin, floor));
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
-async function upsertEntities({ entities, home }) {
+async function upsertEntities({ entities, home, floor }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
   // scoped: `home` is the origin; grading decides where each entity is seen from
-  const placements = home === undefined || !positionMap ? null : await placeEntities(entities, home);
+  const placements = home === undefined || !positionMap ? null : await placeEntities(entities, home, floor ?? home);
 
   let merged = 0;
   const jobs = []; // {name, facet, text}
@@ -992,7 +1072,10 @@ a datetime property. Falls back to lexical matching if embeddings are unavailabl
     },
     async (args) => {
       need("read");
-      return { content: [{ type: "text", text: JSON.stringify(await searchGraph(args, scope)) }] };
+      const read = [];
+      const result = await searchGraph(args, scope, read);
+      recordReads(identity, read);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
   );
 
@@ -1032,7 +1115,8 @@ ${facetDoc}`,
     async (args) => {
       need("write");
       const home = resolveWriteHome(scope, args.home);
-      const write = { entities: args.entities, home };
+      // fixed at request time: what the requester read, not the approver
+      const write = { entities: args.entities, home, floor: derivedFloor(identity, home) };
       if (caps.write === "queued") {
         const pending = await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home });
         return { content: [{ type: "text", text: JSON.stringify(pending) }] };
@@ -1315,6 +1399,7 @@ async function boot() {
     await adbCommand(`UPDATE ${ENTITY_LABEL} SET _origin = :root WHERE _origin IS NULL`, "sql", { root: positionMap.root }).catch((e) => log.warn(`origin migration: ${e}`));
   }
   if (SCOPED) log.info(`semantic grading: ${GRADER_MODEL ? `on (${GRADER_MODEL})` : "off"}`);
+  if (SCOPED) await ensureReadMarkSchema();
   if (SCOPED) {
     await ensureGrantSchema();
     await refreshGrants();

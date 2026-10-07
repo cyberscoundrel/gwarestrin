@@ -1,8 +1,8 @@
 # Data scoping
 
-Status: the position tree, homes, filtered reads, set_home, per-agent
-positions from profiles, grants and semantic grading are built (2026-10-07);
-derived-data labels are not yet. Last discussed 2026-10-06.
+Status: built (2026-10-07): the position tree, homes, filtered reads,
+set_home, per-agent positions from profiles, grants, semantic grading and
+derived-data limits. Open: the questions below, and per-client defaults. Last discussed 2026-10-06.
 
 An agent is untrusted: prompt injection can make it ask for anything. So who
 may see what is enforced by the data source, against an identity the agent
@@ -122,6 +122,21 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   an injected "this is public" layoff list went to the top, a routine work
   order from Operations came with a release proposal to the floor, and an
   update adding pay cuts re-restricted a floor note.
+- **Derived data**: graph-rag remembers, per identity (each agent by its
+  full id), the homes of everything search showed it (results and relation
+  neighbours) over the last `DERIVED_WINDOW_HOURS` (12), persisted in
+  ArcadeDB (`ReadMark`). A write by that identity is homed no lower than
+  the deepest position that sees both its origin and everything it read, so
+  a summary of data read through a grant can't outlive the grant or reach
+  people who can't see its sources. The limit is fixed when the write is
+  requested (an approver's reads don't count) and combines with grading (the
+  stricter wins); nothing is proposed below it. Briefings at agent creation
+  are built with the agent's own token, so they hold only what it may see.
+  Verified live: a Sales agent's summary of floor data read through a grant
+  went to the top (out of its own sight), a Sales agent that read nothing
+  still wrote at Sales, a floor agent stayed on the floor, the limit
+  survived a graph-rag restart, and a queued write from an Operations agent
+  that read Sales notes through a grant landed at the top once approved.
 - **Data egress**: the grader receives the entry's text, and embeddings are
   computed by the model litellm routes `embed-minilm` to. On the homelab both
   are hosted (OpenRouter); for real organizational data route both to local

@@ -24,6 +24,7 @@ test("an agent placed lower sees from there, and never approves or runs raw quer
   const id = resolveAgentToken(signAgentToken(KEY, { u: "alice", a: "agent-1234567890", p: ["floor"], iat: 1 }), entryFor, map);
   assert.deepEqual(id.positions, ["floor"]);
   assert.equal(id.user, "alice/agent:agent-12");
+  assert.equal(id.key, "alice/agent:agent-1234567890", "read tracking uses the full agent id");
   assert.equal(id.caps.write, "queued");
   assert.equal(id.caps.approve, false);
   assert.equal(id.caps.raw, false);

@@ -57,7 +57,8 @@ export function resolveAgentToken(token, entryFor, map, now = Date.now()) {
     }
   }
   return {
-    user: `${entry.user}/agent:${payload.a.slice(0, 8)}`,
+    user: `${entry.user}/agent:${payload.a.slice(0, 8)}`, // for audit trails
+    key: `${entry.user}/agent:${payload.a}`, // unique per agent (read tracking)
     agent: payload.a,
     caps: {
       read: entry.caps?.read === true,
