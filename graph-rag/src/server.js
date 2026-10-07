@@ -376,52 +376,52 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
   }
 
   if (embedding) {
-    // brute-force cosine over persisted facet vectors — homelab scale makes
-    // this free, and it sidesteps version-dependent HNSW query APIs. The
-    // temporal predicate rides in SQL so filtered-empty stays authoritative.
-    const innerK = temporal_filter ? Math.min(k * 3, 96) : k;
+    // exact cosine, scored and ranked by ArcadeDB over every row the caller
+    // may see (the visibility and temporal predicates ride in the same
+    // query). Earlier this fetched the first k*8 rows and ranked only those,
+    // which misses the right entities once a graph outgrows a few dozen.
+    const innerK = Math.max(temporal_filter ? Math.min(k * 3, 96) : k, 12);
+    const vec = `[${embedding.map((x) => (Number.isFinite(x) ? x : 0)).join(",")}]`;
+    const best = new Map(); // rid -> { score, facets }
     for (const facet of facetList) {
       if (!knownIndexes.has(facet)) continue; // nothing ever embedded under it
       let rows;
       try {
         rows = await adbQuery(
-          `SELECT FROM ${ENTITY_LABEL} WHERE embed_${facet} IS NOT NULL${where} LIMIT ${innerK * 8}`,
+          `SELECT @rid AS rid, vectorCosineSimilarity(embed_${facet}, ${vec}) AS score FROM ${ENTITY_LABEL} ` +
+            `WHERE embed_${facet} IS NOT NULL${where} ORDER BY score DESC LIMIT ${innerK}`,
         );
       } catch {
         continue; // facet property not in schema yet
       }
-      vectorWorked = true; // authoritative: cosine over what exists (temporal included)
+      vectorWorked = true; // authoritative: ranked over everything visible (temporal included)
       for (const row of rows) {
-        const vec = row[`embed_${facet}`];
-        if (!Array.isArray(vec) || vec.length !== embedding.length) continue;
-        let dot = 0;
-        let na = 0;
-        let nb = 0;
-        for (let i = 0; i < vec.length; i++) {
-          dot += vec[i] * embedding[i];
-          na += vec[i] * vec[i];
-          nb += embedding[i] * embedding[i];
-        }
-        const denom = Math.sqrt(na) * Math.sqrt(nb);
-        const score = denom === 0 ? 0 : dot / denom;
-        const name = row.name;
-        const rid = row["@rid"];
-        if (!name || !rid) continue;
-        const entry =
-          byRid.get(rid) ??
-          {
-            name,
-            labels: row["@type"] ? [row["@type"]] : [],
-            properties: publicProps(row),
-            ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
-            ...(SCOPED && positionMap && !ownsHome(scope, row._home) ? { via: "grant" } : {}),
-            score: -2,
-            facets: [],
-            rid,
-          };
-        if (score > entry.score) entry.score = score;
-        if (!entry.facets.includes(facet)) entry.facets.push(facet);
-        byRid.set(rid, entry);
+        const rid = String(row.rid);
+        const score = Number(row.score);
+        if (!RID_RE.test(rid) || !Number.isFinite(score)) continue;
+        const b = best.get(rid) ?? { score: -2, facets: [] };
+        if (score > b.score) b.score = score;
+        if (!b.facets.includes(facet)) b.facets.push(facet);
+        best.set(rid, b);
+      }
+    }
+    const top = [...best].sort((a, b) => b[1].score - a[1].score).slice(0, Math.max(k, 12));
+    if (top.length) {
+      const rows = await adbQuery(`SELECT FROM [${top.map(([rid]) => rid).join(",")}]`);
+      const byId = new Map(rows.map((r) => [String(r["@rid"]), r]));
+      for (const [rid, b] of top) {
+        const row = byId.get(rid);
+        if (!row?.name) continue;
+        byRid.set(rid, {
+          name: row.name,
+          labels: row["@type"] ? [row["@type"]] : [],
+          properties: publicProps(row),
+          ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
+          ...(SCOPED && positionMap && !ownsHome(scope, row._home) ? { via: "grant" } : {}),
+          score: b.score,
+          facets: b.facets,
+          rid,
+        });
       }
     }
   }
