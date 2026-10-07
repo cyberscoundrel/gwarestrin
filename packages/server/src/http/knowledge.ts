@@ -43,6 +43,19 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
     const { id } = req.params as { id: string };
     return proxy(reply, `/api/grants/${encodeURIComponent(id)}/revoke`, { method: "POST", body: {} });
   });
+  // a share one of this person's agents proposed (the chat's confirmation card)
+  app.get("/api/grants/proposals/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    return proxy(reply, `/api/grants/proposals/${encodeURIComponent(id)}`);
+  });
+  app.post("/api/grants/proposals/:id/confirm", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    return proxy(reply, `/api/grants/proposals/${encodeURIComponent(id)}/confirm`, { method: "POST", body: req.body ?? {} });
+  });
+  app.post("/api/grants/proposals/:id/decline", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    return proxy(reply, `/api/grants/proposals/${encodeURIComponent(id)}/decline`, { method: "POST", body: {} });
+  });
   app.get("/api/knowledge/entities", async (req, reply) => {
     const q = String((req.query as { q?: string }).q ?? "").slice(0, 80);
     return proxy(reply, `/api/entities?q=${encodeURIComponent(q)}`);

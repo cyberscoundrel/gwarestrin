@@ -11,6 +11,8 @@
 import { ancestors, visibleHomes } from "./positions.js";
 
 export const MAX_GRANT_DAYS = 90;
+/** what a share from a conversation lasts unless the person says otherwise */
+export const DEFAULT_SHARE_DAYS = 14;
 
 /** is this grant in force at `now` (ms) */
 export function isActive(grant, now = Date.now()) {
@@ -58,8 +60,10 @@ export function resolveExpiry(until, { root }, now = Date.now()) {
     if (root) return null;
     throw new Error(`a grant needs an expiry (until), at most ${MAX_GRANT_DAYS} days out`);
   }
-  const t = Date.parse(until);
-  if (!Number.isFinite(t)) throw new Error(`invalid expiry: ${until}`);
+  // "14d" = 14 days from now (agents needn't know today's date)
+  const rel = /^\s*(\d{1,3})\s*d(ays?)?\s*$/i.exec(String(until));
+  const t = rel ? now + Number(rel[1]) * 86_400_000 : Date.parse(until);
+  if (!Number.isFinite(t)) throw new Error(`invalid expiry: ${until} (an ISO date, or e.g. 14d)`);
   if (t <= now) throw new Error("the expiry must be in the future");
   if (!root && t - now > MAX_GRANT_DAYS * 86_400_000) throw new Error(`grants expire within ${MAX_GRANT_DAYS} days`);
   return new Date(t).toISOString();

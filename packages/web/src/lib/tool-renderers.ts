@@ -9,7 +9,8 @@
  */
 import { registerToolRenderer } from "@earendil-works/pi-web-ui";
 import { html, svg, type TemplateResult } from "lit";
-import { ChevronRight, FilePen, FileText, Pencil, SquareTerminal, type IconNode } from "lucide";
+import { Cable, ChevronRight, FilePen, FileText, Pencil, SquareTerminal, type IconNode } from "lucide";
+import "./share-card.js";
 
 type State = "inprogress" | "complete" | "error";
 interface ToolResultLike {
@@ -180,4 +181,54 @@ export function registerGwToolRenderers(): void {
       });
     },
   });
+
+  // tool connections (pi-mcp-adapter's one "mcp" tool: {tool: "<server>_<tool>", args} or
+  // {server} to list a server's tools). A proposed share becomes a confirmation card.
+  registerToolRenderer("mcp", {
+    render(params: unknown, result: ToolResultLike | undefined, isStreaming?: boolean) {
+      const a = args(params);
+      const state = stateOf(result, isStreaming);
+      const out = outputText(result);
+      const tool = typeof a.tool === "string" ? a.tool : "";
+      if (tool.endsWith("grant_access") && result && !result.isError) {
+        const proposals = proposedShares(out);
+        if (proposals.length) {
+          return {
+            content: html`<div class="grid gap-2">
+              ${proposals.map(
+                (p) => html`<gw-share-card pending-id=${p.pendingId} .target=${p.target} .to=${p.to}></gw-share-card>`,
+              )}
+            </div>`,
+            isCustom: true,
+          };
+        }
+      }
+      const server = typeof a.server === "string" ? a.server : tool.split("_")[0] ?? "";
+      const name = tool ? tool.slice(server.length + 1) || tool : "";
+      return card({
+        state,
+        icon: Cable,
+        title: name
+          ? label(state, `Using ${name.replace(/_/g, " ")}`, `Used ${name.replace(/_/g, " ")}`, `Couldn't use ${name.replace(/_/g, " ")}`)
+          : label(state, `Opening ${server}`, `Opened ${server}`, `Couldn't open ${server}`),
+        detail: server || undefined,
+        body: out ? consoleOut(out, state) : undefined,
+      });
+    },
+  });
+}
+
+/** shares an agent proposed, from a grant_access result (the JSON may be wrapped in text) */
+function proposedShares(text: string): Array<{ pendingId: string; target: string; to: string }> {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return [];
+  try {
+    const j = JSON.parse(text.slice(start, end + 1)) as { results?: Array<Record<string, unknown>> };
+    return (j.results ?? [])
+      .filter((r) => r.proposed === true && typeof r.pendingId === "string")
+      .map((r) => ({ pendingId: String(r.pendingId), target: String(r.target ?? ""), to: String(r.to ?? "") }));
+  } catch {
+    return [];
+  }
 }
