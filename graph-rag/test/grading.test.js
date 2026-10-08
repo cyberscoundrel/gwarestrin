@@ -36,11 +36,25 @@ test("verdicts outside the allowed lists are unusable or dropped", () => {
     '{"name":"b","visible_from":"P3","confidence":0.9},' + // P3 = floor: below the origin, can't be visible_from
     '{"name":"c","visible_from":"P1","release_to":"P2","confidence":0.8,"reason":"routine"}]}'; // P2 = org: not below
   const [a, b, c] = parseVerdicts(text, byLabel, map, "ops", ["a", "b", "c"]);
-  assert.deepEqual(a, { home: "org", confidence: 0.9, reason: "salary" });
+  assert.deepEqual(a, { home: "org", confidence: 0.9, until: null, reason: "salary" });
   assert.equal(b, null);
   assert.equal(c.home, "ops");
   assert.equal(c.release, undefined, "a release must be below the origin");
   assert.deepEqual(parseVerdicts("not json", byLabel, map, "ops", ["a"]), [null]);
+});
+
+test("the grader dates what ends, from when it was written; anything unclear lasts", () => {
+  const written = Date.parse("2026-10-08T09:00:00Z"); // a Thursday
+  const { messages, byLabel } = gradingPrompt(map, "ops", [{ name: "a" }, { name: "b" }, { name: "c" }], written);
+  assert.match(messages[1].content, /Written on 2026-10-08 \(Thursday\)/);
+  assert.match(messages[0].content, /until = null when it lasts/);
+  const text = '{"items":[{"name":"a","visible_from":"P1","until":"2026-10-16","confidence":0.9,"reason":"visit"},' +
+    '{"name":"b","visible_from":"P1","until":null,"confidence":0.9,"reason":"filing"},' +
+    '{"name":"c","visible_from":"P1","until":"next week","confidence":0.9,"reason":"?"}]}';
+  const [a, b, c] = parseVerdicts(text, byLabel, map, "ops", ["a", "b", "c"], written);
+  assert.equal(a.until, "2026-10-16T23:59:59.000Z");
+  assert.equal(b.until, null);
+  assert.equal(c.until, null);
 });
 
 test("new entities: restrict or keep when sure; one level up and a review when not", () => {

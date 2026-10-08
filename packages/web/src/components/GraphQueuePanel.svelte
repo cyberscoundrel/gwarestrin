@@ -40,8 +40,11 @@
       return null;
     }
     if (p.kind === "upsert") {
-      const list = (body.entities as Array<{ name?: string }> | undefined) ?? [];
-      const shown = list.slice(0, 4).map((e) => e.name).join(", ");
+      const list = (body.entities as Array<{ name?: string; valid_until?: string }> | undefined) ?? [];
+      // an entry with an end date drops out of searches after it
+      const until = (e: { valid_until?: string }) =>
+        e.valid_until && e.valid_until !== "lasting" ? ` (until ${new Date(e.valid_until).toLocaleDateString(undefined, { month: "short", day: "numeric" })})` : "";
+      const shown = list.slice(0, 4).map((e) => `${e.name}${until(e)}`).join(", ");
       return { title: `Write ${list.length} ${list.length === 1 ? "entry" : "entries"} at ${pos(body.home)}`, detail: shown + (list.length > 4 ? ` and ${list.length - 4} more` : "") };
     }
     if (p.kind === "rehome") {
