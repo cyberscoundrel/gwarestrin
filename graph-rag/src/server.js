@@ -1463,10 +1463,10 @@ async function openNeed(need, askerScope) {
     validUntil = open_until;
     validBy = "question";
   }
-  await adbCommand(`UPDATE ${need.rid} SET _status = 'open', _open_until = :open_until, _valid_until = :valid_until, _valid_by = :by`, "sql", {
+  await adbCommand(`UPDATE ${need.rid} SET _status = 'open', _open_until = :open_until, _valid_until = :valid_until, _valid_by = :valid_by`, "sql", {
     open_until,
     valid_until: validUntil,
-    by: validBy,
+    valid_by: validBy,
   });
   const opened = { ...need, status: "open", open_until };
   const matches = vec ? await matchHidden(vec, askerScope) : [];
