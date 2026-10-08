@@ -862,7 +862,9 @@ function peopleView(self) {
 
 /** does the recipient already see data homed at `home` by its own positions */
 function recipientSees(r, home) {
-  const homes = r.to_user ? (personScope(r.to_user)?.homes ?? new Set()) : visibleHomes(positionMap, [r.to_pos]);
+  // homes null = sees everything (the root)
+  const homes = r.to_user ? personScope(r.to_user)?.homes : visibleHomes(positionMap, [r.to_pos]);
+  if (homes === undefined) return false; // unknown person: sees nothing
   return homes === null || homes.has(home);
 }
 
