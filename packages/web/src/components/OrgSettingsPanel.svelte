@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, type Snippet } from "svelte";
   import { History, ShieldCheck, TriangleAlert } from "lucide";
-  import { api, type OrgPolicy, type PolicyView } from "../lib/api.js";
+  import { api, type OrgPolicy, type PolicyView, type PrunedEntry } from "../lib/api.js";
   import Dialog from "./Dialog.svelte";
   import Icon from "./Icon.svelte";
   import PanelHeader from "./PanelHeader.svelte";
@@ -17,6 +17,10 @@
   let saved = $state("");
   let saving = $state(false);
   let attempted = $state(false);
+  // pruning: what was removed, and pruning what's due now
+  let pruned = $state<PrunedEntry[]>([]);
+  let pruneBusy = $state(false);
+  let pruneNote = $state("");
 
   const LABELS: Record<keyof OrgPolicy, string> = {
     maxGrantDays: "Longest share",
@@ -27,6 +31,7 @@
     gradingConfidence: "Grading confidence",
     derivedWindowHours: "Derived-data window",
     requestDays: "How long a request stays open",
+    pruneAfterDays: "Removing expired entries",
   };
 
   async function load(): Promise<void> {
@@ -34,11 +39,27 @@
     try {
       view = await api.policy();
       draft = { ...view.policy };
+      if (view.canEdit) pruned = (await api.pruned().catch(() => ({ pruned: [] }))).pruned;
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
     }
   }
   onMount(() => void load());
+
+  async function pruneNow(): Promise<void> {
+    pruneBusy = true;
+    pruneNote = "";
+    try {
+      const r = await api.pruneNow();
+      if (view) view.pruning = r.preview;
+      pruneNote = r.pruned ? `Removed ${r.pruned} expired ${r.pruned === 1 ? "entry" : "entries"}.` : "Nothing was due.";
+      pruned = (await api.pruned().catch(() => ({ pruned }))).pruned;
+    } catch (e) {
+      pruneNote = e instanceof Error ? e.message : String(e);
+    } finally {
+      pruneBusy = false;
+    }
+  }
 
   const dirty = $derived(!!view && !!draft && JSON.stringify(view.policy) !== JSON.stringify(draft));
   const isDefault = $derived(!!view && !!draft && JSON.stringify(view.defaults) === JSON.stringify(draft));
@@ -52,6 +73,7 @@
     if (draft.defaultShareDays > draft.maxGrantDays) return "Can't be longer than the longest share.";
     return "";
   });
+  const pruneError = $derived(attempted && draft && !inRange(draft.pruneAfterDays, 0, 365) ? "Between 0 and 365 days." : "");
   const requestError = $derived(attempted && draft && !inRange(draft.requestDays, 1, 90) ? "Between 1 and 90 days." : "");
   const windowError = $derived(attempted && draft && !inRange(draft.derivedWindowHours, 0, 168) ? "Between 0 and 168 hours." : "");
 
@@ -60,7 +82,7 @@
     attempted = true;
     error = "";
     saved = "";
-    if (maxError || defError || windowError || requestError) return;
+    if (maxError || defError || windowError || requestError || pruneError) return;
     const changes = Object.fromEntries(
       (Object.keys(draft) as Array<keyof OrgPolicy>).filter((k) => draft![k] !== view!.policy[k]).map((k) => [k, draft![k]]),
     ) as Partial<OrgPolicy>;
@@ -97,6 +119,7 @@
   function fmt(k: keyof OrgPolicy, v: unknown): string {
     if (typeof v === "boolean") return k === "peopleShareDirectly" ? (v ? "directly" : "through review") : v ? "on" : "off";
     if (k === "standingGrants") return v === "root" ? "root only" : "nobody";
+    if (k === "pruneAfterDays") return Number(v) === 0 ? "never" : `${v} days after they end`;
     if (k === "maxGrantDays" || k === "defaultShareDays" || k === "requestDays") return `${v} days`;
     if (k === "derivedWindowHours") return `${v} h`;
     if (k === "gradingConfidence") return `${Math.round(Number(v) * 100)}%`;
@@ -218,6 +241,58 @@
   {/if}
 {/snippet}
 
+{#snippet pruningBody()}
+  {#if draft && view}
+    {@const p = view.pruning}
+    <div class="field">
+      <label class="field-label" for="os-prune">Remove expired entries</label>
+      <div class="flex items-center gap-2">
+        <input id="os-prune" type="number" min="0" max="365" class="input w-24" bind:value={draft.pruneAfterDays} aria-invalid={pruneError ? "true" : undefined} />
+        <span class="text-xs text-faint">days after they end</span>
+      </div>
+      <span class="field-hint">
+        {draft.pruneAfterDays === 0
+          ? "Never: expired entries stay in the graph, out of searches."
+          : p?.sink.keeps
+            ? `Then they move to ${p.sink.name}. Entries that last are never removed.`
+            : "Then they're deleted permanently: no cold storage is set up. Entries that last are never removed."}
+      </span>
+      {#if pruneError}<span class="field-error">{pruneError}</span>{/if}
+    </div>
+    {#if p}
+      <div class="grid gap-2 rounded-md border border-edge bg-panel px-3 py-2.5 text-xs">
+        {#if p.sink.unknown}
+          <span class="text-warn">Pruning is off: this deployment names a storage ({p.sink.name}) that isn't available, so nothing is removed.</span>
+        {:else if !p.enabled}
+          <span class="text-dim">{p.waiting} expired {p.waiting === 1 ? "entry is" : "entries are"} kept out of searches.</span>
+        {:else if p.waiting === 0}
+          <span class="text-dim">No expired entries are waiting.</span>
+        {:else}
+          <span class="text-dim">
+            {p.waiting} expired {p.waiting === 1 ? "entry" : "entries"} waiting.
+            {#if p.days[0]}Next removal: {p.days[0].count} on {new Date(`${p.days[0].day}T12:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}.{/if}
+          </span>
+          {#if p.due}
+            <div class="flex items-center gap-2">
+              <span class="text-faint">{p.due} {p.due === 1 ? "is" : "are"} due now.</span>
+              <button class="btn btn-ghost btn-sm" disabled={pruneBusy} onclick={() => void pruneNow()}>{pruneBusy ? "Removing…" : "Remove now"}</button>
+            </div>
+          {/if}
+        {/if}
+        {#if pruneNote}<span class="text-dim" role="status">{pruneNote}</span>{/if}
+      </div>
+    {/if}
+    {#if pruned.length}
+      <div class="grid gap-1">
+        <span class="text-xs font-medium text-dim">Removed</span>
+        {#each pruned.slice(0, 8) as e (e.pruned_at + e.name)}
+          <span class="truncate text-xs text-faint">{e.name}{e.home ? ` · ${e.home}` : ""} · ended {e.valid_until ? new Date(e.valid_until).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "?"} · removed {new Date(e.pruned_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}{e.kept ? "" : " for good"}</span>
+        {/each}
+      </div>
+    {/if}
+  {/if}
+{/snippet}
+
 {#snippet deployBody()}
   {#if view}
     <dl class="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
@@ -272,6 +347,7 @@
       {@render section("Sharing", "How long shares last and who makes them.", sharingBody)}
       {@render section("Grading", "Filing new entries where they belong.", gradingBody)}
       {@render section("Derived data", "Summaries and notes built from what an agent read.", derivedBody)}
+      {@render section("Expired entries", "Entries that end (a visit, this week's schedule) leave searches on their date, and the graph later.", pruningBody)}
       {@render section("Deployment", "For reference; changed at deploy, not here.", deployBody)}
       {@render section("Recent changes", view.updated_by ? `Last changed by ${view.updated_by}.` : "Who changed what, and when.", historyBody)}
     {/if}

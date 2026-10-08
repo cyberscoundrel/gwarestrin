@@ -71,6 +71,9 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
   // the organization's data-scoping policy (graph-rag lets only a root person change it)
   app.get("/api/policy", async (_req, reply) => proxy(reply, "/api/policy"));
   app.put("/api/policy", async (req, reply) => proxy(reply, "/api/policy", { method: "PUT", body: req.body ?? {} }));
+  // what pruning removed (graph-rag shows it only to the root), and pruning now
+  app.get("/api/pruned", async (_req, reply) => proxy(reply, "/api/pruned"));
+  app.post("/api/pruned/run", async (_req, reply) => proxy(reply, "/api/pruned/run", { method: "POST", body: {} }));
   app.get("/api/knowledge/entities", async (req, reply) => {
     const q = String((req.query as { q?: string }).q ?? "").slice(0, 80);
     return proxy(reply, `/api/entities?q=${encodeURIComponent(q)}`);

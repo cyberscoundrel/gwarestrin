@@ -11,6 +11,7 @@
  *   gradingConfidence: number,     // how sure the grader must be to act
  *   derivedWindowHours: number,    // how long what an identity read bounds where its writes land (0 = off)
  *   requestDays: number,           // how long a request for access stays open
+ *   pruneAfterDays: number,        // expired entries are removed this long after their end (0 = never)
  * }} Policy */
 
 export const LIMITS = {
@@ -19,6 +20,7 @@ export const LIMITS = {
   gradingConfidence: [0.3, 0.95],
   derivedWindowHours: [0, 168],
   requestDays: [1, 90],
+  pruneAfterDays: [0, 365],
 };
 
 /** defaults: the built-in values, overridable per deployment by env */
@@ -33,6 +35,7 @@ export function defaultPolicy(env = process.env) {
     gradingConfidence: num("GRADING_CONFIDENCE", 0.6),
     derivedWindowHours: num("DERIVED_WINDOW_HOURS", 12),
     requestDays: num("REQUEST_DAYS", 14),
+    pruneAfterDays: num("PRUNE_AFTER_DAYS", 30),
   };
 }
 

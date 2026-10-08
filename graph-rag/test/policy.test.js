@@ -5,7 +5,7 @@ import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "../src/policy
 const d = defaultPolicy({});
 
 test("defaults are the built-in values, overridable by env", () => {
-  assert.deepEqual(d, { maxGrantDays: 90, defaultShareDays: 14, standingGrants: "root", peopleShareDirectly: true, gradingEnabled: true, gradingConfidence: 0.6, derivedWindowHours: 12, requestDays: 14 });
+  assert.deepEqual(d, { maxGrantDays: 90, defaultShareDays: 14, standingGrants: "root", peopleShareDirectly: true, gradingEnabled: true, gradingConfidence: 0.6, derivedWindowHours: 12, requestDays: 14, pruneAfterDays: 30 });
   const e = defaultPolicy({ MAX_GRANT_DAYS: "30", DERIVED_WINDOW_HOURS: "24", STANDING_GRANTS: "nobody", PEOPLE_SHARE_DIRECTLY: "false", GRADING_ENABLED: "false" });
   assert.equal(e.maxGrantDays, 30);
   assert.equal(e.derivedWindowHours, 24);
