@@ -113,6 +113,16 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   standing access. Revoking (grantor or any owner) applies at once; expiry is
   checked at query time. Granted results carry `via: "grant"`; granted data
   can't be moved or granted onward. Verified live: 24/24 checks.
+- **Person shares** (`grant_access` with `person`, or the Shared access
+  panel's "A person"): the same grant, received by one person instead of a
+  position. Only that person and the agents acting for them see it (also an
+  agent whose profile places it lower; the share was made to the person, so
+  they can use it); neither colleagues at their position nor those above it
+  do. `to` naming a person rather than a position counts as a person share.
+  People are the token map's tenants; `find_shareable` and `/api/positions`
+  list them with their positions so agents can match "show bob". Stored as
+  `AccessGrant.to_user` (`to_pos` empty). The default for answering an access
+  request (see the inquiries design).
 - **Semantic grading** (`GRADER_MODEL`, a litellm alias; empty = off): each
   write keeps its writer's position as its *origin*; the grader, given the
   positions' own descriptions, homes it at the origin or above (restricting

@@ -29,7 +29,7 @@ import {
   writableHomes,
 } from "./positions.js";
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
-import { grantedView, isActive, resolveExpiry } from "./grants.js";
+import { grantedView, isActive, reaches, resolveExpiry } from "./grants.js";
 import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
 import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -120,9 +120,11 @@ function scopeOf(identity) {
   if (!positionMap) return { homes: new Set(), writeHome: null, root: false };
   const held = heldPositions(positionMap, identity.positions);
   const homes = visibleHomes(positionMap, held);
-  // grants add homes (subtree grants) and single records (entity grants)
-  const granted = grantedView(positionMap, held, grantCache);
-  return { homes, writeHome: defaultHome(positionMap, held), root: homes === null, held, granted };
+  // grants add homes (subtree grants) and single records (entity grants);
+  // a share to a person reaches them and the agents acting for them
+  const person = personOf(identity.user);
+  const granted = grantedView(positionMap, held, grantCache, Date.now(), person);
+  return { homes, writeHome: defaultHome(positionMap, held), root: homes === null, held, granted, person };
 }
 
 /**
@@ -800,7 +802,7 @@ let grantCache = []; // active grants, refreshed on change and every minute
 
 async function ensureGrantSchema() {
   await adbCommand("CREATE DOCUMENT TYPE AccessGrant IF NOT EXISTS").catch(() => {});
-  for (const prop of ["id", "kind", "target", "target_name", "target_home", "to_pos", "reason", "granted_by", "created_at", "expires_at", "status", "revoked_at", "revoked_by"]) {
+  for (const prop of ["id", "kind", "target", "target_name", "target_home", "to_pos", "to_user", "reason", "granted_by", "created_at", "expires_at", "status", "revoked_at", "revoked_by"]) {
     await adbCommand(`CREATE PROPERTY AccessGrant.${prop} IF NOT EXISTS STRING`).catch(() => {});
   }
 }
@@ -817,19 +819,66 @@ async function refreshGrants() {
 
 const positionName = (id) => positionMap?.positions[id]?.name ?? id;
 
+/** the people a share can go to: everyone in the token map (tenants) */
+const peopleNames = () => [...entriesByUser.keys()].sort();
+
+/** what a person sees by their own positions (null: unknown person) */
+function personScope(name) {
+  const entry = entriesByUser.get(name);
+  return entry ? scopeOf({ user: entry.user, positions: entry.positions ?? [], caps: {} }) : null;
+}
+
+/**
+ * Who a share goes to: a position (`to`, by id or name) or one person
+ * (`person`, by user name). A `to` that names no position but a person
+ * counts as that person (agents often say "to": "bob").
+ */
+function recipientOf({ to, person }, identity) {
+  if (to && person) throw new Error("share with a position (to) or a person (person), not both");
+  if (!to && !person) throw new Error("say who to share with: a position (to) or a person (person)");
+  let name = person ? String(person).trim() : null;
+  if (!name) {
+    try {
+      return { to_pos: positionId(to), to_user: null };
+    } catch (err) {
+      if (!entriesByUser.has(String(to).trim())) throw err;
+      name = String(to).trim();
+    }
+  }
+  if (!entriesByUser.has(name)) throw new Error(`unknown person: ${name}`);
+  if (name === personOf(identity.user)) throw new Error("that's you: you already see what you own");
+  return { to_pos: null, to_user: name };
+}
+
+const recipientName = (g) => g.to_user ?? positionName(g.to_pos);
+const recipientKind = (g) => (g.to_user ? "person" : "position");
+
+/** everyone else, with where they sit (for matching "let bob know") */
+function peopleView(self) {
+  return peopleNames()
+    .filter((n) => n !== self)
+    .map((name) => ({ name, positions: heldPositions(positionMap, entriesByUser.get(name)?.positions).map(positionName) }));
+}
+
+/** does the recipient already see data homed at `home` by its own positions */
+function recipientSees(r, home) {
+  const homes = r.to_user ? (personScope(r.to_user)?.homes ?? new Set()) : visibleHomes(positionMap, [r.to_pos]);
+  return homes === null || homes.has(home);
+}
+
 /** propose or make a grant; owners only, agents and queued writers propose */
-async function grantAccess({ entities, subtree: subtreeRef, to, reason, until }, identity, scope) {
+async function grantAccess({ entities, subtree: subtreeRef, to, person, reason, until }, identity, scope) {
   if (!SCOPED || !positionMap) throw new Error("position scoping is not enabled");
   if (!!entities === !!subtreeRef) throw new Error("grant either entities or a subtree, not both");
-  const toPos = positionId(to);
+  const recipient = recipientOf({ to, person }, identity);
+  const who = recipientName(recipient);
   const expires_at = resolveExpiry(until, expiryRules(identity, scope));
-  const base = { to_pos: toPos, reason: String(reason).slice(0, 500), granted_by: identity.user, expires_at };
+  const base = { ...recipient, reason: String(reason).slice(0, 500), granted_by: identity.user, expires_at };
   const targets = [];
   if (subtreeRef) {
     const p = positionId(subtreeRef);
     if (!ownsHome(scope, p)) throw new Error(`you can only grant what you own: ${subtreeRef} is outside your positions`);
-    const toView = visibleHomes(positionMap, [toPos]); // null = the root, sees everything
-    if (toView === null || toView.has(p)) throw new Error(`${positionName(toPos)} already sees ${positionName(p)}`);
+    if (recipientSees(recipient, p)) throw new Error(`${who} already sees ${positionName(p)}`);
     targets.push({ kind: "subtree", target: p, target_name: positionName(p), target_home: p });
   } else {
     for (const ref of entities) {
@@ -843,7 +892,7 @@ async function grantAccess({ entities, subtree: subtreeRef, to, reason, until },
         // not written yet? a share may wait on the person's own pending write
         const pend = await pendingEntityWrite(identity, ref.name);
         if (pend) {
-          if (visibleHomes(positionMap, [toPos])?.has(pend.origin) ?? true) throw new Error(`${positionName(toPos)} already sees ${ref.name}`);
+          if (recipientSees(recipient, pend.origin)) throw new Error(`${who} already sees ${ref.name}`);
           targets.push({ kind: "entity", target: null, target_name: ref.name, target_home: pend.origin, origin: pend.origin, after: pend.id });
           continue;
         }
@@ -851,7 +900,7 @@ async function grantAccess({ entities, subtree: subtreeRef, to, reason, until },
       }
       if (hits.length > 1) throw new Error(`${ref.name} exists at several homes you own; pass its home`);
       const home = effectiveHome(positionMap, hits[0]._home);
-      if (visibleHomes(positionMap, [toPos])?.has(home) ?? true) throw new Error(`${positionName(toPos)} already sees ${ref.name}`);
+      if (recipientSees(recipient, home)) throw new Error(`${who} already sees ${ref.name}`);
       targets.push({ kind: "entity", target: String(hits[0].rid), target_name: ref.name, target_home: home });
     }
   }
@@ -868,7 +917,7 @@ async function grantAccess({ entities, subtree: subtreeRef, to, reason, until },
         home: t.target_home,
         status: identity.agent || !(policy.peopleShareDirectly || scope.root) ? "waiting" : "confirmed",
       });
-      results.push({ proposed: true, waits_for_write: t.after, target: t.target_name, to: positionName(toPos), ...q });
+      results.push({ proposed: true, waits_for_write: t.after, target: t.target_name, to: who, to_kind: recipientKind(recipient), ...q });
       continue;
     }
     // people share what they own directly (it's theirs to share; time-limited
@@ -876,10 +925,10 @@ async function grantAccess({ entities, subtree: subtreeRef, to, reason, until },
     // agents only propose, and a person confirms
     if (!identity.agent && (policy.peopleShareDirectly || scope.root)) {
       await storeGrant(grant);
-      results.push({ granted: true, id: grant.id, target: t.target_name, to: positionName(toPos), expires_at });
+      results.push({ granted: true, id: grant.id, target: t.target_name, to: who, to_kind: recipientKind(recipient), expires_at });
     } else {
       const q = await queueWrite({ kind: "grant", payload: JSON.stringify(grant), user: identity.user, home: t.target_home });
-      results.push({ proposed: true, target: t.target_name, to: positionName(toPos), ...q });
+      results.push({ proposed: true, target: t.target_name, to: who, to_kind: recipientKind(recipient), ...q });
     }
   }
   return { results };
@@ -889,11 +938,11 @@ async function storeGrant(g) {
   if (g.expires_at && Date.parse(g.expires_at) <= Date.now()) throw new Error("this grant has already expired");
   await adbCommand(
     "INSERT INTO AccessGrant SET id = :id, kind = :kind, target = :target, target_name = :target_name, target_home = :target_home, " +
-      "to_pos = :to_pos, reason = :reason, granted_by = :granted_by, created_at = :created_at, expires_at = :expires_at, status = 'active'",
+      "to_pos = :to_pos, to_user = :to_user, reason = :reason, granted_by = :granted_by, created_at = :created_at, expires_at = :expires_at, status = 'active'",
     "sql",
-    { ...g, created_at: new Date().toISOString(), expires_at: g.expires_at ?? null },
+    { ...g, to_pos: g.to_pos ?? null, to_user: g.to_user ?? null, created_at: new Date().toISOString(), expires_at: g.expires_at ?? null },
   );
-  log.info(`grant ${g.id}: ${g.kind} ${g.target_name} -> ${positionName(g.to_pos)} by ${g.granted_by} until ${g.expires_at ?? "revoked"}`);
+  log.info(`grant ${g.id}: ${g.kind} ${g.target_name} -> ${g.to_user ? `person ${g.to_user}` : positionName(g.to_pos)} by ${g.granted_by} until ${g.expires_at ?? "revoked"}`);
   await refreshGrants();
   return { granted: true, id: g.id };
 }
@@ -923,14 +972,15 @@ function listGrants(scope) {
   for (const g of grantCache) {
     if (!isActive(g)) continue;
     const outgoing = ownsHome(scope, g.target_home);
-    const incoming = vis === null || vis.has(g.to_pos);
+    const incoming = g.to_user ? g.to_user === scope.person : vis === null || vis.has(g.to_pos);
     if (!outgoing && !incoming) continue;
     out.push({
       id: g.id,
       kind: g.kind,
       target: g.target_name,
       target_home: positionName(g.target_home),
-      to: positionName(g.to_pos),
+      to: recipientName(g),
+      to_kind: recipientKind(g),
       reason: g.reason,
       granted_by: g.granted_by,
       expires_at: g.expires_at ?? null,
@@ -1039,7 +1089,8 @@ function proposalView(rec, g) {
     ...(rec.note ? { note: rec.note } : {}),
     max_days: policy.maxGrantDays,
     target: g.kind === "subtree" ? `everything under ${positionName(g.target)}` : g.target_name,
-    to: positionName(g.to_pos),
+    to: recipientName(g),
+    to_kind: recipientKind(g),
     reason: g.reason,
     expires_at: g.expires_at ?? null,
   };
@@ -1054,17 +1105,16 @@ async function proposalStatus(id, identity, scope) {
 }
 
 /** the person confirms (optionally with another end date or recipient) */
-async function confirmProposal(id, { until, to } = {}, identity, scope) {
+async function confirmProposal(id, { until, to, person } = {}, identity, scope) {
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid id");
   const rec = (await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status IN ['pending', 'waiting']", { id }))[0];
   const g = rec && ownProposal(identity, scope, rec);
   if (!g) throw new Error(`no pending share proposal ${id} of yours`);
   const grant = { ...g, granted_by: identity.user };
   if (until !== undefined) grant.expires_at = resolveExpiry(until, expiryRules(identity, scope));
-  if (to !== undefined) {
-    grant.to_pos = positionId(to);
-    const toView = visibleHomes(positionMap, [grant.to_pos]);
-    if (toView === null || toView.has(grant.target_home)) throw new Error(`${positionName(grant.to_pos)} already sees it`);
+  if (to !== undefined || person !== undefined) {
+    Object.assign(grant, recipientOf({ to, person }, identity));
+    if (recipientSees(grant, grant.target_home)) throw new Error(`${recipientName(grant)} already sees it`);
   }
   if (!policy.peopleShareDirectly && !scope.root) {
     // the organization routes people's shares through review: the person's yes
@@ -1131,6 +1181,7 @@ async function findShareable({ query, k = 8 }, identity, scope) {
     related: res.relationships,
     // where things can be shared to (match the person's wording to these)
     positions: Object.values(positionMap?.positions ?? {}).filter((p) => p.parent !== null).map((p) => p.name),
+    people: positionMap ? peopleView(personOf(identity.user)) : [],
   };
 }
 
@@ -1397,19 +1448,21 @@ homes you can see).`,
   if (SCOPED) server.tool(
     "find_shareable",
     `Find knowledge-graph entries you own (and so may share) by describing them; also lists the
-positions things can be shared with.
+positions and the people things can be shared with.
 
-When the person asks you to let a position know about something ("let Sales know what this email
-said", "share the line 2 plan with the floor"):
+When the person asks you to let a position or a person know about something ("let Sales know what
+this email said", "share the line 2 plan with the floor", "show bob the Toro schedule"):
 1. Work out what "this" is from the conversation. If it isn't in the knowledge graph yet (e.g. text
    pasted into the chat), save it first with upsert_entities, then use the name you saved.
 2. Otherwise call find_shareable with a short description and pick the matching entries; mention
    related entries only if the person seems to want them too.
-3. Match who they named to one of the returned positions.
-4. Propose with grant_access: the entries, that position and a one-sentence reason in the person's
-   words; leave "until" out unless they said how long (the organization's default applies).
-5. Tell them the share is waiting for their confirmation in the chat. Nothing is shared until they
-   confirm.`,
+3. Match who they named: a team or role to one of the returned positions ("to"), one named person
+   to one of the returned people ("person"). Only that person (and their agents) will see it.
+4. Propose with grant_access: the entries, that position or person and a one-sentence reason in
+   the person's words; leave "until" out unless they said how long (the organization's default
+   applies).
+5. Tell them the share is waiting for their confirmation in the chat (and, if the entry's save was
+   queued, for that approval too). Nothing is shared until they confirm.`,
     { query: z.string().min(1), k: z.number().int().min(1).max(32).optional() },
     async (args) => {
       need("read");
@@ -1419,15 +1472,18 @@ said", "share the line 2 plan with the floor"):
 
   if (SCOPED && caps.write !== "deny") server.tool(
     "grant_access",
-    `Show data you own to another position for a while: either named entities or a whole subtree
-(a position and everything below it). Give a reason; "until" ("14d" or an ISO date) is optional,
+    `Show data you own to another position, or to one person, for a while: either named entities or
+a whole subtree (a position and everything below it). Name the recipient with "to" (a position:
+its holders and those above it see the data) or "person" (one person and their agents only). Give a
+reason; "until" ("14d" or an ISO date) is optional,
 the organization's default length applies without it, and its maximum always does. People share what they own at once; agents propose and
 the person confirms (a card in their chat). Data you only see through a grant can't be granted
 onward. To find what to share, use find_shareable.`,
     {
       entities: z.array(z.object({ name: z.string().min(1), home: z.string().optional() })).min(1).max(32).optional(),
       subtree: z.string().min(1).optional(),
-      to: z.string().min(1),
+      to: z.string().min(1).optional(),
+      person: z.string().min(1).optional(),
       reason: z.string().min(3).max(500),
       until: z.string().optional(),
     },
@@ -1566,7 +1622,7 @@ app.get("/api/positions", (req, res) => {
   // the whole tree's names: grants may go to positions outside the caller's
   // reach (that is their point); this says nothing about anyone's data
   const tree = Object.entries(positionMap.positions).map(([id, p]) => ({ id, name: p.name, parent: p.parent }));
-  res.json({ scoped: true, root: positionMap.root, held, positions, tree, canGrantStanding: reach === null && !identity.agent && policy.standingGrants === "root" });
+  res.json({ scoped: true, root: positionMap.root, held, positions, tree, people: peopleView(personOf(identity.user)), canGrantStanding: reach === null && !identity.agent && policy.standingGrants === "root" });
 });
 
 /** ---- organization policy (Organization settings; see policy.js) ---- */
@@ -1691,7 +1747,8 @@ app.post("/api/grants", (req, res) => {
   const args = {
     ...(Array.isArray(b.entities) ? { entities: b.entities.slice(0, 32).map((e) => ({ name: String(e?.name ?? ""), ...(e?.home ? { home: String(e.home) } : {}) })) } : {}),
     ...(typeof b.subtree === "string" ? { subtree: b.subtree } : {}),
-    to: String(b.to ?? ""),
+    ...(typeof b.to === "string" && b.to ? { to: b.to } : {}),
+    ...(typeof b.person === "string" && b.person ? { person: b.person } : {}),
     reason: String(b.reason ?? ""),
     ...(typeof b.until === "string" && b.until ? { until: b.until } : {}),
   };
@@ -1711,7 +1768,11 @@ app.post("/api/grants/proposals/:id/confirm", (req, res) => {
   const ctx = httpScope(req, res);
   if (!ctx) return;
   const b = req.body ?? {};
-  const changes = { ...(typeof b.until === "string" && b.until ? { until: b.until } : {}), ...(typeof b.to === "string" && b.to ? { to: b.to } : {}) };
+  const changes = {
+    ...(typeof b.until === "string" && b.until ? { until: b.until } : {}),
+    ...(typeof b.to === "string" && b.to ? { to: b.to } : {}),
+    ...(typeof b.person === "string" && b.person ? { person: b.person } : {}),
+  };
   void confirmProposal(req.params.id, changes, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
 });
 app.post("/api/grants/proposals/:id/decline", (req, res) => {

@@ -31,6 +31,16 @@ test("the sales manager sees engineering for the deal; reps under the grant see 
   assert.deepEqual([...grantedView(map, ["floor"], grants, NOW).homes], [], "other positions get nothing");
 });
 
+test("a share to a person reaches only that person (and their agents), not their position or managers", () => {
+  const toBob = g({ kind: "entity", target: "#12:3", to: null, to_user: "bob" });
+  assert.deepEqual([...grantedView(map, ["floor"], [toBob], NOW, "bob").rids], ["#12:3"]);
+  assert.deepEqual([...grantedView(map, ["floor"], [toBob], NOW, "carol").rids], [], "someone else at bob's position gets nothing");
+  assert.deepEqual([...grantedView(map, ["ops"], [toBob], NOW, "alice").rids], [], "bob's manager gets nothing either");
+  assert.deepEqual([...grantedView(map, ["floor"], [toBob], NOW).rids], [], "no person: nothing");
+  assert.deepEqual([...grantedView(map, [], [toBob], NOW, "bob").rids], ["#12:3"], "it doesn't depend on bob's positions");
+  assert.deepEqual([...grantedView(map, ["floor"], [{ ...toBob, expires_at: "2026-10-01T00:00:00Z" }], NOW, "bob").rids], [], "expired");
+});
+
 test("subtree grants cover everything below the target; entity grants single records", () => {
   assert.deepEqual([...subtree(map, "ops")].sort(), ["eng", "floor", "ops"]);
   const v = grantedView(map, ["floor"], [g({ kind: "subtree", target: "ops", to: "floor" }), g({ kind: "entity", target: "#12:3", to: "floor" })], NOW);
