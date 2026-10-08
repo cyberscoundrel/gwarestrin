@@ -29,6 +29,7 @@ import {
   writableHomes,
 } from "./positions.js";
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
+import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { applyDismiss, applyShare, askerView, MATCH_MIN, mergeTarget, ownerView, routeMatches } from "./requests.js";
 import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
@@ -321,6 +322,9 @@ async function embedBatch(texts) {
   return vecs;
 }
 
+/** an entry's end date in results (lasting entries carry none) */
+const validityOf = (row) => (row?._valid_until ? { valid_until: row._valid_until, ...(isExpired(row._valid_until) ? { expired: true } : {}) } : {});
+
 /** strip vector props; keep human-readable facet texts */
 function publicProps(props) {
   const out = {};
@@ -344,7 +348,7 @@ function identityText(name, labels, props) {
 
 /** ---- tool implementations ---- */
 
-async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { homes: null }, readHomes = []) {
+async function searchGraph({ query, facets, k = 8, temporal_filter, include_expired = false }, scope = { homes: null }, readHomes = []) {
   console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter })}`);
   const facetList = (facets?.length ? facets : Object.keys(FACETS)).map((f) => {
     if (typeof f !== "string" || !FACET_RE.test(f)) throw new Error(`invalid facet: ${f}`);
@@ -356,8 +360,9 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
     if (!knownIndexes.has(f) && FACETS[f]) await ensureIndex(f);
   }
 
-  // every read path below carries the caller's home filter
-  const visible = homeFilter(scope);
+  // every read path below carries the caller's home filter, and (unless
+  // history is asked for) leaves out entries past their end date
+  const visible = homeFilter(scope) + (include_expired ? "" : liveClause());
   let where = visible;
   if (temporal_filter) {
     const p = temporal_filter.property;
@@ -424,6 +429,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
           properties: publicProps(row),
           ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
           ...(SCOPED && positionMap && !ownsHome(scope, row._home) ? { via: "grant" } : {}),
+          ...validityOf(row),
           score: b.score,
           facets: b.facets,
           rid,
@@ -449,6 +455,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter }, scope = { 
         properties: publicProps(row),
         ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
         ...(SCOPED && positionMap && !ownsHome(scope, row._home) ? { via: "grant" } : {}),
+        ...validityOf(row),
         score: null,
         facets: ["lexical"],
         rid: row["@rid"],
@@ -562,11 +569,11 @@ function applyFloor(place, origin, floor) {
 }
 
 /** one grading call (chunks of up to 16 entities); null per entity when it fails */
-async function gradeBatch(origin, entities) {
+async function gradeBatch(origin, entities, writtenAt = Date.now()) {
   const out = [];
   for (let i = 0; i < entities.length; i += 16) {
     const chunk = entities.slice(i, i + 16);
-    const { messages, byLabel } = gradingPrompt(positionMap, origin, chunk);
+    const { messages, byLabel } = gradingPrompt(positionMap, origin, chunk, writtenAt);
     let text = null;
     try {
       const res = await fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}/chat/completions`, {
@@ -580,7 +587,7 @@ async function gradeBatch(origin, entities) {
     } catch (e) {
       log.warn(`grading failed (entities held one level up): ${String(e).slice(0, 160)}`);
     }
-    out.push(...(text === null ? chunk.map(() => null) : parseVerdicts(text, byLabel, positionMap, origin, chunk.map((e) => e.name))));
+    out.push(...(text === null ? chunk.map(() => null) : parseVerdicts(text, byLabel, positionMap, origin, chunk.map((e) => e.name), writtenAt)));
   }
   return out;
 }
@@ -590,7 +597,7 @@ async function gradeBatch(origin, entities) {
  * resolved position (provenance); an existing entity is (name, origin).
  * Without a grader: new entities at the origin, existing ones where they are.
  */
-async function placeEntities(entities, origin, floor) {
+async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
   const existing = await Promise.all(
     entities.map((e) =>
       adbQuery(`SELECT _home FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin }).then(
@@ -599,23 +606,28 @@ async function placeEntities(entities, origin, floor) {
     ),
   );
   const grading = Boolean(GRADER_MODEL) && policy.gradingEnabled;
-  if (!grading || origin === positionMap.root) {
-    return entities.map((_, i) =>
-      applyFloor({ home: existing[i] ?? origin, note: grading ? "at the root: nothing to grade" : "not graded (grading off)" }, origin, floor),
-    );
+  if (!grading) return entities.map((_, i) => applyFloor({ home: existing[i] ?? origin, note: "not graded (grading off)" }, origin, floor));
+  const verdicts = await gradeBatch(origin, entities, writtenAt);
+  // the end date the grader judged; an unsure verdict means lasting, a failed one leaves it be
+  const until = (v) => (v ? (v.confidence >= policy.gradingConfidence ? v.until : null) : undefined);
+  if (origin === positionMap.root) {
+    // nothing above the root to restrict to: graded for its end date only
+    return entities.map((_, i) => ({ ...applyFloor({ home: existing[i] ?? origin, note: "at the root" }, origin, floor), until: until(verdicts[i]) }));
   }
-  const verdicts = await gradeBatch(origin, entities);
-  return entities.map((_, i) => applyFloor(decide(positionMap, origin, verdicts[i], existing[i], policy.gradingConfidence), origin, floor));
+  return entities.map((_, i) => ({ ...applyFloor(decide(positionMap, origin, verdicts[i], existing[i], policy.gradingConfidence), origin, floor), until: until(verdicts[i]) }));
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
-async function upsertEntities({ entities, home, floor }) {
+async function upsertEntities({ entities, home, floor, written_at }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
+  // dates in the content ("next Friday") mean the day it was written, not approved
+  const writtenAt = Number.isFinite(Date.parse(written_at)) ? Date.parse(written_at) : Date.now();
   // scoped: `home` is the origin; grading decides where each entity is seen from
-  const placements = home === undefined || !positionMap ? null : await placeEntities(entities, home, floor ?? home);
+  const placements = home === undefined || !positionMap ? null : await placeEntities(entities, home, floor ?? home, writtenAt);
 
   let merged = 0;
+  const validities = []; // per entity: the end date this write set (ISO / null), if any
   const jobs = []; // {name, facet, text}
   for (const [idx, e] of entities.entries()) {
     if (!e?.name || typeof e.name !== "string") throw new Error("entity.name required");
@@ -640,9 +652,22 @@ async function upsertEntities({ entities, home, floor }) {
     const key = home === undefined ? `{name: '${esc(e.name)}'}` : `{name: '${esc(e.name)}', \`_origin\`: '${esc(home)}'}`;
     const place = placements?.[idx];
     const placeSql = place ? `, n.\`_home\` = '${esc(place.home)}', n.\`_grade\` = '${esc(place.note)}'` : "";
+    // its end date: the writer's word, else the grader's, else unchanged
+    const stored = (
+      await adbQuery(`SELECT _valid_until, _valid_by FROM ${ENTITY_LABEL} WHERE name = :name${home === undefined ? "" : " AND _origin = :origin"} LIMIT 1`, { name: e.name, origin: home })
+    )[0];
+    const validity = chooseValidity(
+      parseValidUntil(e.valid_until, writtenAt),
+      stored ? { valid_until: stored._valid_until ?? null, valid_by: stored._valid_by ?? null } : undefined,
+      place?.until,
+    );
+    const validSql = validity
+      ? `, n.\`_valid_until\` = ${validity.valid_until ? `'${esc(validity.valid_until)}'` : "null"}, n.\`_valid_by\` = '${validity.valid_by}'`
+      : "";
+    if (validity) validities[idx] = validity.valid_until;
     await adbCommand(
       `MERGE (n:${ENTITY_LABEL} ${key}) ` +
-        `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""}${placeSql} ${labelClause}`,
+        `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""}${placeSql}${validSql} ${labelClause}`,
       "cypher",
     );
     merged++;
@@ -674,7 +699,7 @@ async function upsertEntities({ entities, home, floor }) {
   if (placements) {
     for (const [i, e] of entities.entries()) {
       const p = placements[i];
-      placed.push({ name: e.name, home: positionMap.positions[p.home]?.name, note: p.note });
+      placed.push({ name: e.name, home: positionMap.positions[p.home]?.name, note: p.note, ...(validities[i] !== undefined ? { valid_until: validities[i] } : {}) });
       const ask = p.release ?? p.review;
       if (!ask) continue;
       const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin: home });
@@ -1315,7 +1340,7 @@ async function matchHidden(question, askerScope) {
   for (const facet of Object.keys(FACETS)) {
     if (!knownIndexes.has(facet)) continue;
     const rows = await adbQuery(
-      `SELECT @rid AS rid, vectorCosineSimilarity(embed_${facet}, ${vec}) AS score FROM ${ENTITY_LABEL} WHERE embed_${facet} IS NOT NULL ORDER BY score DESC LIMIT 32`,
+      `SELECT @rid AS rid, vectorCosineSimilarity(embed_${facet}, ${vec}) AS score FROM ${ENTITY_LABEL} WHERE embed_${facet} IS NOT NULL${liveClause()} ORDER BY score DESC LIMIT 32`,
     ).catch(() => []);
     for (const row of rows) {
       const rid = String(row.rid);
@@ -1610,9 +1635,12 @@ function createServer(identity) {
 ${facetDoc}
 Custom facets created via upsert_entities are also searchable. Use for conceptual or
 paraphrased questions; temporal_filter (property + after/before ISO datetimes) narrows by
-a datetime property. Falls back to lexical matching if embeddings are unavailable.${homeNote}`,
+a datetime property. Entries past their end date (valid_until) are left out; include_expired
+shows them too, marked expired (for history: "who was on shift last Friday?"). Falls back to
+lexical matching if embeddings are unavailable.${homeNote}`,
     {
       query: z.string().min(1),
+      include_expired: z.boolean().optional(),
       facets: z.array(z.string()).optional(),
       k: z.number().int().min(1).max(32).optional(),
       temporal_filter: z
@@ -1648,7 +1676,12 @@ a datetime property. Falls back to lexical matching if embeddings are unavailabl
 facet texts — a concise natural-language sentence per facet capturing that aspect (facet
 list below). Provide only facets you have information for. Unknown facet names are allowed
 and indexed lazily. Include datetime facts BOTH as properties (for temporal_filter) and
-inside facet texts.${SCOPED ? `
+inside facet texts.
+Things that stop mattering on a date (a visit, an event, this week's schedule, a temporary state)
+get valid_until: an ISO date or e.g. "7d"; after it they drop out of searches and are later
+removed. Leave it out for what lasts (where things are, how things are done, decisions); grading
+fills it in when the content clearly ends, and "lasting" keeps an entry from ever expiring. To
+change an existing entry's end date, upsert it again with valid_until.${SCOPED ? `
 Entities land at your position by default; \`home\` may name one of your positions or one above it
 (restricting who sees them), never one below or beside yours.` : ""}
 ${facetDoc}`,
@@ -1661,6 +1694,7 @@ ${facetDoc}`,
             labels: z.array(z.string()).optional(),
             properties: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
             facets: z.record(z.string()).optional(),
+            valid_until: z.string().optional(),
           }),
         )
         .max(64),
@@ -1668,8 +1702,14 @@ ${facetDoc}`,
     async (args) => {
       need("write");
       const home = resolveWriteHome(scope, args.home);
+      // end dates resolve now ("7d" from today), not when a queued write is approved
+      const now = Date.now();
+      const entities = args.entities.map((e) => {
+        const v = parseValidUntil(e.valid_until, now);
+        return v === undefined ? e : { ...e, valid_until: v.valid_until ?? "lasting" };
+      });
       // fixed at request time: what the requester read, not the approver
-      const write = { entities: args.entities, home, floor: derivedFloor(identity, home) };
+      const write = { entities, home, floor: derivedFloor(identity, home), written_at: new Date(now).toISOString() };
       if (caps.write === "queued") {
         const pending = await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home });
         return { content: [{ type: "text", text: JSON.stringify(pending) }] };
@@ -2117,7 +2157,7 @@ app.get("/api/entities", (req, res) => {
   const q = String(req.query.q ?? "").trim().slice(0, 80);
   // case-insensitive: people type "thinkcentre" for "ThinkCentre"
   const match = q ? ` AND (name ILIKE '%${likeTerm(q)}%' OR text_identity ILIKE '%${likeTerm(q)}%')` : "";
-  void adbQuery(`SELECT name, _home FROM ${ENTITY_LABEL} WHERE name IS NOT NULL${match}${homeFilter(ctx.scope, { own: true })} ORDER BY name LIMIT 25`).then(
+  void adbQuery(`SELECT name, _home FROM ${ENTITY_LABEL} WHERE name IS NOT NULL${match}${homeFilter(ctx.scope, { own: true })}${liveClause()} ORDER BY name LIMIT 25`).then(
     (rows) => res.json({ entities: rows.map((r) => ({ name: r.name, home: homeLabel(r._home) })) }),
     (e) => httpError(res, e),
   );
@@ -2143,7 +2183,7 @@ async function boot() {
   // declared, or SQL WHERE can't see it (see upsertEntities)
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._home IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_home) NOTUNIQUE`).catch(() => {});
-  for (const prop of ["_origin", "_grade"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["_origin", "_grade", "_valid_until", "_valid_by"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (name, _origin) NOTUNIQUE`).catch(() => {});
   if (SCOPED && positionMap) {
     // entities from before origins: their origin is where they are (legacy, unhomed ones: the root)

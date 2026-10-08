@@ -123,6 +123,16 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   list them with their positions so agents can match "show bob". Stored as
   `AccessGrant.to_user` (`to_pos` empty). The default for answering an access
   request.
+- **Time extents** (`_valid_until`, `_valid_by` on every entity): how long
+  an entry stays true or useful. A writer may give `valid_until` (an ISO
+  date, `7d`, or `lasting`) and it sticks; otherwise grading judges it in the
+  same call that decides the home (also for root writes, which grading
+  otherwise skips), told the date it was written so "next Friday" resolves
+  against that, not the approval. Unsure, unclear or far-off answers mean
+  lasting: the safe side is keeping. Past its end date an entry drops out of
+  every read (search, traversal, request matching, the share picker);
+  `search_graph` with `include_expired` shows history, marked `expired`.
+  Pruning removes expired entries for good after a retention window (next).
 - **Access requests** (`request_access`; `AccessRequest` documents, never
   graph entities, so search never returns them): someone asks for what they
   can't see ("when does the next Toro order go to plating?"). An agent
