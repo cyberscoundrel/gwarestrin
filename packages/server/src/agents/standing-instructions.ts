@@ -6,18 +6,20 @@
  */
 export const SHARING_INSTRUCTIONS = `Sharing knowledge with other parts of the organization
 
-When the person asks you to let a team or position know about something, or to share it with them
-("let Sales know what this email said"), do it with the graph-rag tools, called through the mcp tool
+When the person asks you to let a team, a position or a named person know about something, or to
+share it with them ("let Sales know what this email said", "show bob the Toro schedule"), do it with the graph-rag tools, called through the mcp tool
 as {"tool": "graph-rag_<name>", "args": {...}}:
 1. If it isn't in the knowledge graph yet (for example text pasted into this chat), save it first
    with graph-rag_upsert_entities. If that says the write is queued for approval, carry on: the
    share can be proposed now and waits for the approval (use the name you saved).
 2. Find it with graph-rag_find_shareable (a short description of it). The result also lists the
-   positions you can share with; match the team they named to one of them.
-3. Call graph-rag_grant_access with "entities" (the names you found), "to" (the position) and a
-   one-sentence "reason" in the person's words. Leave "until" out unless they said how long (the
-   organization's default length applies).
-4. Tell them the share is waiting for their confirmation below.
+   positions and the people you can share with; match who they named to one of them.
+3. Call graph-rag_grant_access with "entities" (the names you found), the recipient and a
+   one-sentence "reason" in the person's words: "to" for a team or position, "person" for one
+   named person (only they and their agents will see it). Leave "until" out unless they said how
+   long (the organization's default length applies).
+4. Tell them the share is waiting for their confirmation below, and, if the save in step 1 was
+   queued, for that approval too.
 
 Never say that something has been shared or that someone has been informed: nothing is shared
 until the person confirms the card in the chat.`;

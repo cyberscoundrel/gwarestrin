@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ArrowRight, CalendarClock, CircleCheck, Plus, Search, Share2, TriangleAlert, X } from "lucide";
+  import { ArrowRight, CalendarClock, CircleCheck, Plus, Search, Share2, TriangleAlert, User, X } from "lucide";
   import { api, type GrantView, type PositionsView } from "../lib/api.js";
   import Dialog from "./Dialog.svelte";
   import Dropdown from "./Dropdown.svelte";
@@ -31,7 +31,9 @@
   let searching = $state(false);
   let picked = $state<Array<{ name: string; home?: { id: string; name: string } }>>([]);
   let branch = $state("");
+  let toKind = $state<"person" | "position">("person");
   let to = $state("");
+  let person = $state("");
   let reason = $state("");
   let until = $state(dateIn(14));
   let standing = $state(false);
@@ -79,7 +81,10 @@
   );
   /** anyone but the root (it already sees everything) */
   const toOptions = $derived(sortedTree.filter((p) => p.parent !== null).map((p) => ({ value: p.id, label: path(p.id) })));
-
+  const personOptions = $derived(
+    (tree?.people ?? []).map((p) => ({ value: p.name, label: p.positions.length ? `${p.name} · ${p.positions.join(", ")}` : p.name })),
+  );
+  const recipient = $derived(toKind === "person" ? person : to);
   const outgoing = $derived(grants.filter((g) => g.direction === "outgoing"));
   const incoming = $derived(grants.filter((g) => g.direction === "incoming"));
 
@@ -108,7 +113,7 @@
   const whatError = $derived(
     attempted && (what === "entries" ? picked.length === 0 : !branch) ? (what === "entries" ? "Pick at least one entry." : "Pick a branch to share.") : "",
   );
-  const toError = $derived(attempted && !to ? "Pick who to share with." : "");
+  const toError = $derived(attempted && !recipient ? (toKind === "person" ? "Pick a person." : "Pick a position.") : "");
   const reasonError = $derived(attempted && reason.trim().length < 3 ? "Say why, so the share can be reviewed later." : "");
   const untilError = $derived.by(() => {
     if (!attempted || standing) return "";
@@ -127,6 +132,7 @@
     picked = [];
     branch = "";
     to = "";
+    person = "";
     reason = "";
     until = dateIn(defaultDays);
     standing = false;
@@ -144,7 +150,7 @@
       const end = standing ? undefined : new Date(`${until}T23:59:59`).toISOString();
       const r = await api.createGrant({
         ...(what === "entries" ? { entities: picked.map((e) => ({ name: e.name, ...(e.home ? { home: e.home.id } : {}) })) } : { subtree: branch }),
-        to,
+        ...(toKind === "person" ? { person } : { to }),
         reason: reason.trim(),
         ...(end ? { until: end } : {}),
       });
@@ -152,7 +158,7 @@
       const granted = r.results.length - proposed;
       notice = proposed
         ? `Sent for approval: ${proposed === 1 ? "this share takes effect" : `${proposed} shares take effect`} once someone approves.`
-        : `Shared with ${path(to)}${granted > 1 ? ` (${granted} entries)` : ""}.`;
+        : `Shared with ${toKind === "person" ? person : path(to)}${granted > 1 ? ` (${granted} entries)` : ""}.`;
       resetForm();
       view = "list";
       await refresh();
@@ -189,7 +195,9 @@
     <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-fg">
       <span class="min-w-0 truncate">{g.kind === "subtree" ? `Everything under ${g.target}` : g.target}</span>
       <Icon icon={ArrowRight} size={13} class="shrink-0 text-faint" />
-      <span class="min-w-0 truncate">{g.to}</span>
+      <span class="inline-flex min-w-0 items-center gap-1 truncate">
+        {#if g.to_kind === "person"}<Icon icon={User} size={13} class="shrink-0 text-faint" label="person" />{/if}{g.to_kind === "person" && g.direction === "incoming" ? "You" : g.to}
+      </span>
       {#if canRevoke}
         <button class="btn btn-danger btn-sm ml-auto" disabled={busyId === g.id} onclick={() => void revoke(g)}>
           {busyId === g.id ? "Revoking…" : "Revoke"}
@@ -222,7 +230,7 @@
     <section class="grid gap-3 px-5 py-5">
       <h4 class="m-0 text-xs font-medium text-dim">Shared with you</h4>
       {#if incoming.length === 0}
-        <p class="m-0 text-xs text-faint">Nobody has shared anything with your positions.</p>
+        <p class="m-0 text-xs text-faint">Nobody has shared anything with you or your positions.</p>
       {:else}
         <ul class="m-0 grid list-none gap-3 p-0">
           {#each incoming as g (g.id)}{@render grantRow(g, false)}{/each}
@@ -286,8 +294,17 @@
 
     <div class="field">
       <span class="field-label">Share with</span>
-      <Dropdown full label="position to share with" value={to} options={[{ value: "", label: "Pick a position" }, ...toOptions]} onchange={(v) => (to = v)} searchable />
-      <span class="field-hint">People at that position, and those above it, will see what you share.</span>
+      <div class="segmented" role="group" aria-label="share with">
+        <button type="button" aria-pressed={toKind === "person"} onclick={() => (toKind = "person")}>A person</button>
+        <button type="button" aria-pressed={toKind === "position"} onclick={() => (toKind = "position")}>A position</button>
+      </div>
+      {#if toKind === "person"}
+        <Dropdown full label="person to share with" value={person} options={[{ value: "", label: "Pick a person" }, ...personOptions]} onchange={(v) => (person = v)} searchable />
+        <span class="field-hint">Only that person, and the agents working for them, will see what you share.</span>
+      {:else}
+        <Dropdown full label="position to share with" value={to} options={[{ value: "", label: "Pick a position" }, ...toOptions]} onchange={(v) => (to = v)} searchable />
+        <span class="field-hint">People at that position, and those above it, will see what you share.</span>
+      {/if}
       {#if toError}<span class="field-error">{toError}</span>{/if}
     </div>
 
@@ -326,7 +343,7 @@
     id="grants-title"
     title={view === "new" ? "Share access" : "Shared access"}
     subtitle={view === "new"
-      ? "Show part of the knowledge graph to a position that normally can't see it."
+      ? "Show part of the knowledge graph to a person or a position that normally can't see it."
       : "Exceptions to who sees what in the knowledge graph. Every share is recorded and ends on its date unless revoked sooner."}
     icon={Share2}
     {onclose}

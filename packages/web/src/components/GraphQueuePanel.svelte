@@ -51,7 +51,7 @@
     if (p.kind === "grant") {
       const what = body.kind === "subtree" ? `everything under ${pos(body.target)}` : String(body.target_name);
       const until = body.expires_at ? `until ${new Date(String(body.expires_at)).toLocaleDateString()}` : "with no end date";
-      return { title: `Share ${what} with ${pos(body.to_pos)} ${until}`, detail: `Why: ${String(body.reason ?? "")}` };
+      return { title: `Share ${what} with ${typeof body.to_user === "string" && body.to_user ? body.to_user : pos(body.to_pos)} ${until}`, detail: `Why: ${String(body.reason ?? "")}` };
     }
     if (p.kind === "backfill") return { title: "Fill in missing search embeddings", detail: `Up to ${String(body.limit ?? 64)} entries.` };
     return null;
