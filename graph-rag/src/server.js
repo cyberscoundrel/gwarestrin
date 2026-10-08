@@ -29,7 +29,7 @@ import {
   writableHomes,
 } from "./positions.js";
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
-import { grantedView, isActive, resolveExpiry } from "./grants.js";
+import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { applyDismiss, applyShare, askerView, MATCH_MIN, mergeTarget, ownerView, routeMatches } from "./requests.js";
 import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
 import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
@@ -121,7 +121,7 @@ function scopeOf(identity) {
   if (!positionMap) return { homes: new Set(), writeHome: null, root: false };
   const held = heldPositions(positionMap, identity.positions);
   const homes = visibleHomes(positionMap, held);
-  // grants add homes (subtree grants) and single records (entity grants);
+  // grants add homes (subtree grants) and single entities (entity grants);
   // a share to a person reaches them and the agents acting for them
   const person = personOf(identity.user);
   const granted = grantedView(positionMap, held, grantCache, Date.now(), person);
@@ -136,14 +136,15 @@ function scopeOf(identity) {
 function homeFilter(scope, { own = false } = {}) {
   if (scope.homes === null) return "";
   const homes = new Set(scope.homes);
-  const rids = [];
+  let entities = "";
   if (!own && scope.granted) {
     for (const h of scope.granted.homes) homes.add(h);
-    for (const r of scope.granted.rids) if (RID_RE.test(r)) rids.push(r);
+    // a granted record id counts only while it holds the granted entity
+    entities = entityPredicate(scope.granted.entities, esc, RID_RE);
   }
   const conds = [];
   if (homes.size) conds.push(`_home IN [${[...homes].map((h) => `'${esc(h)}'`).join(",")}]`);
-  if (rids.length) conds.push(`@rid IN [${rids.join(",")}]`);
+  if (entities) conds.push(entities);
   return conds.length ? ` AND (${conds.join(" OR ")})` : " AND 1 = 0";
 }
 
@@ -742,8 +743,12 @@ async function executeGraph({ command, language = "cypher" }, identity) {
     return queueWrite({ kind: "command", command, language, user: identity.user });
   }
   const result = await adbCommand(command, language);
+  if (DELETE_RE.test(command)) await refreshGrants(); // revoke grants on what it deleted
   return { result };
 }
+
+/** a raw command that may delete entities (their grants are swept after it) */
+const DELETE_RE = /\b(DELETE|TRUNCATE)\b/i;
 
 /** execute a queued write (admin approval path) */
 async function executePending(rec) {
@@ -752,7 +757,9 @@ async function executePending(rec) {
   if (rec.kind === "rehome") return applyRehome(JSON.parse(rec.payload));
   if (rec.kind === "grant") return storeGrant(JSON.parse(rec.payload));
   if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
-  return adbCommand(rec.payload, rec.language ?? "sql");
+  const result = await adbCommand(rec.payload, rec.language ?? "sql");
+  if (DELETE_RE.test(rec.payload)) await refreshGrants();
+  return result;
 }
 
 /** move entities to another home: restricting applies, widening needs a person */
@@ -803,7 +810,7 @@ let grantCache = []; // active grants, refreshed on change and every minute
 
 async function ensureGrantSchema() {
   await adbCommand("CREATE DOCUMENT TYPE AccessGrant IF NOT EXISTS").catch(() => {});
-  for (const prop of ["id", "kind", "target", "target_name", "target_home", "to_pos", "to_user", "reason", "granted_by", "created_at", "expires_at", "status", "revoked_at", "revoked_by"]) {
+  for (const prop of ["id", "kind", "target", "target_name", "target_origin", "target_home", "to_pos", "to_user", "reason", "granted_by", "created_at", "expires_at", "status", "revoked_at", "revoked_by"]) {
     await adbCommand(`CREATE PROPERTY AccessGrant.${prop} IF NOT EXISTS STRING`).catch(() => {});
   }
 }
@@ -812,10 +819,39 @@ async function refreshGrants() {
   if (!SCOPED) return;
   try {
     const rows = await adbQuery("SELECT FROM AccessGrant WHERE status = 'active' LIMIT 5000");
-    grantCache = rows.map((r) => ({ ...r, to: r.to_pos })).filter((g) => isActive(g));
+    const active = rows.map((r) => ({ ...r, to: r.to_pos })).filter((g) => isActive(g));
+    // a failed sweep keeps them: the read predicate still checks each entity
+    const gone = new Set(
+      (await danglingEntityGrants(active).catch((e) => (log.warn(`grant sweep failed: ${String(e).slice(0, 160)}`), []))).map((g) => g.id),
+    );
+    grantCache = active.filter((g) => !gone.has(g.id));
   } catch (e) {
     log.warn(`grant refresh failed (keeping ${grantCache.length}): ${String(e).slice(0, 160)}`);
   }
+}
+
+/**
+ * Entity grants whose entry was deleted (or whose record id now holds another
+ * entity: ArcadeDB reuses ids) are revoked, whatever deleted it.
+ */
+async function danglingEntityGrants(grants) {
+  const rids = [...new Set(grants.filter((g) => g.kind === "entity" && RID_RE.test(String(g.target))).map((g) => g.target))];
+  if (rids.length === 0) return [];
+  const found = [];
+  for (let i = 0; i < rids.length; i += 500) {
+    const chunk = rids.slice(i, i + 500);
+    found.push(...(await adbQuery(`SELECT @rid AS rid, name, _origin FROM ${ENTITY_LABEL} WHERE @rid IN [${chunk.join(",")}]`)));
+  }
+  const gone = danglingGrants(grants, found);
+  for (const g of gone) {
+    await adbCommand("UPDATE AccessGrant SET status = 'revoked', revoked_at = :now, revoked_by = :actor WHERE id = :id", "sql", {
+      now: new Date().toISOString(),
+      actor: "graph-rag: entry deleted",
+      id: g.id,
+    });
+    log.info(`grant ${g.id} revoked: ${g.target_name} (${g.target}) was deleted`);
+  }
+  return gone;
 }
 
 const positionName = (id) => positionMap?.positions[id]?.name ?? id;
@@ -890,7 +926,7 @@ async function grantAccess({ entities, subtree: subtreeRef, to, person, reason, 
     for (const ref of entities) {
       const from = ref.home === undefined ? undefined : positionId(ref.home);
       const rows = await adbQuery(
-        `SELECT @rid AS rid, name, _home FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope, { own: true })}`,
+        `SELECT @rid AS rid, name, _home, _origin FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope, { own: true })}`,
         { name: ref.name },
       );
       const hits = rows.filter((r) => from === undefined || effectiveHome(positionMap, r._home) === from);
@@ -899,7 +935,7 @@ async function grantAccess({ entities, subtree: subtreeRef, to, person, reason, 
         const pend = await pendingEntityWrite(identity, ref.name);
         if (pend) {
           if (recipientSees(recipient, pend.origin)) throw new Error(`${who} already sees ${ref.name}`);
-          targets.push({ kind: "entity", target: null, target_name: ref.name, target_home: pend.origin, origin: pend.origin, after: pend.id });
+          targets.push({ kind: "entity", target: null, target_name: ref.name, target_origin: pend.origin, target_home: pend.origin, origin: pend.origin, after: pend.id });
           continue;
         }
         throw new Error(`no entity ${ref.name} you own${from ? ` at ${ref.home}` : ""} (granted entities can't be granted onward)`);
@@ -907,7 +943,7 @@ async function grantAccess({ entities, subtree: subtreeRef, to, person, reason, 
       if (hits.length > 1) throw new Error(`${ref.name} exists at several homes you own; pass its home`);
       const home = effectiveHome(positionMap, hits[0]._home);
       if (recipientSees(recipient, home)) throw new Error(`${who} already sees ${ref.name}`);
-      targets.push({ kind: "entity", target: String(hits[0].rid), target_name: ref.name, target_home: home });
+      targets.push({ kind: "entity", target: String(hits[0].rid), target_name: ref.name, target_origin: hits[0]._origin ?? null, target_home: home });
     }
   }
   const results = [];
@@ -943,10 +979,10 @@ async function grantAccess({ entities, subtree: subtreeRef, to, person, reason, 
 async function storeGrant(g) {
   if (g.expires_at && Date.parse(g.expires_at) <= Date.now()) throw new Error("this grant has already expired");
   await adbCommand(
-    "INSERT INTO AccessGrant SET id = :id, kind = :kind, target = :target, target_name = :target_name, target_home = :target_home, " +
+    "INSERT INTO AccessGrant SET id = :id, kind = :kind, target = :target, target_name = :target_name, target_origin = :target_origin, target_home = :target_home, " +
       "to_pos = :to_pos, to_user = :to_user, reason = :reason, granted_by = :granted_by, created_at = :created_at, expires_at = :expires_at, status = 'active'",
     "sql",
-    { ...g, to_pos: g.to_pos ?? null, to_user: g.to_user ?? null, created_at: new Date().toISOString(), expires_at: g.expires_at ?? null },
+    { ...g, target_origin: g.target_origin ?? null, to_pos: g.to_pos ?? null, to_user: g.to_user ?? null, created_at: new Date().toISOString(), expires_at: g.expires_at ?? null },
   );
   log.info(`grant ${g.id}: ${g.kind} ${g.target_name} -> ${g.to_user ? `person ${g.to_user}` : positionName(g.to_pos)} by ${g.granted_by} until ${g.expires_at ?? "revoked"}`);
   await refreshGrants();
@@ -1035,7 +1071,7 @@ async function resolveWaitingShares(writeId) {
       log.info(`share ${rec.id} not made: ${why}`);
       continue;
     }
-    const resolved = { ...g, target: String(ent.rid), target_home: effectiveHome(positionMap, ent._home), after: undefined };
+    const resolved = { ...g, target: String(ent.rid), target_origin: g.origin, target_home: effectiveHome(positionMap, ent._home), after: undefined };
     if (rec.status === "confirmed" && !(policy.peopleShareDirectly || owner.root)) {
       // shares go through review: an ordinary request in Approvals now
       await adbCommand("UPDATE PendingWrite SET status = 'pending', payload = :payload, note = :note WHERE id = :id", "sql", {
@@ -1288,11 +1324,11 @@ async function matchHidden(question, askerScope) {
     }
   }
   if (best.size === 0) return [];
-  const rows = await adbQuery(`SELECT @rid AS rid, name, _home FROM [${[...best.keys()].join(",")}]`);
-  const granted = askerScope.granted ?? { homes: new Set(), rids: new Set() };
+  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _origin FROM [${[...best.keys()].join(",")}]`);
+  const granted = askerScope.granted ?? { homes: new Set(), entities: [] };
   return rows
-    .map((r) => ({ rid: String(r.rid), name: r.name, home: effectiveHome(positionMap, r._home), score: best.get(String(r.rid)) ?? 0 }))
-    .filter((m) => m.name && !askerScope.homes.has(m.home) && !granted.homes.has(m.home) && !granted.rids.has(m.rid))
+    .map((r) => ({ rid: String(r.rid), name: r.name, origin: r._origin, home: effectiveHome(positionMap, r._home), score: best.get(String(r.rid)) ?? 0 }))
+    .filter((m) => m.name && !askerScope.homes.has(m.home) && !granted.homes.has(m.home) && !grantShows(granted, m))
     .sort((a, b) => b.score - a.score);
 }
 
