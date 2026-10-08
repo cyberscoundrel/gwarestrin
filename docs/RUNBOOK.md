@@ -531,6 +531,11 @@ Who sees what in the knowledge graph follows the position tree
   queued widening.
 - A tenant whose user holds no position sees nothing in the graph and cannot
   write to it.
+- **Entity grants follow the entry, not its record id** (ArcadeDB reuses ids
+  after a delete): a grant shows a record only while it holds the granted
+  name (and origin). Grants on deleted entries are revoked
+  (`revoked_by: graph-rag: entry deleted`) right after an `execute_graph`
+  delete, and by the minute-by-minute grant refresh whatever deleted them.
 - **Workspaces** (admin's rail): per workspace, the agent limit, the tool
   connections its agents may use (e.g. which DAB) and the model providers
   (e.g. local inference only). The provisioner stores them
