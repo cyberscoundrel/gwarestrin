@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parsePositionMap } from "../src/positions.js";
-import { askerView, cosine, needName, openUntil, ownersFor, ownerView, pickPositions } from "../src/needs.js";
+import { askerView, cosine, groupLinked, groupView, needName, openUntil, ownersFor, ownerView, pickPositions } from "../src/needs.js";
 
 //            org (admin)
 //      ┌──────┴──────┐
@@ -83,4 +83,22 @@ test("an owner sees only their own meetings; a posted need asks them to add what
   const posted = ownerView(need(), [], NOW);
   assert.equal(posted.posted, true);
   assert.equal(posted.status, "open");
+});
+
+test("linked questions group for an owner, through links among the ones they're shown", () => {
+  assert.deepEqual(groupLinked(["a", "b", "c", "d"], [["a", "b"], ["b", "c"], ["c", "x"]]).map((g) => g.sort()), [["a", "b", "c"], ["d"]]);
+  assert.deepEqual(groupLinked(["a"], []), [["a"]]);
+});
+
+test("one item for a group: every asker, the union of entries, shared only once shared with all", () => {
+  const bob = ownerView(need({ qid: "q1", asker: "bob" }), [{ rid: "#1:1", name: "Pricing", home: "Sales", state: "shared" }], NOW);
+  const alice = ownerView(need({ qid: "q2", asker: "alice", question: "What discount is Toro asking for?" }), [{ rid: "#1:1", name: "Pricing", home: "Sales", state: "open" }], NOW);
+  const g = groupView([bob, alice]);
+  assert.deepEqual(g.askers, ["bob", "alice"]);
+  assert.deepEqual(g.ids, ["q1", "q2"]);
+  assert.equal(g.questions.length, 2);
+  assert.deepEqual(g.entries, [{ key: "#1:1", name: "Pricing", home: "Sales", shared: false }], "shared with bob, not yet with alice");
+  assert.equal(g.status, "open");
+  const single = groupView([bob]);
+  assert.deepEqual(single.askers, ["bob"]);
 });
