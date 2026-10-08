@@ -125,7 +125,9 @@ export class GwRequestCard extends LitElement {
         : v.status === "expired"
           ? v.shared.length ? "" : "This request has ended; nobody shared anything."
           : v.still_open
-            ? `Asked. If someone has this, they can share it with you${v.expires_at ? ` until ${pretty(v.expires_at)}` : ""}.`
+            ? v.shared.length
+              ? `More may be shared with you${v.expires_at ? ` until ${pretty(v.expires_at)}` : ""}.`
+              : `Asked. If someone has this, they can share it with you${v.expires_at ? ` until ${pretty(v.expires_at)}` : ""}.`
             : "";
     return html`<div class="gw-request-card grid gap-2 rounded-lg border border-edge bg-panel p-3.5" data-status=${v.status}>
       ${head} ${shared} ${line ? html`<div class="text-xs text-faint">${line}</div>` : nothing}
