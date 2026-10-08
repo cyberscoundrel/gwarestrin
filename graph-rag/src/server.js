@@ -1690,7 +1690,9 @@ async function answerRequest(qid, { entries, until }, identity, scope) {
       if (edge?.state === "shared" || edge?.state === "visible") continue;
       let done = false;
       try {
-        const r = (await grantAccess({ entities: [{ name: e.name, home: e.home }], person: need.asker, reason: `Asked: ${need.question}`.slice(0, 500), until }, identity, scope)).results[0];
+        // an answer always ends: the organization's default unless the owner picked a date
+        const end = until ?? `${policy.defaultShareDays}d`;
+        const r = (await grantAccess({ entities: [{ name: e.name, home: e.home }], person: need.asker, reason: `Asked: ${need.question}`.slice(0, 500), until: end }, identity, scope)).results[0];
         results.push({ name: e.name, asker: need.asker, ...(r.granted ? { granted: true, expires_at: r.expires_at } : { proposed: true }) });
         done = true;
       } catch (err) {
