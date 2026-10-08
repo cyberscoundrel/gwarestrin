@@ -323,7 +323,7 @@
         {busyId === r.id ? "Sharing…" : `Share with ${who(r)}`}
       </button>
     </div>
-    <span class="text-2xs text-faint">Only {who(r)} and their agents will see what you share. {who(r)} isn't told who was asked, or if you say no.</span>
+    <span class="text-2xs text-faint">Only {who(r)} and their agents will see what you share. {r.askers?.length > 1 ? "They aren't" : `${who(r)} isn't`} told who was asked, or if you say no.</span>
     {/if}
   </li>
 {/snippet}
