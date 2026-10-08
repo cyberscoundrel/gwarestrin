@@ -56,6 +56,7 @@ const {
   // semantic grading of new writes against the position tree (empty = off)
   GRADER_MODEL = "",
   GRADER_TIMEOUT_MS = "30000",
+  EMBED_TIMEOUT_MS = "30000",
   // where pruned entries go before deletion; "discard" keeps nothing (see prune.js)
   PRUNE_SINK = "discard",
   // policy defaults (MAX_GRANT_DAYS, DEFAULT_SHARE_DAYS, STANDING_GRANTS,
@@ -315,6 +316,8 @@ async function embedBatch(texts) {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${LITELLM_API_KEY}` },
     body: JSON.stringify({ model: EMBED_MODEL, input: texts }),
+    // a stalled backend fails the call (search falls back to lexical) instead of hanging it
+    signal: AbortSignal.timeout(Number(EMBED_TIMEOUT_MS)),
   });
   if (!res.ok) throw new Error(`embeddings HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`);
   const j = await res.json();
