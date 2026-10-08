@@ -1336,7 +1336,7 @@ async function requestAccess({ question }, identity, scope) {
   await insertRequest(req);
   return identity.agent
     ? { proposed: true, requestId: req.id, note: "waiting for the person to confirm the request in the chat" }
-    : askerView(req);
+    : askerRequest(req.id, identity);
 }
 
 /** the asker's side: their own requests only (a joined one shows the request it joined) */
