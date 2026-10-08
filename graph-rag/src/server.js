@@ -1371,6 +1371,9 @@ async function shareNeed(need, recipient) {
   });
 }
 
+/** is this person among the owners an entry's meeting goes to (not merely above it) */
+const ownerOf = (person, home, asker) => ownersFor(positionMap, home, holdersMap(), asker).includes(person);
+
 /** is the question shown to this person: an active share of it to them or a position they reach */
 function shownTo(need, person, scope) {
   const vis = scope.homes;
@@ -1456,7 +1459,7 @@ async function openNeed(need, askerScope) {
         q: JSON.stringify([...t.questions, { text: need.question, at: new Date(now).toISOString() }].slice(-20)),
         until: until > t.open_until ? until : t.open_until,
       });
-      await adbCommand(`UPDATE ${need.rid} SET _status = 'joined', _joined_into = :into`, "sql", { into: t.qid });
+      await adbCommand(`UPDATE ${need.rid} SET _status = 'joined', _joined_into = :joined_into`, "sql", { joined_into: t.qid });
       log.info(`question ${need.qid} joined ${t.qid} (same asker, same question)`);
       return;
     }
@@ -1611,7 +1614,7 @@ async function incomingRequests(identity) {
     const need = needOf(row);
     // shown to me through a share of the question (not merely below me in the tree)
     if (!shownTo(need, person, scope) || need.dismissed.includes(person)) continue;
-    const mine = (await needEdges(need.rid)).filter((e) => e.state !== "visible" && ownsHome(scope, e.home));
+    const mine = (await needEdges(need.rid)).filter((e) => e.state !== "visible" && ownerOf(person, e.home, need.asker));
     out.push({ ...ownerView(need, mine), entries: ownerView(need, mine).entries.map((e) => ({ ...e, home: positionName(e.home) })) });
   }
   return { requests: out.sort((a, b) => Number(b.status === "open") - Number(a.status === "open")) };
@@ -1623,7 +1626,7 @@ async function answerRequest(qid, { entries, until }, identity, scope) {
   const person = personOf(identity.user);
   const need = await loadNeed(qid);
   if (!need || need.status !== "open" || (need.open_until && Date.parse(need.open_until) <= Date.now())) throw new Error("this request is closed");
-  const mine = (await needEdges(need.rid)).filter((e) => e.state === "open" && ownsHome(scope, e.home));
+  const mine = (await needEdges(need.rid)).filter((e) => e.state === "open" && ownerOf(person, e.home, need.asker));
   const keys = new Set(Array.isArray(entries) ? entries.map(String) : []);
   const chosen = mine.filter((e) => keys.has(e.rid));
   if (chosen.length === 0) throw new Error(mine.length ? "pick at least one of the matching entries" : `no request ${qid} for you to answer`);
@@ -1652,7 +1655,7 @@ async function dismissRequest(qid, identity) {
   const scope = personScope(person);
   const need = await loadNeed(qid);
   if (!need || !scope || !shownTo(need, person, scope)) throw new Error(`no request ${qid} for you`);
-  for (const e of await needEdges(need.rid)) if (e.state === "open" && ownsHome(scope, e.home)) await adbCommand(`UPDATE ${e.erid} SET state = 'declined'`);
+  for (const e of await needEdges(need.rid)) if (e.state === "open" && ownerOf(person, e.home, need.asker)) await adbCommand(`UPDATE ${e.erid} SET state = 'declined'`);
   await adbCommand(`UPDATE ${need.rid} SET _dismissed = :d`, "sql", { d: JSON.stringify([...new Set([...need.dismissed, person])]) });
   return { dismissed: true, id: qid };
 }
