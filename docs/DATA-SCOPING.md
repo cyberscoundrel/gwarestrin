@@ -153,7 +153,9 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   document puts more in the graph. Queued writers' ingests are one approval;
   rejecting one deletes the stored text. Ingests run one at a time in the
   background. Questions meet sections and facts like any entry. Re-ingesting
-  a title replaces its sections; pruning a document removes its text.
+  a title replaces its sections; pruning a document removes its text, and a
+  sweep removes stored texts nothing refers to any more (entries deleted some
+  other way) once they're a day old.
 - **Pruning** (`pruneAfterDays` in Organization settings, default 30; 0 =
   never): an entry whose end date passed more than that long ago is removed.
   A sweep runs every 10 minutes (and on demand: "Remove now", root only),

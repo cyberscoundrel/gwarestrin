@@ -1,9 +1,9 @@
 // The document store: where whole documents live, outside ArcadeDB (which
 // keeps the document's entry, its sections' embeddings and previews, and any
-// extracted facts). A store is { name, put(id, text, meta), get(id), remove(id) }.
+// extracted facts). A store is { name, put(id, text, meta), get(id), remove(id), list() }.
 // Built in: a directory ("fs:/app/documents"). Object storage later is another
 // store chosen with DOC_STORE; nothing else changes.
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -28,6 +28,13 @@ function fsStore(dir) {
     },
     async remove(id) {
       await rm(at(id), { recursive: true, force: true });
+    },
+    /** every stored document: [{ id, at (ms) }] */
+    async list() {
+      const names = await readdir(dir).catch(() => []);
+      const out = [];
+      for (const n of names) if (ID_RE.test(n)) out.push({ id: n, at: (await stat(join(dir, n)).catch(() => null))?.mtimeMs ?? 0 });
+      return out;
     },
   };
 }

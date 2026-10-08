@@ -1919,6 +1919,40 @@ async function extractFacts(p, chunks, sections, writtenAt) {
   return n;
 }
 
+/**
+ * Stored texts nothing refers to any more (their entries were deleted some
+ * other way): removed once a day old, so a deleted document doesn't linger.
+ * A pending ingest still refers to its text.
+ */
+async function sweepOrphanDocuments(minAgeMs = 86_400_000) {
+  if (!docStore?.list) return 0;
+  const stored = await docStore.list();
+  if (stored.length === 0) return 0;
+  let rows;
+  try {
+    rows = await adbQuery(`SELECT _doc_id FROM ${ENTITY_LABEL} WHERE _kind IN ['document', 'section'] AND _doc_id IS NOT NULL LIMIT 100000`);
+  } catch {
+    return 0; // can't tell what's live: remove nothing
+  }
+  const live = new Set(rows.map((r) => r._doc_id));
+  const pending = (await adbQuery("SELECT payload FROM PendingWrite WHERE kind = 'ingest' AND status IN ['pending', 'executing'] LIMIT 1000").catch(() => [])).map((r) => {
+    try {
+      return JSON.parse(r.payload).doc_id;
+    } catch {
+      return null;
+    }
+  });
+  let n = 0;
+  for (const d of stored) {
+    if (live.has(d.id) || pending.includes(d.id) || Date.now() - d.at < minAgeMs) continue;
+    await docStore.remove(d.id).catch(() => {});
+    chunkCache.delete(d.id);
+    n++;
+  }
+  if (n) log.info(`removed ${n} stored document${n === 1 ? "" : "s"} nothing refers to any more`);
+  return n;
+}
+
 function startIngest(p) {
   ingestQueue = ingestQueue
     .then(() => ingestDocument(p))
@@ -2828,7 +2862,10 @@ async function boot() {
   await ensurePruneSchema();
   if (!pruneSink) log.warn(`PRUNE_SINK=${PRUNE_SINK} isn't a known sink: pruning is off (nothing is deleted)`);
   // every 10 minutes, a batch at a time; the first a minute after boot
-  const prune = () => void pruneExpired().catch((e) => log.warn(`pruning failed: ${String(e).slice(0, 160)}`));
+  const prune = () =>
+    void pruneExpired()
+      .then(() => sweepOrphanDocuments())
+      .catch((e) => log.warn(`pruning failed: ${String(e).slice(0, 160)}`));
   setTimeout(prune, 60_000);
   setInterval(prune, 600_000);
   if (SCOPED) log.info(`semantic grading: ${GRADER_MODEL && policy.gradingEnabled ? `on (${GRADER_MODEL}, confidence ${policy.gradingConfidence})` : "off"}`);

@@ -14,7 +14,9 @@ test("the directory store keeps a document's text and meta, and forgets it", asy
   assert.match(text, /500 hours/);
   assert.equal(meta.title, "Mill 1 manual");
   assert.equal(meta.chars, text.length);
+  assert.deepEqual((await store.list()).map((d) => d.id), [id]);
   await store.remove(id);
+  assert.deepEqual(await store.list(), []);
   await assert.rejects(store.get(id));
 });
 
