@@ -47,6 +47,13 @@
       const shown = list.slice(0, 4).map((e) => `${e.name}${until(e)}`).join(", ");
       return { title: `Write ${list.length} ${list.length === 1 ? "entry" : "entries"} at ${pos(body.home)}`, detail: shown + (list.length > 4 ? ` and ${list.length - 4} more` : "") };
     }
+    if (p.kind === "ingest") {
+      const n = Number(body.sections ?? 0);
+      return {
+        title: `Add the document "${String(body.title ?? "")}" (${n} ${n === 1 ? "section" : "sections"}) at ${pos(body.home)}`,
+        detail: `${String(body.description ?? "")} ${body.extract ? "Individual facts will be extracted from it too." : "No facts are extracted from it."}`.trim(),
+      };
+    }
     if (p.kind === "rehome") {
       const why = typeof body.reason === "string" && body.reason ? body.reason : "Changes who can see it.";
       return { title: `Move ${String(body.name)} from ${pos(body.from)} to ${pos(body.to)}`, detail: why };

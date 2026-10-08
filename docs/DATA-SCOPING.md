@@ -132,6 +132,28 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   lasting: the safe side is keeping. Past its end date an entry drops out of
   every read (search, traversal, request matching, the share picker);
   `search_graph` with `include_expired` shows history, marked `expired`.
+- **Documents** (`ingest_document`, `read_document`; graph-rag/src/documents.js,
+  docstore.js): a manual or a transcript is a small structure, not one
+  blurred embedding. The whole text lives in the document store
+  (`DOC_STORE`, default a directory on the `graph-rag-documents` volume; object
+  storage later is another store), not in ArcadeDB. The graph gets the
+  document's entry (`_kind: "document"`, title + description) and one entry per
+  section (`_kind: "section"`, about a page, split on the document's headings,
+  speaker turns and paragraphs), each embedded from its full text plus a
+  little context from the section before, but storing only a preview;
+  sections are PART_OF the document and NEXT to each other. Sections are
+  graded like any write and filed no lower than the document, so a sensitive
+  part can sit higher than the rest. `read_document` returns text from the
+  store only for sections the reader can see (and counts as reading them);
+  sharing a document shares its sections. Extraction is an explicit choice
+  on every ingest (`extract: true | false`, no default: agents ask the person):
+  with it, a model (`EXTRACT_MODEL`, else the grader's) pulls focused facts
+  (specifications, decisions, dated action items) into ordinary entries,
+  filed no lower than their section and SOURCED_FROM it, so an extracted
+  document puts more in the graph. Queued writers' ingests are one approval;
+  rejecting one deletes the stored text. Ingests run one at a time in the
+  background. Questions meet sections and facts like any entry. Re-ingesting
+  a title replaces its sections; pruning a document removes its text.
 - **Pruning** (`pruneAfterDays` in Organization settings, default 30; 0 =
   never): an entry whose end date passed more than that long ago is removed.
   A sweep runs every 10 minutes (and on demand: "Remove now", root only),

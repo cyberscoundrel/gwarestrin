@@ -30,7 +30,9 @@ import {
 } from "./positions.js";
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
-import { createSink, ledgerLine, preview, pruneCutoff, pruneRecord } from "./prune.js";
+import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
+import { createDocStore } from "./docstore.js";
+import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
 import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
@@ -59,6 +61,10 @@ const {
   EMBED_TIMEOUT_MS = "30000",
   // where pruned entries go before deletion; "discard" keeps nothing (see prune.js)
   PRUNE_SINK = "discard",
+  // where whole documents live (outside ArcadeDB; see docstore.js)
+  DOC_STORE = "fs:/app/documents",
+  // the model that extracts facts from documents (when an ingest asks for it); default: the grader's
+  EXTRACT_MODEL = "",
   // policy defaults (MAX_GRANT_DAYS, DEFAULT_SHARE_DAYS, STANDING_GRANTS,
   // PEOPLE_SHARE_DIRECTLY, GRADING_ENABLED, GRADING_CONFIDENCE,
   // DERIVED_WINDOW_HOURS) are read by policy.js
@@ -329,7 +335,14 @@ async function embedBatch(texts) {
 }
 
 /** a question in results: who asked, until when; it's a request, not a fact */
-const questionOf = (row) => (row?._kind === "need" ? { kind: "question", asked_by: row._asker, open_until: row._open_until ?? null } : {});
+const questionOf = (row) =>
+  row?._kind === "need"
+    ? { kind: "question", asked_by: row._asker, open_until: row._open_until ?? null }
+    : row?._kind === "section"
+      ? { kind: "section", document: row._doc_title, document_id: row._doc_id, section: Number(row._section) + 1 }
+      : row?._kind === "document"
+        ? { kind: "document", document_id: row._doc_id, status: row._doc_status }
+        : {};
 
 /** an entry's end date in results (lasting entries carry none) */
 const validityOf = (row) => (row?._valid_until ? { valid_until: row._valid_until, ...(isExpired(row._valid_until) ? { expired: true } : {}) } : {});
@@ -372,7 +385,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
   // every read path below carries the caller's home filter, and (unless
   // history is asked for) leaves out entries past their end date
   // questions show while open (history: any but drafts); never where only knowledge is wanted
-  const kinds = assertions_only ? ASSERTIONS : include_expired ? " AND (_kind IS NULL OR _status <> 'proposed')" : openNeedsClause();
+  const kinds = assertions_only ? ASSERTIONS : include_expired ? " AND (_kind IS NULL OR _kind <> 'need' OR _status <> 'proposed')" : openNeedsClause();
   const visible = homeFilter(scope) + (include_expired ? "" : liveClause()) + kinds;
   let where = visible;
   if (temporal_filter) {
@@ -666,6 +679,11 @@ async function upsertEntities({ entities, home, floor, written_at }) {
     const key = home === undefined ? `{name: '${esc(e.name)}'}` : `{name: '${esc(e.name)}', \`_origin\`: '${esc(home)}'}`;
     const place = placements?.[idx];
     const placeSql = place ? `, n.\`_home\` = '${esc(place.home)}', n.\`_grade\` = '${esc(place.note)}'` : "";
+    // server-set fields (documents, sections); never from a caller (tool schemas drop them)
+    const systemSql = Object.entries(e._system && typeof e._system === "object" ? e._system : {})
+      .filter(([k, v]) => /^_[a-z][a-z0-9_]*$/.test(k) && ["string", "number"].includes(typeof v))
+      .map(([k, v]) => `, n.\`${k}\` = ${typeof v === "string" ? `'${esc(v)}'` : Number(v)}`)
+      .join("");
     // its end date: the writer's word, else the grader's, else unchanged
     const stored = (
       await adbQuery(`SELECT _valid_until, _valid_by FROM ${ENTITY_LABEL} WHERE name = :name${home === undefined ? "" : " AND _origin = :origin"} LIMIT 1`, { name: e.name, origin: home })
@@ -681,7 +699,7 @@ async function upsertEntities({ entities, home, floor, written_at }) {
     if (validity) validities[idx] = validity.valid_until;
     await adbCommand(
       `MERGE (n:${ENTITY_LABEL} ${key}) ` +
-        `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""}${placeSql}${validSql} ${labelClause}`,
+        `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""}${placeSql}${validSql}${systemSql} ${labelClause}`,
       "cypher",
     );
     merged++;
@@ -689,14 +707,16 @@ async function upsertEntities({ entities, home, floor, written_at }) {
       const f = sanitizeFacet(facet);
       if (typeof text !== "string" || !text.trim()) continue;
       await ensureIndex(f);
-      jobs.push({ name: e.name, facet: f, text: text.slice(0, 4000) });
+      // a section stores its preview but is embedded from its full text (+ context)
+      const embed = typeof e._embed?.[facet] === "string" ? e._embed[facet] : text;
+      jobs.push({ name: e.name, facet: f, text: text.slice(0, 4000), embed: embed.slice(0, 6000) });
     }
   }
 
   // one batched embeddings call for all facet texts
   let embedded = 0;
   if (jobs.length > 0) {
-    const vecs = await embedBatch(jobs.map((j) => j.text));
+    const vecs = await embedBatch(jobs.map((j) => j.embed ?? j.text));
     for (let i = 0; i < jobs.length; i++) {
       const { name, facet, text } = jobs[i];
       const homeCond = home === undefined ? "" : ` AND _origin = '${esc(home)}'`;
@@ -806,6 +826,12 @@ async function executePending(rec) {
   if (rec.kind === "rehome") return applyRehome(JSON.parse(rec.payload));
   if (rec.kind === "grant") return storeGrant(JSON.parse(rec.payload));
   if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
+  // approved: runs in the background (minutes for a long document)
+  if (rec.kind === "ingest") {
+    const p = JSON.parse(rec.payload);
+    void startIngest(p);
+    return { ingesting: true, doc_id: p.doc_id, sections: p.sections };
+  }
   const result = await adbCommand(rec.payload, rec.language ?? "sql");
   if (DELETE_RE.test(rec.payload)) await refreshGrants();
   return result;
@@ -975,7 +1001,7 @@ async function grantAccess({ entities, subtree: subtreeRef, to, person, reason, 
     for (const ref of entities) {
       const from = ref.home === undefined ? undefined : positionId(ref.home);
       const rows = await adbQuery(
-        `SELECT @rid AS rid, name, _home, _origin FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope, { own: true })}`,
+        `SELECT @rid AS rid, name, _home, _origin, _kind, _doc_id FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope, { own: true })}${ASSERTIONS}`,
         { name: ref.name },
       );
       const hits = rows.filter((r) => from === undefined || effectiveHome(positionMap, r._home) === from);
@@ -993,6 +1019,14 @@ async function grantAccess({ entities, subtree: subtreeRef, to, person, reason, 
       const home = effectiveHome(positionMap, hits[0]._home);
       if (recipientSees(recipient, home)) throw new Error(`${who} already sees ${ref.name}`);
       targets.push({ kind: "entity", target: String(hits[0].rid), target_name: ref.name, target_origin: hits[0]._origin ?? null, target_home: home });
+      if (hits[0]._kind === "document") {
+        // a document is shared with its sections (those the owner owns and the recipient doesn't see)
+        const secs = await adbQuery(`SELECT @rid AS rid, name, _home, _origin FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d${homeFilter(scope, { own: true })}`, { d: hits[0]._doc_id });
+        for (const sec of secs) {
+          const h = effectiveHome(positionMap, sec._home);
+          if (!recipientSees(recipient, h)) targets.push({ kind: "entity", target: String(sec.rid), target_name: sec.name, target_origin: sec._origin ?? null, target_home: h });
+        }
+      }
     }
   }
   const results = [];
@@ -1291,9 +1325,9 @@ async function schemaGraph() {
 const QUESTION_GRANTOR = "graph-rag: question";
 const REQUEST_MATCH_MIN = Number.isFinite(Number(process.env.REQUEST_MATCH_MIN)) && process.env.REQUEST_MATCH_MIN ? Number(process.env.REQUEST_MATCH_MIN) : MATCH_MIN;
 /** reads of assertions only (questions aren't knowledge to search, share or match) */
-const ASSERTIONS = " AND _kind IS NULL";
+const ASSERTIONS = " AND (_kind IS NULL OR _kind <> 'need')";
 /** in search: assertions, and questions only while open */
-const openNeedsClause = (now = Date.now()) => ` AND (_kind IS NULL OR (_status = 'open' AND _open_until > '${new Date(now).toISOString()}'))`;
+const openNeedsClause = (now = Date.now()) => ` AND (_kind IS NULL OR _kind <> 'need' OR (_status = 'open' AND _open_until > '${new Date(now).toISOString()}'))`;
 
 async function ensureNeedSchema() {
   for (const prop of ["_kind", "_qid", "_asker", "_asked_by", "_status", "_open_until", "_joined_into", "_questions", "_dismissed"]) {
@@ -1525,7 +1559,7 @@ async function openNeed(need, askerScope) {
 async function meetAssertion(rid, vec) {
   if (!SCOPED || !positionMap || !Array.isArray(vec)) return;
   const row = (await adbQuery(`SELECT @rid AS rid, name, _home, _origin, _kind, _valid_until FROM ${rid}`))[0];
-  if (!row || row._kind || isExpired(row._valid_until)) return;
+  if (!row || row._kind === "need" || row._kind === "document" || isExpired(row._valid_until)) return;
   const now = new Date().toISOString();
   const near = await adbQuery(
     `SELECT @rid AS rid, vectorCosineSimilarity(embed_identity, [${vec.join(",")}]) AS score FROM ${ENTITY_LABEL} WHERE _kind = 'need' AND _status = 'open' AND _open_until > :now AND embed_identity IS NOT NULL ORDER BY score DESC LIMIT 16`,
@@ -1729,6 +1763,239 @@ async function expireRequests() {
   }).catch((e) => log.warn(`question expiry sweep: ${String(e).slice(0, 120)}`));
 }
 
+/** ---- documents (see documents.js and docstore.js) ---- */
+
+const docStore = createDocStore(DOC_STORE);
+let ingestQueue = Promise.resolve(); // one document at a time (grading and embedding are the cost)
+const chunkCache = new Map(); // doc id -> chunks (deterministic from the stored text)
+
+async function ensureDocumentSchema() {
+  for (const prop of ["_doc_id", "_doc_title", "_doc_status"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._section IF NOT EXISTS INTEGER`).catch(() => {});
+  await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_doc_id) NOTUNIQUE`).catch(() => {});
+  for (const t of ["PART_OF", "NEXT", "SOURCED_FROM"]) await adbCommand(`CREATE EDGE TYPE ${t} IF NOT EXISTS`).catch(() => {});
+}
+
+async function storedChunks(docId) {
+  if (chunkCache.has(docId)) return chunkCache.get(docId);
+  const { text } = await docStore.get(docId);
+  const cs = chunk(text);
+  if (chunkCache.size > 50) chunkCache.delete(chunkCache.keys().next().value);
+  chunkCache.set(docId, cs);
+  return cs;
+}
+
+async function edgeOnce(type, from, to) {
+  const out = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('${type}')) FROM ${from})`).catch(() => []);
+  if (out.some((e) => String(e.dst) === to)) return;
+  await adbCommand(`CREATE EDGE ${type} FROM ${from} TO ${to}`);
+}
+
+/** one model call (the extraction model: EXTRACT_MODEL, else the grader's) */
+async function chat(model, messages) {
+  const res = await fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${LITELLM_API_KEY}` },
+    body: JSON.stringify({ model, messages, temperature: 0 }),
+    signal: AbortSignal.timeout(Number(GRADER_TIMEOUT_MS) * 2),
+  });
+  if (!res.ok) throw new Error(`${model} HTTP ${res.status}`);
+  return (await res.json()).choices?.[0]?.message?.content ?? "";
+}
+
+/**
+ * Ingest a stored document: its entry, its sections (graded, never below
+ * the entry), their links, and, only when the ingest said so, extracted
+ * facts. Re-ingesting the same title replaces the sections.
+ */
+async function ingestDocument(p) {
+  const writtenAt = Date.parse(p.written_at) || Date.now();
+  const { text } = await docStore.get(p.doc_id);
+  const chunks = chunk(text);
+  chunkCache.set(p.doc_id, chunks);
+  const vu = p.valid_until; // ISO, "lasting", or undefined: as resolved when it was written
+  const keyOf = (name, kind) => adbQuery(`SELECT @rid AS rid, _home, _doc_id FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin AND _kind = :kind LIMIT 1`, { name, origin: p.home, kind });
+  const before = (await keyOf(p.title, "document"))[0];
+  await upsertEntities({
+    entities: [
+      {
+        name: p.title,
+        facets: { identity: `${p.title}: ${p.description}` },
+        properties: { description: p.description, sections: chunks.length, characters: text.length, extracted: Boolean(p.extract) },
+        ...(vu ? { valid_until: vu } : {}),
+        _system: { _kind: "document", _doc_id: p.doc_id, _doc_status: "ingesting" },
+      },
+    ],
+    home: p.home,
+    floor: p.floor,
+    written_at: p.written_at,
+  });
+  const doc = (await keyOf(p.title, "document"))[0];
+  if (!doc) throw new Error("the document entry wasn't written");
+  // sections can be filed higher than the document (grading restricts), never lower
+  const docHome = effectiveHome(positionMap, doc._home);
+  for (let i = 0; i < chunks.length; i += 32) {
+    await upsertEntities({
+      entities: chunks.slice(i, i + 32).map((c) => ({
+        name: sectionName(p.title, c.index, c.heading),
+        facets: { identity: preview(c.text) },
+        _embed: { identity: c.embedText },
+        ...(c.heading ? { properties: { heading: c.heading } } : {}),
+        ...(vu ? { valid_until: vu } : {}),
+        _system: { _kind: "section", _doc_id: p.doc_id, _doc_title: p.title, _section: c.index },
+      })),
+      home: p.home,
+      floor: docHome,
+      written_at: p.written_at,
+    });
+  }
+  const sections = await adbQuery(`SELECT @rid AS rid, _home, _section FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d ORDER BY _section`, { d: p.doc_id });
+  for (const [i, s] of sections.entries()) {
+    await edgeOnce("PART_OF", String(s.rid), String(doc.rid));
+    if (sections[i + 1]) await edgeOnce("NEXT", String(s.rid), String(sections[i + 1].rid));
+  }
+  // a re-ingest: sections past the new end, and the old text, go
+  if (before?._doc_id && before._doc_id !== p.doc_id) {
+    await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :old`, "sql", { old: before._doc_id }).catch(() => {});
+    await docStore.remove(before._doc_id).catch(() => {});
+    chunkCache.delete(before._doc_id);
+  }
+  let facts = 0;
+  if (p.extract) facts = await extractFacts(p, chunks, sections, writtenAt);
+  await adbCommand(`UPDATE ${String(doc.rid)} SET _doc_status = 'ready', facts = :facts`, "sql", { facts });
+  log.info(`document "${p.title}" (${p.doc_id}): ${sections.length} sections${p.extract ? `, ${facts} extracted facts` : ", no extraction (as asked)"}`);
+  return { doc_id: p.doc_id, sections: sections.length, facts };
+}
+
+/** extracted facts: ordinary entries, filed no lower than their section, linked to it */
+async function extractFacts(p, chunks, sections, writtenAt) {
+  const model = EXTRACT_MODEL || GRADER_MODEL;
+  if (!model) {
+    log.warn(`document "${p.title}": extraction asked for, but no EXTRACT_MODEL or GRADER_MODEL is set`);
+    return 0;
+  }
+  const homeOf = new Map(sections.map((s) => [Number(s._section), { rid: String(s.rid), home: effectiveHome(positionMap, s._home) }]));
+  const all = [];
+  for (let i = 0; i < chunks.length; i += 4) {
+    const group = chunks.slice(i, i + 4);
+    try {
+      all.push(...parseExtraction(await chat(model, extractionPrompt(p.title, group, writtenAt)), group, writtenAt));
+    } catch (e) {
+      log.warn(`document "${p.title}": extraction of sections ${i + 1}-${i + group.length} failed: ${String(e).slice(0, 120)}`);
+    }
+  }
+  // one write per section home (grading runs per write), floored at that home
+  const byHome = new Map();
+  for (const f of all) {
+    const s = homeOf.get(f.section);
+    if (!s) continue;
+    if (!byHome.has(s.home)) byHome.set(s.home, []);
+    byHome.get(s.home).push({ ...f, sectionRid: s.rid });
+  }
+  let n = 0;
+  for (const [home, list] of byHome) {
+    for (let i = 0; i < list.length; i += 32) {
+      const batch = list.slice(i, i + 32);
+      await upsertEntities({
+        entities: batch.map((f) => ({
+          name: f.name,
+          facets: { identity: f.statement },
+          properties: { source: `${p.title} §${f.section + 1}` },
+          ...(f.until ? { valid_until: f.until } : {}),
+        })),
+        home: p.home,
+        floor: home,
+        written_at: p.written_at,
+      });
+      for (const f of batch) {
+        const row = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin AND _kind IS NULL LIMIT 1`, { name: f.name, origin: p.home }))[0];
+        if (row) {
+          await edgeOnce("SOURCED_FROM", String(row.rid), f.sectionRid);
+          n++;
+        }
+      }
+    }
+  }
+  return n;
+}
+
+function startIngest(p) {
+  ingestQueue = ingestQueue
+    .then(() => ingestDocument(p))
+    .catch(async (e) => {
+      log.warn(`document "${p.title}" (${p.doc_id}) failed: ${String(e).slice(0, 200)}`);
+      await adbCommand(`UPDATE ${ENTITY_LABEL} SET _doc_status = 'failed' WHERE _kind = 'document' AND _doc_id = :d`, "sql", { d: p.doc_id }).catch(() => {});
+    });
+  return ingestQueue;
+}
+
+/** an ingest from a tool call: stored now; ingested now, or after approval for queued writers */
+async function requestIngest({ title, description, text, extract, home: requestedHome, valid_until }, identity, scope) {
+  if (!docStore) throw new Error("no document store is configured (DOC_STORE)");
+  if (typeof extract !== "boolean") throw new Error('say whether to extract facts: extract: true or false (ask the person if they haven\'t said)');
+  const body = String(text ?? "");
+  if (body.trim().length < 20) throw new Error("the document text is empty");
+  if (body.length > MAX_CHARS) throw new Error(`documents are limited to ${MAX_CHARS} characters`);
+  const chunks = chunk(body);
+  if (chunks.length > MAX_SECTIONS) throw new Error(`documents are limited to ${MAX_SECTIONS} sections (this one has ${chunks.length})`);
+  const home = resolveWriteHome(scope, requestedHome);
+  const now = Date.now();
+  const v = parseValidUntil(valid_until, now);
+  const doc_id = randomUUID();
+  const payload = {
+    doc_id,
+    title: String(title).trim().slice(0, 200),
+    description: String(description).trim().slice(0, 500),
+    extract,
+    home,
+    floor: derivedFloor(identity, home),
+    written_at: new Date(now).toISOString(),
+    ...(v ? { valid_until: v.valid_until ?? "lasting" } : {}),
+    chars: body.length,
+    sections: chunks.length,
+  };
+  await docStore.put(doc_id, body, { title: payload.title, by: identity.user, at: payload.written_at });
+  if (identity.caps.write === "queued") {
+    const q = await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home });
+    return { ...q, doc_id, sections: chunks.length, extract, note: "the document is stored; it's added to the knowledge graph once the ingest is approved" };
+  }
+  void startIngest(payload);
+  return { ingesting: true, doc_id, sections: chunks.length, extract, note: "sections are being graded and embedded; search finds them in a minute or two" };
+}
+
+/** read a document's sections the caller can see (text from the document store) */
+async function readDocument({ document, section, count = 3 }, identity, scope) {
+  if (!docStore) throw new Error("no document store is configured");
+  const ref = String(document ?? "").trim();
+  const visible = homeFilter(scope) + liveClause();
+  let docId = PENDING_ID_RE.test(ref) ? ref : null;
+  let title = null;
+  let status = null;
+  if (!docId) {
+    const d = (await adbQuery(`SELECT _doc_id, _doc_status FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND name = :name${visible} LIMIT 1`, { name: ref }))[0];
+    const s = d ? null : (await adbQuery(`SELECT _doc_id FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_title = :name${visible} LIMIT 1`, { name: ref }))[0];
+    docId = d?._doc_id ?? s?._doc_id ?? null;
+    status = d?._doc_status ?? null;
+  }
+  if (!docId) throw new Error(`no document "${ref}" you can see`);
+  const rows = await adbQuery(`SELECT _home, _section, _doc_title FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d${visible} ORDER BY _section`, { d: docId });
+  if (rows.length === 0) throw new Error(status === "ingesting" ? "this document is still being ingested" : `no document "${ref}" you can see`);
+  title = rows[0]._doc_title;
+  const chunks = await storedChunks(docId);
+  const seen = new Set(rows.map((r) => Number(r._section)));
+  const n = Math.max(1, Math.min(6, Number(count) || 3));
+  const from = section ? Math.max(0, Number(section) - 1) : 0;
+  const picked = chunks.filter((c) => c.index >= from && seen.has(c.index)).slice(0, n);
+  recordReads(identity, rows.filter((r) => picked.some((c) => c.index === Number(r._section))).map((r) => effectiveHome(positionMap, r._home)));
+  return {
+    document: title,
+    document_id: docId,
+    // only the sections you can see are listed and returned
+    contents: chunks.filter((c) => seen.has(c.index)).map((c) => ({ section: c.index + 1, heading: c.heading || undefined })),
+    sections: picked.map((c) => ({ section: c.index + 1, heading: c.heading || undefined, text: c.text })),
+  };
+}
+
 /** ---- pruning (see prune.js): expired entries leave for good after a window ---- */
 
 const pruneSink = createSink(PRUNE_SINK);
@@ -1774,6 +2041,7 @@ async function pruneExpired(limit = 100) {
       const gone = await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE @rid = ${rec.rid} AND _valid_until < :cutoff`, "sql", { cutoff });
       if (Number(gone?.[0]?.count ?? 0) !== 1) continue;
       pruned++;
+      if (rec.properties?._kind === "document" && rec.properties._doc_id && docStore) await docStore.remove(rec.properties._doc_id).catch(() => {});
       await adbCommand("UPDATE AccessGrant SET status = 'revoked', revoked_at = :now, revoked_by = 'graph-rag: entry pruned' WHERE target = :rid AND status = 'active'", "sql", { now, rid: rec.rid }).catch(() => {});
       const line = ledgerLine(rec, pruneSink);
       await adbCommand(
@@ -1795,7 +2063,7 @@ async function pruneExpired(limit = 100) {
 /** for Organization settings: what's waiting to be pruned, and when */
 async function prunePreview() {
   const rows = await adbQuery(`SELECT _valid_until AS valid_until FROM ${ENTITY_LABEL} WHERE _valid_until IS NOT NULL AND _valid_until <= :now LIMIT 100000`, { now: new Date().toISOString() }).catch(() => []);
-  return { ...preview(rows, policy.pruneAfterDays), sink: pruneSink ? { name: pruneSink.name, keeps: pruneSink.keeps } : { name: PRUNE_SINK, unknown: true } };
+  return { ...prunePreviewDays(rows, policy.pruneAfterDays), sink: pruneSink ? { name: pruneSink.name, keeps: pruneSink.keeps } : { name: PRUNE_SINK, unknown: true } };
 }
 
 /** ---- pending-write queue (audited writes for low-capability identities) ---- */
@@ -1890,6 +2158,8 @@ async function rejectPending(id, identity) {
   );
   if (Number(done?.[0]?.count ?? 0) !== 1) throw new Error(`pending write ${id} was already handled`);
   if (rows[0].kind === "upsert") await dropWaitingShares(id).catch((e) => log.warn(`waiting shares for ${id}: ${String(e).slice(0, 160)}`));
+  // a rejected ingest leaves nothing behind
+  if (rows[0].kind === "ingest" && docStore) await docStore.remove(JSON.parse(rows[0].payload).doc_id).catch(() => {});
   return { rejected: true };
 }
 
@@ -2063,6 +2333,44 @@ homes you can see).`,
     async (args) => {
       need("write");
       return { content: [{ type: "text", text: JSON.stringify(await setHome(args, identity, scope)) }] };
+    },
+  );
+
+  if (SCOPED && caps.write !== "deny") server.tool(
+    "ingest_document",
+    `Add a long document (a manual, a meeting transcript, a report) to the knowledge graph. Give
+its full text, a short title and a one-sentence description. The text is kept in the document
+store; the graph gets the document's entry and one searchable section per page or so, each filed
+where it belongs (a sensitive part may be filed higher than the rest).
+extract is required, true or false: true also pulls focused facts (specifications, decisions,
+action items with dates) out of the text into the graph, each linked to its section; false keeps
+only the document and its sections. It's the person's decision: if they haven't said, ask them
+("Should I also pull the individual facts out of it?") before calling this. valid_until works as
+in upsert_entities. Re-ingesting the same title replaces the document.`,
+    {
+      title: z.string().min(3).max(200),
+      description: z.string().min(3).max(500),
+      text: z.string().min(20),
+      extract: z.boolean(),
+      ...(SCOPED ? { home: z.string().optional() } : {}),
+      valid_until: z.string().optional(),
+    },
+    async (args) => {
+      need("write");
+      return { content: [{ type: "text", text: JSON.stringify(await requestIngest(args, identity, scope)) }] };
+    },
+  );
+
+  if (SCOPED) server.tool(
+    "read_document",
+    `Read a document from the knowledge graph. Search results with kind "section" are parts of a
+document (document, document_id, section): pass document_id (or the document's title) and the
+section to read it in full, with up to count sections from there (default 3, at most 6). Without
+a section you get its contents (the sections you can see) and the first sections.`,
+    { document: z.string().min(1), section: z.number().int().min(1).optional(), count: z.number().int().min(1).max(6).optional() },
+    async (args) => {
+      need("read");
+      return { content: [{ type: "text", text: JSON.stringify(await readDocument(args, identity, scope)) }] };
     },
   );
 
@@ -2529,6 +2837,8 @@ async function boot() {
     await ensureGrantSchema();
     await refreshGrants();
     await ensureNeedSchema();
+    await ensureDocumentSchema();
+    if (!docStore) log.warn(`DOC_STORE=${DOC_STORE} isn't a known store: documents can't be ingested`);
     await expireRequests();
     setInterval(() => void refreshGrants().then(expireRequests), 60_000);
   }
