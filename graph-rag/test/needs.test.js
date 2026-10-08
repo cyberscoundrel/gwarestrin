@@ -75,7 +75,7 @@ test("the asker sees what was shared, and what turned up that they can see", () 
 
 test("an owner sees only their own meetings; a posted need asks them to add what they know", () => {
   const v = ownerView(need(), [{ rid: "#1:1", name: "Toro PO", home: "Operations", state: "open" }], NOW);
-  assert.deepEqual(v.entries, [{ key: "#1:1", name: "Toro PO", home: "Operations", shared: false }]);
+  assert.deepEqual(v.entries, [{ key: "#1:1", name: "Toro PO", home: "Operations", shared: false, score: 0 }]);
   assert.equal(v.status, "open");
   assert.equal(v.posted, false);
   assert.equal(ownerView(need(), [{ rid: "#1:1", name: "Toro PO", home: "Operations", state: "shared" }], NOW).status, "shared");
@@ -97,7 +97,7 @@ test("one item for a group: every asker, the union of entries, shared only once 
   assert.deepEqual(g.askers, ["bob", "alice"]);
   assert.deepEqual(g.ids, ["q1", "q2"]);
   assert.equal(g.questions.length, 2);
-  assert.deepEqual(g.entries, [{ key: "#1:1", name: "Pricing", home: "Sales", shared: false }], "shared with bob, not yet with alice");
+  assert.deepEqual(g.entries, [{ key: "#1:1", name: "Pricing", home: "Sales", shared: false, score: 0 }], "shared with bob, not yet with alice");
   assert.equal(g.status, "open");
   const single = groupView([bob]);
   assert.deepEqual(single.askers, ["bob"]);

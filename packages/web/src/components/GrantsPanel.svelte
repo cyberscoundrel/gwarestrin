@@ -57,8 +57,10 @@
         grants = (await api.grants()).grants;
         requests = (await api.incomingRequests().catch(() => ({ requests: [] }))).requests;
         for (const r of requests) {
-          // every unshared match starts picked; the owner unticks what shouldn't go
-          reqPicked[r.id] ??= r.entries.filter((e) => !e.shared).map((e) => e.key);
+          // only the closest match starts picked: looser ones are shown, for the owner to add
+          const open = r.entries.filter((e) => !e.shared);
+          const best = open.reduce<(typeof open)[number] | null>((b, e) => ((e.score ?? 0) > (b?.score ?? -1) ? e : b), null);
+          reqPicked[r.id] ??= best ? [best.key] : [];
           reqUntil[r.id] ??= dateIn(defaultDays);
         }
       }

@@ -121,7 +121,7 @@ export function ownerView(need, mine, now = Date.now()) {
     asked: need.asked ?? 1,
     asker: need.asker,
     status: ended ? "expired" : mine.length === 0 ? "open" : open.length ? "open" : mine.some((e) => e.state === "shared") ? "shared" : "dismissed",
-    entries: mine.map((e) => ({ key: e.rid, name: e.name, home: e.home, shared: e.state === "shared" })),
+    entries: mine.map((e) => ({ key: e.rid, name: e.name, home: e.home, shared: e.state === "shared", score: e.score ?? 0 })),
     posted: mine.length === 0,
     expires_at: need.open_until ?? null,
   };
@@ -155,7 +155,7 @@ export function groupView(views) {
   for (const v of views) {
     for (const e of v.entries) {
       const prev = entries.get(e.key);
-      entries.set(e.key, prev ? { ...prev, shared: prev.shared && e.shared } : { ...e });
+      entries.set(e.key, prev ? { ...prev, shared: prev.shared && e.shared, score: Math.max(prev.score ?? 0, e.score ?? 0) } : { ...e });
     }
   }
   // an asker whose question doesn't meet an entry hasn't had it shared
