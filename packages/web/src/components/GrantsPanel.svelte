@@ -196,7 +196,7 @@
       <span class="min-w-0 truncate">{g.kind === "subtree" ? `Everything under ${g.target}` : g.target}</span>
       <Icon icon={ArrowRight} size={13} class="shrink-0 text-faint" />
       <span class="inline-flex min-w-0 items-center gap-1 truncate">
-        {#if g.to_kind === "person"}<Icon icon={User} size={13} class="shrink-0 text-faint" label="person" />{/if}{g.to}
+        {#if g.to_kind === "person"}<Icon icon={User} size={13} class="shrink-0 text-faint" label="person" />{/if}{g.to_kind === "person" && g.direction === "incoming" ? "You" : g.to}
       </span>
       {#if canRevoke}
         <button class="btn btn-danger btn-sm ml-auto" disabled={busyId === g.id} onclick={() => void revoke(g)}>

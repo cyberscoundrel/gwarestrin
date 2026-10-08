@@ -857,7 +857,10 @@ const recipientKind = (g) => (g.to_user ? "person" : "position");
 function peopleView(self) {
   return peopleNames()
     .filter((n) => n !== self)
-    .map((name) => ({ name, positions: heldPositions(positionMap, entriesByUser.get(name)?.positions).map(positionName) }));
+    .map((name) => ({
+      name,
+      positions: heldPositions(positionMap, entriesByUser.get(name)?.positions).map((id) => (id === positionMap.root ? "Whole organization" : positionName(id))),
+    }));
 }
 
 /** does the recipient already see data homed at `home` by its own positions */
