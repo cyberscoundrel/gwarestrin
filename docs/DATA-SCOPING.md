@@ -168,7 +168,13 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   labelled `kind: "question"`; reading one never bounds where later writes
   land (it carries no knowledge). Drafts (an agent's, until the person
   confirms) and closed questions stay out of search. The same person asking
-  nearly the same thing again joins the open question.
+  nearly the same thing again joins the open question; different people
+  asking nearly the same (`LINK_MIN` 0.85) are linked (an ALSO edge). An
+  owner sees linked questions as one item ("bob and alice asked") and one
+  Share answers everyone in it, each with their own person share (a linked
+  question that didn't meet the entry gets the meeting then). An asker sees
+  "also asked by" only for questions they could see anyway: a link, like any
+  meeting, shows only to someone who can see both ends.
 - **Semantic grading** (`GRADER_MODEL`, a litellm alias; empty = off): each
   write keeps its writer's position as its *origin*; the grader, given the
   positions' own descriptions, homes it at the origin or above (restricting

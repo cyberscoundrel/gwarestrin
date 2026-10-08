@@ -57,8 +57,10 @@
         grants = (await api.grants()).grants;
         requests = (await api.incomingRequests().catch(() => ({ requests: [] }))).requests;
         for (const r of requests) {
-          // every unshared match starts picked; the owner unticks what shouldn't go
-          reqPicked[r.id] ??= r.entries.filter((e) => !e.shared).map((e) => e.key);
+          // only the closest match starts picked: looser ones are shown, for the owner to add
+          const open = r.entries.filter((e) => !e.shared);
+          const best = open.reduce<(typeof open)[number] | null>((b, e) => ((e.score ?? 0) > (b?.score ?? -1) ? e : b), null);
+          reqPicked[r.id] ??= best ? [best.key] : [];
           reqUntil[r.id] ??= dateIn(defaultDays);
         }
       }
@@ -182,6 +184,11 @@
   }
 
   const openRequests = $derived(requests.filter((r) => r.status === "open"));
+  /** "bob", "bob and alice", "bob, alice and carol": everyone a linked question came from */
+  function who(r: IncomingRequest): string {
+    const a = r.askers?.length ? r.askers : [r.asker];
+    return a.length <= 1 ? a[0] ?? "" : `${a.slice(0, -1).join(", ")} and ${a.at(-1)}`;
+  }
   const handledRequests = $derived(requests.filter((r) => r.status !== "open").slice(0, 5));
   function toggleReq(id: string, key: string, on: boolean) {
     const cur = reqPicked[id] ?? [];
@@ -202,10 +209,10 @@
       const failed = out.results.filter((x) => x.error);
       const queued = out.results.filter((x) => x.proposed).length;
       notice = failed.length
-        ? `Shared ${out.results.length - failed.length} of ${out.results.length} with ${r.asker}. ${failed.map((x) => `${x.name}: ${x.error}`).join("; ")}`
+        ? `Shared ${out.results.length - failed.length} of ${out.results.length} with ${who(r)}. ${failed.map((x) => `${x.name}: ${x.error}`).join("; ")}`
         : queued
-          ? `Sent for approval: ${r.asker} gets access once an approver signs off.`
-          : `Shared with ${r.asker}${u ? ` until ${when(new Date(`${u}T23:59:59`).toISOString()).replace("Until ", "")}` : ""}.`;
+          ? `Sent for approval: ${who(r)} gets access once an approver signs off.`
+          : `Shared with ${who(r)}${u ? ` until ${when(new Date(`${u}T23:59:59`).toISOString()).replace("Until ", "")}` : ""}.`;
       await refresh();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -219,7 +226,7 @@
     error = "";
     try {
       await api.dismissRequest(r.id);
-      notice = `Not shared. ${r.asker} isn't told who was asked or that anyone declined.`;
+      notice = `Not shared. ${who(r)} isn't told who was asked or that anyone declined.`;
       await refresh();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -276,12 +283,14 @@
   {@const picked = reqPicked[r.id] ?? []}
   <li class="animate-enter grid gap-3 rounded-lg border border-edge2 bg-panel p-4">
     <div class="grid gap-1.5">
-      <span class="text-sm text-fg"><span class="font-medium">{r.asker}</span> asked{r.asked > 1 ? ` (${r.asked} times)` : ""}</span>
-      <p class="m-0 border-l-2 border-edge2 pl-2.5 text-sm leading-relaxed text-dim">{r.question}</p>
+      <span class="text-sm text-fg"><span class="font-medium">{who(r)}</span> asked{r.asked > r.askers.length ? ` (${r.asked} times)` : ""}</span>
+      {#each r.questions as q, i (i)}
+        <p class="m-0 border-l-2 border-edge2 pl-2.5 text-sm leading-relaxed text-dim">{q}</p>
+      {/each}
     </div>
     {#if r.posted}
       <p class="m-0 text-xs leading-relaxed text-dim">
-        Nothing in the knowledge graph answers this yet. If you know, tell your agent so it's saved: {r.asker} is told if they can see it, or you're asked here whether to share it with them.
+        Nothing in the knowledge graph answers this yet. If you know, tell your agent so it's saved: {who(r)} is told if they can see it, or you're asked here whether to share it with them.
       </p>
       <div class="flex">
         <span class="ml-auto"></span>
@@ -290,14 +299,14 @@
     {:else}
     <div class="grid gap-1.5">
       <span class="text-xs text-faint">Your entries that match</span>
-      <ul class="m-0 grid list-none gap-1 p-0" aria-label="entries matching {r.asker}'s question">
+      <ul class="m-0 grid list-none gap-1 p-0" aria-label="entries matching the question">
         {#each r.entries as e (e.key)}
           {@const on = picked.includes(e.key)}
           <li class="flex items-center gap-3 rounded-md border px-3 py-2 {on ? 'border-edge2 bg-panel2' : 'border-edge bg-bg'}">
             {#if e.shared}
               <Icon icon={CircleCheck} size={14} class="text-ok" label="already shared" />
             {:else}
-              <Switch checked={on} label="share {e.name} with {r.asker}" onchange={(v) => toggleReq(r.id, e.key, v)} />
+              <Switch checked={on} label="share {e.name} with {who(r)}" onchange={(v) => toggleReq(r.id, e.key, v)} />
             {/if}
             <span class="min-w-0 flex-1 truncate text-sm {on || e.shared ? 'text-fg' : 'text-dim'}">{e.name}</span>
             <span class="shrink-0 text-2xs text-faint">{e.shared ? "shared" : e.home}</span>
@@ -313,10 +322,10 @@
       <span class="ml-auto"></span>
       <button class="btn btn-ghost btn-sm" disabled={busyId === r.id} onclick={() => void dismiss(r)}>Not this time</button>
       <button class="btn btn-primary btn-sm" disabled={busyId === r.id || picked.length === 0} onclick={() => void answer(r)}>
-        {busyId === r.id ? "Sharing…" : `Share with ${r.asker}`}
+        {busyId === r.id ? "Sharing…" : `Share with ${who(r)}`}
       </button>
     </div>
-    <span class="text-2xs text-faint">Only {r.asker} and their agents will see what you share. {r.asker} isn't told who was asked, or if you say no.</span>
+    <span class="text-2xs text-faint">Only {who(r)} and their agents will see what you share. {r.askers?.length > 1 ? "They aren't" : `${who(r)} isn't`} told who was asked, or if you say no.</span>
     {/if}
   </li>
 {/snippet}
@@ -338,7 +347,7 @@
         {#each handledRequests as r (r.id)}
           {@const sharedNames = r.entries.filter((e) => e.shared).map((e) => e.name)}
           <span class="text-xs text-faint">
-            {r.asker} asked “{r.question}” ·
+            {who(r)} asked “{r.question}” ·
             {r.status === "shared" ? `shared ${sharedNames.join(", ")}` : r.status === "dismissed" ? "not shared" : "ended"}
           </span>
         {/each}

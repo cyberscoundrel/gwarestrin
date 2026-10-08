@@ -24,6 +24,8 @@ export const MATCH_MIN = 0.45;
 export const MATCH_MAX = 8;
 /** the same person asking nearly the same thing again joins the open need */
 export const JOIN_MIN = 0.9;
+/** different people asking nearly the same thing: their questions are linked */
+export const LINK_MIN = 0.85;
 /** an unmatched need is posted for positions whose description is at least this close */
 export const POST_MIN = 0.3;
 export const POST_MAX = 2;
@@ -119,8 +121,56 @@ export function ownerView(need, mine, now = Date.now()) {
     asked: need.asked ?? 1,
     asker: need.asker,
     status: ended ? "expired" : mine.length === 0 ? "open" : open.length ? "open" : mine.some((e) => e.state === "shared") ? "shared" : "dismissed",
-    entries: mine.map((e) => ({ key: e.rid, name: e.name, home: e.home, shared: e.state === "shared" })),
+    entries: mine.map((e) => ({ key: e.rid, name: e.name, home: e.home, shared: e.state === "shared", score: e.score ?? 0 })),
     posted: mine.length === 0,
     expires_at: need.open_until ?? null,
+  };
+}
+
+/**
+ * Linked questions shown to one owner, as groups (connected through links
+ * among the shown ones). `qids`: the shown questions; `links`: [[a, b]].
+ */
+export function groupLinked(qids, links) {
+  const parent = new Map(qids.map((q) => [q, q]));
+  const find = (q) => (parent.get(q) === q ? q : find(parent.get(q)));
+  for (const [a, b] of links) if (parent.has(a) && parent.has(b)) parent.set(find(a), find(b));
+  const groups = new Map();
+  for (const q of qids) {
+    const root = find(q);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(q);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * One item for a group of linked questions (owner views, oldest first):
+ * every asker and question, the union of the owner's entries (shared only
+ * once shared with every asker), open while any of them is.
+ */
+export function groupView(views) {
+  if (views.length === 1) return { ...views[0], askers: [views[0].asker], questions: [views[0].question], ids: [views[0].id] };
+  const entries = new Map();
+  for (const v of views) {
+    for (const e of v.entries) {
+      const prev = entries.get(e.key);
+      entries.set(e.key, prev ? { ...prev, shared: prev.shared && e.shared, score: Math.max(prev.score ?? 0, e.score ?? 0) } : { ...e });
+    }
+  }
+  // an asker whose question doesn't meet an entry hasn't had it shared
+  for (const [key, e] of entries) if (views.some((v) => !v.entries.some((x) => x.key === key))) entries.set(key, { ...e, shared: false });
+  const open = views.some((v) => v.status === "open");
+  const list = [...entries.values()];
+  return {
+    ...views[0],
+    askers: [...new Set(views.map((v) => v.asker))],
+    questions: views.map((v) => v.question),
+    ids: views.map((v) => v.id),
+    asked: views.reduce((n, v) => n + (v.asked ?? 1), 0),
+    status: open ? "open" : views.some((v) => v.status === "shared") ? "shared" : views[0].status,
+    entries: list,
+    posted: list.length === 0,
+    expires_at: views.map((v) => v.expires_at).filter(Boolean).sort().at(-1) ?? null,
   };
 }

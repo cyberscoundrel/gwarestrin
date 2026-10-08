@@ -15,6 +15,8 @@ interface RequestView {
   still_open: boolean;
   /** entries shared with the person so far */
   shared: string[];
+  /** others who asked nearly the same (only those the person can see anyway) */
+  also_asked?: string[];
   expires_at: string | null;
   joined_into?: string;
 }
@@ -131,6 +133,7 @@ export class GwRequestCard extends LitElement {
             : "";
     return html`<div class="gw-request-card grid gap-2 rounded-lg border border-edge bg-panel p-3.5" data-status=${v.status}>
       ${head} ${shared} ${line ? html`<div class="text-xs text-faint">${line}</div>` : nothing}
+      ${v.also_asked?.length ? html`<div class="text-2xs text-faint">Also asked by ${v.also_asked.join(", ")}.</div>` : nothing}
       ${v.still_open
         ? html`<div class="flex"><span class="ml-auto"></span><button class="btn btn-ghost btn-sm" ?disabled=${this.busy} @click=${() => void this.act("withdraw")}>Withdraw</button></div>`
         : nothing}

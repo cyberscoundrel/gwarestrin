@@ -32,7 +32,7 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview, pruneCutoff, pruneRecord } from "./prune.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
-import { askerView, JOIN_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
+import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
 import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
 import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -1302,6 +1302,8 @@ async function ensureNeedSchema() {
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._asked IF NOT EXISTS INTEGER`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_qid) NOTUNIQUE`).catch(() => {});
   await adbCommand("CREATE EDGE TYPE NEAR IF NOT EXISTS").catch(() => {});
+  // ALSO: two people asking nearly the same thing (new question -> earlier one)
+  await adbCommand("CREATE EDGE TYPE ALSO IF NOT EXISTS").catch(() => {});
   for (const [prop, type] of [["score", "DOUBLE"], ["state", "STRING"], ["at", "STRING"]]) await adbCommand(`CREATE PROPERTY NEAR.${prop} IF NOT EXISTS ${type}`).catch(() => {});
 }
 
@@ -1463,6 +1465,19 @@ async function openNeed(need, askerScope) {
       log.info(`question ${need.qid} joined ${t.qid} (same asker, same question)`);
       return;
     }
+    // other people asking nearly the same thing: linked, so owners answer them together
+    const others = await adbQuery(
+      `SELECT @rid AS rid, _qid, vectorCosineSimilarity(embed_identity, ${v}) AS score FROM ${ENTITY_LABEL} WHERE _kind = 'need' AND _status = 'open' AND _open_until > :now AND _asker <> :asker ORDER BY score DESC LIMIT 5`,
+      { asker: need.asker, now: new Date(now).toISOString() },
+    ).catch(() => []);
+    for (const o of others) {
+      if (!(Number(o.score) >= LINK_MIN) || !RID_RE.test(String(o.rid))) continue;
+      await adbCommand(`CREATE EDGE ALSO FROM ${need.rid} TO ${String(o.rid)} SET score = :score, at = :at`, "sql", {
+        score: Math.round(Number(o.score) * 1000) / 1000,
+        at: new Date(now).toISOString(),
+      });
+      log.info(`question ${need.qid} linked to ${o._qid} (another person asked nearly the same)`);
+    }
   }
   // how long it matters: the grader judges the question's subject (Friday's visit ends Friday)
   let validUntil = null;
@@ -1567,7 +1582,17 @@ async function askerRequest(qid, identity) {
     const target = await loadNeed(need.joined_into);
     if (target) return { ...askerView(target, await needEdges(target.rid)), id: need.qid, joined_into: target.qid };
   }
-  return askerView(need, await needEdges(need.rid));
+  return { ...askerView(need, await needEdges(need.rid)), also_asked: await alsoAsked(need) };
+}
+
+/** who else asked nearly the same, among questions the asker can see anyway */
+async function alsoAsked(need) {
+  const names = [];
+  for (const rid of await linkedRids(need.rid)) {
+    const row = (await adbQuery(`SELECT @rid AS rid, name, _home, _origin, _asker, _status FROM ${rid}`).catch(() => []))[0];
+    if (row && row._asker !== need.asker && row._status === "open" && personSees(need.asker, row)) names.push(row._asker);
+  }
+  return [...new Set(names)];
 }
 
 async function confirmRequest(qid, identity, scope) {
@@ -1600,52 +1625,88 @@ async function withdrawRequest(qid, identity) {
   return askerRequest(qid, identity);
 }
 
-/** the owners' side: open questions shown to this person, with their own entries that meet them */
-async function incomingRequests(identity) {
-  const person = personOf(identity.user);
-  const scope = personScope(person);
-  if (!scope) return { requests: [] };
+/** questions linked to this one (other people asking the same thing) */
+async function linkedRids(rid) {
+  const rows = await adbQuery(`SELECT @out AS a, @in AS b FROM (SELECT expand(bothE('ALSO')) FROM ${rid})`).catch(() => []);
+  return [...new Set(rows.flatMap((r) => [String(r.a), String(r.b)]))].filter((r) => r !== rid && RID_RE.test(r));
+}
+
+/** the open questions shown to this person with their meetings, grouped where linked */
+async function shownGroups(person, scope) {
   const rows = await adbQuery(
     `SELECT FROM ${ENTITY_LABEL} WHERE _kind = 'need' AND _status = 'open' AND _open_until > :now AND _asker <> :me LIMIT 300`,
     { now: new Date().toISOString(), me: person },
   );
-  const out = [];
+  const items = new Map(); // qid -> { need, edges, mine }
   for (const row of rows) {
     const need = needOf(row);
     // shown to me through a share of the question (not merely below me in the tree)
     if (!shownTo(need, person, scope) || need.dismissed.includes(person)) continue;
-    const mine = (await needEdges(need.rid)).filter((e) => e.state !== "visible" && ownerOf(person, e.home, need.asker));
-    out.push({ ...ownerView(need, mine), entries: ownerView(need, mine).entries.map((e) => ({ ...e, home: positionName(e.home) })) });
+    const edges = await needEdges(need.rid);
+    items.set(need.qid, { need, edges, mine: edges.filter((e) => e.state !== "visible" && ownerOf(person, e.home, need.asker)) });
   }
+  const byRid = new Map([...items.values()].map((i) => [i.need.rid, i.need.qid]));
+  const links = [];
+  for (const { need } of items.values()) for (const r of await linkedRids(need.rid)) if (byRid.has(r)) links.push([need.qid, byRid.get(r)]);
+  const asked = (i) => i.need.questions[0]?.at ?? "";
+  return groupLinked([...items.keys()], links).map((g) => g.map((q) => items.get(q)).sort((a, b) => asked(a).localeCompare(asked(b))));
+}
+
+const groupOut = (group) => {
+  const v = groupView(group.map((i) => ownerView(i.need, i.mine)));
+  return { ...v, entries: v.entries.map((e) => ({ ...e, home: positionName(e.home) })) };
+};
+
+/** the owners' side: open questions shown to this person, one item per group of linked ones */
+async function incomingRequests(identity) {
+  const person = personOf(identity.user);
+  const scope = personScope(person);
+  if (!scope) return { requests: [] };
+  const out = (await shownGroups(person, scope)).map(groupOut);
   return { requests: out.sort((a, b) => Number(b.status === "open") - Number(a.status === "open")) };
 }
 
-/** the owner shares (some of) their entries that meet the question with the asker */
+/** the group of linked questions shown to this person that holds `qid` */
+async function groupOf(qid, person, scope) {
+  return (await shownGroups(person, scope)).find((g) => g.some((i) => i.need.qid === qid)) ?? null;
+}
+
+/** the owner shares (some of) their entries with everyone in the group who asked */
 async function answerRequest(qid, { entries, until }, identity, scope) {
   if (identity.agent) throw new Error("the person who owns the data answers a request");
   const person = personOf(identity.user);
-  const need = await loadNeed(qid);
-  if (!need || need.status !== "open" || (need.open_until && Date.parse(need.open_until) <= Date.now())) throw new Error("this request is closed");
-  const mine = (await needEdges(need.rid)).filter((e) => e.state === "open" && ownerOf(person, e.home, need.asker));
+  const group = await groupOf(qid, person, personScope(person) ?? scope);
+  if (!group) throw new Error("this request is closed");
+  // the owner's entries across the group, by record id
+  const offered = new Map();
+  for (const i of group) for (const e of i.mine) if (e.state === "open" && !offered.has(e.rid)) offered.set(e.rid, e);
   const keys = new Set(Array.isArray(entries) ? entries.map(String) : []);
-  const chosen = mine.filter((e) => keys.has(e.rid));
-  if (chosen.length === 0) throw new Error(mine.length ? "pick at least one of the matching entries" : `no request ${qid} for you to answer`);
+  const chosen = [...offered.values()].filter((e) => keys.has(e.rid));
+  if (chosen.length === 0) throw new Error(offered.size ? "pick at least one of the matching entries" : `no request ${qid} for you to answer`);
   const results = [];
-  for (const e of chosen) {
-    let done = false;
-    try {
-      const r = (await grantAccess({ entities: [{ name: e.name, home: e.home }], person: need.asker, reason: `Asked: ${need.question}`.slice(0, 500), until }, identity, scope)).results[0];
-      results.push({ name: e.name, ...(r.granted ? { granted: true, expires_at: r.expires_at } : { proposed: true }) });
-      done = true;
-    } catch (err) {
-      const msg = String(err instanceof Error ? err.message : err);
-      done = /already sees/.test(msg); // the asker got it some other way meanwhile
-      results.push({ name: e.name, error: msg.slice(0, 200) });
+  for (const { need, edges } of group) {
+    for (const e of chosen) {
+      const edge = edges.find((x) => x.rid === e.rid);
+      if (edge?.state === "shared" || edge?.state === "visible") continue;
+      let done = false;
+      try {
+        // an answer always ends: the organization's default unless the owner picked a date
+        const end = until ?? `${policy.defaultShareDays}d`;
+        const r = (await grantAccess({ entities: [{ name: e.name, home: e.home }], person: need.asker, reason: `Asked: ${need.question}`.slice(0, 500), until: end }, identity, scope)).results[0];
+        results.push({ name: e.name, asker: need.asker, ...(r.granted ? { granted: true, expires_at: r.expires_at } : { proposed: true }) });
+        done = true;
+      } catch (err) {
+        const msg = String(err instanceof Error ? err.message : err);
+        done = /already sees/.test(msg); // that asker got it some other way meanwhile
+        results.push({ name: e.name, asker: need.asker, error: msg.slice(0, 200) });
+      }
+      if (!done) continue;
+      // a linked question that didn't meet the entry itself gets the meeting now
+      if (edge) await adbCommand(`UPDATE ${edge.erid} SET state = 'shared'`);
+      else await meet(need, e.rid, e.score ?? 0, "shared");
     }
-    if (done) await adbCommand(`UPDATE ${e.erid} SET state = 'shared'`);
   }
-  void person;
-  const view = (await incomingRequests(identity)).requests.find((r) => r.id === qid) ?? null;
+  const view = (await incomingRequests(identity)).requests.find((r) => r.ids.includes(qid)) ?? null;
   return { request: view, results };
 }
 
@@ -1653,10 +1714,12 @@ async function dismissRequest(qid, identity) {
   if (identity.agent) throw new Error("the person who owns the data answers a request");
   const person = personOf(identity.user);
   const scope = personScope(person);
-  const need = await loadNeed(qid);
-  if (!need || !scope || !shownTo(need, person, scope)) throw new Error(`no request ${qid} for you`);
-  for (const e of await needEdges(need.rid)) if (e.state === "open" && ownerOf(person, e.home, need.asker)) await adbCommand(`UPDATE ${e.erid} SET state = 'declined'`);
-  await adbCommand(`UPDATE ${need.rid} SET _dismissed = :d`, "sql", { d: JSON.stringify([...new Set([...need.dismissed, person])]) });
+  const group = scope && (await groupOf(qid, person, scope));
+  if (!group) throw new Error(`no request ${qid} for you`);
+  for (const { need, mine } of group) {
+    for (const e of mine) if (e.state === "open") await adbCommand(`UPDATE ${e.erid} SET state = 'declined'`);
+    await adbCommand(`UPDATE ${need.rid} SET _dismissed = :d`, "sql", { d: JSON.stringify([...new Set([...need.dismissed, person])]) });
+  }
   return { dismissed: true, id: qid };
 }
 

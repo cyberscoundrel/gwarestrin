@@ -134,8 +134,13 @@ export interface IncomingRequest {
   /** how many times it was asked (repeats join the open request) */
   asked: number;
   asker: string;
+  /** linked questions from several people come as one item: every asker, every question */
+  askers: string[];
+  questions: string[];
+  ids: string[];
   status: "open" | "shared" | "dismissed" | "expired";
-  entries: Array<{ key: string; name: string; home: string; shared: boolean }>;
+  /** score: how close the entry is to the question (the closest is pre-picked) */
+  entries: Array<{ key: string; name: string; home: string; shared: boolean; score?: number }>;
   /** nothing of theirs matches: the question was posted for their position, to add the answer */
   posted: boolean;
   expires_at: string | null;
