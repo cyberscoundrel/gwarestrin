@@ -168,6 +168,8 @@ services:
       # the directory, not single files: a file that doesn't exist yet would
       # become an empty directory mount
       - ./graph-rag-config:/app/config:ro
+      # whole documents (manuals, transcripts) live here, not in ArcadeDB
+      - graph-rag-documents:/app/documents
     labels:
       gwarestrin.mcp.enable: "true"
       gwarestrin.mcp.port: "8000"
@@ -478,6 +480,7 @@ networks:
         - subnet: 172.31.99.0/24
 
 volumes:
+  graph-rag-documents:
   gwarestrin-state:
   gondolin-cache:
   arcadedb-data:
