@@ -10,6 +10,7 @@
  *   gradingEnabled: boolean,       // grade new entries (needs a grader model)
  *   gradingConfidence: number,     // how sure the grader must be to act
  *   derivedWindowHours: number,    // how long what an identity read bounds where its writes land (0 = off)
+ *   requestDays: number,           // how long a request for access stays open
  * }} Policy */
 
 export const LIMITS = {
@@ -17,6 +18,7 @@ export const LIMITS = {
   defaultShareDays: [1, 365],
   gradingConfidence: [0.3, 0.95],
   derivedWindowHours: [0, 168],
+  requestDays: [1, 90],
 };
 
 /** defaults: the built-in values, overridable per deployment by env */
@@ -30,6 +32,7 @@ export function defaultPolicy(env = process.env) {
     gradingEnabled: env.GRADING_ENABLED !== "false",
     gradingConfidence: num("GRADING_CONFIDENCE", 0.6),
     derivedWindowHours: num("DERIVED_WINDOW_HOURS", 12),
+    requestDays: num("REQUEST_DAYS", 14),
   };
 }
 

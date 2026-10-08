@@ -26,6 +26,7 @@
     gradingEnabled: "Grading",
     gradingConfidence: "Grading confidence",
     derivedWindowHours: "Derived-data window",
+    requestDays: "How long a request stays open",
   };
 
   async function load(): Promise<void> {
@@ -51,6 +52,7 @@
     if (draft.defaultShareDays > draft.maxGrantDays) return "Can't be longer than the longest share.";
     return "";
   });
+  const requestError = $derived(attempted && draft && !inRange(draft.requestDays, 1, 90) ? "Between 1 and 90 days." : "");
   const windowError = $derived(attempted && draft && !inRange(draft.derivedWindowHours, 0, 168) ? "Between 0 and 168 hours." : "");
 
   async function save(): Promise<void> {
@@ -58,7 +60,7 @@
     attempted = true;
     error = "";
     saved = "";
-    if (maxError || defError || windowError) return;
+    if (maxError || defError || windowError || requestError) return;
     const changes = Object.fromEntries(
       (Object.keys(draft) as Array<keyof OrgPolicy>).filter((k) => draft![k] !== view!.policy[k]).map((k) => [k, draft![k]]),
     ) as Partial<OrgPolicy>;
@@ -95,7 +97,7 @@
   function fmt(k: keyof OrgPolicy, v: unknown): string {
     if (typeof v === "boolean") return k === "peopleShareDirectly" ? (v ? "directly" : "through review") : v ? "on" : "off";
     if (k === "standingGrants") return v === "root" ? "root only" : "nobody";
-    if (k === "maxGrantDays" || k === "defaultShareDays") return `${v} days`;
+    if (k === "maxGrantDays" || k === "defaultShareDays" || k === "requestDays") return `${v} days`;
     if (k === "derivedWindowHours") return `${v} h`;
     if (k === "gradingConfidence") return `${Math.round(Number(v) * 100)}%`;
     return String(v);
@@ -153,6 +155,15 @@
         </span>
       </span>
     </label>
+    <div class="field">
+      <label class="field-label" for="os-req">Requests for access stay open</label>
+      <div class="flex items-center gap-2">
+        <input id="os-req" type="number" min="1" max="90" class="input w-24" bind:value={draft.requestDays} aria-invalid={requestError ? "true" : undefined} />
+        <span class="text-xs text-faint">days</span>
+      </div>
+      <span class="field-hint">When someone asks for something they can't see, the people who have it can share it with them until then.</span>
+      {#if requestError}<span class="field-error">{requestError}</span>{/if}
+    </div>
   {/if}
 {/snippet}
 

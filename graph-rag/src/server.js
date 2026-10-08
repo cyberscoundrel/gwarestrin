@@ -29,7 +29,8 @@ import {
   writableHomes,
 } from "./positions.js";
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
-import { grantedView, isActive, reaches, resolveExpiry } from "./grants.js";
+import { grantedView, isActive, resolveExpiry } from "./grants.js";
+import { applyDismiss, applyShare, askerView, MATCH_MIN, mergeTarget, ownerView, routeMatches } from "./requests.js";
 import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
 import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -1197,6 +1198,241 @@ async function schemaGraph() {
   return { types: [], indexes };
 }
 
+/** ---- access requests (see requests.js) ---- */
+
+const REQUEST_MATCH_MIN = Number.isFinite(Number(process.env.REQUEST_MATCH_MIN)) && process.env.REQUEST_MATCH_MIN ? Number(process.env.REQUEST_MATCH_MIN) : MATCH_MIN;
+
+async function ensureRequestSchema() {
+  await adbCommand("CREATE DOCUMENT TYPE AccessRequest IF NOT EXISTS").catch(() => {});
+  for (const prop of ["id", "question", "asker", "asked_by", "status", "created_at", "expires_at", "routes_json", "questions_json", "joined_into"]) {
+    await adbCommand(`CREATE PROPERTY AccessRequest.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  }
+  await adbCommand("CREATE PROPERTY AccessRequest.rev IF NOT EXISTS INTEGER").catch(() => {});
+  await adbCommand("CREATE INDEX IF NOT EXISTS ON AccessRequest (id) UNIQUE").catch((e) => log.warn(`request index: ${String(e).slice(0, 120)}`));
+}
+
+const fromRow = (r) => ({
+  id: r.id,
+  question: r.question,
+  asker: r.asker,
+  asked_by: r.asked_by,
+  status: r.status,
+  created_at: r.created_at,
+  expires_at: r.expires_at ?? null,
+  routes: JSON.parse(r.routes_json || "[]"),
+  questions: JSON.parse(r.questions_json || "[]"),
+  joined_into: r.joined_into ?? null,
+  rev: Number(r.rev ?? 0),
+});
+
+async function loadRequest(id) {
+  if (!PENDING_ID_RE.test(String(id))) throw new Error("invalid request id");
+  const row = (await adbQuery("SELECT FROM AccessRequest WHERE id = :id", { id }))[0];
+  return row ? fromRow(row) : null;
+}
+
+async function insertRequest(req) {
+  await adbCommand(
+    "INSERT INTO AccessRequest SET id = :id, question = :question, asker = :asker, asked_by = :asked_by, status = :status, created_at = :created_at, " +
+      "expires_at = :expires_at, routes_json = :routes_json, questions_json = :questions_json, joined_into = :joined_into, rev = 0",
+    "sql",
+    { ...req, routes_json: JSON.stringify(req.routes), questions_json: JSON.stringify(req.questions), joined_into: req.joined_into ?? null },
+  );
+}
+
+/** load, change, store; retried when someone else changed it in between */
+async function mutateRequest(id, change) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const req = await loadRequest(id);
+    if (!req) throw new Error(`no request ${id}`);
+    const out = change(req);
+    const done = await adbCommand(
+      "UPDATE AccessRequest SET status = :status, expires_at = :expires_at, routes_json = :routes_json, questions_json = :questions_json, " +
+        "joined_into = :joined_into, rev = :next WHERE id = :id AND rev = :rev",
+      "sql",
+      { ...req, routes_json: JSON.stringify(req.routes), questions_json: JSON.stringify(req.questions), joined_into: req.joined_into ?? null, next: req.rev + 1 },
+    );
+    if (Number(done?.[0]?.count ?? 0) === 1) return out ?? req;
+  }
+  throw new Error("this request is busy; try again");
+}
+
+/** who holds which positions (people only; for routing) */
+const holdersMap = () => new Map([...entriesByUser].map(([name, e]) => [name, heldPositions(positionMap, e.positions)]));
+
+/**
+ * The entries closest to the question that the asker can't see. Runs over
+ * the whole graph; the result never reaches the asker, only the owners.
+ */
+async function matchHidden(question, askerScope) {
+  if (askerScope.homes === null) return []; // sees everything already
+  let embedding;
+  try {
+    embedding = (await embedBatch([question]))[0];
+  } catch (e) {
+    log.warn(`request matching: embedding failed, nothing routed: ${String(e).slice(0, 120)}`);
+    return [];
+  }
+  if (!embedding) return [];
+  const vec = `[${embedding.map((x) => (Number.isFinite(x) ? x : 0)).join(",")}]`;
+  const best = new Map(); // rid -> score
+  for (const facet of Object.keys(FACETS)) {
+    if (!knownIndexes.has(facet)) continue;
+    const rows = await adbQuery(
+      `SELECT @rid AS rid, vectorCosineSimilarity(embed_${facet}, ${vec}) AS score FROM ${ENTITY_LABEL} WHERE embed_${facet} IS NOT NULL ORDER BY score DESC LIMIT 32`,
+    ).catch(() => []);
+    for (const row of rows) {
+      const rid = String(row.rid);
+      const score = Number(row.score);
+      if (RID_RE.test(rid) && Number.isFinite(score) && score >= REQUEST_MATCH_MIN && score > (best.get(rid) ?? -2)) best.set(rid, score);
+    }
+  }
+  if (best.size === 0) return [];
+  const rows = await adbQuery(`SELECT @rid AS rid, name, _home FROM [${[...best.keys()].join(",")}]`);
+  const granted = askerScope.granted ?? { homes: new Set(), rids: new Set() };
+  return rows
+    .map((r) => ({ rid: String(r.rid), name: r.name, home: effectiveHome(positionMap, r._home), score: best.get(String(r.rid)) ?? 0 }))
+    .filter((m) => m.name && !askerScope.homes.has(m.home) && !granted.homes.has(m.home) && !granted.rids.has(m.rid))
+    .sort((a, b) => b.score - a.score);
+}
+
+/** route a confirmed request to the owners of what matches, or join an earlier open one */
+async function openRequest(req, askerScope) {
+  const matches = await matchHidden(req.question, askerScope);
+  const routes = routeMatches(positionMap, matches, holdersMap(), req.asker);
+  const mine = (await adbQuery("SELECT FROM AccessRequest WHERE asker = :asker AND status = 'open' LIMIT 200", { asker: req.asker })).map(fromRow);
+  const target = mergeTarget(mine, req.asker, routes);
+  const expires_at = new Date(Date.now() + policy.requestDays * 86_400_000).toISOString();
+  if (target) {
+    await mutateRequest(target.id, (t) => {
+      t.questions = [...t.questions, { text: req.question, at: new Date().toISOString() }].slice(-20);
+      if (!t.expires_at || t.expires_at < expires_at) t.expires_at = expires_at;
+    });
+    log.info(`request ${req.id} joined ${target.id} (same asker, overlapping matches)`);
+    return { ...req, status: "joined", joined_into: target.id, routes: [] };
+  }
+  log.info(`request ${req.id} by ${req.asker}: ${matches.length} match(es) routed to ${routes.map((r) => `${r.person}(${r.entries.length})`).join(", ") || "nobody"}`);
+  return { ...req, status: "open", routes, expires_at };
+}
+
+/** ask: an agent drafts it (the person confirms on a card); a person's ask goes out at once */
+async function requestAccess({ question }, identity, scope) {
+  if (!SCOPED || !positionMap) throw new Error("position scoping is not enabled");
+  const text = String(question ?? "").replace(/\s+/g, " ").trim();
+  if (text.length < 3) throw new Error("say what you'd like to know");
+  const now = new Date();
+  let req = {
+    id: randomUUID(),
+    question: text.slice(0, 500),
+    asker: personOf(identity.user),
+    asked_by: identity.user,
+    status: "proposed",
+    created_at: now.toISOString(),
+    expires_at: new Date(now.getTime() + policy.requestDays * 86_400_000).toISOString(),
+    routes: [],
+    questions: [{ text: text.slice(0, 500), at: now.toISOString() }],
+  };
+  if (!identity.agent) req = await openRequest(req, scope);
+  await insertRequest(req);
+  return identity.agent
+    ? { proposed: true, requestId: req.id, note: "waiting for the person to confirm the request in the chat" }
+    : askerView(req);
+}
+
+/** the asker's side: their own requests only (a joined one shows the request it joined) */
+async function askerRequest(id, identity) {
+  const req = await loadRequest(id);
+  if (!req || req.asker !== personOf(identity.user)) throw new Error(`no request ${id} of yours`);
+  if (req.status === "joined" && req.joined_into) {
+    const target = await loadRequest(req.joined_into);
+    if (target) return { ...askerView(target), id: req.id, joined_into: target.id };
+  }
+  return askerView(req);
+}
+
+async function confirmRequest(id, identity, scope) {
+  if (identity.agent) throw new Error("the person confirms a request, not an agent");
+  const req = await loadRequest(id);
+  if (!req || req.asker !== identity.user || req.status !== "proposed") throw new Error(`no request ${id} waiting for you`);
+  const opened = await openRequest(req, scope);
+  await mutateRequest(id, (r) => {
+    if (r.status !== "proposed") throw new Error("this request was already handled");
+    Object.assign(r, { status: opened.status, routes: opened.routes, expires_at: opened.expires_at, joined_into: opened.joined_into ?? null });
+  });
+  return askerRequest(id, identity);
+}
+
+async function withdrawRequest(id, identity) {
+  if (identity.agent) throw new Error("only the person can withdraw a request");
+  const req = await loadRequest(id);
+  if (!req || req.asker !== identity.user) throw new Error(`no request ${id} of yours`);
+  await mutateRequest(id, (r) => {
+    if (!["proposed", "open"].includes(r.status)) throw new Error("this request is already closed");
+    r.status = "withdrawn";
+  });
+  return askerRequest(id, identity);
+}
+
+/** the owner's side: requests routed to this person, open ones first */
+async function incomingRequests(identity) {
+  const person = personOf(identity.user);
+  const since = new Date(Date.now() - 30 * 86_400_000).toISOString();
+  const rows = await adbQuery(
+    "SELECT FROM AccessRequest WHERE status IN ['open', 'answered', 'closed', 'expired'] AND created_at > :since AND routes_json LIKE :pat ORDER BY created_at DESC LIMIT 100",
+    { since, pat: `%"person":"${person.replace(/[%_"\\]/g, "")}"%` },
+  );
+  const views = rows.map(fromRow).map((r) => {
+    const v = ownerView(r, person);
+    return v && { ...v, entries: v.entries.map((e) => ({ ...e, home: positionName(e.home) })) };
+  });
+  return { requests: views.filter(Boolean).sort((a, b) => Number(b.status === "open") - Number(a.status === "open")) };
+}
+
+/** the owner shares (some of) their matches with the asker: person grants */
+async function answerRequest(id, { entries, until }, identity, scope) {
+  if (identity.agent) throw new Error("the person who owns the data answers a request");
+  const person = personOf(identity.user);
+  const req = await loadRequest(id);
+  const route = req?.routes.find((r) => r.person === person);
+  if (!req || !route) throw new Error(`no request ${id} for you`);
+  if (req.status !== "open" || route.status !== "open" || (req.expires_at && Date.parse(req.expires_at) <= Date.now())) throw new Error("this request is closed");
+  const keys = new Set(Array.isArray(entries) ? entries.map(String) : []);
+  const chosen = route.entries.filter((e) => !e.shared && (keys.has(e.key ?? e.rid) || keys.has(e.rid)));
+  if (chosen.length === 0) throw new Error("pick at least one of the matching entries");
+  const results = [];
+  const done = [];
+  for (const e of chosen) {
+    try {
+      const r = (await grantAccess({ entities: [{ name: e.name, home: e.home }], person: req.asker, reason: `Asked: ${req.question}`.slice(0, 500), until }, identity, scope)).results[0];
+      results.push({ name: e.name, ...(r.granted ? { granted: true, expires_at: r.expires_at } : { proposed: true }) });
+      done.push(e.rid);
+    } catch (err) {
+      const msg = String(err instanceof Error ? err.message : err);
+      // the asker got it some other way meanwhile: nothing left to do for it
+      if (/already sees/.test(msg)) done.push(e.rid);
+      results.push({ name: e.name, error: msg.slice(0, 200) });
+    }
+  }
+  if (done.length) await mutateRequest(id, (r) => void applyShare(r, person, done));
+  const view = ownerView(await loadRequest(id), person);
+  return { request: { ...view, entries: view.entries.map((x) => ({ ...x, home: positionName(x.home) })) }, results };
+}
+
+async function dismissRequest(id, identity) {
+  if (identity.agent) throw new Error("the person who owns the data answers a request");
+  const person = personOf(identity.user);
+  const req = await loadRequest(id);
+  if (!req?.routes.some((r) => r.person === person)) throw new Error(`no request ${id} for you`);
+  await mutateRequest(id, (r) => void applyDismiss(r, person));
+  return { dismissed: true, id };
+}
+
+async function expireRequests() {
+  await adbCommand("UPDATE AccessRequest SET status = 'expired' WHERE status IN ['proposed', 'open'] AND expires_at < :now", "sql", {
+    now: new Date().toISOString(),
+  }).catch((e) => log.warn(`request expiry sweep: ${String(e).slice(0, 120)}`));
+}
+
 /** ---- pending-write queue (audited writes for low-capability identities) ---- */
 
 async function ensurePendingSchema() {
@@ -1499,6 +1735,26 @@ onward. To find what to share, use find_shareable.`,
   );
 
   if (SCOPED) server.tool(
+    "request_access",
+    `Ask for information the person can't see. When the knowledge graph doesn't answer their
+question (search_graph finds nothing that answers it), offer to ask; if they agree, call this
+with their question in their own words. graph-rag checks the whole graph, including parts the
+person can't see, and quietly asks the people who own anything that matches; an owner may then
+share it with them. The person confirms the request on a card in the chat first, since it carries
+their question and name to others.
+
+You never learn whether anything matched, who was asked, or whether anyone said no: never say
+that the information exists or that someone has it. Say the request is waiting for their
+confirmation; once confirmed, if someone shares an answer it shows up in their searches (and on
+the card), and you can search again.`,
+    { question: z.string().min(3).max(500) },
+    async (args) => {
+      need("read");
+      return { content: [{ type: "text", text: JSON.stringify(await requestAccess(args, identity, scope)) }] };
+    },
+  );
+
+  if (SCOPED) server.tool(
     "list_grants",
     "List active grants on data you own (outgoing) and grants that show you data (incoming).",
     {},
@@ -1785,6 +2041,39 @@ app.post("/api/grants/proposals/:id/decline", (req, res) => {
   if (ctx) void declineProposal(req.params.id, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
 });
 
+/** access requests: the asker's card (their own) and the owners' side (routed to them) */
+app.get("/api/requests", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (ctx) void incomingRequests(ctx.identity).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.get("/api/requests/:id", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (ctx) void askerRequest(req.params.id, ctx.identity).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/requests/:id/confirm", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (ctx) void confirmRequest(req.params.id, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/requests/:id/withdraw", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (ctx) void withdrawRequest(req.params.id, ctx.identity).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/requests/:id/answer", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (!ctx) return;
+  if (ctx.identity.caps.write === "deny") return res.status(403).json({ error: "graph writes are denied for this identity" });
+  const b = req.body ?? {};
+  const args = {
+    entries: Array.isArray(b.entries) ? b.entries.slice(0, 32).map(String) : [],
+    ...(typeof b.until === "string" && b.until ? { until: b.until } : {}),
+  };
+  void answerRequest(req.params.id, args, ctx.identity, ctx.scope).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/requests/:id/dismiss", (req, res) => {
+  const ctx = httpScope(req, res);
+  if (ctx) void dismissRequest(req.params.id, ctx.identity).then((r) => res.json(r), (e) => httpError(res, e));
+});
+
 /** entities the caller owns (by home), for picking what to grant */
 app.get("/api/entities", (req, res) => {
   const ctx = httpScope(req, res);
@@ -1833,7 +2122,9 @@ async function boot() {
   if (SCOPED) {
     await ensureGrantSchema();
     await refreshGrants();
-    setInterval(() => void refreshGrants(), 60_000);
+    await ensureRequestSchema();
+    await expireRequests();
+    setInterval(() => void refreshGrants().then(expireRequests), 60_000);
   }
   await ensurePendingSchema();
   console.log(`[graph-rag] indexes ready: ${[...knownIndexes].join(", ")}`);
