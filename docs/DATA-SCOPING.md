@@ -151,7 +151,9 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   "need"`, homed at the asker's position, embedded, with an open-until date
   (`requestDays`, or sooner if its subject ends: grading dates "is Sandra
   here Friday" to Friday) and an end date for pruning (lasting questions stay
-  as history). An answer is an assertion near a need, whichever came first,
+  as history). An answer is an assertion near a need (cosine similarity at
+  least `REQUEST_MATCH_MIN`, default 0.55; 0.45 let entries that merely shared
+  a product name match), whichever came first,
   so posting a question and saving an entry run the same meeting, recorded
   as a NEAR edge (need -> assertion, score, state). One rule: a meeting is
   shown only to someone who can see both points. If the asker sees the

@@ -19,7 +19,7 @@
 import { ancestors } from "./positions.js";
 
 /** how close an assertion must be to a need to count as a meeting */
-export const MATCH_MIN = 0.45;
+export const MATCH_MIN = 0.55;
 /** at most this many meetings per need from one search */
 export const MATCH_MAX = 8;
 /** the same person asking nearly the same thing again joins the open need */
