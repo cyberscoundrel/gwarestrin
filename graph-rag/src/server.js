@@ -1368,6 +1368,14 @@ async function shareNeed(need, recipient) {
   });
 }
 
+/** is the question shown to this person: an active share of it to them or a position they reach */
+function shownTo(need, person, scope) {
+  const vis = scope.homes;
+  return grantCache.some(
+    (g) => isActive(g) && g.kind === "entity" && g.target === need.rid && (g.to_user ? g.to_user === person : vis === null || vis.has(g.to_pos)),
+  );
+}
+
 /** record a meeting (once per pair) */
 async function meet(need, assertionRid, score, state) {
   const edges = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('NEAR')) FROM ${need.rid})`).catch(() => []);
@@ -1599,7 +1607,7 @@ async function incomingRequests(identity) {
   for (const row of rows) {
     const need = needOf(row);
     // shown to me through a share of the question (not merely below me in the tree)
-    if (!grantShows(scope.granted, { rid: need.rid, name: need.name, origin: need.origin }) || need.dismissed.includes(person)) continue;
+    if (!shownTo(need, person, scope) || need.dismissed.includes(person)) continue;
     const mine = (await needEdges(need.rid)).filter((e) => e.state !== "visible" && ownsHome(scope, e.home));
     out.push({ ...ownerView(need, mine), entries: ownerView(need, mine).entries.map((e) => ({ ...e, home: positionName(e.home) })) });
   }
@@ -1640,7 +1648,7 @@ async function dismissRequest(qid, identity) {
   const person = personOf(identity.user);
   const scope = personScope(person);
   const need = await loadNeed(qid);
-  if (!need || !scope || !grantShows(scope.granted, { rid: need.rid, name: need.name, origin: need.origin })) throw new Error(`no request ${qid} for you`);
+  if (!need || !scope || !shownTo(need, person, scope)) throw new Error(`no request ${qid} for you`);
   for (const e of await needEdges(need.rid)) if (e.state === "open" && ownsHome(scope, e.home)) await adbCommand(`UPDATE ${e.erid} SET state = 'declined'`);
   await adbCommand(`UPDATE ${need.rid} SET _dismissed = :d`, "sql", { d: JSON.stringify([...new Set([...need.dismissed, person])]) });
   return { dismissed: true, id: qid };
