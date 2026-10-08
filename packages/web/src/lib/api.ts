@@ -43,6 +43,27 @@ export interface OrgPolicy {
   gradingConfidence: number;
   derivedWindowHours: number;
   requestDays: number;
+  pruneAfterDays: number;
+}
+
+/** what pruning will remove, and where it goes (the root only) */
+export interface PrunePreview {
+  enabled: boolean;
+  /** expired entries still in the graph */
+  waiting: number;
+  /** of those, past the window: removed at the next sweep */
+  due?: number;
+  days: Array<{ day: string; count: number }>;
+  sink: { name: string; keeps?: boolean; unknown?: boolean };
+}
+export interface PrunedEntry {
+  name: string;
+  home: string | null;
+  kind: string | null;
+  valid_until: string | null;
+  pruned_at: string;
+  sink: string;
+  kept: boolean;
 }
 
 export interface PolicyView {
@@ -53,6 +74,7 @@ export interface PolicyView {
   canEdit: boolean;
   history: Array<{ changed_at: string; changed_by: string; prev_json: string; next_json: string }>;
   infra: { scoped: boolean; positions: number; graderModel: string | null; embedModel: string };
+  pruning?: PrunePreview;
 }
 
 export interface WorkspaceSettings {
@@ -196,6 +218,12 @@ export const api = {
   },
   async policy(): Promise<PolicyView> {
     return json(await fetch("/api/policy"));
+  },
+  async pruned(): Promise<{ pruned: PrunedEntry[] }> {
+    return json(await fetch("/api/pruned"));
+  },
+  async pruneNow(): Promise<{ pruned: number; preview: PrunePreview }> {
+    return json(await fetch("/api/pruned/run", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }));
   },
   async savePolicy(changes: Partial<OrgPolicy>): Promise<{ policy: OrgPolicy }> {
     return json(await fetch("/api/policy", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));

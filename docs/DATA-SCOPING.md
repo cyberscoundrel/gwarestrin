@@ -132,7 +132,20 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   lasting: the safe side is keeping. Past its end date an entry drops out of
   every read (search, traversal, request matching, the share picker);
   `search_graph` with `include_expired` shows history, marked `expired`.
-  Pruning removes expired entries for good after a retention window (next).
+- **Pruning** (`pruneAfterDays` in Organization settings, default 30; 0 =
+  never): an entry whose end date passed more than that long ago is removed.
+  A sweep runs every 10 minutes (and on demand: "Remove now", root only),
+  only over entries with a definite end date, so lasting ones are never
+  touched. Each batch first goes to a *sink* (`PRUNE_SINK`); only what it
+  accepts is deleted, and only if it's still expired then (an owner may have
+  extended it). The built-in `discard` sink keeps nothing, so pruning is
+  permanent removal; cold storage later is another sink receiving the full
+  record (properties, links, shares; vectors are recomputable) with no change
+  to the pruner. An unknown `PRUNE_SINK` turns pruning off rather than
+  delete data meant for storage. Shares on a pruned entry are revoked. What
+  stays is a `PruneRecord` line: name, home, kind, end and removal dates,
+  never content, shown only to the root. Organization settings previews
+  what's waiting and when it goes.
 - **Access requests** (`request_access`; `AccessRequest` documents, never
   graph entities, so search never returns them): someone asks for what they
   can't see ("when does the next Toro order go to plating?"). An agent

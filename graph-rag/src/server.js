@@ -30,6 +30,7 @@ import {
 } from "./positions.js";
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
+import { createSink, ledgerLine, preview, pruneCutoff, pruneRecord } from "./prune.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { applyDismiss, applyShare, askerView, MATCH_MIN, mergeTarget, ownerView, routeMatches } from "./requests.js";
 import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
@@ -55,6 +56,8 @@ const {
   // semantic grading of new writes against the position tree (empty = off)
   GRADER_MODEL = "",
   GRADER_TIMEOUT_MS = "30000",
+  // where pruned entries go before deletion; "discard" keeps nothing (see prune.js)
+  PRUNE_SINK = "discard",
   // policy defaults (MAX_GRANT_DAYS, DEFAULT_SHARE_DAYS, STANDING_GRANTS,
   // PEOPLE_SHARE_DIRECTLY, GRADING_ENABLED, GRADING_CONFIDENCE,
   // DERIVED_WINDOW_HOURS) are read by policy.js
@@ -1494,6 +1497,75 @@ async function expireRequests() {
   }).catch((e) => log.warn(`request expiry sweep: ${String(e).slice(0, 120)}`));
 }
 
+/** ---- pruning (see prune.js): expired entries leave for good after a window ---- */
+
+const pruneSink = createSink(PRUNE_SINK);
+let pruneRunning = false;
+
+async function ensurePruneSchema() {
+  await adbCommand("CREATE DOCUMENT TYPE PruneRecord IF NOT EXISTS").catch(() => {});
+  for (const prop of ["name", "home", "kind", "valid_until", "pruned_at", "sink"]) {
+    await adbCommand(`CREATE PROPERTY PruneRecord.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  }
+}
+
+/** one batch: hand expired entries to the sink, delete what it accepted, leave a line each */
+async function pruneExpired(limit = 100) {
+  const cutoff = pruneCutoff(policy.pruneAfterDays);
+  if (!cutoff || !pruneSink || pruneRunning) return { pruned: 0 };
+  pruneRunning = true;
+  try {
+    // only entries with a definite end date; lasting ones never come here
+    const rows = await adbQuery(`SELECT FROM ${ENTITY_LABEL} WHERE _valid_until IS NOT NULL AND _valid_until < :cutoff LIMIT ${Math.max(1, Math.min(500, limit))}`, { cutoff });
+    if (rows.length === 0) return { pruned: 0 };
+    const records = [];
+    for (const row of rows) {
+      const rid = String(row["@rid"]);
+      if (!RID_RE.test(rid)) continue;
+      const raw = await adbQuery(`SELECT @type AS type, @out AS src, @in AS dst FROM (SELECT expand(bothE()) FROM ${rid}) LIMIT 200`).catch(() => []);
+      const others = [...new Set(raw.map((e) => String(String(e.src) === rid ? e.dst : e.src)).filter((r) => RID_RE.test(r)))];
+      const names = new Map(others.length ? (await adbQuery(`SELECT @rid AS rid, name FROM [${others.join(",")}]`).catch(() => [])).map((n) => [String(n.rid), n.name]) : []);
+      const edges = raw.map((e) => {
+        const out = String(e.src) === rid;
+        const other = String(out ? e.dst : e.src);
+        return { type: e.type, direction: out ? "out" : "in", other: names.get(other) ?? other };
+      });
+      const grants = await adbQuery("SELECT id, to_pos, to_user, expires_at FROM AccessGrant WHERE target = :rid AND status = 'active'", { rid }).catch(() => []);
+      records.push(pruneRecord(row, edges, grants));
+    }
+    const accepted = new Set(await pruneSink.archive(records));
+    let pruned = 0;
+    const now = new Date().toISOString();
+    for (const rec of records) {
+      if (!accepted.has(rec.rid)) continue;
+      // still expired? (an owner may have extended it since the batch was read)
+      const gone = await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE @rid = ${rec.rid} AND _valid_until < :cutoff`, "sql", { cutoff });
+      if (Number(gone?.[0]?.count ?? 0) !== 1) continue;
+      pruned++;
+      await adbCommand("UPDATE AccessGrant SET status = 'revoked', revoked_at = :now, revoked_by = 'graph-rag: entry pruned' WHERE target = :rid AND status = 'active'", "sql", { now, rid: rec.rid }).catch(() => {});
+      const line = ledgerLine(rec, pruneSink);
+      await adbCommand(
+        "INSERT INTO PruneRecord SET name = :name, home = :home, kind = :kind, valid_until = :valid_until, pruned_at = :pruned_at, sink = :sink, kept = :kept",
+        "sql",
+        line,
+      ).catch((e) => log.warn(`prune record for ${rec.name}: ${String(e).slice(0, 120)}`));
+    }
+    if (pruned) {
+      await refreshGrants();
+      log.info(`pruned ${pruned} expired entr${pruned === 1 ? "y" : "ies"} (ended before ${cutoff.slice(0, 10)}; sink ${pruneSink.name}${pruneSink.keeps ? "" : ": nothing kept"})`);
+    }
+    return { pruned };
+  } finally {
+    pruneRunning = false;
+  }
+}
+
+/** for Organization settings: what's waiting to be pruned, and when */
+async function prunePreview() {
+  const rows = await adbQuery(`SELECT _valid_until AS valid_until FROM ${ENTITY_LABEL} WHERE _valid_until IS NOT NULL AND _valid_until <= :now LIMIT 100000`, { now: new Date().toISOString() }).catch(() => []);
+  return { ...preview(rows, policy.pruneAfterDays), sink: pruneSink ? { name: pruneSink.name, keeps: pruneSink.keeps } : { name: PRUNE_SINK, unknown: true } };
+}
+
 /** ---- pending-write queue (audited writes for low-capability identities) ---- */
 
 async function ensurePendingSchema() {
@@ -2028,15 +2100,18 @@ app.get("/api/policy", (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);
   if (!identity) return res.status(401).json({ error: "unauthenticated" });
   const scope = scopeOf(identity);
-  void adbQuery("SELECT changed_at, changed_by, prev_json, next_json FROM PolicyChange ORDER BY changed_at DESC LIMIT 10")
-    .catch(() => [])
-    .then((history) =>
+  void Promise.all([
+    adbQuery("SELECT changed_at, changed_by, prev_json, next_json FROM PolicyChange ORDER BY changed_at DESC LIMIT 10").catch(() => []),
+    canEditPolicy(identity, scope) ? prunePreview() : null,
+  ])
+    .then(([history, pruning]) =>
       res.json({
         policy,
         defaults: policyDefaults,
         ...policyMeta,
         canEdit: canEditPolicy(identity, scope),
         history: canEditPolicy(identity, scope) ? history : [],
+        ...(canEditPolicy(identity, scope) ? { pruning } : {}),
         // set at deploy, not here
         infra: {
           scoped: SCOPED,
@@ -2046,6 +2121,22 @@ app.get("/api/policy", (req, res) => {
         },
       }),
     );
+});
+/** the pruning record: what was removed, when (names only, never content; the root only) */
+app.get("/api/pruned", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root sees what was pruned" });
+  void adbQuery("SELECT name, home, kind, valid_until, pruned_at, sink, kept FROM PruneRecord ORDER BY pruned_at DESC LIMIT 100")
+    .catch(() => [])
+    .then((rows) => res.json({ pruned: rows.map((r) => ({ ...r, home: r.home ? homeLabel(r.home)?.name ?? r.home : null })) }));
+});
+/** prune what's due now instead of at the next sweep (the root only) */
+app.post("/api/pruned/run", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root prunes" });
+  void pruneExpired(500).then(async (r) => res.json({ ...r, preview: await prunePreview() }), (e) => httpError(res, e));
 });
 app.put("/api/policy", (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);
@@ -2193,6 +2284,12 @@ async function boot() {
   await ensurePolicySchema();
   await loadPolicy();
   setInterval(() => void loadPolicy(), 60_000);
+  await ensurePruneSchema();
+  if (!pruneSink) log.warn(`PRUNE_SINK=${PRUNE_SINK} isn't a known sink: pruning is off (nothing is deleted)`);
+  // every 10 minutes, a batch at a time; the first a minute after boot
+  const prune = () => void pruneExpired().catch((e) => log.warn(`pruning failed: ${String(e).slice(0, 160)}`));
+  setTimeout(prune, 60_000);
+  setInterval(prune, 600_000);
   if (SCOPED) log.info(`semantic grading: ${GRADER_MODEL && policy.gradingEnabled ? `on (${GRADER_MODEL}, confidence ${policy.gradingConfidence})` : "off"}`);
   if (SCOPED) await ensureReadMarkSchema();
   if (SCOPED) {
