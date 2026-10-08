@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ArrowRight, CalendarClock, CircleCheck, Plus, Search, Share2, TriangleAlert, User, X } from "lucide";
-  import { api, type GrantView, type PositionsView } from "../lib/api.js";
+  import { api, type GrantView, type IncomingRequest, type PositionsView } from "../lib/api.js";
   import Dialog from "./Dialog.svelte";
   import Dropdown from "./Dropdown.svelte";
   import EmptyState from "./EmptyState.svelte";
@@ -18,6 +18,10 @@
 
   let tree = $state<PositionsView | null>(null);
   let grants = $state<GrantView[]>([]);
+  // requests for access routed to this person: entries picked to share, end date
+  let requests = $state<IncomingRequest[]>([]);
+  let reqPicked = $state<Record<string, string[]>>({});
+  let reqUntil = $state<Record<string, string>>({});
   let loaded = $state(false);
   let error = $state("");
   let notice = $state("");
@@ -49,7 +53,15 @@
     error = "";
     try {
       tree = await api.positions();
-      if (tree.scoped) grants = (await api.grants()).grants;
+      if (tree.scoped) {
+        grants = (await api.grants()).grants;
+        requests = (await api.incomingRequests().catch(() => ({ requests: [] }))).requests;
+        for (const r of requests) {
+          // every unshared match starts picked; the owner unticks what shouldn't go
+          reqPicked[r.id] ??= r.entries.filter((e) => !e.shared).map((e) => e.key);
+          reqUntil[r.id] ??= dateIn(defaultDays);
+        }
+      }
       const p = await api.policy().catch(() => null);
       if (p) {
         const fresh = maxDays === 90 && defaultDays === 14 && until === dateIn(14);
@@ -169,6 +181,53 @@
     }
   }
 
+  const openRequests = $derived(requests.filter((r) => r.status === "open"));
+  const handledRequests = $derived(requests.filter((r) => r.status !== "open").slice(0, 5));
+  function toggleReq(id: string, key: string, on: boolean) {
+    const cur = reqPicked[id] ?? [];
+    reqPicked[id] = on ? [...new Set([...cur, key])] : cur.filter((k) => k !== key);
+  }
+
+  async function answer(r: IncomingRequest): Promise<void> {
+    const keys = reqPicked[r.id] ?? [];
+    if (keys.length === 0) {
+      error = "Pick at least one entry to share, or choose Not this time.";
+      return;
+    }
+    busyId = r.id;
+    error = "";
+    try {
+      const u = reqUntil[r.id];
+      const out = await api.answerRequest(r.id, keys, u ? new Date(`${u}T23:59:59`).toISOString() : undefined);
+      const failed = out.results.filter((x) => x.error);
+      const queued = out.results.filter((x) => x.proposed).length;
+      notice = failed.length
+        ? `Shared ${out.results.length - failed.length} of ${out.results.length} with ${r.asker}. ${failed.map((x) => `${x.name}: ${x.error}`).join("; ")}`
+        : queued
+          ? `Sent for approval: ${r.asker} gets access once an approver signs off.`
+          : `Shared with ${r.asker}${u ? ` until ${when(new Date(`${u}T23:59:59`).toISOString()).replace("Until ", "")}` : ""}.`;
+      await refresh();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busyId = null;
+    }
+  }
+
+  async function dismiss(r: IncomingRequest): Promise<void> {
+    busyId = r.id;
+    error = "";
+    try {
+      await api.dismissRequest(r.id);
+      notice = `Not shared. ${r.asker} isn't told who was asked or that anyone declined.`;
+      await refresh();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      busyId = null;
+    }
+  }
+
   async function revoke(g: GrantView): Promise<void> {
     busyId = g.id;
     error = "";
@@ -213,10 +272,68 @@
   </li>
 {/snippet}
 
+{#snippet requestRow(r: IncomingRequest)}
+  {@const picked = reqPicked[r.id] ?? []}
+  <li class="animate-enter grid gap-3 rounded-lg border border-edge2 bg-panel p-4">
+    <div class="grid gap-1.5">
+      <span class="text-sm text-fg"><span class="font-medium">{r.asker}</span> asked{r.asked > 1 ? ` (${r.asked} times)` : ""}</span>
+      <p class="m-0 border-l-2 border-edge2 pl-2.5 text-sm leading-relaxed text-dim">{r.question}</p>
+    </div>
+    <div class="grid gap-1.5">
+      <span class="text-xs text-faint">Your entries that match</span>
+      <ul class="m-0 grid list-none gap-1 p-0" aria-label="entries matching {r.asker}'s question">
+        {#each r.entries as e (e.key)}
+          {@const on = picked.includes(e.key)}
+          <li class="flex items-center gap-3 rounded-md border px-3 py-2 {on ? 'border-edge2 bg-panel2' : 'border-edge bg-bg'}">
+            {#if e.shared}
+              <Icon icon={CircleCheck} size={14} class="text-ok" label="already shared" />
+            {:else}
+              <Switch checked={on} label="share {e.name} with {r.asker}" onchange={(v) => toggleReq(r.id, e.key, v)} />
+            {/if}
+            <span class="min-w-0 flex-1 truncate text-sm {on || e.shared ? 'text-fg' : 'text-dim'}">{e.name}</span>
+            <span class="shrink-0 text-2xs text-faint">{e.shared ? "shared" : e.home}</span>
+          </li>
+        {/each}
+      </ul>
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+      <label class="flex items-center gap-2 text-xs text-dim">
+        Until
+        <input type="date" class="input w-auto py-1 text-xs" bind:value={reqUntil[r.id]} min={dateIn(1)} max={dateIn(maxDays)} disabled={busyId === r.id} />
+      </label>
+      <span class="ml-auto"></span>
+      <button class="btn btn-ghost btn-sm" disabled={busyId === r.id} onclick={() => void dismiss(r)}>Not this time</button>
+      <button class="btn btn-primary btn-sm" disabled={busyId === r.id || picked.length === 0} onclick={() => void answer(r)}>
+        {busyId === r.id ? "Sharing…" : `Share with ${r.asker}`}
+      </button>
+    </div>
+    <span class="text-2xs text-faint">Only {r.asker} and their agents will see what you share. {r.asker} isn't told who was asked, or if you say no.</span>
+  </li>
+{/snippet}
+
 {#snippet listView()}
   {#if !tree?.scoped}
     <EmptyState icon={Share2} title="Nothing to share yet" hint="This workspace's knowledge graph isn't divided into positions, so everyone already sees all of it." />
   {:else}
+    {#if openRequests.length || handledRequests.length}
+      <section class="grid gap-3 px-5 pt-5">
+        <h4 class="m-0 text-xs font-medium text-dim">Asked of you</h4>
+        {#if openRequests.length}
+          <ul class="m-0 grid list-none gap-3 p-0">
+            {#each openRequests as r (r.id)}{@render requestRow(r)}{/each}
+          </ul>
+        {:else}
+          <p class="m-0 text-xs text-faint">Nothing waiting for you.</p>
+        {/if}
+        {#each handledRequests as r (r.id)}
+          {@const sharedNames = r.entries.filter((e) => e.shared).map((e) => e.name)}
+          <span class="text-xs text-faint">
+            {r.asker} asked “{r.question}” ·
+            {r.status === "shared" ? `shared ${sharedNames.join(", ")}` : r.status === "dismissed" ? "not shared" : "ended"}
+          </span>
+        {/each}
+      </section>
+    {/if}
     <section class="grid gap-3 px-5 pt-5">
       <h4 class="m-0 text-xs font-medium text-dim">Shared by you</h4>
       {#if outgoing.length === 0}

@@ -56,6 +56,18 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
     const { id } = req.params as { id: string };
     return proxy(reply, `/api/grants/proposals/${encodeURIComponent(id)}/decline`, { method: "POST", body: {} });
   });
+  // requests for access: the asker's card, and the owners' side in Shared access
+  app.get("/api/requests", async (_req, reply) => proxy(reply, "/api/requests"));
+  app.get("/api/requests/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    return proxy(reply, `/api/requests/${encodeURIComponent(id)}`);
+  });
+  for (const action of ["confirm", "withdraw", "answer", "dismiss"] as const) {
+    app.post(`/api/requests/:id/${action}`, async (req, reply) => {
+      const { id } = req.params as { id: string };
+      return proxy(reply, `/api/requests/${encodeURIComponent(id)}/${action}`, { method: "POST", body: action === "answer" ? (req.body ?? {}) : {} });
+    });
+  }
   // the organization's data-scoping policy (graph-rag lets only a root person change it)
   app.get("/api/policy", async (_req, reply) => proxy(reply, "/api/policy"));
   app.put("/api/policy", async (req, reply) => proxy(reply, "/api/policy", { method: "PUT", body: req.body ?? {} }));

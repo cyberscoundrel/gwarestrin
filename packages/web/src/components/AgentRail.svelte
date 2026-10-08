@@ -36,6 +36,19 @@
       .then((w) => (canManageWorkspaces = w.enabled !== false))
       .catch(() => (canManageWorkspaces = false));
   });
+  // requests for access waiting on this person (Shared access › Asked of you)
+  let askedOfYou = $state(0);
+  $effect(() => {
+    if (showGrants) return; // recounted when the panel closes
+    const count = () =>
+      void api
+        .incomingRequests()
+        .then((r) => (askedOfYou = r.requests.filter((x) => x.status === "open").length))
+        .catch(() => (askedOfYou = 0));
+    count();
+    const t = setInterval(count, 60_000);
+    return () => clearInterval(t);
+  });
   // only the organization's root edits its settings; nobody else sees the entry
   let canEditSettings = $state(false);
   $effect(() => {
@@ -189,6 +202,9 @@
     <button class={ghost} onclick={() => (showGrants = true)}>
       <Icon icon={Share2} size={14} />
       Shared access
+      {#if askedOfYou > 0}
+        <span class="tabular ml-auto rounded-full bg-signal-soft px-1.5 text-2xs font-medium text-signal" aria-label="{askedOfYou} asked of you">{askedOfYou}</span>
+      {/if}
     </button>
     {#if canEditSettings}
       <button class={ghost} onclick={() => (showSettings = true)}>

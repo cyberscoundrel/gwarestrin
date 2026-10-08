@@ -122,7 +122,26 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   People are the token map's tenants; `find_shareable` and `/api/positions`
   list them with their positions so agents can match "show bob". Stored as
   `AccessGrant.to_user` (`to_pos` empty). The default for answering an access
-  request (see the inquiries design).
+  request.
+- **Access requests** (`request_access`; `AccessRequest` documents, never
+  graph entities, so search never returns them): someone asks for what they
+  can't see ("when does the next Toro order go to plating?"). An agent
+  drafts the request and the person confirms it on a card (it carries their
+  question and name); a person's own ask goes out at once. graph-rag embeds
+  the question, ranks the *whole* graph (`REQUEST_MATCH_MIN`, default 0.45,
+  at most 8 matches) and keeps only entries the asker can't see. Each match
+  goes to its owners: the people holding its home position, or the nearest
+  position above it that someone holds; one route per owner with only their
+  entries. Owners see it under Shared access › Asked of you (a count on the
+  rail), untick what shouldn't go and share: person grants to the asker,
+  under the usual policy (review, limits). Either owner of an entry may
+  share it. The asker's card says "Asked" whether there were ten matches or
+  none and whether anyone declined; it lists only what was actually shared.
+  Asking again while a request with overlapping matches is open joins it
+  (owners see "asked 2 times"). Requests stay open for `requestDays`
+  (Organization settings, default 14), then expire; withdrawn, answered and
+  declined ones are kept as the record of who asked what. Unmatched requests
+  just stay open for now (open questions come next).
 - **Semantic grading** (`GRADER_MODEL`, a litellm alias; empty = off): each
   write keeps its writer's position as its *origin*; the grader, given the
   positions' own descriptions, homes it at the origin or above (restricting

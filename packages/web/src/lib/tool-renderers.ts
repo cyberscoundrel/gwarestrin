@@ -10,6 +10,7 @@
 import { registerToolRenderer } from "@earendil-works/pi-web-ui";
 import { html, svg, type TemplateResult } from "lit";
 import { Cable, ChevronRight, FilePen, FileText, Pencil, SquareTerminal, type IconNode } from "lucide";
+import "./request-card.js";
 import "./share-card.js";
 
 type State = "inprogress" | "complete" | "error";
@@ -203,6 +204,25 @@ export function registerGwToolRenderers(): void {
           };
         }
       }
+      if (tool.endsWith("request_access") && result && !result.isError) {
+        const id = requestIdOf(out);
+        if (id) {
+          const q = typeof (a.args as Record<string, unknown> | undefined)?.question === "string" ? String((a.args as Record<string, unknown>).question) : "";
+          return { content: html`<gw-request-card request-id=${id} .question=${q}></gw-request-card>`, isCustom: true };
+        }
+      }
+      // {describe: "<server>_<tool>"}: the agent reading a tool's instructions
+      if (typeof a.describe === "string") {
+        const d = a.describe;
+        const pretty = d.replace(/^[^_]+_/, "").replace(/_/g, " ");
+        return card({
+          state,
+          icon: Cable,
+          title: label(state, `Reading how to use ${pretty}`, `Read how to use ${pretty}`, `Couldn't read about ${pretty}`),
+          detail: d.split("_")[0] || undefined,
+          body: out ? consoleOut(out, state) : undefined,
+        });
+      }
       const server = typeof a.server === "string" ? a.server : tool.split("_")[0] ?? "";
       const name = tool ? tool.slice(server.length + 1) || tool : "";
       return card({
@@ -216,6 +236,19 @@ export function registerGwToolRenderers(): void {
       });
     },
   });
+}
+
+/** the request an agent drafted, from a request_access result */
+function requestIdOf(text: string): string | null {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  try {
+    const j = JSON.parse(text.slice(start, end + 1)) as { requestId?: unknown; proposed?: unknown };
+    return j.proposed === true && typeof j.requestId === "string" ? j.requestId : null;
+  } catch {
+    return null;
+  }
 }
 
 /** shares an agent proposed, from a grant_access result (the JSON may be wrapped in text) */

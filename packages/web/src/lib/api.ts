@@ -42,6 +42,7 @@ export interface OrgPolicy {
   gradingEnabled: boolean;
   gradingConfidence: number;
   derivedWindowHours: number;
+  requestDays: number;
 }
 
 export interface PolicyView {
@@ -102,6 +103,19 @@ export interface NewGrant {
   person?: string;
   reason: string;
   until?: string;
+}
+
+/** a request for access routed to this person: someone asked; these entries of theirs match */
+export interface IncomingRequest {
+  id: string;
+  question: string;
+  /** how many times it was asked (repeats join the open request) */
+  asked: number;
+  asker: string;
+  status: "open" | "shared" | "dismissed" | "expired";
+  entries: Array<{ key: string; name: string; home: string; shared: boolean }>;
+  created_at: string;
+  expires_at: string | null;
 }
 
 /** per target: granted at once, or proposed (queued for a person to approve) */
@@ -201,6 +215,21 @@ export const api = {
   },
   async grants(): Promise<{ grants: GrantView[]; canGrantStanding: boolean }> {
     return json(await fetch("/api/grants"));
+  },
+  async incomingRequests(): Promise<{ requests: IncomingRequest[] }> {
+    return json(await fetch("/api/requests"));
+  },
+  async answerRequest(id: string, entries: string[], until?: string): Promise<{ request: IncomingRequest; results: Array<{ name: string; granted?: boolean; proposed?: boolean; error?: string }> }> {
+    return json(
+      await fetch(`/api/requests/${encodeURIComponent(id)}/answer`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ entries, ...(until ? { until } : {}) }),
+      }),
+    );
+  },
+  async dismissRequest(id: string): Promise<void> {
+    await json(await fetch(`/api/requests/${encodeURIComponent(id)}/dismiss`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }));
   },
   async createGrant(input: NewGrant): Promise<GrantResult> {
     return json(
