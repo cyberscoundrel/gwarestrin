@@ -281,7 +281,7 @@
     </div>
     {#if r.posted}
       <p class="m-0 text-xs leading-relaxed text-dim">
-        Nothing in the knowledge graph answers this yet. If you know, tell your agent so it's saved; it then shows up here for you to share with {r.asker}.
+        Nothing in the knowledge graph answers this yet. If you know, tell your agent so it's saved: {r.asker} is told if they can see it, or you're asked here whether to share it with them.
       </p>
       <div class="flex">
         <span class="ml-auto"></span>
