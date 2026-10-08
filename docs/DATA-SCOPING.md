@@ -146,25 +146,29 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   stays is a `PruneRecord` line: name, home, kind, end and removal dates,
   never content, shown only to the root. Organization settings previews
   what's waiting and when it goes.
-- **Access requests** (`request_access`; `AccessRequest` documents, never
-  graph entities, so search never returns them): someone asks for what they
-  can't see ("when does the next Toro order go to plating?"). An agent
-  drafts the request and the person confirms it on a card (it carries their
-  question and name); a person's own ask goes out at once. graph-rag embeds
-  the question, ranks the *whole* graph (`REQUEST_MATCH_MIN`, default 0.45,
-  at most 8 matches) and keeps only entries the asker can't see. Each match
-  goes to its owners: the people holding its home position, or the nearest
-  position above it that someone holds; one route per owner with only their
-  entries. Owners see it under Shared access › Asked of you (a count on the
-  rail), untick what shouldn't go and share: person grants to the asker,
-  under the usual policy (review, limits). Either owner of an entry may
-  share it. The asker's card says "Asked" whether there were ten matches or
-  none and whether anyone declined; it lists only what was actually shared.
-  Asking again while a request with overlapping matches is open joins it
-  (owners see "asked 2 times"). Requests stay open for `requestDays`
-  (Organization settings, default 14), then expire; withdrawn, answered and
-  declined ones are kept as the record of who asked what. Unmatched requests
-  just stay open for now (open questions come next).
+- **Questions as needs** (`request_access`; graph-rag/src/needs.js): a
+  question is an entry like any other, of the opposite sign: `_kind =
+  "need"`, homed at the asker's position, embedded, with an open-until date
+  (`requestDays`, or sooner if its subject ends: grading dates "is Sandra
+  here Friday" to Friday) and an end date for pruning (lasting questions stay
+  as history). An answer is an assertion near a need, whichever came first,
+  so posting a question and saving an entry run the same meeting, recorded
+  as a NEAR edge (need -> assertion, score, state). One rule: a meeting is
+  shown only to someone who can see both points. If the asker sees the
+  assertion, they're told (`visible`); otherwise its owners (holders of its
+  home, or the nearest position above that someone holds) are shown the
+  question through a person share of it, and asked to share the assertion
+  back (`open` -> `shared` / `declined`). A question nothing matches is
+  posted (a position share) for the positions whose own descriptions fit it
+  best, never by hidden data, so someone who knows can save the answer,
+  which then meets it. The asker sees "Asked" whether there were ten
+  matches, none, or refusals, and only what was shared or turned up visible;
+  the shares that show a question are hidden from Shared access, which
+  would tell the asker who was asked. Open questions appear in search
+  labelled `kind: "question"`; reading one never bounds where later writes
+  land (it carries no knowledge). Drafts (an agent's, until the person
+  confirms) and closed questions stay out of search. The same person asking
+  nearly the same thing again joins the open question.
 - **Semantic grading** (`GRADER_MODEL`, a litellm alias; empty = off): each
   write keeps its writer's position as its *origin*; the grader, given the
   positions' own descriptions, homes it at the origin or above (restricting

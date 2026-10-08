@@ -279,6 +279,15 @@
       <span class="text-sm text-fg"><span class="font-medium">{r.asker}</span> asked{r.asked > 1 ? ` (${r.asked} times)` : ""}</span>
       <p class="m-0 border-l-2 border-edge2 pl-2.5 text-sm leading-relaxed text-dim">{r.question}</p>
     </div>
+    {#if r.posted}
+      <p class="m-0 text-xs leading-relaxed text-dim">
+        Nothing in the knowledge graph answers this yet. If you know, tell your agent so it's saved: {r.asker} is told if they can see it, or you're asked here whether to share it with them.
+      </p>
+      <div class="flex">
+        <span class="ml-auto"></span>
+        <button class="btn btn-ghost btn-sm" disabled={busyId === r.id} onclick={() => void dismiss(r)}>Not for me</button>
+      </div>
+    {:else}
     <div class="grid gap-1.5">
       <span class="text-xs text-faint">Your entries that match</span>
       <ul class="m-0 grid list-none gap-1 p-0" aria-label="entries matching {r.asker}'s question">
@@ -308,6 +317,7 @@
       </button>
     </div>
     <span class="text-2xs text-faint">Only {r.asker} and their agents will see what you share. {r.asker} isn't told who was asked, or if you say no.</span>
+    {/if}
   </li>
 {/snippet}
 

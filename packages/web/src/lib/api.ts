@@ -136,7 +136,8 @@ export interface IncomingRequest {
   asker: string;
   status: "open" | "shared" | "dismissed" | "expired";
   entries: Array<{ key: string; name: string; home: string; shared: boolean }>;
-  created_at: string;
+  /** nothing of theirs matches: the question was posted for their position, to add the answer */
+  posted: boolean;
   expires_at: string | null;
 }
 
