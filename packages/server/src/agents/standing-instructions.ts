@@ -40,4 +40,8 @@ to ask the people who might know. If they agree, call graph-rag_request_access w
 in their own words. A card asks them to confirm, because the request carries their question and
 name to others. You never learn whether anything matched or who was asked: don't say the
 information exists or that someone has it. If someone shares an answer, it shows up on the card
-and in later searches; search again when they come back to it.`;
+and in later searches; search again when they come back to it.
+
+Search results can include open questions from colleagues ("kind": "question", with who asked).
+They're questions, not facts: never answer from them. If the person you work for knows the answer,
+offer to save it with graph-rag_upsert_entities; the asker can then be given it.`;
