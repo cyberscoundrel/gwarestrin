@@ -244,6 +244,7 @@
 {#snippet pruningBody()}
   {#if draft && view}
     {@const p = view.pruning}
+    {@const upcoming = p?.days.find((d) => d.day > new Date().toISOString().slice(0, 10))}
     <div class="field">
       <label class="field-label" for="os-prune">Remove expired entries</label>
       <div class="flex items-center gap-2">
@@ -270,7 +271,7 @@
         {:else}
           <span class="text-dim">
             {p.waiting} expired {p.waiting === 1 ? "entry" : "entries"} waiting.
-            {#if p.days[0]}Next removal: {p.days[0].count} on {new Date(`${p.days[0].day}T12:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}.{/if}
+            {#if upcoming}Next removal: {upcoming.count} on {new Date(`${upcoming.day}T12:00:00Z`).toLocaleDateString(undefined, { month: "short", day: "numeric" })}.{/if}
           </span>
           {#if p.due}
             <div class="flex items-center gap-2">
