@@ -8,6 +8,47 @@ import { getInstanceMetadata } from "../instance/metadata.js";
  * graph-rag with the instance's own token (the person, not an agent);
  * graph-rag owns the tree and enforces every rule.
  */
+/** graph-rag as this instance's own person (not an agent); null when the workspace has no knowledge graph */
+async function graphRag(manager: AgentManager, path: string, init: { method?: "GET" | "PUT" | "POST"; body?: unknown } = {}): Promise<{ status: number; body: unknown } | null> {
+  const values = getInstanceMetadata()?.values as Record<string, { token?: unknown }> | undefined;
+  const token = typeof values?.graph?.token === "string" ? values.graph.token : undefined;
+  const base = manager.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL;
+  if (!token || !base) return null;
+  const res = await fetch(new URL(path, base), {
+    method: init.method ?? "GET",
+    headers: { authorization: `Bearer ${token}`, ...(init.body !== undefined ? { "content-type": "application/json" } : {}) },
+    ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+    signal: AbortSignal.timeout(20_000),
+  });
+  return { status: res.status, body: await res.json().catch(() => ({})) };
+}
+
+/** only the organization's root may configure the graph worker (graph-rag decides) */
+export async function canSetGraphWorker(manager: AgentManager): Promise<boolean> {
+  return (await graphRag(manager, "/api/worker").catch(() => null))?.status === 200;
+}
+
+/**
+ * Push the Graph worker profile (model + instructions) to graph-rag, or clear
+ * it when no profile holds the role any more. Only the root's instance can.
+ */
+export async function syncGraphWorker(manager: AgentManager): Promise<{ error?: string }> {
+  try {
+    const current = await graphRag(manager, "/api/worker");
+    if (current?.status !== 200) return {};
+    const p = manager.profiles.graphWorker();
+    const had = (current.body as { profile?: string | null }).profile;
+    if (!p && !had) return {};
+    const r = await graphRag(manager, "/api/worker", {
+      method: "PUT",
+      body: p ? { profile: p.name, model: p.graphWorker?.model ?? "", instructions: p.instructions ?? "", enabled: true } : { profile: null, model: "", instructions: "" },
+    });
+    return r?.status === 200 ? {} : { error: `graph-rag didn't take the graph worker settings (${r?.status ?? "unreachable"})` };
+  } catch (e) {
+    return { error: `graph-rag unreachable: ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
 export async function registerKnowledgeRoutes(app: FastifyInstance, manager: AgentManager): Promise<void> {
   const target = () => {
     const values = getInstanceMetadata()?.values as Record<string, { token?: unknown }> | undefined;
@@ -71,6 +112,10 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
   // the organization's data-scoping policy (graph-rag lets only a root person change it)
   app.get("/api/policy", async (_req, reply) => proxy(reply, "/api/policy"));
   app.put("/api/policy", async (req, reply) => proxy(reply, "/api/policy", { method: "PUT", body: req.body ?? {} }));
+  // the graph worker's backlog and settings (root only), the models it can use, a backfill
+  app.get("/api/graph-worker", async (_req, reply) => proxy(reply, "/api/worker"));
+  app.get("/api/graph-worker/models", async (_req, reply) => proxy(reply, "/api/worker/models"));
+  app.post("/api/graph-worker/backfill", async (_req, reply) => proxy(reply, "/api/worker/backfill", { method: "POST", body: {} }));
   // what pruning removed (graph-rag shows it only to the root), and pruning now
   app.get("/api/pruned", async (_req, reply) => proxy(reply, "/api/pruned"));
   app.post("/api/pruned/run", async (_req, reply) => proxy(reply, "/api/pruned/run", { method: "POST", body: {} }));

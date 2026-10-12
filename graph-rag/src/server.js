@@ -32,6 +32,7 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
+import { mentionsPrompt, normalize, parseMentions, resolve, thingName } from "./things.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
@@ -65,6 +66,11 @@ const {
   DOC_STORE = "fs:/app/documents",
   // the model that extracts facts from documents (when an ingest asks for it); default: the grader's
   EXTRACT_MODEL = "",
+  // the graph worker (finds the things statements are about); its model and instructions
+  // normally come from the admin's Graph worker profile; these are fallbacks and limits
+  WORKER_MODEL = "",
+  WORKER_TIMEOUT_MS = "120000",
+  WORKER_DAILY_CALLS = "300",
   // policy defaults (MAX_GRANT_DAYS, DEFAULT_SHARE_DAYS, STANDING_GRANTS,
   // PEOPLE_SHARE_DIRECTLY, GRADING_ENABLED, GRADING_CONFIDENCE,
   // DERIVED_WINDOW_HOURS) are read by policy.js
@@ -155,6 +161,8 @@ function homeFilter(scope, { own = false } = {}) {
   }
   const conds = [];
   if (homes.size) conds.push(`_home IN [${[...homes].map((h) => `'${esc(h)}'`).join(",")}]`);
+  // a thing: seen from the homes of the statements about it
+  if (homes.size) conds.push(`(_kind = 'thing' AND _homes CONTAINSANY [${[...homes].map((h) => `'${esc(h)}'`).join(",")}])`);
   if (entities) conds.push(entities);
   return conds.length ? ` AND (${conds.join(" OR ")})` : " AND 1 = 0";
 }
@@ -385,7 +393,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
   // every read path below carries the caller's home filter, and (unless
   // history is asked for) leaves out entries past their end date
   // questions show while open (history: any but drafts); never where only knowledge is wanted
-  const kinds = assertions_only ? ASSERTIONS : include_expired ? " AND (_kind IS NULL OR _kind <> 'need' OR _status <> 'proposed')" : openNeedsClause();
+  const kinds = assertions_only ? ASSERTIONS : include_expired ? " AND (_kind IS NULL OR _kind IN ['document', 'section'] OR (_kind = 'need' AND _status <> 'proposed'))" : openNeedsClause();
   const visible = homeFilter(scope) + (include_expired ? "" : liveClause()) + kinds;
   let where = visible;
   if (temporal_filter) {
@@ -455,6 +463,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
           ...(SCOPED && positionMap && !ownsHome(scope, row._home) ? { via: "grant" } : {}),
           ...validityOf(row),
           ...questionOf(row),
+          ...(row._mentions_at ? { _mentioned: true } : {}),
           score: b.score,
           facets: b.facets,
           rid,
@@ -514,12 +523,18 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
     }
   }
 
+  // what people look for gets processed first (the worker's backlog, by demand)
+  for (const r of results.slice(0, k)) {
+    if (r.kind === "question" || !RID_RE.test(String(r.rid)) || r._mentioned) continue;
+    void enqueue("mentions", { rid: String(r.rid) }, { key: `mentions:${r.rid}`, priority: 5 }).catch(() => {});
+  }
+
   // what the caller has now seen (derived-data tracking; not returned)
   readHomes.push(...results.slice(0, k).filter((r) => r.kind !== "question").map((r) => r.home?.id), ...neighbourHomes.map((h) => (SCOPED && positionMap ? effectiveHome(positionMap, h) : h)));
   return {
     query,
     // exactly k results (the schema allows 1..32, default 8)
-    results: results.slice(0, k).map(({ rid: _rid, ...r }) => r),
+    results: results.slice(0, k).map(({ rid: _rid, _mentioned, ...r }) => r),
     relationships,
     ...(embedFailed ? { note: "embedding backend unavailable; lexical fallback used" } : {}),
   };
@@ -732,7 +747,12 @@ async function upsertEntities({ entities, home, floor, written_at }) {
         if (jobs[i].facet !== "identity") continue;
         const vec = vecs[i];
         void adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: jobs[i].name, origin: home })
-          .then((rows) => rows[0] && meetAssertion(String(rows[0].rid), vec))
+          .then(async (rows) => {
+            if (!rows[0]) return;
+            // the graph worker finds what it's about (in the background)
+            await enqueue("mentions", { rid: String(rows[0].rid) }, { key: `mentions:${rows[0].rid}` }).catch(() => {});
+            await meetAssertion(String(rows[0].rid), vec);
+          })
           .catch((e) => log.warn(`meeting questions for ${jobs[i].name}: ${String(e).slice(0, 120)}`));
       }
     }
@@ -826,6 +846,7 @@ async function executePending(rec) {
   if (rec.kind === "rehome") return applyRehome(JSON.parse(rec.payload));
   if (rec.kind === "grant") return storeGrant(JSON.parse(rec.payload));
   if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
+  if (rec.kind === "merge") return mergeThings(JSON.parse(rec.payload));
   // approved: runs in the background (minutes for a long document)
   if (rec.kind === "ingest") {
     const p = JSON.parse(rec.payload);
@@ -1325,9 +1346,9 @@ async function schemaGraph() {
 const QUESTION_GRANTOR = "graph-rag: question";
 const REQUEST_MATCH_MIN = Number.isFinite(Number(process.env.REQUEST_MATCH_MIN)) && process.env.REQUEST_MATCH_MIN ? Number(process.env.REQUEST_MATCH_MIN) : MATCH_MIN;
 /** reads of assertions only (questions aren't knowledge to search, share or match) */
-const ASSERTIONS = " AND (_kind IS NULL OR _kind <> 'need')";
+const ASSERTIONS = " AND (_kind IS NULL OR _kind IN ['document', 'section'])";
 /** in search: assertions, and questions only while open */
-const openNeedsClause = (now = Date.now()) => ` AND (_kind IS NULL OR _kind <> 'need' OR (_status = 'open' AND _open_until > '${new Date(now).toISOString()}'))`;
+const openNeedsClause = (now = Date.now()) => ` AND (_kind IS NULL OR _kind IN ['document', 'section'] OR (_kind = 'need' AND _status = 'open' AND _open_until > '${new Date(now).toISOString()}'))`;
 
 async function ensureNeedSchema() {
   for (const prop of ["_kind", "_qid", "_asker", "_asked_by", "_status", "_open_until", "_joined_into", "_questions", "_dismissed"]) {
@@ -1559,7 +1580,7 @@ async function openNeed(need, askerScope) {
 async function meetAssertion(rid, vec) {
   if (!SCOPED || !positionMap || !Array.isArray(vec)) return;
   const row = (await adbQuery(`SELECT @rid AS rid, name, _home, _origin, _kind, _valid_until FROM ${rid}`))[0];
-  if (!row || row._kind === "need" || row._kind === "document" || isExpired(row._valid_until)) return;
+  if (!row || (row._kind && row._kind !== "section") || isExpired(row._valid_until)) return;
   const now = new Date().toISOString();
   const near = await adbQuery(
     `SELECT @rid AS rid, vectorCosineSimilarity(embed_identity, [${vec.join(",")}]) AS score FROM ${ENTITY_LABEL} WHERE _kind = 'need' AND _status = 'open' AND _open_until > :now AND embed_identity IS NOT NULL ORDER BY score DESC LIMIT 16`,
@@ -1603,7 +1624,13 @@ async function requestAccess({ question }, identity, scope) {
   } catch (e) {
     log.warn(`question ${qid}: embedding failed, it won't meet anything: ${String(e).slice(0, 120)}`);
   }
-  if (identity.agent) return { proposed: true, requestId: qid, note: "waiting for the person to confirm the request in the chat" };
+  if (identity.agent) {
+    return {
+      proposed: true,
+      requestId: qid,
+      note: "Drafted only: nothing has been sent. Tell the person: \"I've drafted the question; nothing is sent until you press Ask on the card below.\"",
+    };
+  }
   await openNeed(need, scope);
   return askerRequest(qid, identity);
 }
@@ -1792,12 +1819,12 @@ async function edgeOnce(type, from, to) {
 }
 
 /** one model call (the extraction model: EXTRACT_MODEL, else the grader's) */
-async function chat(model, messages) {
+async function chat(model, messages, timeoutMs = Number(GRADER_TIMEOUT_MS) * 2) {
   const res = await fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}/chat/completions`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${LITELLM_API_KEY}` },
     body: JSON.stringify({ model, messages, temperature: 0 }),
-    signal: AbortSignal.timeout(Number(GRADER_TIMEOUT_MS) * 2),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`${model} HTTP ${res.status}`);
   return (await res.json()).choices?.[0]?.message?.content ?? "";
@@ -2028,6 +2055,208 @@ async function readDocument({ document, section, count = 3 }, identity, scope) {
     contents: chunks.filter((c) => seen.has(c.index)).map((c) => ({ section: c.index + 1, heading: c.heading || undefined })),
     sections: picked.map((c) => ({ section: c.index + 1, heading: c.heading || undefined, text: c.text })),
   };
+}
+
+/** ---- the graph worker: a job queue and loop (things and their links; see things.js) ---- */
+
+// the worker's settings come from the admin's "Graph worker" profile (PUT /api/worker)
+let worker = { enabled: true, model: "", instructions: "", profile: null, updated_by: null, updated_at: null };
+const workerModel = () => worker.model || WORKER_MODEL || GRADER_MODEL;
+const workerUsage = { day: "", calls: 0 }; // model calls today (WORKER_DAILY_CALLS caps them)
+let workerTicking = false;
+
+async function ensureWorkerSchema() {
+  await adbCommand("CREATE DOCUMENT TYPE Job IF NOT EXISTS").catch(() => {});
+  for (const prop of ["id", "kind", "job_key", "payload", "status", "run_after", "created_at", "updated_at", "error"]) {
+    await adbCommand(`CREATE PROPERTY Job.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  }
+  for (const prop of ["attempts", "priority"]) await adbCommand(`CREATE PROPERTY Job.${prop} IF NOT EXISTS INTEGER`).catch(() => {});
+  await adbCommand("CREATE INDEX IF NOT EXISTS ON Job (job_key) NOTUNIQUE").catch(() => {});
+  await adbCommand("CREATE INDEX IF NOT EXISTS ON Job (status) NOTUNIQUE").catch(() => {});
+  for (const prop of ["_thing_type", "_norm", "_mentions_at"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["_homes", "_alias_norms"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS LIST`).catch(() => {});
+  await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_norm) NOTUNIQUE`).catch(() => {});
+  await adbCommand("CREATE EDGE TYPE ABOUT IF NOT EXISTS").catch(() => {});
+  await adbCommand("CREATE PROPERTY ABOUT.role IF NOT EXISTS STRING").catch(() => {});
+  // a crash mid-job leaves it running: it runs again
+  await adbCommand("UPDATE Job SET status = 'pending' WHERE status = 'running'").catch(() => {});
+  try {
+    const row = (await adbQuery("SELECT FROM OrgPolicy WHERE scope = 'worker' LIMIT 1"))[0];
+    if (row) worker = { ...worker, ...JSON.parse(row.json), updated_by: row.updated_by ?? null, updated_at: row.updated_at ?? null };
+  } catch {
+    /* defaults */
+  }
+}
+
+/** queue a job once: a pending one with the same key is reused (and raised in priority) */
+async function enqueue(kind, payload, { key, priority = 0 } = {}) {
+  const job_key = key ?? `${kind}:${JSON.stringify(payload)}`;
+  const open = (await adbQuery("SELECT id, priority FROM Job WHERE job_key = :k AND status IN ['pending', 'running'] LIMIT 1", { k: job_key }).catch(() => []))[0];
+  if (open) {
+    if (priority > Number(open.priority ?? 0)) await adbCommand("UPDATE Job SET priority = :p WHERE id = :id AND status = 'pending'", "sql", { p: priority, id: open.id });
+    return open.id;
+  }
+  const now = new Date().toISOString();
+  const id = randomUUID();
+  await adbCommand(
+    "INSERT INTO Job SET id = :id, kind = :kind, job_key = :k, payload = :payload, status = 'pending', attempts = 0, priority = :p, run_after = :now, created_at = :now, updated_at = :now",
+    "sql",
+    { id, kind, k: job_key, payload: JSON.stringify(payload), p: priority, now },
+  );
+  return id;
+}
+
+/** one model call for the worker, counted against the daily budget */
+async function workerCall(messages) {
+  const day = new Date().toISOString().slice(0, 10);
+  if (workerUsage.day !== day) Object.assign(workerUsage, { day, calls: 0 });
+  if (workerUsage.calls >= Number(WORKER_DAILY_CALLS)) throw Object.assign(new Error("the worker's daily budget is used up"), { later: true });
+  workerUsage.calls++;
+  return chat(workerModel(), messages, Number(WORKER_TIMEOUT_MS));
+}
+
+const THING_KINDS_READ = ["document", "section"]; // besides plain entries, what the worker reads for things
+
+/** a thing's visibility follows the statements about it: add a home */
+async function thingSeenFrom(rid, home) {
+  const row = (await adbQuery(`SELECT _homes FROM ${rid}`))[0];
+  const homes = Array.isArray(row?._homes) ? row._homes : [];
+  if (!homes.includes(home)) await adbCommand(`UPDATE ${rid} SET _homes = :homes`, "sql", { homes: [...homes, home] });
+}
+
+async function aboutOnce(statementRid, thingRid, role) {
+  const out = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${statementRid})`).catch(() => []);
+  if (out.some((e) => String(e.dst) === thingRid)) return;
+  await adbCommand(`CREATE EDGE ABOUT FROM ${statementRid} TO ${thingRid} SET role = :role`, "sql", { role });
+}
+
+/** the job: find the things one statement is about, resolve them, link them */
+async function jobMentions({ rid }) {
+  if (!RID_RE.test(String(rid))) return;
+  const row = (await adbQuery(`SELECT FROM ${rid}`))[0];
+  if (!row?.name || (row._kind && !THING_KINDS_READ.includes(row._kind))) return; // gone, or a question/thing/document entry
+  const facets = Object.fromEntries(Object.keys(FACETS).filter((f) => row[`text_${f}`]).map((f) => [f, row[`text_${f}`]]));
+  if (Object.keys(facets).length === 0) return;
+  const mentions = parseMentions(await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions)));
+  const home = effectiveHome(positionMap, row._home);
+  const vecs = mentions.length ? await embedBatch(mentions.map((m) => `${m.type}: ${m.name}`)) : [];
+  for (const [i, m] of mentions.entries()) {
+    const n = normalize(m.name);
+    const byName = await adbQuery(
+      `SELECT @rid AS rid, label, _alias_norms, _thing_type FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 5`,
+      { t: m.type, n },
+    ).catch(() => []);
+    const near = byName.length
+      ? []
+      : await adbQuery(
+          `SELECT @rid AS rid, label, _alias_norms, _thing_type, vectorCosineSimilarity(embed_thing, [${vecs[i].join(",")}]) AS score FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND embed_thing IS NOT NULL ORDER BY score DESC LIMIT 3`,
+          { t: m.type },
+        ).catch(() => []);
+    const cands = [...byName, ...near].map((c) => ({ rid: String(c.rid), name: c.label, aliases: c._alias_norms ?? [], type: c._thing_type, score: c.score === undefined ? undefined : Number(c.score) }));
+    const r = resolve(m, cands);
+    let thing = r.use;
+    if (r.alias) {
+      const cur = (await adbQuery(`SELECT _alias_norms FROM ${thing}`))[0]?._alias_norms ?? [];
+      await adbCommand(`UPDATE ${thing} SET _alias_norms = :a`, "sql", { a: [...new Set([...cur, normalize(r.alias)])] }).catch(() => {});
+    }
+    if (r.create) {
+      await adbCommand(
+        `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :label, _kind = 'thing', _thing_type = :t, _norm = :n, _alias_norms = :aliases, _homes = :homes, _home = :root, embed_thing = [${vecs[i].join(",")}], updated_at = :now`,
+        "sql",
+        { name: thingName(m.type, m.name), label: m.name, t: m.type, n, aliases: [], homes: [home], root: positionMap.root, now: new Date().toISOString() },
+      );
+      thing = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND _norm = :n ORDER BY @rid DESC LIMIT 1`, { t: m.type, n }))[0]?.rid);
+      if (r.maybe && RID_RE.test(thing)) {
+        // unsure: a person decides whether they're the same (nothing merges on its own)
+        const other = (await adbQuery(`SELECT label FROM ${r.maybe}`))[0]?.label;
+        await queueWrite({ kind: "merge", payload: JSON.stringify({ keep: r.maybe, drop: thing, keep_name: other, drop_name: m.name, type: m.type }), user: "graph-rag worker", home: positionMap.root });
+      }
+    }
+    if (!RID_RE.test(String(thing))) continue;
+    await thingSeenFrom(thing, home);
+    await aboutOnce(rid, thing, m.role);
+  }
+  await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
+  return { things: mentions.length };
+}
+
+/** approved merge: the dropped thing's links move to the kept one */
+async function mergeThings({ keep, drop, drop_name }) {
+  if (!RID_RE.test(String(keep)) || !RID_RE.test(String(drop))) throw new Error("invalid merge");
+  const k = (await adbQuery(`SELECT _homes, _alias_norms FROM ${keep}`))[0];
+  const d = (await adbQuery(`SELECT _homes, _alias_norms, _norm FROM ${drop}`))[0];
+  if (!k || !d) throw new Error("one of the things is gone");
+  const edges = await adbQuery(`SELECT @out AS src, role FROM (SELECT expand(inE('ABOUT')) FROM ${drop})`).catch(() => []);
+  for (const e of edges) await aboutOnce(String(e.src), keep, e.role ?? "mentions");
+  await adbCommand(`UPDATE ${keep} SET _homes = :homes, _alias_norms = :aliases`, "sql", {
+    homes: [...new Set([...(k._homes ?? []), ...(d._homes ?? [])])],
+    aliases: [...new Set([...(k._alias_norms ?? []), ...(d._alias_norms ?? []), d._norm, normalize(drop_name)].filter(Boolean))],
+  });
+  await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE @rid = ${drop} AND _kind = 'thing'`);
+  return { merged: true };
+}
+
+const JOBS = { mentions: jobMentions };
+
+/** a few jobs per tick, highest priority first; failures back off and give up after a few tries */
+async function workerTick() {
+  if (workerTicking || !worker.enabled || !workerModel() || !SCOPED || !positionMap) return;
+  workerTicking = true;
+  try {
+    const now = new Date().toISOString();
+    const due = await adbQuery("SELECT id, kind, payload, attempts FROM Job WHERE status = 'pending' AND run_after <= :now ORDER BY priority DESC, created_at ASC LIMIT 3", { now });
+    for (const job of due) {
+      const claimed = await adbCommand("UPDATE Job SET status = 'running', updated_at = :now WHERE id = :id AND status = 'pending'", "sql", { now, id: job.id });
+      if (Number(claimed?.[0]?.count ?? 0) !== 1) continue;
+      try {
+        if (!JOBS[job.kind]) throw new Error(`unknown job kind ${job.kind}`);
+        await JOBS[job.kind](JSON.parse(job.payload || "{}"));
+        await adbCommand("UPDATE Job SET status = 'done', updated_at = :now WHERE id = :id", "sql", { now: new Date().toISOString(), id: job.id });
+      } catch (e) {
+        const attempts = Number(job.attempts ?? 0) + (e.later ? 0 : 1);
+        const giveUp = attempts >= 5;
+        const wait = e.later ? 3_600_000 : 30_000 * 4 ** attempts;
+        await adbCommand("UPDATE Job SET status = :s, attempts = :a, run_after = :ra, error = :err, updated_at = :now WHERE id = :id", "sql", {
+          s: giveUp ? "failed" : "pending",
+          a: attempts,
+          ra: new Date(Date.now() + wait).toISOString(),
+          err: String(e?.message ?? e).slice(0, 300),
+          now: new Date().toISOString(),
+          id: job.id,
+        });
+        if (e.later) break; // out of budget: stop for this tick
+      }
+    }
+  } finally {
+    workerTicking = false;
+  }
+}
+
+/** what we know about a thing: the statements about it the caller can see */
+async function aboutThing({ name }, identity, scope) {
+  const n = normalize(name);
+  const visible = homeFilter(scope);
+  const things = await adbQuery(
+    `SELECT @rid AS rid, label, _thing_type, _alias_norms FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n)${visible} LIMIT 5`,
+    { n },
+  );
+  if (things.length === 0) return { things: [], note: `nothing called "${name}" that you can see is known yet` };
+  const out = [];
+  const read = [];
+  for (const t of things) {
+    const rows = await adbQuery(
+      `SELECT name, _home, _kind, _doc_title, _doc_id, _section, text_identity, _valid_until FROM (SELECT expand(in('ABOUT')) FROM ${String(t.rid)}) WHERE name IS NOT NULL${visible}${liveClause()} LIMIT 40`,
+    ).catch(() => []);
+    read.push(...rows.map((r) => effectiveHome(positionMap, r._home)));
+    out.push({
+      name: t.label,
+      type: t._thing_type,
+      also_called: t._alias_norms ?? [],
+      statements: rows.map((r) => ({ name: r.name, ...questionOf(r), ...validityOf(r), text: String(r.text_identity ?? "").slice(0, 300) })),
+    });
+  }
+  recordReads(identity, read);
+  return { things: out };
 }
 
 /** ---- pruning (see prune.js): expired entries leave for good after a window ---- */
@@ -2396,6 +2625,20 @@ in upsert_entities. Re-ingesting the same title replaces the document.`,
   );
 
   if (SCOPED) server.tool(
+    "about_thing",
+    `Everything you can see about one thing: a person, customer, supplier, machine, part, order,
+place, project or team, by name (aliases work: "Toro Co." finds Toro). The graph worker links
+statements to the things they mention in the background, so newly saved entries appear here after
+a minute or so. Use it for "what do we know about X" questions, and to find related entries after
+a search.`,
+    { name: z.string().min(2) },
+    async (args) => {
+      need("read");
+      return { content: [{ type: "text", text: JSON.stringify(await aboutThing(args, identity, scope)) }] };
+    },
+  );
+
+  if (SCOPED) server.tool(
     "read_document",
     `Read a document from the knowledge graph. Search results with kind "section" are parts of a
 document (document, document_id, section): pass document_id (or the document's title) and the
@@ -2697,6 +2940,69 @@ app.get("/api/policy", (req, res) => {
       }),
     );
 });
+/** the graph worker: settings (pushed from the admin's Graph worker profile) and its backlog; root only */
+async function workerStatus() {
+  const counts = await adbQuery("SELECT status, count(*) AS n FROM Job GROUP BY status").catch(() => []);
+  const things = await adbQuery(`SELECT count(*) AS n FROM ${ENTITY_LABEL} WHERE _kind = 'thing'`).catch(() => []);
+  const failed = await adbQuery("SELECT kind, error, updated_at FROM Job WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 5").catch(() => []);
+  return {
+    ...worker,
+    model: workerModel() || null,
+    jobs: Object.fromEntries(counts.map((c) => [c.status, Number(c.n)])),
+    things: Number(things[0]?.n ?? 0),
+    today: { calls: workerUsage.day === new Date().toISOString().slice(0, 10) ? workerUsage.calls : 0, budget: Number(WORKER_DAILY_CALLS) },
+    recent_failures: failed,
+  };
+}
+app.get("/api/worker", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root sees the graph worker" });
+  void workerStatus().then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.put("/api/worker", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root sets the graph worker" });
+  const b = req.body ?? {};
+  const next = {
+    enabled: typeof b.enabled === "boolean" ? b.enabled : worker.enabled,
+    model: typeof b.model === "string" ? b.model.slice(0, 300) : worker.model,
+    instructions: typeof b.instructions === "string" ? b.instructions.slice(0, 4000) : worker.instructions,
+    profile: typeof b.profile === "string" ? b.profile.slice(0, 120) : b.profile === null ? null : worker.profile,
+  };
+  const now = new Date().toISOString();
+  void (async () => {
+    const json = JSON.stringify(next);
+    const done = await adbCommand("UPDATE OrgPolicy SET json = :json, updated_by = :u, updated_at = :now WHERE scope = 'worker'", "sql", { json, u: identity.user, now });
+    if (Number(done?.[0]?.count ?? 0) === 0) await adbCommand("INSERT INTO OrgPolicy SET scope = 'worker', json = :json, updated_by = :u, updated_at = :now", "sql", { json, u: identity.user, now });
+    worker = { ...next, updated_by: identity.user, updated_at: now };
+    log.info(`graph worker set by ${identity.user}: ${next.enabled ? `on, ${workerModel() || "no model"}` : "off"}${next.profile ? ` (profile ${next.profile})` : ""}`);
+    return workerStatus();
+  })().then((r) => res.json(r), (e) => httpError(res, e));
+});
+/** the models graph-rag reaches through litellm (what a Graph worker profile can pick) */
+app.get("/api/worker/models", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root sets the graph worker" });
+  void fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}/models`, { headers: { authorization: `Bearer ${LITELLM_API_KEY}` }, signal: AbortSignal.timeout(10_000) })
+    .then((r) => r.json())
+    .then((j) => res.json({ models: (j.data ?? []).map((m) => m.id).filter((id) => typeof id === "string" && !/embed/i.test(id)).sort() }))
+    .catch((e) => httpError(res, e));
+});
+/** queue the entries saved before the worker existed (newest first; demand still goes first) */
+app.post("/api/worker/backfill", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root runs a backfill" });
+  void (async () => {
+    const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _mentions_at IS NULL AND embed_identity IS NOT NULL${ASSERTIONS}${liveClause()} ORDER BY updated_at DESC LIMIT 500`);
+    for (const r of rows) await enqueue("mentions", { rid: String(r.rid) }, { key: `mentions:${r.rid}` });
+    return { queued: rows.length };
+  })().then((r) => res.json(r), (e) => httpError(res, e));
+});
+
 /** the pruning record: what was removed, when (names only, never content; the root only) */
 app.get("/api/pruned", (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);
@@ -2875,6 +3181,9 @@ async function boot() {
     await refreshGrants();
     await ensureNeedSchema();
     await ensureDocumentSchema();
+    await ensureWorkerSchema();
+    setInterval(() => void workerTick().catch((e) => log.warn(`worker: ${String(e).slice(0, 160)}`)), 5_000);
+    log.info(`graph worker: ${worker.enabled && workerModel() ? `on (${workerModel()}${worker.profile ? `, from profile ${worker.profile}` : ""})` : "off"}`);
     if (!docStore) log.warn(`DOC_STORE=${DOC_STORE} isn't a known store: documents can't be ingested`);
     await expireRequests();
     setInterval(() => void refreshGrants().then(expireRequests), 60_000);

@@ -8,6 +8,7 @@ import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { AgentManager } from "../agents/manager.js";
 import { dirsFor } from "../agents/scaffold.js";
+import { canSetGraphWorker, syncGraphWorker } from "./knowledge.js";
 import { runContextEngine, type ContextEngineInput } from "../analyze/engines.js";
 import { getInstanceMetadata } from "../instance/metadata.js";
 import type { ServerConfig } from "../config.js";
@@ -254,6 +255,8 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
       ),
       sharedTools: Type.Optional(Type.Boolean()),
       positions: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 16 })),
+      instructions: Type.Optional(Type.String({ maxLength: 4000 })),
+      graphWorker: Type.Optional(Type.Union([Type.Object({ model: Type.String({ minLength: 1, maxLength: 300 }) }), Type.Null()])),
     },
     { additionalProperties: false },
   );
@@ -274,8 +277,14 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
     if (!Value.Check(upsertProfileSchema, req.body)) {
       return reply.code(400).send({ error: "invalid profile payload" });
     }
-    const profile = manager.profiles.upsert(id === "new" ? undefined : id, req.body as UpsertProfileInput);
-    return { profile };
+    const input = req.body as UpsertProfileInput;
+    // the graph worker belongs to the organization's root: graph-rag says whether this instance is it
+    if (input.graphWorker && !(await canSetGraphWorker(manager))) {
+      return reply.code(403).send({ error: "only the organization's admin workspace can set the graph worker" });
+    }
+    const profile = manager.profiles.upsert(id === "new" ? undefined : id, input);
+    const synced = await syncGraphWorker(manager);
+    return { profile, ...(synced.error ? { warning: synced.error } : {}) };
   });
 
   app.delete("/api/profiles/:id", async (req, reply) => {
@@ -283,6 +292,7 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
     try {
       const removed = manager.profiles.remove(id);
       if (!removed) return reply.code(404).send({ error: "not found" });
+      if (removed.graphWorker) await syncGraphWorker(manager);
       return { removed: removed.id };
     } catch (err) {
       return reply.code(400).send({ error: err instanceof Error ? err.message : String(err) });

@@ -41,6 +41,8 @@ export async function registerInstanceRoutes(app: FastifyInstance): Promise<void
     if (!ops()) return reply.send({ enabled: false, instances: [] });
     return proxy(reply, req, "/instances", "GET");
   });
+  // what each tool connection is for (the organization's words; every workspace's agents get them)
+  app.put("/api/instances/connections", async (req, reply) => proxy(reply, req, "/connections", "PUT", req.body ?? {}));
   app.put("/api/instances/:name/settings", async (req, reply) => {
     const { name } = req.params as { name: string };
     return proxy(reply, req, `/instances/${encodeURIComponent(name)}/settings`, "PUT", req.body ?? {});

@@ -89,10 +89,38 @@ export class ProfileStore {
         : existing?.positions
           ? { positions: existing.positions }
           : {}),
+      ...(input.instructions !== undefined
+        ? input.instructions.trim()
+          ? { instructions: input.instructions.trim() }
+          : {}
+        : existing?.instructions
+          ? { instructions: existing.instructions }
+          : {}),
+      ...(input.graphWorker !== undefined
+        ? input.graphWorker
+          ? { graphWorker: { model: input.graphWorker.model } }
+          : {}
+        : existing?.graphWorker
+          ? { graphWorker: existing.graphWorker }
+          : {}),
     };
+    // one graph worker profile: taking it over clears it elsewhere
+    if (record.graphWorker) {
+      for (const [pid, p] of this.profiles) {
+        if (pid !== recordId && p.graphWorker) {
+          const { graphWorker: _gw, ...rest } = p;
+          this.profiles.set(pid, rest);
+        }
+      }
+    }
     this.profiles.set(recordId, record);
     void this.persist();
     return record;
+  }
+
+  /** the profile that configures the graph worker, if any */
+  graphWorker(): ProfileRecord | undefined {
+    return this.list().find((p) => p.graphWorker);
   }
 
   remove(id: string): ProfileRecord | undefined {

@@ -35,6 +35,11 @@ export const instanceMetadataSchema = Type.Object(
         providers: Type.Optional(Type.Union([Type.Literal("all"), Type.Array(Type.String())])),
       }),
     ),
+    /**
+     * what each tool connection is for, in the organization's words (the
+     * admin writes them in Workspaces); agents get them with their tools
+     */
+    connections: Type.Optional(Type.Record(Type.String(), Type.String())),
     /** substitution bag: MCP defs reference values via ${values.a.b} paths */
     values: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     /** optional UI surfaces (all enforcement happens in the backing service) */

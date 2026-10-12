@@ -9,7 +9,8 @@ import type { ProviderRegistry } from "../providers/registry.js";
 import { buildGeneratedProviders, generatedProvidersPath, writeGeneratedProviders } from "../providers/generate.js";
 import { scoped } from "../util/log.js";
 import { graphTokenFor } from "./graph-token.js";
-import { SHARING_INSTRUCTIONS } from "./standing-instructions.js";
+import { connectionDigest } from "./connection-digest.js";
+import { buildStandingInstructions } from "./standing-instructions.js";
 
 /** read by the graph-context extension at every turn */
 export const STANDING_INSTRUCTIONS_FILE = "standing-instructions.md";
@@ -48,7 +49,7 @@ export async function scaffoldAgent(
   registry: ProviderRegistry,
   extensionsRoot: string,
   mcpRegistry?: McpRegistryStore,
-  instanceOpts?: { sharedTools?: { enabled: boolean; hostDir: string } },
+  instanceOpts?: { sharedTools?: { enabled: boolean; hostDir: string }; profileInstructions?: string | undefined },
 ): Promise<AgentDirs> {
   const dirs = dirsFor(stateDir, agent);
   await Promise.all([
@@ -124,9 +125,16 @@ export async function scaffoldAgent(
       JSON.stringify({ mcpServers: resolved }, null, 2) + "\n",
       "utf8",
     );
-    // agents with the knowledge graph get the sharing steps on every turn
+    // standing instructions on every turn: its sources (what each is for, what a database
+    // holds), what its profile says it's for, and the knowledge-graph procedures
     const instructions = path.join(dirs.home, STANDING_INSTRUCTIONS_FILE);
-    if (Object.keys(resolved).includes("graph-rag")) await writeFile(instructions, SHARING_INSTRUCTIONS + "\n", "utf8");
+    const notes = getInstanceMetadata()?.connections ?? {};
+    const others = Object.keys(resolved).filter((n) => n !== "graph-rag");
+    const connections = await Promise.all(
+      others.map(async (name) => ({ name, description: notes[name], digest: await connectionDigest(name, resolved[name] as { url?: string; headers?: Record<string, string> }) })),
+    );
+    const text = buildStandingInstructions({ graph: Object.keys(resolved).includes("graph-rag"), connections, profileInstructions: instanceOpts?.profileInstructions });
+    if (text) await writeFile(instructions, text + "\n", "utf8");
     else await rm(instructions, { force: true });
   }
 

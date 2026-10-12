@@ -17,12 +17,19 @@
   let busy = $state<string | null>(null);
   let errors = $state<Record<string, string>>({});
   let notices = $state<Record<string, string>>({});
+  // what each tool connection is for (one set of notes for the whole organization)
+  let notes = $state<Record<string, string>>({});
+  let notesSaved = $state<Record<string, string>>({});
+  let notesBusy = $state(false);
+  let notesMsg = $state("");
 
   async function load(): Promise<void> {
     loadError = "";
     try {
       view = await api.workspaces();
       drafts = Object.fromEntries(view.instances.map((w) => [w.name, structuredClone($state.snapshot(w.settings))]));
+      notesSaved = { ...(view.connections ?? {}) };
+      notes = Object.fromEntries((view.choices?.mcp ?? []).map((n) => [n, notesSaved[n] ?? ""]));
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
     }
@@ -65,6 +72,21 @@
       errors[w.name] = e instanceof Error ? e.message : String(e);
     } finally {
       busy = null;
+    }
+  }
+
+  const notesDirty = $derived(Object.entries(notes).some(([n, t]) => t.trim() !== (notesSaved[n] ?? "")));
+  async function saveNotes(): Promise<void> {
+    notesBusy = true;
+    notesMsg = "";
+    try {
+      const changed = Object.fromEntries(Object.entries(notes).filter(([n, t]) => t.trim() !== (notesSaved[n] ?? "")));
+      notesSaved = (await api.saveConnections(changed)).connections;
+      notesMsg = "Saved. Agents get the new descriptions when they next start.";
+    } catch (e) {
+      notesMsg = e instanceof Error ? e.message : String(e);
+    } finally {
+      notesBusy = false;
     }
   }
 
@@ -163,11 +185,30 @@
           </li>
         {/each}
       </ul>
+      {#if (view.choices?.mcp ?? []).length}
+        <section class="grid gap-3 border-t border-edge px-5 py-5">
+          <div class="grid gap-1">
+            <h4 class="m-0 text-xs font-medium text-dim">What each tool connection is for</h4>
+            <span class="text-xs text-faint">Agents read this to know what a connection holds and when to use it, e.g. "the shop's ERP: customers, jobs (work orders) and their schedules, materials. Look up a customer's jobs by customer code."</span>
+          </div>
+          {#each view.choices?.mcp ?? [] as name (name)}
+            <div class="field">
+              <label class="field-label font-mono" for="cn-{name}">{name}</label>
+              <textarea id="cn-{name}" class="input min-h-14 resize-y text-xs" maxlength="1500" bind:value={notes[name]} placeholder="What it holds, and what to use it for"></textarea>
+            </div>
+          {/each}
+          <div class="flex items-center gap-3">
+            {#if notesMsg}<span class="text-xs text-dim" role="status">{notesMsg}</span>{/if}
+            <span class="ml-auto"></span>
+            <button class="btn btn-primary btn-sm" disabled={notesBusy || !notesDirty} onclick={() => void saveNotes()}>{notesBusy ? "Saving…" : "Save"}</button>
+          </div>
+        </section>
+      {/if}
       {#if view.history?.length}
         <section class="grid gap-2 border-t border-edge px-5 py-5">
           <h4 class="m-0 text-xs font-medium text-dim">Recent changes</h4>
           {#each view.history as h (h.at + h.name)}
-            <span class="text-xs text-faint">{h.by} · {new Date(h.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} · {h.name}: {describeChange(h.prev, h.next)}</span>
+            <span class="text-xs text-faint">{h.by} · {new Date(h.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} · {h.name}: {h.connections ? `described ${h.connections.join(", ")}` : h.prev && h.next ? describeChange(h.prev, h.next) : ""}</span>
           {/each}
         </section>
       {/if}
