@@ -131,7 +131,7 @@ export async function scaffoldAgent(
     const notes = getInstanceMetadata()?.connections ?? {};
     const others = Object.keys(resolved).filter((n) => n !== "graph-rag");
     const connections = await Promise.all(
-      others.map(async (name) => ({ name, description: notes[name], digest: await connectionDigest(name, resolved[name] as { url?: string; headers?: Record<string, string> }) })),
+      others.map(async (name) => ({ name, description: notes[name], digest: await connectionDigest(name, resolved[name] as { url?: string; headers?: Record<string, string> }, notes[name]) })),
     );
     const text = buildStandingInstructions({ graph: Object.keys(resolved).includes("graph-rag"), connections, profileInstructions: instanceOpts?.profileInstructions });
     if (text) await writeFile(instructions, text + "\n", "utf8");

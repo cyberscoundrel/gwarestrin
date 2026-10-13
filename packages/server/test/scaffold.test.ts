@@ -6,7 +6,7 @@ import type { AgentRecord } from "@gwarestrin/shared";
 import { ProviderRegistry } from "../src/providers/registry.js";
 import { agentConfigPath, dirsFor, piEnvFor, scaffoldAgent, STANDING_INSTRUCTIONS_FILE } from "../src/agents/scaffold.js";
 import { McpRegistryStore } from "../src/mcp/registry-store.js";
-import { formatEntities } from "../src/agents/connection-digest.js";
+import { formatEntities, keyTables } from "../src/agents/connection-digest.js";
 
 let stateDir: string;
 let registry: ProviderRegistry;
@@ -82,6 +82,12 @@ describe("standing instructions", () => {
     const text = JSON.stringify({ entities: [{ name: "dbo_Customer", fields: [{ name: "Customer" }, { name: "Name" }] }, { name: "dbo_Job", fields: ["Job", "Customer", "Status"] }] });
     expect(formatEntities(text)).toBe("- dbo_Customer: Customer, Name\n- dbo_Job: Job, Customer, Status");
     expect(formatEntities("not json")).toBeNull();
+  });
+
+  it("the description names the key tables", () => {
+    const names = ["dbo_Account", "dbo_Customer", "dbo_Job", "dbo_Job_Operation", "dbo_Material", "dbo_Calendar_OLD"];
+    expect(keyTables("The shop's ERP: customers, jobs (work orders) with operations, materials.", names)).toEqual(["dbo_Customer", "dbo_Job", "dbo_Material"]);
+    expect(keyTables(undefined, names)).toEqual([]);
   });
 });
 
