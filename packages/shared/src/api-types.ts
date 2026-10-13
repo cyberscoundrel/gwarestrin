@@ -110,6 +110,15 @@ export interface ProfileRecord {
    * the user's reach are ignored by the graph (see docs/DATA-SCOPING.md).
    */
   positions?: string[] | undefined;
+  /** what agents under this profile are for and how to work: added to their standing instructions */
+  instructions?: string | undefined;
+  /**
+   * this profile configures the graph worker (the background job that links
+   * statements to the things they're about): its model (a model name graph-rag
+   * reaches through litellm) and, from `instructions`, its guidance. One
+   * profile at most, on the organization's admin instance.
+   */
+  graphWorker?: { model: string } | undefined;
 }
 
 export interface UpsertProfileInput {
@@ -120,4 +129,7 @@ export interface UpsertProfileInput {
   contextEngine?: ProfileContextEngine | undefined;
   sharedTools?: boolean | undefined;
   positions?: string[] | undefined;
+  instructions?: string | undefined;
+  /** null clears it */
+  graphWorker?: { model: string } | null | undefined;
 }

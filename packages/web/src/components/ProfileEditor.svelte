@@ -3,7 +3,7 @@
   import { ArrowLeft, Copy, Ellipsis, Lock, Trash2, TriangleAlert, Users } from "lucide";
   import type { ThinkingLevel } from "@gwarestrin/shared";
   import { store } from "../lib/stores.svelte.js";
-  import { api, mcpApi, type McpServerDef, type PositionsView } from "../lib/api.js";
+  import { api, mcpApi, type GraphWorkerView, type McpServerDef, type PositionsView } from "../lib/api.js";
   import Dropdown from "./Dropdown.svelte";
   import Icon from "./Icon.svelte";
   import ModelPicker from "./ModelPicker.svelte";
@@ -47,6 +47,18 @@
   let sharedTools = $state(existing?.sharedTools !== false);
   let positionMode = $state<"mine" | "pick">(existing?.positions?.length ? "pick" : "mine");
   let pickedPositions = $state<string[]>(existing?.positions ? [...existing.positions] : []);
+  let instructions = $state(existing?.instructions ?? "");
+  // the graph worker: only on the organization's admin workspace (graph-rag answers there only)
+  let isWorker = $state(!duplicating && existing?.graphWorker !== undefined);
+  let workerModel = $state(existing?.graphWorker?.model ?? "");
+  let worker = $state<GraphWorkerView | null>(null);
+  let workerModels = $state<string[]>([]);
+  $effect(() => {
+    void api.graphWorker().then((w) => {
+      worker = w;
+      if (w) void api.graphWorkerModels().then((m) => (workerModels = m)).catch(() => {});
+    });
+  });
 
   let servers = $state<Record<string, McpServerDef>>({});
   let serversLoaded = $state(false);
@@ -102,13 +114,14 @@
 
   // ---- dirty state: compare against the seeded snapshot ----
   const snapshot = () =>
-    JSON.stringify([name, description, tier, model, thinkingLevel, namePrefix, mcpMode, [...pickedMcp].sort(), engineEnabled, engineType, enginePrompt, engineRounds, engineTimeoutS, sharedTools, positionMode, [...pickedPositions].sort()]);
+    JSON.stringify([name, description, tier, model, thinkingLevel, namePrefix, mcpMode, [...pickedMcp].sort(), engineEnabled, engineType, enginePrompt, engineRounds, engineTimeoutS, sharedTools, positionMode, [...pickedPositions].sort(), instructions, isWorker, workerModel]);
   const initial = untrack(snapshot);
   const dirty = $derived(snapshot() !== initial || duplicating);
 
   // ---- inline validation ----
   const nameError = $derived(attempted && !name.trim() ? "Give the agent profile a name." : "");
   const toolsError = $derived(attempted && mcpMode === "pick" && pickedMcp.length === 0 ? "Allow at least one connection, or allow all." : "");
+  const workerError = $derived(attempted && isWorker && !workerModel ? "Pick the model the graph worker uses." : "");
   const positionsError = $derived(
     attempted && positionMode === "pick" && pickedPositions.length === 0 ? "Pick at least one position, or let agents work where you stand." : "",
   );
@@ -134,7 +147,7 @@
   async function save() {
     attempted = true;
     error = "";
-    if (nameError || toolsError || positionsError) return;
+    if (nameError || toolsError || positionsError || workerError) return;
     saving = true;
     try {
       const saved = await api.saveProfile(isNew ? "new" : profileId, {
@@ -161,6 +174,8 @@
         sharedTools,
         // empty = where the workspace's user stands
         positions: positionMode === "pick" ? [...pickedPositions] : [],
+        instructions: instructions.trim(),
+        ...(worker ? { graphWorker: isWorker ? { model: workerModel } : null } : {}),
       });
       await store.refreshProfiles();
       store.editingProfileId = saved.id;
@@ -241,6 +256,42 @@
     ></textarea>
     <span class="field-hint">Shown when picking a profile for a new agent.</span>
   </div>
+  <div class="field">
+    <label class="field-label" for="pf-instr">Instructions</label>
+    <textarea
+      id="pf-instr"
+      class="input min-h-24 resize-y"
+      maxlength="4000"
+      bind:value={instructions}
+      placeholder="What these agents are for and how to work, e.g. You help the shop floor plan maintenance. Check machine status in the ERP before answering. Keep answers short."
+    ></textarea>
+    <span class="field-hint">Agents read this on every turn, after the list of their sources.</span>
+  </div>
+{/snippet}
+
+{#snippet workerBody()}
+  <label class="flex items-start gap-3">
+    <Switch checked={isWorker} label="this profile runs the graph worker" onchange={(v) => (isWorker = v)} />
+    <span class="grid gap-0.5">
+      <span class="text-sm text-fg">This profile runs the graph worker</span>
+      <span class="text-xs text-faint">
+        The graph worker reads every new entry in the background and links it to the people, customers, machines and orders it's about, so agents can ask "what do we know about X". It uses this profile's model below and its instructions above as guidance (e.g. "customers are named by their ERP code"). One profile at a time.
+      </span>
+    </span>
+  </label>
+  {#if isWorker}
+    <div class="field">
+      <span class="field-label">Worker model</span>
+      <Dropdown full label="graph worker model" value={workerModel} options={[{ value: "", label: "Pick a model" }, ...workerModels.map((m) => ({ value: m, label: m.split("/").at(-1) ?? m }))]} onchange={(v) => (workerModel = v)} searchable />
+      <span class="field-hint">Models graph-rag reaches through the deployment's model gateway. A local model keeps your entries on your hardware.</span>
+      {#if workerError}<span class="field-error">{workerError}</span>{/if}
+    </div>
+  {/if}
+  {#if worker}
+    <span class="text-xs text-faint">
+      Now: {worker.enabled && worker.model ? `on, ${worker.model.split("/").at(-1)}${worker.profile ? ` (from ${worker.profile})` : ""}` : "off"} · {worker.things} things known · {worker.jobs.pending ?? 0} waiting{worker.jobs.failed ? `, ${worker.jobs.failed} failed` : ""} · {worker.today.calls} of {worker.today.budget} model calls today
+    </span>
+  {/if}
 {/snippet}
 
 {#snippet defaultsBody()}
@@ -517,6 +568,9 @@
       )}
       {@render section("Briefing", "Standing knowledge from the graph that a new agent keeps in mind on every turn.", briefingBody)}
       {@render section("Shared scripts", "Reuse across agents.", sharedBody)}
+      {#if worker}
+        {@render section("Graph worker", "The background job that links what's written down to what it's about. Only your organization's admin workspace sets it.", workerBody)}
+      {/if}
     </div>
   </div>
 

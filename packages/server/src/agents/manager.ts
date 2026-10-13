@@ -248,6 +248,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const record = this.store.create(defaults);
     await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry, {
       sharedTools: profile.sharedTools === false ? { enabled: false, hostDir: "" } : { enabled: true, hostDir: this.sharedToolsDir() },
+      profileInstructions: profile.instructions,
     });
     return record;
   }
@@ -264,7 +265,9 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
 
   async patchAgent(id: string, patch: PatchAgentInput): Promise<AgentRecord> {
     const record = this.store.patch(id, patch);
-    await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry);
+    await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry, {
+      profileInstructions: this.profiles.resolve(record.profileId).instructions,
+    });
     // restart only when spawn-affecting config changes; model/thinkingLevel are
     // applied live via RPC and picked up from settings on the next start
     const needsRestart =
@@ -312,6 +315,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const profile = this.profiles.resolve(record.profileId);
     const dirs = await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry, {
       sharedTools: profile.sharedTools === false ? { enabled: false, hostDir: "" } : { enabled: true, hostDir: this.sharedToolsDir() },
+      profileInstructions: profile.instructions,
     });
 
     let proc: PiProcess;

@@ -6,6 +6,7 @@ import type { AgentRecord } from "@gwarestrin/shared";
 import { ProviderRegistry } from "../src/providers/registry.js";
 import { agentConfigPath, dirsFor, piEnvFor, scaffoldAgent, STANDING_INSTRUCTIONS_FILE } from "../src/agents/scaffold.js";
 import { McpRegistryStore } from "../src/mcp/registry-store.js";
+import { formatEntities, keyTables } from "../src/agents/connection-digest.js";
 
 let stateDir: string;
 let registry: ProviderRegistry;
@@ -57,17 +58,36 @@ describe("scaffoldAgent", () => {
 });
 
 describe("standing instructions", () => {
-  it("agents with the knowledge graph get the sharing steps; others don't", async () => {
+  it("every agent learns its sources first, in order; the graph procedures only with the graph", async () => {
     const mcp = new McpRegistryStore(stateDir);
     await mcp.load();
     await mcp.put("graph-rag", { url: "http://graph-rag:8000/mcp" });
-    await mcp.put("mssql", { url: "http://dab:5000/mcp" });
-    const withGraph = await scaffoldAgent(stateDir, agent({ id: "a-graph", mcpServers: ["graph-rag", "mssql"] }), registry, stateDir, mcp);
+    await mcp.put("mssql", { url: "http://127.0.0.1:9/mcp" }); // unreachable: no table summary, no failure
+    const withGraph = await scaffoldAgent(stateDir, agent({ id: "a-graph", mcpServers: ["graph-rag", "mssql"] }), registry, stateDir, mcp, {
+      profileInstructions: "You help the shop floor plan maintenance.",
+    });
     const text = await readFile(path.join(withGraph.home, STANDING_INSTRUCTIONS_FILE), "utf8");
+    expect(text.startsWith("Your sources")).toBe(true);
+    expect(text).toMatch(/1\. The knowledge graph[\s\S]*2\. mssql[\s\S]*3\. Asking/);
+    expect(text).toContain("Never read a whole table to search it");
+    expect(text).toContain("You help the shop floor plan maintenance.");
     expect(text).toContain("graph-rag_find_shareable");
-    expect(text).toContain("Never say that something has been shared");
     const without = await scaffoldAgent(stateDir, agent({ id: "a-sql", mcpServers: ["mssql"] }), registry, stateDir, mcp);
-    await expect(readFile(path.join(without.home, STANDING_INSTRUCTIONS_FILE), "utf8")).rejects.toThrow();
+    const sql = await readFile(path.join(without.home, STANDING_INSTRUCTIONS_FILE), "utf8");
+    expect(sql).toContain("1. mssql");
+    expect(sql).not.toContain("graph-rag_");
+  });
+
+  it("a database's tables become a short map", () => {
+    const text = JSON.stringify({ entities: [{ name: "dbo_Customer", fields: [{ name: "Customer" }, { name: "Name" }] }, { name: "dbo_Job", fields: ["Job", "Customer", "Status"] }] });
+    expect(formatEntities(text)).toBe("- dbo_Customer: Customer, Name\n- dbo_Job: Job, Customer, Status");
+    expect(formatEntities("not json")).toBeNull();
+  });
+
+  it("the description names the key tables", () => {
+    const names = ["dbo_Account", "dbo_Customer", "dbo_Job", "dbo_Job_Operation", "dbo_Material", "dbo_Calendar_OLD"];
+    expect(keyTables("The shop's ERP: customers, jobs (work orders) with operations, materials.", names)).toEqual(["dbo_Customer", "dbo_Job", "dbo_Material"]);
+    expect(keyTables(undefined, names)).toEqual([]);
   });
 });
 

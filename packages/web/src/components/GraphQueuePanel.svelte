@@ -47,6 +47,12 @@
       const shown = list.slice(0, 4).map((e) => `${e.name}${until(e)}`).join(", ");
       return { title: `Write ${list.length} ${list.length === 1 ? "entry" : "entries"} at ${pos(body.home)}`, detail: shown + (list.length > 4 ? ` and ${list.length - 4} more` : "") };
     }
+    if (p.kind === "merge") {
+      return {
+        title: `Is "${String(body.drop_name ?? "")}" the same ${String(body.type ?? "thing")} as "${String(body.keep_name ?? "")}"?`,
+        detail: "The graph worker wasn't sure. Approve to merge them into one; reject to keep them apart.",
+      };
+    }
     if (p.kind === "ingest") {
       const n = Number(body.sections ?? 0);
       return {

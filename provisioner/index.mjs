@@ -253,6 +253,10 @@ const OPS_TOKEN_FILE = `${INSTANCES_DIR}/.ops-token`;
 const OPS_PORT = Number(process.env.OPS_PORT ?? 8081);
 const SETTINGS_DEFAULTS = defaultSettings();
 
+// what each tool connection is for (organization-wide; the admin writes them in Workspaces)
+const CONNECTIONS_FILE = `${INSTANCES_DIR}/.connections.json`;
+const connectionNotes = () => readJson(CONNECTIONS_FILE, { connections: {} }).connections ?? {};
+
 const settingsFor = (name) => normalizeSettings(readJson(SETTINGS_FILE, { tenants: {} }).tenants?.[name], SETTINGS_DEFAULTS);
 
 function opsToken() {
@@ -335,6 +339,8 @@ function ensureMetadata(name, tier, { token, delegationKey }, oshValues) {
     },
     // what this workspace may do (the admin's settings), enforced by its server
     settings: settingsFor(name),
+    // what each tool connection is for, for its agents
+    connections: connectionNotes(),
   };
   if (tier === "admin") {
     doc.presentation = { queue: { label: "Graph review", url: "http://graph-rag:8000/api/queue", tokenRef: "values.graph.token" } };
@@ -590,8 +596,26 @@ async function listWorkspaces() {
     instances: workspaces.map((w) => ({ ...w, settings: settingsFor(w.name) })),
     defaults: SETTINGS_DEFAULTS,
     choices: { providers, mcp: await mcpChoices().catch(() => []) },
+    connections: connectionNotes(),
     history,
   };
+}
+
+/** the admin describes what tool connections are for; every workspace gets the notes */
+async function updateConnections(input, actor) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw Object.assign(new Error("connections must be an object"), { status: 400 });
+  const next = { ...connectionNotes() };
+  for (const [name, text] of Object.entries(input)) {
+    if (!/^[a-z0-9][a-z0-9_-]{0,62}$/i.test(name)) throw Object.assign(new Error(`invalid connection name ${name}`), { status: 400 });
+    if (typeof text !== "string" || text.length > 1500) throw Object.assign(new Error(`${name}: a description of up to 1500 characters`), { status: 400 });
+    if (text.trim()) next[name] = text.trim();
+    else delete next[name];
+  }
+  writeFileSync(CONNECTIONS_FILE, JSON.stringify({ connections: next }, null, 1) + "\n");
+  appendFileSync(SETTINGS_LOG, JSON.stringify({ at: new Date().toISOString(), by: actor, name: "(tool connections)", connections: Object.keys(input) }) + "\n");
+  log(`connections: ${Object.keys(input).join(", ")} described by ${actor}`);
+  await tick();
+  return { connections: next };
 }
 
 async function updateWorkspace(name, input, actor) {
@@ -623,4 +647,4 @@ const tick = () =>
   }));
 await tick();
 setInterval(() => void tick(), POLL * 1000);
-startOpsServer({ port: OPS_PORT, token: OPS_TOKEN, list: listWorkspaces, update: updateWorkspace, log });
+startOpsServer({ port: OPS_PORT, token: OPS_TOKEN, list: listWorkspaces, update: updateWorkspace, updateConnections, log });

@@ -60,3 +60,43 @@ search again when they come back to it.
 Search results can include open questions from colleagues ("kind": "question", with who asked).
 They're questions, not facts: never answer from them. If the person you work for knows the answer,
 offer to save it with graph-rag_upsert_entities; the asker can then be given it.`;
+
+export interface SourceInfo {
+  name: string;
+  /** the organization's words for what it's for (Workspaces), if written */
+  description?: string | undefined;
+  /** for databases: its tables and fields */
+  digest?: string | null | undefined;
+}
+
+/**
+ * The agent's standing instructions: first what its sources are and in what
+ * order to use them (so it doesn't have to explore to find out), then what its
+ * profile says it's for, then the knowledge-graph procedures.
+ */
+export function buildStandingInstructions({ graph, connections, profileInstructions }: { graph: boolean; connections: SourceInfo[]; profileInstructions?: string | undefined }): string {
+  const parts: string[] = [];
+  const src: string[] = ["Your sources", "", "You work for one person in an organization. Answer from these, in this order:"];
+  let n = 1;
+  if (graph) {
+    src.push(
+      `${n++}. The knowledge graph (graph-rag): what people in the organization have written down: notes, decisions, schedules, documents, and the people, customers, machines and orders they're about. It shows only what this person's position allows. Search it first for anything about the organization's own work (graph-rag_search_graph); graph-rag_about_thing answers "what do we know about X".`,
+    );
+  }
+  for (const c of connections) {
+    src.push(
+      `${n++}. ${c.name}: ${c.description ?? "(your organization hasn't described this connection; its tools say what they do)"}`,
+    );
+    if (c.digest) src.push(`   What it holds:\n${c.digest.split("\n").map((l) => `   ${l}`).join("\n")}`);
+  }
+  if (connections.length) {
+    src.push(
+      "   For a connected system: look up what you need directly, with a filter (a customer code, a job number, a name). Never read a whole table to search it, and don't page through tables to see what's there.",
+    );
+  }
+  if (graph) src.push(`${n++}. Asking: when none of these answers it, offer to ask the people who might know (see "Asking for what the person can't see" below).`);
+  if (n > 1) parts.push(src.join("\n"));
+  if (profileInstructions?.trim()) parts.push(`What you're for (from your profile)\n\n${profileInstructions.trim()}`);
+  if (graph) parts.push(SHARING_INSTRUCTIONS);
+  return parts.join("\n\n");
+}

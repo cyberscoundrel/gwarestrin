@@ -156,6 +156,31 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   a title replaces its sections; pruning a document removes its text, and a
   sweep removes stored texts nothing refers to any more (entries deleted some
   other way) once they're a day old.
+- **Things and the graph worker** (graph-rag/src/things.js; a job queue in
+  graph-rag): the nouns statements are about (people, customers, machines,
+  orders...) exist once, as `_kind: "thing"` nodes (type, name, aliases),
+  and statements link to them with ABOUT edges (with a role). Every write
+  queues a `mentions` job; the worker's loop (a few jobs every few seconds,
+  a daily call budget, backoff and retries) makes one model call per
+  statement to name its things, then resolves each: an exact name or alias
+  of the same type is that thing, a very close name by embedding (0.92) is
+  that thing with a new alias, a close one (0.8) becomes a new thing plus a
+  review item ("is X the same as Y?"; approving merges them), anything else
+  a new thing. A thing is visible to anyone who sees a statement about it
+  (`_homes`), so not even a name leaks. Searches raise the priority of what
+  they found; a backfill queues older entries. `about_thing` lists what the
+  caller can see about one thing. The worker's model and guidance come from
+  the admin's **Graph worker profile** (a profile marked as the worker, its
+  model one graph-rag reaches through litellm, its instructions the
+  guidance), pushed to graph-rag on save; only the root's workspace can.
+  Without such a profile (or `WORKER_MODEL`) the worker is off: jobs wait.
+- **Agents' sources** (agent server: standing-instructions.ts,
+  connection-digest.ts): every agent's standing instructions start with its
+  sources in order: the knowledge graph, then each tool connection with the
+  organization's description of it (Workspaces) and, for a database, every
+  table name plus the columns of the key tables that description mentions
+  (one row's column names, never values), then asking. Then the profile's
+  own instructions, then the knowledge-graph procedures.
 - **Pruning** (`pruneAfterDays` in Organization settings, default 30; 0 =
   never): an entry whose end date passed more than that long ago is removed.
   A sweep runs every 10 minutes (and on demand: "Remove now", root only),

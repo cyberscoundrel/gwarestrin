@@ -46,6 +46,17 @@ export interface OrgPolicy {
   pruneAfterDays: number;
 }
 
+/** the graph worker: links statements to the things they're about, in the background */
+export interface GraphWorkerView {
+  enabled: boolean;
+  model: string | null;
+  instructions: string;
+  profile: string | null;
+  jobs: Record<string, number>;
+  things: number;
+  today: { calls: number; budget: number };
+}
+
 /** what pruning will remove, and where it goes (the root only) */
 export interface PrunePreview {
   enabled: boolean;
@@ -99,7 +110,9 @@ export interface WorkspacesView {
   instances: WorkspaceView[];
   defaults?: WorkspaceSettings;
   choices?: { providers: string[]; mcp: string[] };
-  history?: Array<{ at: string; by: string; name: string; prev: WorkspaceSettings; next: WorkspaceSettings }>;
+  /** what each tool connection is for (organization-wide) */
+  connections?: Record<string, string>;
+  history?: Array<{ at: string; by: string; name: string; prev?: WorkspaceSettings; next?: WorkspaceSettings; connections?: string[] }>;
 }
 
 export interface GrantView {
@@ -234,6 +247,9 @@ export const api = {
   async savePolicy(changes: Partial<OrgPolicy>): Promise<{ policy: OrgPolicy }> {
     return json(await fetch("/api/policy", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));
   },
+  async saveConnections(notes: Record<string, string>): Promise<{ connections: Record<string, string> }> {
+    return json(await fetch("/api/instances/connections", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(notes) }));
+  },
   /** the organization's workspaces (admins only; enabled: false elsewhere) */
   async workspaces(): Promise<WorkspacesView> {
     return json(await fetch("/api/instances"));
@@ -285,7 +301,15 @@ export const api = {
     const r = await json<{ profiles: ProfileRecord[] }>(await fetch("/api/profiles"));
     return r.profiles;
   },
-  async saveProfile(id: string, input: Partial<ProfileRecord> & { name: string; mcpServers: string[] | "all" }): Promise<ProfileRecord> {
+  /** the graph worker's settings and backlog (the organization's root only; null elsewhere) */
+  async graphWorker(): Promise<GraphWorkerView | null> {
+    const r = await fetch("/api/graph-worker");
+    return r.ok ? json(r) : null;
+  },
+  async graphWorkerModels(): Promise<string[]> {
+    return (await json<{ models: string[] }>(await fetch("/api/graph-worker/models"))).models;
+  },
+  async saveProfile(id: string, input: Partial<Omit<ProfileRecord, "graphWorker">> & { name: string; mcpServers: string[] | "all"; graphWorker?: { model: string } | null }): Promise<ProfileRecord> {
     const r = await json<{ profile: ProfileRecord }>(
       await fetch(`/api/profiles/${encodeURIComponent(id)}`, {
         method: "PUT",

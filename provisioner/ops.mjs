@@ -5,10 +5,11 @@
 //
 //   GET /instances                    workspaces, their settings, the choices
 //   PUT /instances/:name/settings     change one workspace's settings
+//   PUT /connections                  what each tool connection is for (all workspaces)
 import { createServer } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 
-export function startOpsServer({ port, token, list, update, log }) {
+export function startOpsServer({ port, token, list, update, updateConnections, log }) {
   const authorized = (req) => {
     const h = String(req.headers.authorization ?? "");
     const got = Buffer.from(h.startsWith("Bearer ") ? h.slice(7) : "");
@@ -27,7 +28,8 @@ export function startOpsServer({ port, token, list, update, log }) {
       return void Promise.resolve(list()).then((body) => send(res, 200, body), (err) => send(res, 500, { error: String(err.message ?? err) }));
     }
     const m = /^\/instances\/([a-z0-9][a-z0-9-]{0,62})\/settings$/i.exec(url.pathname);
-    if (req.method === "PUT" && m) {
+    const conn = req.method === "PUT" && url.pathname === "/connections" && updateConnections;
+    if (req.method === "PUT" && (m || conn)) {
       let raw = "";
       req.on("data", (c) => {
         raw += c;
@@ -40,7 +42,7 @@ export function startOpsServer({ port, token, list, update, log }) {
         } catch {
           return send(res, 400, { error: "invalid JSON" });
         }
-        void Promise.resolve(update(m[1], body, actor)).then(
+        void Promise.resolve(conn ? updateConnections(body, actor) : update(m[1], body, actor)).then(
           (out) => send(res, 200, out),
           (err) => send(res, err.status ?? 400, { error: String(err.message ?? err).slice(0, 300) }),
         );
