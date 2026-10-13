@@ -2063,7 +2063,8 @@ async function readDocument({ document, section, count = 3 }, identity, scope) {
 
 // the worker's settings come from the admin's "Graph worker" profile (PUT /api/worker)
 let worker = { enabled: true, model: "", instructions: "", profile: null, updated_by: null, updated_at: null };
-const workerModel = () => worker.model || WORKER_MODEL || GRADER_MODEL;
+// only a model someone chose: falling back to the grader's would spend its quota on every write
+const workerModel = () => worker.model || WORKER_MODEL;
 const workerUsage = { day: "", calls: 0 }; // model calls today (WORKER_DAILY_CALLS caps them)
 let workerTicking = false;
 

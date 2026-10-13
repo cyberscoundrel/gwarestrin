@@ -173,6 +173,14 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   the admin's **Graph worker profile** (a profile marked as the worker, its
   model one graph-rag reaches through litellm, its instructions the
   guidance), pushed to graph-rag on save; only the root's workspace can.
+  Without such a profile (or `WORKER_MODEL`) the worker is off: jobs wait.
+- **Agents' sources** (agent server: standing-instructions.ts,
+  connection-digest.ts): every agent's standing instructions start with its
+  sources in order: the knowledge graph, then each tool connection with the
+  organization's description of it (Workspaces) and, for a database, every
+  table name plus the columns of the key tables that description mentions
+  (one row's column names, never values), then asking. Then the profile's
+  own instructions, then the knowledge-graph procedures.
 - **Pruning** (`pruneAfterDays` in Organization settings, default 30; 0 =
   never): an entry whose end date passed more than that long ago is removed.
   A sweep runs every 10 minutes (and on demand: "Remove now", root only),
