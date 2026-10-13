@@ -395,6 +395,8 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
   // questions show while open (history: any but drafts); never where only knowledge is wanted
   const kinds = assertions_only ? ASSERTIONS : include_expired ? " AND (_kind IS NULL OR _kind IN ['document', 'section'] OR (_kind = 'need' AND _status <> 'proposed'))" : openNeedsClause();
   const visible = homeFilter(scope) + (include_expired ? "" : liveClause()) + kinds;
+  // neighbours may also be things (what the results are ABOUT), visible like any node
+  const neighbours = homeFilter(scope) + (include_expired ? "" : liveClause()) + kinds.replace("_kind IN ['document', 'section']", "_kind IN ['document', 'section', 'thing']");
   let where = visible;
   if (temporal_filter) {
     const p = temporal_filter.property;
@@ -510,11 +512,11 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
       const edges = [...new Map(raw.map((e) => [String(e.rid), e])).values()];
       const ends = [...new Set(edges.flatMap((e) => [String(e.src), String(e.dst)]).filter((r) => RID_RE.test(r)))];
       const nodes = ends.length
-        ? await adbQuery(`SELECT @rid AS rid, name, _home, _kind FROM [${ends.join(",")}] WHERE name IS NOT NULL${visible}`)
+        ? await adbQuery(`SELECT @rid AS rid, name, _home, _kind FROM [${ends.join(",")}] WHERE name IS NOT NULL${neighbours}`)
         : [];
       const nameOf = new Map(nodes.map((n) => [String(n.rid), n.name]));
       // reading a question gives no knowledge: it doesn't bound where later writes land
-      for (const n of nodes) if (!n._kind) neighbourHomes.push(n._home);
+      for (const n of nodes) if (!n._kind || n._kind === "section") neighbourHomes.push(n._home);
       relationships = edges
         .filter((e) => nameOf.has(String(e.src)) && nameOf.has(String(e.dst)))
         .map((e) => ({ from: nameOf.get(String(e.src)), rel: e.rel, to: nameOf.get(String(e.dst)) }));
