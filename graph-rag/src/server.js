@@ -32,7 +32,7 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
-import { mentionsPrompt, normalize, parseMentions, parseSort, resolve, thingName } from "./things.js";
+import { mentionsPrompt, normalize, parseMentions, parseSort, resolve, THING_TYPES, thingName } from "./things.js";
 import { firstJob, POOL_DEFAULTS, poolSettings, resumeBrief, taskBrief } from "./pool.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
@@ -2500,7 +2500,12 @@ async function workerLink(args, identity) {
   const rid = identity.role.entry;
   const row = (await adbQuery(`SELECT _home FROM ${rid}`).catch(() => []))[0];
   if (!row) throw new Error("your entry is gone");
-  const mentions = parseMentions(JSON.stringify({ things: args.things }));
+  // a thing's full name ("Toro (customer)", as searches show it) is its name and type
+  const bare = args.things.map((t) => {
+    const m = /^(.*\S)\s*\(([a-z]+)\)$/i.exec(String(t.name));
+    return m && THING_TYPES.includes(m[2].toLowerCase()) ? { ...t, name: m[1], type: t.type ?? m[2].toLowerCase() } : t;
+  });
+  const mentions = parseMentions(JSON.stringify({ things: bare }));
   const linked = await linkMentions(rid, mentions, effectiveHome(positionMap, row._home), { unsure: "skip" });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
   const done = linked.filter((l) => !l.unsure);
