@@ -34,6 +34,19 @@ const createAgentSchema = Type.Object(
 const patchAgentSchema = Type.Object({}, { additionalProperties: true });
 
 export async function registerAgentRoutes(app: FastifyInstance, config: ServerConfig, manager: AgentManager): Promise<void> {
+  // the Graph worker profile is the organization's admin's alone (graph-rag
+  // decides who that is; a minute's cache keeps every click from asking)
+  let adminCheck = { at: 0, ok: false };
+  const isAdmin = async () => {
+    if (Date.now() - adminCheck.at > 60_000) adminCheck = { at: Date.now(), ok: await canSetGraphWorker(manager).catch(() => false) };
+    return adminCheck.ok;
+  };
+  const WORKER_ONLY = "only the organization's admin uses the Graph worker profile";
+  const workerProfile = (profileId: string | undefined) => !!manager.profiles.resolve(profileId).graphWorker;
+  const workerAgent = (id: string) => {
+    const r = manager.store.get(id);
+    return !!r && workerProfile(r.profileId);
+  };
   /** identity for the ui (forwardauth header, fallback: instance owner) */
   app.get("/api/me", async (req) => {
     const header = req.headers["x-authentik-username"];
@@ -56,6 +69,7 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
       return reply.code(400).send({ error: "invalid create payload" });
     }
     const input = req.body as CreateAgentInput;
+    if (workerProfile(input.profileId) && !(await isAdmin())) return reply.code(403).send({ error: WORKER_ONLY });
     try {
       const record = await manager.createAgent({ ...input, profileId: input.profileId });
       const profile = manager.profiles.resolve(record.profileId);
@@ -120,6 +134,7 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
     if (!Value.Check(patchAgentSchema, req.body)) {
       return reply.code(400).send({ error: "invalid patch payload" });
     }
+    if (workerAgent(id) && !(await isAdmin())) return reply.code(403).send({ error: WORKER_ONLY });
     try {
       const record = await manager.patchAgent(id, req.body as PatchAgentInput);
       return { agent: record };
@@ -131,6 +146,7 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
   app.delete("/api/agents/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     const purge = (req.query as { purge?: string }).purge === "true";
+    if (workerAgent(id) && !(await isAdmin())) return reply.code(403).send({ error: WORKER_ONLY });
     try {
       await manager.deleteAgent(id, purge);
       return reply.code(204).send();
@@ -142,6 +158,7 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
   for (const action of ["start", "stop", "restart", "new-session"] as const) {
     app.post(`/api/agents/:id/${action}`, async (req, reply) => {
       const { id } = req.params as { id: string };
+      if (action !== "stop" && workerAgent(id) && !(await isAdmin())) return reply.code(403).send({ error: WORKER_ONLY });
       try {
         if (action === "start") return { runtime: await manager.start(id) };
         if (action === "stop") {

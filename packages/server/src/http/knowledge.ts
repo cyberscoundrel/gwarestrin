@@ -9,7 +9,7 @@ import { getInstanceMetadata } from "../instance/metadata.js";
  * graph-rag owns the tree and enforces every rule.
  */
 /** graph-rag as this instance's own person (not an agent); null when the workspace has no knowledge graph */
-async function graphRag(manager: AgentManager, path: string, init: { method?: "GET" | "PUT" | "POST"; body?: unknown } = {}): Promise<{ status: number; body: unknown } | null> {
+export async function graphRag(manager: AgentManager, path: string, init: { method?: "GET" | "PUT" | "POST"; body?: unknown } = {}): Promise<{ status: number; body: unknown } | null> {
   const values = getInstanceMetadata()?.values as Record<string, { token?: unknown }> | undefined;
   const token = typeof values?.graph?.token === "string" ? values.graph.token : undefined;
   const base = manager.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL;
@@ -116,6 +116,19 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
   app.get("/api/graph-worker", async (_req, reply) => proxy(reply, "/api/worker"));
   app.get("/api/graph-worker/models", async (_req, reply) => proxy(reply, "/api/worker/models"));
   app.post("/api/graph-worker/backfill", async (_req, reply) => proxy(reply, "/api/worker/backfill", { method: "POST", body: {} }));
+  // the worker pool: its settings, its threads (audit), and what waits on the admin
+  app.put("/api/graph-worker/pool", async (req, reply) => proxy(reply, "/api/worker", { method: "PUT", body: { pool: req.body ?? {} } }));
+  app.get("/api/graph-worker/threads", async (_req, reply) => proxy(reply, "/api/worker/threads"));
+  app.get("/api/graph-worker/questions", async (req, reply) => {
+    const status = (req.query as { status?: string }).status;
+    return proxy(reply, `/api/worker/questions${status ? `?status=${encodeURIComponent(status)}` : ""}`);
+  });
+  app.post("/api/graph-worker/questions/answer", async (req, reply) => proxy(reply, "/api/worker/questions/answer", { method: "POST", body: req.body ?? {} }));
+  app.get("/api/graph-worker/proposals", async (_req, reply) => proxy(reply, "/api/worker/proposals"));
+  app.post("/api/graph-worker/proposals/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    return proxy(reply, `/api/worker/proposals/${encodeURIComponent(id)}`, { method: "POST", body: req.body ?? {} });
+  });
   // what pruning removed (graph-rag shows it only to the root), and pruning now
   app.get("/api/pruned", async (_req, reply) => proxy(reply, "/api/pruned"));
   app.post("/api/pruned/run", async (_req, reply) => proxy(reply, "/api/pruned/run", { method: "POST", body: {} }));

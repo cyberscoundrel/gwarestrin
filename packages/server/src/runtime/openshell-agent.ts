@@ -55,6 +55,8 @@ export interface LaunchInputs {
   resolveKey: (providerId: string) => string | undefined;
   /** real value behind an MCP bearerTokenEnv name */
   resolveSecret: (envName: string) => string | undefined;
+  /** pi's tool allowlist (a graph worker's), unset = pi's own */
+  tools?: string[] | undefined;
 }
 
 export interface Launch {
@@ -215,6 +217,7 @@ export class OpenShellAgentLauncher {
     // a session file from the local runtime is a host path: only resume sandbox sessions
     if (record.sessionFile?.startsWith(`${g.sessions}/`)) argv.push("--session", record.sessionFile);
     if (record.enabledModels?.length) argv.push("--models", record.enabledModels.join(","));
+    if (inp.tools?.length) argv.push("--tools", inp.tools.join(","));
 
     const transport = this.deps.runtime.transport(sandbox, argv, {
       workdir: g.workspace,

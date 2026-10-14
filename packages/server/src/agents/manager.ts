@@ -3,7 +3,7 @@ import { instanceSettings, mcpAllowed, modelRefusal } from "../instance/settings
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentRecord, AgentRuntimeSummary, CreateAgentInput, PatchAgentInput, ProfileRecord } from "@gwarestrin/shared";
+import type { AgentRecord, AgentRuntimeSummary, CreateAgentInput, GraphRole, PatchAgentInput, ProfileRecord } from "@gwarestrin/shared";
 import type { ServerConfig } from "../config.js";
 import type { McpRegistryStore } from "../mcp/registry-store.js";
 import type { ProviderRegistry } from "../providers/registry.js";
@@ -12,7 +12,7 @@ import { scoped } from "../util/log.js";
 import { RpcAgent } from "./rpc-agent.js";
 import { PiProcess } from "./pi-process.js";
 import { graphTokenFor } from "./graph-token.js";
-import { dirsFor, piEnvFor, scaffoldAgent, secretForEnv } from "./scaffold.js";
+import { dirsFor, piEnvFor, scaffoldAgent, secretForEnv, WORKER_TOOLS } from "./scaffold.js";
 import { getInstanceMetadata } from "../instance/metadata.js";
 import { OpenShellAgentLauncher } from "../runtime/openshell-agent.js";
 import { OpenShellProviders, OpenShellRuntime, connectOpenShell } from "../runtime/openshell.js";
@@ -207,6 +207,48 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     return this.store.list().map((r) => this.running.get(r.id)?.summary() ?? { id: r.id, status: r.status });
   }
 
+  /** send a running agent a message as its user (the worker pool's threads) */
+  async promptAgent(id: string, message: string): Promise<void> {
+    const agent = this.running.get(id);
+    if (!agent) throw new Error("agent not running");
+    const res = await agent.send("prompt", { message }, 120_000);
+    if (!res.success) throw new Error(res.error ?? "prompt failed");
+  }
+
+  /** resolves once the agent's run has fully settled; rejects if it stops first or takes too long */
+  waitSettled(id: string, timeoutMs: number): Promise<void> {
+    const agent = this.running.get(id);
+    if (!agent) return Promise.reject(new Error("agent not running"));
+    return new Promise((resolve, reject) => {
+      const done = (err?: Error) => {
+        clearTimeout(timer);
+        agent.off("event", onEvent);
+        agent.off("closed", onClosed);
+        if (err) reject(err);
+        else resolve();
+      };
+      const onEvent = (ev: { type?: string }) => {
+        if (ev?.type === "agent_settled") done();
+      };
+      const onClosed = () => done(new Error("the agent stopped"));
+      const timer = setTimeout(() => done(new Error(`no end of turn within ${Math.round(timeoutMs / 60_000)} minutes`)), timeoutMs);
+      agent.on("event", onEvent);
+      agent.on("closed", onClosed);
+    });
+  }
+
+  /** the last thing a running agent said */
+  async lastAssistantText(id: string): Promise<string> {
+    const agent = this.running.get(id);
+    if (!agent) return "";
+    const res = await agent.send("get_last_assistant_text", {}, 10_000).catch(() => null);
+    return String((res?.data as { text?: unknown } | undefined)?.text ?? "");
+  }
+
+  async abortAgent(id: string): Promise<void> {
+    await this.running.get(id)?.send("abort", {}, 10_000).catch(() => undefined);
+  }
+
   getRunning(agentId: string): RpcAgent | undefined {
     return this.running.get(agentId);
   }
@@ -219,7 +261,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     await Promise.all([...this.running.keys()].map((id) => this.stop(id)));
   }
 
-  async createAgent(input: CreateAgentInput & { profileId?: string | undefined }): Promise<AgentRecord> {
+  async createAgent(input: CreateAgentInput & { profileId?: string | undefined }, internal: { graphRole?: GraphRole } = {}): Promise<AgentRecord> {
     // resolution order: explicit create input > selected profile > default
     // profile > server defaults. The profile also fixes the MCP allowlist
     // unless the request overrides it explicitly.
@@ -246,10 +288,14 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     }
     if (!defaults.mcpServers?.length) defaults.mcpServers = this.defaultMcpServers();
 
-    const record = this.store.create(defaults);
+    // a graph worker reaches nothing on the internet (its profile fixes it)
+    if (profile.graphWorker) defaults.gondolin = { ...defaults.gondolin, allowedHosts: [], allowedInternalHosts: [] };
+    if (internal.graphRole && !profile.graphWorker) throw new Error("graph worker agents are made under the Graph worker profile");
+    const record = this.store.create(defaults, internal);
     await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry, {
       sharedTools: profile.sharedTools === false ? { enabled: false, hostDir: "" } : { enabled: true, hostDir: this.sharedToolsDir() },
       profileInstructions: profile.instructions,
+      graphWorker: !!profile.graphWorker,
     });
     return record;
   }
@@ -267,9 +313,16 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   async patchAgent(id: string, patch: PatchAgentInput): Promise<AgentRecord> {
     const refused = patch.model ? modelRefusal(patch.model.provider, patch.model.modelId) : null;
     if (refused) throw new Error(refused);
+    const current = this.store.get(id);
+    // a graph worker's reach is fixed by its profile: read-only connections, no internet
+    if (current && this.profiles.resolve(current.profileId).graphWorker && (patch.mcpServers !== undefined || patch.gondolin !== undefined || patch.providers !== undefined)) {
+      throw new Error("a graph worker's connections and network are set by its profile");
+    }
     const record = this.store.patch(id, patch);
+    const profile = this.profiles.resolve(record.profileId);
     await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry, {
-      profileInstructions: this.profiles.resolve(record.profileId).instructions,
+      profileInstructions: profile.instructions,
+      graphWorker: !!profile.graphWorker,
     });
     // restart only when spawn-affecting config changes; model/thinkingLevel are
     // applied live via RPC and picked up from settings on the next start
@@ -319,6 +372,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const dirs = await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry, {
       sharedTools: profile.sharedTools === false ? { enabled: false, hostDir: "" } : { enabled: true, hostDir: this.sharedToolsDir() },
       profileInstructions: profile.instructions,
+      graphWorker: !!profile.graphWorker,
     });
 
     let proc: PiProcess;
@@ -330,6 +384,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
           resolveKey: (providerId) => this.registry.resolveKey(providerId),
           // the graph token is the agent's own (its profile's positions)
           resolveSecret: (env) => (env === "GWARESTRIN_GRAPH_TOKEN" ? graphTokenFor(record, profile) : secretForEnv(env)),
+          ...(profile.graphWorker ? { tools: WORKER_TOOLS } : {}),
         });
         proc = new PiProcess({ transport: launch.transport });
       } catch (err) {
@@ -411,6 +466,9 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     if (record.enabledModels?.length) {
       args.push("--models", record.enabledModels.join(","));
     }
+    // a graph worker: reading files and MCP only (see WORKER_TOOLS); without
+    // the sandbox, reading files would read the host's: MCP only then
+    if (this.profiles.resolve(record.profileId).graphWorker) args.push("--tools", (record.gondolin.enabled === false ? ["mcp"] : WORKER_TOOLS).join(","));
 
     return new PiProcess({
       cliPath: this.cliPath(),

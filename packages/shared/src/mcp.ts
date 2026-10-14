@@ -20,6 +20,11 @@ export const mcpServerDefSchema = Type.Object(
     bearerTokenEnv: Type.Optional(Type.String()),
     // gwarestrin metadata (stripped when generating .mcp.json)
     description: Type.Optional(Type.String()),
+    /**
+     * the tools that only read, for agents that may only read here (graph
+     * workers); unset = the server's own read-only hints, or known ones
+     */
+    readTools: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 120 }), { maxItems: 64 })),
     /** adapter-native per-server kill switch */
     disabled: Type.Optional(Type.Boolean()),
   },
@@ -40,12 +45,12 @@ export function validateMcpServerDef(def: McpServerDef): string | null {
 }
 
 /** subset of the registry for one agent, with gwarestrin-only keys stripped */
-export function mcpSubset(registry: McpRegistry, names: string[]): Record<string, Omit<McpServerDef, "description">> {
-  const out: Record<string, Omit<McpServerDef, "description">> = {};
+export function mcpSubset(registry: McpRegistry, names: string[]): Record<string, Omit<McpServerDef, "description" | "readTools">> {
+  const out: Record<string, Omit<McpServerDef, "description" | "readTools">> = {};
   for (const name of names) {
     const def = registry[name];
     if (!def) continue; // unknown names ignored (e.g. after registry delete)
-    const { description: _meta, ...adapterDef } = def;
+    const { description: _meta, readTools: _read, ...adapterDef } = def;
     out[name] = adapterDef;
   }
   return out;
