@@ -198,6 +198,10 @@ export class OpenShellAgentLauncher {
       await this.seedWorkspace(sandbox, dirs.workspace, g.workspace).catch((err) =>
         log.warn(`agent ${record.name}: workspace not carried into ${sandbox}: ${err instanceof Error ? err.message : String(err)}`),
       );
+      // conversations kept when its last sandbox was released: it carries on where it left off
+      await this.seedWorkspace(sandbox, dirs.sessions, g.sessions).catch((err) =>
+        log.warn(`agent ${record.name}: conversations not carried into ${sandbox}: ${err instanceof Error ? err.message : String(err)}`),
+      );
     }
 
     const ext = this.guest.extensionsDir;
@@ -231,6 +235,27 @@ export class OpenShellAgentLauncher {
     });
     log.info(`agent ${record.name}: sandbox ${sandbox} (${created ? "created" : "reused"}), ${providerNames.length} provider(s), ${openUrls.length} open url(s)`);
     return { sandbox, created, transport, sessionsDir: g.sessions };
+  }
+
+  /**
+   * Give back an idle agent's sandbox (a microVM holds memory while it
+   * exists, running or not) but keep its conversations: they're copied to
+   * the host first, and a new sandbox gets them back on the next start.
+   */
+  async releaseSandbox(agentId: string, hostSessionsDir: string): Promise<void> {
+    const sandbox = sandboxNameFor(agentId);
+    const scope = this.deps.workspace ? { workspace: this.deps.workspace } : {};
+    try {
+      const pwd = await this.deps.sandbox.exec(sandbox, ["pwd"], { ...scope, noLoginShell: true });
+      const root = pwd.stdout.toString("utf8").trim() || "/sandbox";
+      const tar = await this.deps.sandbox.exec(sandbox, ["sh", "-c", 'cd "$1" 2>/dev/null && tar -cf - .', "sh", `${root}/.gw/sessions`], { ...scope, noLoginShell: true });
+      if (tar.exitCode === 0 && tar.stdout.length) await untarInto(hostSessionsDir, tar.stdout);
+    } catch (err) {
+      if (errorCode(err) === "not_found") return; // nothing to release
+      // without its conversations saved, keep the sandbox
+      throw new Error(`conversations not saved, sandbox kept: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    await this.deleteSandbox(agentId);
   }
 
   async deleteSandbox(agentId: string): Promise<void> {
@@ -347,6 +372,20 @@ const SEED_CHUNK_BYTES = 512 * 1024;
 const SEED_MAX_BYTES = 256 * 1024 * 1024;
 
 /** tar of `entries` under `dir` (the server image has tar; so does the agent image) */
+/** unpack a tar into `dir` (created if missing) */
+async function untarInto(dir: string, archive: Buffer): Promise<void> {
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(dir, { recursive: true });
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("tar", ["-C", dir, "-xf", "-", "--no-same-owner"], { stdio: ["pipe", "ignore", "pipe"] });
+    let err = "";
+    child.stderr.on("data", (b: Buffer) => (err += b.toString("utf8")));
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`tar -x failed (${code}): ${err.slice(0, 200)}`))));
+    child.stdin.end(archive);
+  });
+}
+
 function tarOf(dir: string, entries: string[]): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const child = spawn("tar", ["-C", dir, "-cf", "-", "--", ...entries], { stdio: ["ignore", "pipe", "pipe"] });

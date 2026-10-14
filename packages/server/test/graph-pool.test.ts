@@ -25,6 +25,10 @@ function fakeManager(opts: { settle?: "ok" | "never" | "stop" } = {}) {
       running.get(id)?.emit("closed");
       running.delete(id);
     },
+    async releaseAgent(id: string) {
+      running.get(id)?.emit("closed");
+      running.delete(id);
+    },
     async deleteAgent(id: string) {
       records.delete(id);
     },

@@ -207,6 +207,11 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
     if (!record) return reply.code(404).send({ error: "not found" });
     const dirs = dirsFor(config.stateDir, record);
     let file: string | null = record.sessionFile ?? null;
+    // on OpenShell the session path is the sandbox's: the host keeps a copy by the same name
+    if (file && !file.startsWith(dirs.sessions)) {
+      const local = path.join(dirs.sessions, path.basename(file));
+      file = await stat(local).then(() => local).catch(() => null);
+    }
     if (!file) {
       // fall back to the newest session jsonl on disk
       const entries = await readdir(dirs.sessions).catch(() => [] as string[]);
