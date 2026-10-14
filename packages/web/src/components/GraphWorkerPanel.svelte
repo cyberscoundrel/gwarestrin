@@ -23,6 +23,23 @@
   let answers = $state<Record<string, string>>({});
   let reasons = $state<Record<string, string>>({});
   let busy = $state<string | null>(null);
+  // a survey of a connection: a task thread maps it, seeds its records, relates them
+  let surveyConn = $state("mssql");
+  let surveyFocus = $state("");
+  let surveyMsg = $state("");
+  async function startSurvey(): Promise<void> {
+    busy = "survey";
+    surveyMsg = "";
+    try {
+      const r = await api.startSurvey(surveyConn.trim(), surveyFocus.trim());
+      surveyMsg = `Queued "${r.task}". It runs when the pool has room (threads at once above 0).`;
+      await refresh();
+    } catch (e) {
+      surveyMsg = e instanceof Error ? e.message : String(e);
+    } finally {
+      busy = null;
+    }
+  }
   let actionError = $state("");
 
   async function load(): Promise<void> {
@@ -126,7 +143,7 @@
     done: { label: "done", cls: "text-ok" },
     failed: { label: "failed", cls: "text-err" },
   };
-  const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved" };
+  const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved", relate: "Related", followup: "Queued" };
   const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const describe = (p: WorkerProposal) => {
     try {
@@ -243,6 +260,17 @@
             </div>
           </section>
         {/if}
+
+        <section class="grid gap-2">
+          <h4 class="m-0 text-xs font-medium text-dim">Survey a connection</h4>
+          <span class="text-xs text-faint">A thread maps what the connection holds, seeds its main records (customers, vendors, people, work centers) as things with their keys, records how they relate, and queues follow-ups by topic. Rows stay in the source.</span>
+          <div class="flex flex-wrap items-center gap-2">
+            <input class="input w-36 font-mono text-xs" aria-label="connection" bind:value={surveyConn} />
+            <input class="input min-w-48 flex-1 text-xs" maxlength="1000" placeholder="Focus (optional): e.g. production scheduling and suppliers" aria-label="focus" bind:value={surveyFocus} />
+            <button class="btn btn-primary btn-sm" disabled={busy !== null || !surveyConn.trim()} onclick={() => void startSurvey()}>{busy === "survey" ? "Queuing…" : "Survey"}</button>
+          </div>
+          {#if surveyMsg}<span class="text-xs text-dim" role="status">{surveyMsg}</span>{/if}
+        </section>
 
         <section class="grid gap-2">
           <h4 class="m-0 text-xs font-medium text-dim">Recent threads</h4>

@@ -382,6 +382,10 @@ export const api = {
   async savePool(changes: Partial<PoolSettings>): Promise<GraphWorkerView> {
     return json(await fetch("/api/graph-worker/pool", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));
   },
+  /** start a survey of a tool connection: a task thread maps it, seeds its records and relates them */
+  async startSurvey(connection: string, focus: string): Promise<{ task: string; job: string }> {
+    return json(await fetch("/api/graph-worker/survey", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ connection, focus }) }));
+  },
   async workerThreads(): Promise<WorkerThread[]> {
     return (await json<{ threads: WorkerThread[] }>(await fetch("/api/graph-worker/threads"))).threads;
   },

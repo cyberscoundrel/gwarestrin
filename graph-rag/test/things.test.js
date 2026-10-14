@@ -57,3 +57,19 @@ test("the sorting step: asks whether a worker should look, and reads the verdict
   assert.deepEqual(parseSort('{"things":[],"review":"yes"}'), { review: false, why: "" });
   assert.deepEqual(parseSort("garbage"), { review: false, why: "" });
 });
+
+test("record keys: kept on mentions, and the same key is the same thing whatever its name", async () => {
+  const { normalizeKey, normalizeRel } = await import("../src/things.js");
+  assert.equal(normalizeKey(" mssql:dbo_Customer:TORO "), "mssql:dbo_Customer:TORO");
+  assert.equal(normalizeKey("TORO"), null);
+  assert.equal(normalizeRel("Works In"), "works_in");
+  const m = parseMentions(JSON.stringify({ things: [{ name: "Toro Plating Co", type: "customer", key: "mssql:dbo_Customer:TORO" }, { name: "Toro", type: "customer", key: "mssql:dbo_Customer:TORO" }] }));
+  assert.equal(m.length, 1, "one key, one thing");
+  assert.deepEqual(resolve(m[0], [{ rid: "#1:1", name: "Toro", type: "customer", keys: ["mssql:dbo_Customer:TORO"] }]), { use: "#1:1", alias: "Toro Plating Co" });
+  assert.deepEqual(
+    resolve({ name: "Acme Inc", type: "customer", key: "mssql:dbo_Customer:ACME2" }, [{ rid: "#1:2", name: "Acme Inc", type: "customer", keys: ["mssql:dbo_Customer:ACME1"] }]),
+    { create: true },
+    "same name, another record: another thing",
+  );
+  assert.equal(parseMentions(JSON.stringify({ things: Array.from({ length: 30 }, (_, i) => ({ name: `Customer ${i}`, type: "customer" })) }), 25).length, 25);
+});

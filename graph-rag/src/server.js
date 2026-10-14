@@ -32,8 +32,8 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
-import { mentionsPrompt, normalize, parseMentions, parseSort, resolve, THING_TYPES, thingName } from "./things.js";
-import { firstJob, POOL_DEFAULTS, poolSettings, resumeBrief, taskBrief } from "./pool.js";
+import { mentionsPrompt, normalize, normalizeKey, normalizeRel, parseMentions, parseSort, resolve, THING_TYPES, thingName } from "./things.js";
+import { firstJob, POOL_DEFAULTS, poolSettings, resumeBrief, surveyBrief, taskBrief, taskThreadBrief } from "./pool.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
@@ -2092,7 +2092,7 @@ async function ensureWorkerSchema() {
   await adbCommand("CREATE INDEX IF NOT EXISTS ON Job (job_key) NOTUNIQUE").catch(() => {});
   await adbCommand("CREATE INDEX IF NOT EXISTS ON Job (status) NOTUNIQUE").catch(() => {});
   for (const prop of ["_thing_type", "_norm", "_mentions_at"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
-  for (const prop of ["_homes", "_alias_norms"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS LIST`).catch(() => {});
+  for (const prop of ["_homes", "_alias_norms", "_keys"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS LIST`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_norm) NOTUNIQUE`).catch(() => {});
   for (const prop of ["agent_id", "summary", "lease_until", "claimed_at", "changes"]) await adbCommand(`CREATE PROPERTY Job.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._reviewed_at IF NOT EXISTS STRING`).catch(() => {});
@@ -2102,6 +2102,9 @@ async function ensureWorkerSchema() {
   }
   await adbCommand("CREATE INDEX IF NOT EXISTS ON WorkerQuestion (job_id) NOTUNIQUE").catch(() => {});
   await adbCommand("CREATE EDGE TYPE ABOUT IF NOT EXISTS").catch(() => {});
+  await adbCommand("CREATE EDGE TYPE RELATES IF NOT EXISTS").catch(() => {});
+  for (const prop of ["rel", "evidence", "job", "at"]) await adbCommand(`CREATE PROPERTY RELATES.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._task_by IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand("CREATE PROPERTY ABOUT.role IF NOT EXISTS STRING").catch(() => {});
   // a crash mid-job leaves it running: it runs again (threads keep their lease: their workspace may still run them)
   await adbCommand("UPDATE Job SET status = 'pending' WHERE status = 'running' AND kind <> 'review'").catch(() => {});
@@ -2169,17 +2172,31 @@ async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
   const out = [];
   for (const [i, m] of mentions.entries()) {
     const n = normalize(m.name);
-    const byName = await adbQuery(
-      `SELECT @rid AS rid, label, _alias_norms, _thing_type FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 5`,
-      { t: m.type, n },
-    ).catch(() => []);
+    // a record key finds its thing whatever it's called (and whatever type was guessed)
+    const byKey = m.key
+      ? await adbQuery(`SELECT @rid AS rid, label, _alias_norms, _thing_type, _keys FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: m.key }).catch(() => [])
+      : [];
+    const byName = byKey.length
+      ? byKey
+      : await adbQuery(
+          `SELECT @rid AS rid, label, _alias_norms, _thing_type, _keys FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 5`,
+          { t: m.type, n },
+        ).catch(() => []);
     const near = byName.length
       ? []
       : await adbQuery(
           `SELECT @rid AS rid, label, _alias_norms, _thing_type, vectorCosineSimilarity(embed_thing, [${vecs[i].join(",")}]) AS score FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND embed_thing IS NOT NULL ORDER BY score DESC LIMIT 3`,
           { t: m.type },
         ).catch(() => []);
-    const cands = [...byName, ...near].map((c) => ({ rid: String(c.rid), name: c.label, aliases: c._alias_norms ?? [], type: c._thing_type, score: c.score === undefined ? undefined : Number(c.score) }));
+    const cands = [...byName, ...near].map((c) => ({
+      rid: String(c.rid),
+      name: c.label,
+      aliases: c._alias_norms ?? [],
+      // a keyed match counts as the mention's type: the key decides
+      type: byKey.length ? m.type : c._thing_type,
+      keys: c._keys ?? [],
+      score: c.score === undefined ? undefined : Number(c.score),
+    }));
     const r = resolve(m, cands);
     if (r.create && r.maybe && unsure === "skip") {
       const other = (await adbQuery(`SELECT label FROM ${r.maybe}`))[0]?.label;
@@ -2193,11 +2210,17 @@ async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
     }
     if (r.create) {
       await adbCommand(
-        `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :label, _kind = 'thing', _thing_type = :t, _norm = :n, _alias_norms = :aliases, _homes = :homes, _home = :root, embed_thing = [${vecs[i].join(",")}], updated_at = :now`,
+        `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :label, _kind = 'thing', _thing_type = :t, _norm = :n, _alias_norms = :aliases, _keys = :keys, _homes = :homes, _home = :root, embed_thing = [${vecs[i].join(",")}], updated_at = :now`,
         "sql",
-        { name: thingName(m.type, m.name), label: m.name, t: m.type, n, aliases: [], homes: [home], root: positionMap.root, now: new Date().toISOString() },
+        { name: thingName(m.type, m.name), label: m.name, t: m.type, n, aliases: [], keys: m.key ? [m.key] : [], homes: [home], root: positionMap.root, now: new Date().toISOString() },
       );
       thing = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND _norm = :n ORDER BY @rid DESC LIMIT 1`, { t: m.type, n }))[0]?.rid);
+    } else if (m.key && RID_RE.test(String(thing))) {
+      // a thing found by name learns its record key
+      const cur = (await adbQuery(`SELECT _keys FROM ${thing}`))[0]?._keys ?? [];
+      if (!cur.includes(m.key)) await adbCommand(`UPDATE ${thing} SET _keys = :k`, "sql", { k: [...cur, m.key].slice(-10) }).catch(() => {});
+    }
+    if (r.create) {
       if (r.maybe && RID_RE.test(thing)) {
         // unsure: a person decides whether they're the same (nothing merges on its own)
         const other = (await adbQuery(`SELECT label FROM ${r.maybe}`))[0]?.label;
@@ -2296,7 +2319,8 @@ async function claimThreads(limit) {
   });
   const out = [];
   for (const job of due) {
-    const lease = new Date(now.getTime() + (worker.pool.threadMinutes + 5) * 60_000).toISOString();
+    const minutes = Number(JSON.parse(job.payload || "{}").minutes) || worker.pool.threadMinutes;
+    const lease = new Date(now.getTime() + (minutes + 5) * 60_000).toISOString();
     const claimed = await adbCommand("UPDATE Job SET status = 'running', claimed_at = :now, lease_until = :lease, updated_at = :now WHERE id = :id AND status = 'pending'", "sql", {
       now: now.toISOString(),
       lease,
@@ -2314,8 +2338,8 @@ async function claimThreads(limit) {
       entry: payload.rid,
       name: brief.entry.name,
       agent_id: job.agent_id ?? null,
-      minutes: worker.pool.threadMinutes,
-      message: payload.resume ? resumeBrief(payload.resume) : taskBrief({ ...brief, why: payload.why }),
+      minutes: Number(payload.minutes) || worker.pool.threadMinutes,
+      message: payload.resume ? resumeBrief(payload.resume) : payload.task ? taskThreadBrief(payload.task) : taskBrief({ ...brief, why: payload.why }),
     });
   }
   return { threads: out };
@@ -2357,6 +2381,8 @@ async function finishThread(jobId, { status, summary }) {
     id: jobId,
   });
   if (next === "done" && RID_RE.test(String(payload.rid))) await adbCommand(`UPDATE ${payload.rid} SET _reviewed_at = :now`, "sql", { now }).catch(() => {});
+  // a task's report stays on its task entry (what the survey found, for the admin and later tasks)
+  if (payload.task && RID_RE.test(String(payload.rid)) && summary) await adbCommand(`UPDATE ${payload.rid} SET text_state = :sum`, "sql", { sum: String(summary).slice(0, 6000) }).catch(() => {});
   return { status: next };
 }
 
@@ -2497,25 +2523,126 @@ async function workerUpsert(args, identity, scope) {
 /** a worker links its own entry to things (the same resolution as the one-call step; unsure matches come back to it) */
 async function workerLink(args, identity) {
   await assertNotWaiting(identity);
-  const rid = identity.role.entry;
+  // its own entry by default; or another entry it names (a table's entry listing its records)
+  let rid = identity.role.entry;
+  if (args.entry) {
+    const found = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :n AND (_kind IS NULL OR _kind IN ['document', 'section', 'task']) LIMIT 2`, { n: args.entry }))[0];
+    if (!found) throw new Error(`no entry called "${args.entry}"`);
+    rid = String(found.rid);
+  }
   const row = (await adbQuery(`SELECT _home FROM ${rid}`).catch(() => []))[0];
-  if (!row) throw new Error("your entry is gone");
-  // a thing's full name ("Toro (customer)", as searches show it) is its name and type
-  const bare = args.things.map((t) => {
-    const m = /^(.*\S)\s*\(([a-z]+)\)$/i.exec(String(t.name));
-    return m && THING_TYPES.includes(m[2].toLowerCase()) ? { ...t, name: m[1], type: t.type ?? m[2].toLowerCase() } : t;
-  });
-  const mentions = parseMentions(JSON.stringify({ things: bare }));
+  if (!row) throw new Error("that entry is gone");
+  const mentions = parseMentions(JSON.stringify({ things: args.things.map(bareThing) }), 25);
   const linked = await linkMentions(rid, mentions, effectiveHome(positionMap, row._home), { unsure: "skip" });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
   const done = linked.filter((l) => !l.unsure);
-  if (done.length) await logChange(identity, { kind: "link", detail: done.map((l) => `${l.name} (${l.type}${l.created ? ", new" : ""})`).join(", ") });
+  if (done.length) {
+    const created = done.filter((l) => l.created).length;
+    await logChange(identity, {
+      kind: "link",
+      detail: `${args.entry ? `"${args.entry}": ` : ""}${done.length > 6 ? `${done.length} things (${created} new)` : done.map((l) => `${l.name} (${l.type}${l.created ? ", new" : ""})`).join(", ")}`,
+    });
+  }
   return {
     linked,
     ...(linked.some((l) => l.unsure)
-      ? { note: "Unsure ones weren't linked: they may be an existing thing. Check with about_thing, then link the existing name, or propose_merge, or raise_question." }
+      ? { note: "Unsure ones weren't linked: they may be an existing thing. Check with about_thing, then link the existing name, merge, or ask." }
       : {}),
   };
+}
+
+/** a thing's full name ("Toro (customer)", as searches show it) is its name and type */
+function bareThing(t) {
+  const m = /^(.*\S)\s*\(([a-z]+)\)$/i.exec(String(t?.name ?? ""));
+  return m && THING_TYPES.includes(m[2].toLowerCase()) ? { ...t, name: m[1], type: t.type ?? m[2].toLowerCase() } : t;
+}
+
+/** one thing by key, or by name/alias and type; null when there's none (or several) */
+async function findThing(ref) {
+  const t = bareThing(ref);
+  const key = normalizeKey(t.key);
+  if (key) {
+    const k = (await adbQuery(`SELECT @rid AS rid, label, _thing_type, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }))[0];
+    if (k) return k;
+  }
+  const n = normalize(t.name);
+  const rows = await adbQuery(
+    `SELECT @rid AS rid, label, _thing_type, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n)${t.type ? " AND _thing_type = :t" : ""} LIMIT 2`,
+    { n, t: t.type },
+  );
+  return rows.length === 1 ? rows[0] : null;
+}
+
+/**
+ * Relationships between things (a job is for a customer, an employee works
+ * in a work center), with the evidence. A relationship shows only to someone
+ * who can see both things.
+ */
+async function workerRelate(args, identity) {
+  await assertNotWaiting(identity);
+  const out = [];
+  for (const r of args.relations) {
+    const rel = normalizeRel(r.rel);
+    if (!rel) {
+      out.push({ ...r, skipped: "no relationship verb" });
+      continue;
+    }
+    const from = await findThing(r.from);
+    const to = await findThing(r.to);
+    if (!from || !to) {
+      out.push({ from: r.from.name, rel, to: r.to.name, skipped: `no single thing called "${!from ? r.from.name : r.to.name}": link it to an entry first (link_things), or give its type or key` });
+      continue;
+    }
+    if (String(from.rid) === String(to.rid)) {
+      out.push({ from: from.label, rel, to: to.label, skipped: "a thing and itself" });
+      continue;
+    }
+    const existing = await adbQuery(`SELECT @in AS dst, rel FROM (SELECT expand(outE('RELATES')) FROM ${from.rid})`).catch(() => []);
+    if (existing.some((e) => String(e.dst) === String(to.rid) && e.rel === rel)) {
+      out.push({ from: from.label, rel, to: to.label, already: true });
+      continue;
+    }
+    await adbCommand(`CREATE EDGE RELATES FROM ${from.rid} TO ${to.rid} SET rel = :rel, evidence = :ev, job = :job, at = :now`, "sql", {
+      rel,
+      ev: String(r.evidence ?? "").slice(0, 400),
+      job: identity.role.job,
+      now: new Date().toISOString(),
+    });
+    out.push({ from: from.label, rel, to: to.label, related: true });
+  }
+  const made = out.filter((o) => o.related);
+  if (made.length) await logChange(identity, { kind: "relate", detail: made.length > 6 ? `${made.length} relationships` : made.map((o) => `${o.from} ${o.rel} ${o.to}`).join("; ") });
+  return { relations: out };
+}
+
+/**
+ * A task thread: not one saved entry but a piece of work (a survey of a
+ * connection, a follow-up a survey queued). Its "entry" is a task entry
+ * (_kind 'task', at the root: only the admin sees it) that holds its brief
+ * and, once done, what it found.
+ */
+async function createTask({ title, brief, minutes, parent, by }) {
+  const name = String(title).replace(/\s+/g, " ").trim().slice(0, 120);
+  if (name.length < 4) throw Object.assign(new Error("a task needs a title"), { status: 400 });
+  const now = new Date().toISOString();
+  await adbCommand(
+    `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'task', _home = :root, _origin = :root, text_identity = :brief, _task_by = :by, updated_at = :now`,
+    "sql",
+    { name, root: positionMap.root, brief: String(brief).slice(0, 6000), by: by ?? "", now },
+  );
+  const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _kind = 'task' ORDER BY @rid DESC LIMIT 1`, { name }))[0]?.rid);
+  const job = await enqueue("review", { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}) }, { key: `task:${rid}`, priority: 3 });
+  return { task: name, job };
+}
+
+/** a worker queues follow-up work (a survey fanning out by topic); a few per thread */
+async function workerFollowup(args, identity) {
+  await assertNotWaiting(identity);
+  const queued = Number((await adbQuery("SELECT count(*) AS n FROM Job WHERE kind = 'review' AND payload LIKE :p", { p: `%"parent":"${identity.role.job}"%` }))[0]?.n ?? 0);
+  if (queued >= 20) throw new Error("this thread already queued 20 follow-ups: finish with what's queued");
+  const r = await createTask({ title: args.title, brief: args.brief, minutes: args.minutes, parent: identity.role.job, by: identity.user });
+  await logChange(identity, { kind: "followup", detail: r.task });
+  return { ...r, note: "Queued: another thread does it. Don't wait for it." };
 }
 
 /** a worker merges two things (by name): directly, or as a proposal when it judges it consequential */
@@ -2616,8 +2743,8 @@ async function aboutThing({ name }, identity, scope) {
   const n = normalize(name);
   const visible = homeFilter(scope);
   const things = await adbQuery(
-    `SELECT @rid AS rid, label, _thing_type, _alias_norms FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n)${visible} LIMIT 5`,
-    { n },
+    `SELECT @rid AS rid, label, _thing_type, _alias_norms, _keys FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n OR _keys CONTAINS :raw)${visible} LIMIT 5`,
+    { n, raw: String(name).trim() },
   );
   if (things.length === 0) return { things: [], note: `nothing called "${name}" that you can see is known yet` };
   const out = [];
@@ -2627,10 +2754,24 @@ async function aboutThing({ name }, identity, scope) {
       `SELECT name, _home, _kind, _doc_title, _doc_id, _section, text_identity, _valid_until FROM (SELECT expand(in('ABOUT')) FROM ${String(t.rid)}) WHERE name IS NOT NULL${visible}${liveClause()} LIMIT 40`,
     ).catch(() => []);
     read.push(...rows.map((r) => effectiveHome(positionMap, r._home)));
+    // relationships to other things the caller can see
+    const edges = [
+      ...(await adbQuery(`SELECT @in AS other, rel FROM (SELECT expand(outE('RELATES')) FROM ${String(t.rid)}) LIMIT 60`).catch(() => [])).map((e) => ({ ...e, dir: "out" })),
+      ...(await adbQuery(`SELECT @out AS other, rel FROM (SELECT expand(inE('RELATES')) FROM ${String(t.rid)}) LIMIT 60`).catch(() => [])).map((e) => ({ ...e, dir: "in" })),
+    ].filter((e) => RID_RE.test(String(e.other)));
+    const others = edges.length ? await adbQuery(`SELECT @rid AS rid, label, _thing_type FROM [${[...new Set(edges.map((e) => String(e.other)))].join(",")}] WHERE _kind = 'thing'${visible}`).catch(() => []) : [];
+    const byRid = new Map(others.map((o) => [String(o.rid), o]));
     out.push({
       name: t.label,
       type: t._thing_type,
       also_called: t._alias_norms ?? [],
+      ...(t._keys?.length ? { keys: t._keys } : {}),
+      related: edges
+        .filter((e) => byRid.has(String(e.other)))
+        .map((e) => {
+          const o = byRid.get(String(e.other));
+          return e.dir === "out" ? { [e.rel]: `${o.label} (${o._thing_type})` } : { [`${e.rel} (from)`]: `${o.label} (${o._thing_type})` };
+        }),
       statements: rows.map((r) => ({ name: r.name, ...questionOf(r), ...validityOf(r), text: String(r.text_identity ?? "").slice(0, 300) })),
     });
   }
@@ -3049,14 +3190,52 @@ a search.`,
   if (SCOPED && role === "worker") {
     server.tool(
       "link_things",
-      `Link YOUR entry to the things it's about: people, customers, suppliers, machines, parts, orders,
-places, projects, teams (type one of: person, customer, supplier, machine, part, order, place, project,
-team, other). Existing things are found by name or alias; new ones are created. A name that may be an
-existing thing under another name isn't linked: it comes back as unsure for you to check.`,
-      { things: z.array(z.object({ name: z.string().min(2).max(120), type: z.string(), role: z.string().max(30).optional() })).min(1).max(8) },
+      `Link an entry (yours by default; or name one in entry, e.g. a table's entry listing its records) to
+the things it's about: people, customers, suppliers, machines, parts, orders, places, projects, teams
+(type one of: person, customer, supplier, machine, part, order, place, project, team, other). Up to 25
+a call. Give a record's key when you know it ("mssql:dbo_Customer:TORO"): the same key is always the
+same thing. Existing things are found by key, name or alias; new ones are created. A name that may be
+an existing thing under another name isn't linked: it comes back as unsure for you to check.`,
+      {
+        things: z.array(z.object({ name: z.string().min(2).max(120), type: z.string(), role: z.string().max(30).optional(), key: z.string().max(200).optional() })).min(1).max(25),
+        entry: z.string().max(200).optional(),
+      },
       async (args) => {
         need("read");
         return { content: [{ type: "text", text: JSON.stringify(await workerLink(args, identity)) }] };
+      },
+    );
+    server.tool(
+      "relate_things",
+      `Record relationships between things: from, a verb (rel: works_in, supplies, orders, belongs_to,
+runs_on, reports_to...), to, and the evidence (which table and columns, or the aggregate). Each thing
+by name and type, or by key. Up to 25 a call. A relationship shows only to people who can see both.`,
+      {
+        relations: z
+          .array(
+            z.object({
+              from: z.object({ name: z.string().min(2), type: z.string().optional(), key: z.string().optional() }),
+              rel: z.string().min(2).max(40),
+              to: z.object({ name: z.string().min(2), type: z.string().optional(), key: z.string().optional() }),
+              evidence: z.string().max(400).optional(),
+            }),
+          )
+          .min(1)
+          .max(25),
+      },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerRelate(args, identity)) }] };
+      },
+    );
+    server.tool(
+      "queue_followup",
+      `Queue a follow-up task for another thread: a title and a precise brief (which tables, what to seed,
+which relationships). For a survey's topics that don't fit this conversation. A few per thread.`,
+      { title: z.string().min(4).max(120), brief: z.string().min(20).max(6000), minutes: z.number().int().min(5).max(180).optional() },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerFollowup(args, identity)) }] };
       },
     );
     server.tool(
@@ -3527,6 +3706,18 @@ app.get("/api/worker/threads", (req, res) => {
     }
     return { threads: out };
   })().then((r) => res.json(r), (e) => httpError(res, e));
+});
+/** the admin starts a survey of a connection: a task thread maps it, seeds its records, relates them */
+app.post("/api/worker/survey", (req, res) => {
+  const identity = rootOnly(req, res);
+  if (!identity) return;
+  const connection = String(req.body?.connection ?? "").trim();
+  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/i.test(connection)) return res.status(400).json({ error: "which connection (its name)" });
+  const focus = typeof req.body?.focus === "string" ? req.body.focus.slice(0, 1000) : "";
+  void createTask({ title: `Survey: ${connection}`, brief: surveyBrief(connection, focus), minutes: Number(req.body?.minutes) || 60, by: identity.user }).then(
+    (r) => res.json(r),
+    (e) => httpError(res, e),
+  );
 });
 app.get("/api/worker/questions", (req, res) => {
   if (!rootOnly(req, res)) return;
