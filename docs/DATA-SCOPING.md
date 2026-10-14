@@ -21,6 +21,12 @@ privilege model inside SQL:
 - **One DAB instance per access level**, each with its own SQL login whose
   grants a DBA scopes in the database's own tools (tables/views, read-only
   where appropriate). The login is the boundary.
+- **Read-only by default** (2026-10-14): the DAB role is read only
+  (`"action": "read"`), so agents can describe, read and aggregate
+  (`aggregate_records`: count/sum/avg/min/max with group-by and having) but
+  DAB refuses create, update, delete and stored procedures. DAB's REST and
+  GraphQL endpoints stay off; agents reach only `/mcp`. A workspace that
+  should write gets a separate DAB instance with its own role and login.
 - **gwarestrin decides reachability only**: which positions (below) get which
   DAB instances. Discovery is filtered per tenant, and OpenShell's sandbox
   policy gives an agent no network path to the others. A leaked URL still only

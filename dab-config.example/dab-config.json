@@ -15,7 +15,7 @@
         "rest": { "enabled": false },
         "graphql": { "enabled": false }
       },
-      "permissions": [{ "role": "anonymous", "actions": [{ "action": "*" }] }]
+      "permissions": [{ "role": "anonymous", "actions": [{ "action": "read" }] }]
     }
   },
   "data-source-files": ["/etc/dab/dab-config-otherdb.json"],
@@ -27,7 +27,7 @@
       "authentication": { "provider": "Simulator" }
     },
     "mcp": {
-      "description": "Local SQL Server databases via Microsoft SQL MCP Server (Data API builder). Entities are auto-exposed per database; use describe_entities to discover them, then read_records / create_record / update_record / delete_record / aggregate_records."
+      "description": "Local SQL Server databases via Microsoft SQL MCP Server (Data API builder). Entities are auto-exposed per database; use describe_entities to discover them, then read_records / aggregate_records. Read-only: nothing can be created, changed or deleted."
     }
   }
 }
