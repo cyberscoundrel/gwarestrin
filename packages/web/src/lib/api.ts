@@ -55,6 +55,53 @@ export interface GraphWorkerView {
   jobs: Record<string, number>;
   things: number;
   today: { calls: number; budget: number };
+  pool?: PoolSettings;
+  /** threads by status, and how many started today */
+  threads?: Record<string, number> & { today?: number };
+  open_questions?: number;
+  open_proposals?: number;
+}
+
+/** the graph worker pool: agent threads, one per queue entry (see graph-rag/src/pool.js) */
+export interface PoolSettings {
+  poolSize: number;
+  sortFirst: boolean;
+  dailyThreads: number;
+  threadMinutes: number;
+  keepDays: number;
+}
+export interface WorkerThread {
+  id: string;
+  entry: string | null;
+  why: string;
+  status: "pending" | "running" | "waiting" | "done" | "failed";
+  agent_id: string | null;
+  summary: string;
+  error: string | null;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+}
+export interface WorkerQuestion {
+  id: string;
+  job_id: string;
+  entry_name: string | null;
+  question: string;
+  options: string[];
+  why: string;
+  status: string;
+  agent_id: string | null;
+  created_at: string;
+}
+export interface WorkerProposal {
+  id: string;
+  kind: string;
+  change: string;
+  reason: string;
+  proposed_by: string;
+  created_at: string;
+  entry: string | null;
+  agent_id: string | null;
 }
 
 /** what pruning will remove, and where it goes (the root only) */
@@ -329,6 +376,24 @@ export const api = {
   async graphWorker(): Promise<GraphWorkerView | null> {
     const r = await fetch("/api/graph-worker");
     return r.ok ? json(r) : null;
+  },
+  async savePool(changes: Partial<PoolSettings>): Promise<GraphWorkerView> {
+    return json(await fetch("/api/graph-worker/pool", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));
+  },
+  async workerThreads(): Promise<WorkerThread[]> {
+    return (await json<{ threads: WorkerThread[] }>(await fetch("/api/graph-worker/threads"))).threads;
+  },
+  async workerQuestions(): Promise<WorkerQuestion[]> {
+    return (await json<{ questions: WorkerQuestion[] }>(await fetch("/api/graph-worker/questions"))).questions;
+  },
+  async answerWorkerQuestions(ids: string[], answer: string, dismiss = false): Promise<{ answered: number }> {
+    return json(await fetch("/api/graph-worker/questions/answer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids, answer, dismiss }) }));
+  },
+  async workerProposals(): Promise<WorkerProposal[]> {
+    return (await json<{ proposals: WorkerProposal[] }>(await fetch("/api/graph-worker/proposals"))).proposals;
+  },
+  async decideWorkerProposal(id: string, approve: boolean, reason = ""): Promise<unknown> {
+    return json(await fetch(`/api/graph-worker/proposals/${encodeURIComponent(id)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ approve, reason }) }));
   },
   async graphWorkerModels(): Promise<string[]> {
     return (await json<{ models: string[] }>(await fetch("/api/graph-worker/models"))).models;

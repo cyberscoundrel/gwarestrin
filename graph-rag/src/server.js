@@ -2505,8 +2505,10 @@ async function workerMerge(args, identity, scope) {
 async function decideProposal(id, approve, reason, identity) {
   const rec = (await adbQuery("SELECT kind, note, job_id FROM PendingWrite WHERE id = :id AND status = 'pending' AND job_id IS NOT NULL", { id }))[0];
   if (!rec) throw new Error(`no pending proposal ${id}`);
-  const result = approve ? await approvePending(id, identity) : await rejectPending(id, identity);
-  if (!approve || reason) await resumeThread(rec.job_id, { proposal: rec.note || rec.kind, decision: approve ? "approved" : "rejected", reason, answered_by: identity.user });
+  if (!approve) return rejectPending(id, identity, reason);
+  const result = await approvePending(id, identity);
+  // applied as proposed: the thread only hears of it when there's something to tell it
+  if (reason) await resumeThread(rec.job_id, { proposal: rec.note || rec.kind, decision: "approved", reason, answered_by: identity.user });
   return result;
 }
 
@@ -2764,7 +2766,7 @@ async function approvePending(id, identity) {
   if (rec.kind === "upsert") await resolveWaitingShares(id).catch((e) => log.warn(`waiting shares for ${id}: ${String(e).slice(0, 160)}`));
   return { approved: true, result };
 }
-async function rejectPending(id, identity) {
+async function rejectPending(id, identity, reason = "") {
   const rejector = identity.user;
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
   const rows = await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id });
@@ -2778,6 +2780,8 @@ async function rejectPending(id, identity) {
   if (rows[0].kind === "upsert") await dropWaitingShares(id).catch((e) => log.warn(`waiting shares for ${id}: ${String(e).slice(0, 160)}`));
   // a rejected ingest leaves nothing behind
   if (rows[0].kind === "ingest" && docStore) await docStore.remove(JSON.parse(rows[0].payload).doc_id).catch(() => {});
+  // a worker thread's proposal: the thread decides again (wherever it was rejected)
+  if (rows[0].job_id) await resumeThread(rows[0].job_id, { proposal: rows[0].note || rows[0].kind, decision: "rejected", reason, answered_by: rejector }).catch(() => {});
   return { rejected: true };
 }
 

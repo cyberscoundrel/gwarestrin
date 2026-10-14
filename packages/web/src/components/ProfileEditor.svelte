@@ -275,15 +275,15 @@
     <span class="grid gap-0.5">
       <span class="text-sm text-fg">This profile runs the graph worker</span>
       <span class="text-xs text-faint">
-        The graph worker reads every new entry in the background and links it to the people, customers, machines and orders it's about, so agents can ask "what do we know about X". It uses this profile's model below and its instructions above as guidance (e.g. "customers are named by their ERP code"). One profile at a time.
+        The graph worker keeps the graph linked and current: every new entry is linked to the people, customers, machines and orders it's about, and entries that need judgement get their own agent thread under this profile. Threads use this profile's model (a labeled model) and its instructions above as guidance (e.g. "customers are named by their ERP code"). They read everything, are read-only on other connections, can't run commands or reach the internet, and bring questions and bigger changes to you. Admins only; one profile at a time. Pool size and limits are in Graph worker.
       </span>
     </span>
   </label>
   {#if isWorker}
     <div class="field">
-      <span class="field-label">Worker model</span>
+      <span class="field-label">Sorting model (one call per entry)</span>
       <Dropdown full label="graph worker model" value={workerModel} options={[{ value: "", label: "Pick a model" }, ...workerModels.map((m) => ({ value: m, label: m.split("/").at(-1) ?? m }))]} onchange={(v) => (workerModel = v)} searchable />
-      <span class="field-hint">Models graph-rag reaches through the deployment's model gateway. A local model keeps your entries on your hardware.</span>
+      <span class="field-hint">Links each new entry and decides whether it needs a thread. Models graph-rag reaches through the deployment's model gateway; a local model keeps your entries on your hardware.</span>
       {#if workerError}<span class="field-error">{workerError}</span>{/if}
     </div>
   {/if}
