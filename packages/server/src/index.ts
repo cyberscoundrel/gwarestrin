@@ -58,7 +58,7 @@ async function main(): Promise<void> {
   await registerFileRoutes(app, config, manager);
   await registerGraphQueueRoutes(app);
   await registerKnowledgeRoutes(app, manager);
-  await registerInstanceRoutes(app);
+  await registerInstanceRoutes(app, registry);
   await registerMcpRoutes(app, mcpRegistry);
   await registerWs(app, config, manager);
   startSidecarDiscovery(process.env.DOCKER_PROXY_URL, mcpRegistry);

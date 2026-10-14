@@ -1,5 +1,23 @@
 import { Type, type Static } from "typebox";
 
+export const MODEL_TIERS = ["basic", "standard", "frontier"] as const;
+export const MODEL_HOSTING = ["on-prem", "private-cloud", "public-api"] as const;
+export type ModelTier = (typeof MODEL_TIERS)[number];
+export type ModelHosting = (typeof MODEL_HOSTING)[number];
+
+/** what the organization's admin says a model is (see provisioner/model-labels.mjs) */
+export const modelLabelSchema = Type.Object({
+  tier: Type.Union([Type.Literal("basic"), Type.Literal("standard"), Type.Literal("frontier")]),
+  hosting: Type.Union([Type.Literal("on-prem"), Type.Literal("private-cloud"), Type.Literal("public-api")]),
+  notes: Type.Optional(Type.String({ maxLength: 500 })),
+  by: Type.Optional(Type.String()),
+  at: Type.Optional(Type.String()),
+});
+export type ModelLabel = Static<typeof modelLabelSchema>;
+
+/** a model's label key */
+export const modelKey = (provider: string, modelId: string): string => `${provider}/${modelId}`;
+
 /**
  * Instance metadata v1 — the deployment contract between the surrounding
  * infrastructure (IdP, reverse proxy, provisioner) and a gwarestrin
@@ -40,6 +58,12 @@ export const instanceMetadataSchema = Type.Object(
      * admin writes them in Workspaces); agents get them with their tools
      */
     connections: Type.Optional(Type.Record(Type.String(), Type.String())),
+    /**
+     * the organization's model labels ("<provider>/<model id>" -> label).
+     * Present = only labeled models may run agents here; absent (legacy) =
+     * no label restriction.
+     */
+    models: Type.Optional(Type.Record(Type.String(), modelLabelSchema)),
     /** substitution bag: MCP defs reference values via ${values.a.b} paths */
     values: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
     /** optional UI surfaces (all enforcement happens in the backing service) */

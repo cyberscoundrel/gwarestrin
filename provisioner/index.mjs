@@ -27,6 +27,7 @@ import { appendFileSync, chmodSync, readFileSync, writeFileSync, existsSync } fr
 import * as openshell from "./openshell.mjs";
 import { applySettingsUpdate, defaultSettings, normalizeSettings } from "./instance-settings.mjs";
 import { startOpsServer } from "./ops.mjs";
+import { applyLabelUpdate, normalizeLabels } from "./model-labels.mjs";
 
 const AUTH_URL = (process.env.AUTHENTIK_URL ?? "http://authentik-server:9000").replace(/\/+$/, "");
 const AUTH_TOKEN = process.env.AUTHENTIK_TOKEN ?? "";
@@ -257,6 +258,10 @@ const SETTINGS_DEFAULTS = defaultSettings();
 const CONNECTIONS_FILE = `${INSTANCES_DIR}/.connections.json`;
 const connectionNotes = () => readJson(CONNECTIONS_FILE, { connections: {} }).connections ?? {};
 
+// which models may run agents, and what they are (organization-wide; the admin labels them in Models)
+const MODELS_FILE = `${INSTANCES_DIR}/.model-labels.json`;
+const modelLabels = () => normalizeLabels(readJson(MODELS_FILE, { models: {} }).models);
+
 const settingsFor = (name) => normalizeSettings(readJson(SETTINGS_FILE, { tenants: {} }).tenants?.[name], SETTINGS_DEFAULTS);
 
 function opsToken() {
@@ -341,6 +346,10 @@ function ensureMetadata(name, tier, { token, delegationKey }, oshValues) {
     settings: settingsFor(name),
     // what each tool connection is for, for its agents
     connections: connectionNotes(),
+    // the models agents may use (only labeled ones), with their labels. Only
+    // once the admin has saved labels: before that, nothing is enforced (a
+    // deploy doesn't stop every agent before anyone could label a model)
+    ...(existsSync(MODELS_FILE) ? { models: modelLabels() } : {}),
   };
   if (tier === "admin") {
     doc.presentation = { queue: { label: "Graph review", url: "http://graph-rag:8000/api/queue", tokenRef: "values.graph.token" } };
@@ -597,8 +606,25 @@ async function listWorkspaces() {
     defaults: SETTINGS_DEFAULTS,
     choices: { providers, mcp: await mcpChoices().catch(() => []) },
     connections: connectionNotes(),
+    models: modelLabels(),
     history,
   };
+}
+
+/** the admin labels models; only labeled models may run agents in any workspace */
+async function updateModels(input, actor) {
+  let next;
+  try {
+    next = applyLabelUpdate(modelLabels(), input, actor);
+  } catch (err) {
+    throw Object.assign(err, { status: 400 });
+  }
+  writeFileSync(MODELS_FILE, JSON.stringify({ models: next }, null, 1) + "\n");
+  const changed = Object.keys(input ?? {});
+  appendFileSync(SETTINGS_LOG, JSON.stringify({ at: new Date().toISOString(), by: actor, name: "(models)", models: changed }) + "\n");
+  log(`models: ${changed.length} label(s) changed by ${actor}`);
+  await tick();
+  return { models: next };
 }
 
 /** the admin describes what tool connections are for; every workspace gets the notes */
@@ -647,4 +673,4 @@ const tick = () =>
   }));
 await tick();
 setInterval(() => void tick(), POLL * 1000);
-startOpsServer({ port: OPS_PORT, token: OPS_TOKEN, list: listWorkspaces, update: updateWorkspace, updateConnections, log });
+startOpsServer({ port: OPS_PORT, token: OPS_TOKEN, list: listWorkspaces, update: updateWorkspace, updateConnections, updateModels, log });

@@ -1,4 +1,4 @@
-import type { AgentRecord, AgentRuntimeSummary, ModelView, ProfileRecord, ProviderView } from "@gwarestrin/shared";
+import type { AgentRecord, AgentRuntimeSummary, ModelLabel, ModelView, ProfileRecord, ProviderView } from "@gwarestrin/shared";
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -114,6 +114,22 @@ export interface WorkspacesView {
   connections?: Record<string, string>;
   history?: Array<{ at: string; by: string; name: string; prev?: WorkspaceSettings; next?: WorkspaceSettings; connections?: string[] }>;
 }
+
+/** every model the providers offer, with the organization's labels (admins) */
+export interface ModelCatalog {
+  /** false: this workspace's metadata carries no labels yet, so none are enforced */
+  enforced: boolean;
+  providers: Array<{
+    id: string;
+    description: string | null;
+    tier: "local" | "cloud";
+    degraded: boolean;
+    models: Array<{ key: string; id: string; name: string; contextWindow: number; source: string; label: ModelLabel | null }>;
+  }>;
+  /** labeled, but no provider offers it right now */
+  missing: Array<{ key: string; label: ModelLabel }>;
+}
+export type LabelInput = Pick<ModelLabel, "tier" | "hosting" | "notes">;
 
 export interface GrantView {
   id: string;
@@ -249,6 +265,14 @@ export const api = {
   },
   async saveConnections(notes: Record<string, string>): Promise<{ connections: Record<string, string> }> {
     return json(await fetch("/api/instances/connections", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(notes) }));
+  },
+  /** every model the providers offer, with labels (admins only: 404 elsewhere) */
+  async modelCatalog(): Promise<ModelCatalog> {
+    return json(await fetch("/api/models/catalog"));
+  },
+  /** label models ({key: label}) or remove labels ({key: null}) */
+  async saveModelLabels(changes: Record<string, LabelInput | null>): Promise<{ models: Record<string, ModelLabel> }> {
+    return json(await fetch("/api/models/labels", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));
   },
   /** the organization's workspaces (admins only; enabled: false elsewhere) */
   async workspaces(): Promise<WorkspacesView> {

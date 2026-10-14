@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Building2, ChevronRight, Inbox, Pencil, Plus, Share2, ShieldCheck, UserPlus, X } from "lucide";
+  import { Building2, ChevronRight, Cpu, Inbox, Pencil, Plus, Share2, ShieldCheck, UserPlus, X } from "lucide";
   import { store } from "../lib/stores.svelte.js";
   import { modelDisplayName } from "../lib/format.js";
   import DeleteAgentModal from "./DeleteAgentModal.svelte";
@@ -7,6 +7,7 @@
   import GrantsPanel from "./GrantsPanel.svelte";
   import OrgSettingsPanel from "./OrgSettingsPanel.svelte";
   import WorkspacesPanel from "./WorkspacesPanel.svelte";
+  import ModelsPanel from "./ModelsPanel.svelte";
   import { api } from "../lib/api.js";
   import Icon from "./Icon.svelte";
 
@@ -28,6 +29,7 @@
   let showGrants = $state(false);
   let showSettings = $state(false);
   let showWorkspaces = $state(false);
+  let showModels = $state(false);
   // admins manage the organization's workspaces (the instance holds the ops credential)
   let canManageWorkspaces = $state(false);
   $effect(() => {
@@ -217,6 +219,10 @@
         <Icon icon={Building2} size={14} />
         Workspaces
       </button>
+      <button class={ghost} onclick={() => (showModels = true)}>
+        <Icon icon={Cpu} size={14} />
+        Models
+      </button>
     {/if}
   </div>
 </nav>
@@ -232,6 +238,16 @@
 {/if}
 {#if showWorkspaces}
   <WorkspacesPanel onclose={() => (showWorkspaces = false)} />
+{/if}
+{#if showModels}
+  <ModelsPanel
+    onclose={() => {
+      showModels = false;
+      // the workspace picks up new labels within seconds (metadata reload)
+      void store.refreshProviders();
+      setTimeout(() => void store.refreshProviders(), 4000);
+    }}
+  />
 {/if}
 
 {#if deleteTarget}

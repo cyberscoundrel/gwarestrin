@@ -157,12 +157,15 @@
               <span class="min-w-0 flex-1 truncate text-sm {selected ? 'text-fg' : 'text-dim'}">
                 {modelDisplayName(g.provider.id, m.id, store.providers)}
               </span>
+              {#if m.label}<span class="shrink-0 text-2xs text-faint" title={m.label.notes ?? ""}>{m.label.tier}</span>{/if}
               {#if isFreeModelId(m.id)}<span class="shrink-0 text-2xs text-ok">free</span>{/if}
               {#if m.reasoning}<span class="shrink-0 text-2xs text-faint">reasoning</span>{/if}
             </button>
           {/each}
         {:else}
-          <p class="m-0 px-3 py-6 text-center text-sm text-faint">No models match.</p>
+          <p class="m-0 px-3 py-6 text-center text-sm text-faint">
+            {store.providers.length === 0 ? "No models are available yet: an admin labels models in Models before agents can use them." : "No models match."}
+          </p>
         {/each}
       </div>
     </div>

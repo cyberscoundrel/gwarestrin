@@ -93,6 +93,8 @@ export interface ModelView {
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
   /** "static" = declared in providers.json; "discovered" = probed from /models */
   source: "static" | "discovered" | "first-party";
+  /** the organization's label (served views only; only labeled models run agents) */
+  label?: import("./instance-metadata.js").ModelLabel | undefined;
 }
 
 export const DEFAULT_CONTEXT_WINDOW = 32_768;

@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { instanceSettings, mcpAllowed, providerAllowed } from "../instance/settings.js";
+import { instanceSettings, mcpAllowed, modelRefusal } from "../instance/settings.js";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,10 +188,12 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     for (const [id, agent] of this.running) {
       const record = this.store.get(id);
       if (!record) continue;
-      if (record.model && !providerAllowed(record.model.provider)) {
-        log.warn(`agent ${record.name}: model provider ${record.model.provider} is no longer allowed here; stopping it`);
+      // a model that lost its label (or its provider) stops: only labeled models run agents
+      const refused = record.model ? modelRefusal(record.model.provider, record.model.modelId) : null;
+      if (refused) {
+        log.warn(`agent ${record.name}: ${refused}; stopping it`);
         void this.stop(id).catch((err) => log.error(`stop ${id} failed`, err));
-        agent.noteError(`stopped: model provider ${record.model.provider} isn't allowed in this workspace any more`);
+        agent.noteError(`stopped: ${refused}`);
         continue;
       }
       if (record.mcpServers.some((n) => !mcpAllowed(n))) {
@@ -224,12 +226,11 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const profile = this.profiles.resolve(input.profileId);
     const defaults: CreateAgentInput = { ...input, profileId: profile.id };
 
-    if (input.model && !providerAllowed(input.model.provider)) {
-      throw new Error(`model provider ${input.model.provider} isn't allowed in this workspace`);
-    }
+    const refused = input.model ? modelRefusal(input.model.provider, input.model.modelId) : null;
+    if (refused) throw new Error(refused);
     const profileModel = profile.defaults.model ?? undefined;
-    // a profile's model on a provider this workspace doesn't allow falls back to the default
-    if (!defaults.model && profileModel && providerAllowed(profileModel.provider)) defaults.model = profileModel;
+    // a profile's model that isn't allowed here (provider, or no label) falls back to the default
+    if (!defaults.model && profileModel && !modelRefusal(profileModel.provider, profileModel.modelId)) defaults.model = profileModel;
     if (!defaults.model) {
       const m = this.defaultModel();
       if (m) defaults.model = m;
@@ -264,6 +265,8 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   }
 
   async patchAgent(id: string, patch: PatchAgentInput): Promise<AgentRecord> {
+    const refused = patch.model ? modelRefusal(patch.model.provider, patch.model.modelId) : null;
+    if (refused) throw new Error(refused);
     const record = this.store.patch(id, patch);
     await scaffoldAgent(this.config.stateDir, record, this.registry, this.extensionsRoot, this.mcpRegistry, {
       profileInstructions: this.profiles.resolve(record.profileId).instructions,
@@ -302,9 +305,9 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     if (this.running.has(id)) return this.running.get(id)!.summary();
     this.cancelPendingRestart(id);
 
-    if (record.model && !providerAllowed(record.model.provider)) {
-      throw new Error(`model provider ${record.model.provider} isn't allowed in this workspace; pick another model`);
-    }
+    const refused = record.model ? modelRefusal(record.model.provider, record.model.modelId) : null;
+    if (refused) throw new Error(`${refused}; pick another model`);
+    if (!record.model && !this.defaultModel()) throw new Error("no model is available: an admin labels models in Models before agents can use them");
     const runningCount = this.running.size;
     const cap = instanceSettings().maxAgents ?? this.config.maxAgents;
     if (runningCount >= cap) {
