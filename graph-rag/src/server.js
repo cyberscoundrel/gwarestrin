@@ -666,7 +666,8 @@ async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
   );
   const grading = Boolean(GRADER_MODEL) && policy.gradingEnabled;
   if (!grading) return entities.map((_, i) => applyFloor({ home: existing[i] ?? origin, note: "not graded (grading off)" }, origin, floor));
-  const verdicts = await gradeBatch(origin, entities, writtenAt);
+  // written for everyone: graded from the top for its end date only (everyone isn't a position to describe)
+  const verdicts = await gradeBatch(origin === EVERYONE ? positionMap.root : origin, entities, writtenAt);
   // the end date the grader judged; an unsure verdict means lasting, a failed one leaves it be
   const until = (v) => (v ? (v.confidence >= policy.gradingConfidence ? v.until : null) : undefined);
   if (origin === EVERYONE) {
