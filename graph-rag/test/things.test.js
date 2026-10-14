@@ -78,3 +78,12 @@ test("identifiers match exactly or not at all: close embeddings of numbers are d
   assert.deepEqual(resolve({ name: "3260364", type: "order" }, [{ rid: "#1:1", name: "3260372", type: "order", score: 0.97 }]), { create: true });
   assert.deepEqual(resolve({ name: "PO 4471", type: "order" }, [{ rid: "#1:1", name: "PO-4471", type: "order" }]), { use: "#1:1" }, "the same number written differently is the same");
 });
+
+test("a name several things share is ambiguous, not the first one found", () => {
+  const cands = [
+    { rid: "#1:1", name: "John", type: "person", keys: ["mssql:dbo_Employee:FRAJ"] },
+    { rid: "#1:2", name: "John", type: "person", keys: ["mssql:dbo_Contact:281"] },
+  ];
+  assert.deepEqual(resolve({ name: "John", type: "person" }, cands), { ambiguous: ["#1:1", "#1:2"] });
+  assert.deepEqual(resolve({ name: "John", type: "person", key: "mssql:dbo_Contact:281" }, cands), { use: "#1:2" }, "a key settles it");
+});

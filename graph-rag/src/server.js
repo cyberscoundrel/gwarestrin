@@ -2198,6 +2198,12 @@ async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
       score: c.score === undefined ? undefined : Number(c.score),
     }));
     const r = resolve(m, cands);
+    if (r.ambiguous) {
+      // several things go by this name: nothing is linked; a thread (or the sorting step's escalation) picks
+      const names = await adbQuery(`SELECT label, _keys FROM [${r.ambiguous.join(",")}]`).catch(() => []);
+      out.push({ name: m.name, type: m.type, unsure: names.map((x) => `${x.label}${(x._keys ?? [])[0] ? ` [${x._keys[0]}]` : ""}`).join(" or ") });
+      continue;
+    }
     if (r.create && r.maybe && unsure === "skip") {
       const other = (await adbQuery(`SELECT label FROM ${r.maybe}`))[0]?.label;
       out.push({ name: m.name, type: m.type, unsure: other ?? null });
@@ -2549,6 +2555,45 @@ async function workerLink(args, identity) {
       ? { note: "Unsure ones weren't linked: they may be an existing thing. Check with about_thing, then link the existing name, merge, or ask." }
       : {}),
   };
+}
+
+/** a worker removes links it judges wrong (from its entry by default, or the entry it names) */
+async function workerUnlink(args, identity) {
+  await assertNotWaiting(identity);
+  let rid = identity.role.entry;
+  if (args.entry) {
+    const found = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :n AND (_kind IS NULL OR _kind IN ['document', 'section', 'task']) LIMIT 2`, { n: args.entry }))[0];
+    if (!found) throw new Error(`no entry called "${args.entry}"`);
+    rid = String(found.rid);
+  }
+  const edges = await adbQuery(`SELECT @rid AS edge, @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
+  const out = [];
+  for (const ref of args.things) {
+    const t = await findThing(ref);
+    if (!t) {
+      out.push({ name: ref.name, skipped: "no single thing by that name, type or key" });
+      continue;
+    }
+    const e = edges.filter((x) => String(x.dst) === String(t.rid));
+    for (const x of e) if (RID_RE.test(String(x.edge))) await adbCommand(`DELETE FROM ${x.edge}`);
+    out.push({ name: t.label, [e.length ? "unlinked" : "wasnt_linked"]: true });
+  }
+  const done = out.filter((o) => o.unlinked);
+  if (done.length) await logChange(identity, { kind: "unlink", detail: `${args.entry ? `"${args.entry}": ` : ""}${done.map((o) => o.name).join(", ")}`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return { results: out };
+}
+
+/** a worker deletes a stray thing nothing refers to any more (anything still linked is merged or unlinked first) */
+async function workerDeleteThing(args, identity) {
+  await assertNotWaiting(identity);
+  const t = await findThing(args);
+  if (!t) throw new Error(`no single thing called "${args.name}"${args.type ? ` (${args.type})` : ""}: give its type or key`);
+  const about = Number((await adbQuery(`SELECT count(*) AS n FROM (SELECT expand(inE('ABOUT')) FROM ${t.rid})`))[0]?.n ?? 0);
+  const rel = Number((await adbQuery(`SELECT count(*) AS n FROM (SELECT expand(bothE('RELATES')) FROM ${t.rid})`))[0]?.n ?? 0);
+  if (about || rel) throw new Error(`"${t.label}" is still linked from ${about} entr${about === 1 ? "y" : "ies"} and has ${rel} relationship(s): unlink or merge it first`);
+  await adbCommand(`DELETE FROM ${t.rid}`);
+  await logChange(identity, { kind: "delete", detail: `${t.label} (${t._thing_type})`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return { deleted: t.label };
 }
 
 /** a thing's full name ("Toro (customer)", as searches show it) is its name and type */
@@ -3249,6 +3294,30 @@ which relationships). For a survey's topics that don't fit this conversation. A 
       async (args) => {
         need("write");
         return { content: [{ type: "text", text: JSON.stringify(await workerFollowup(args, identity)) }] };
+      },
+    );
+    server.tool(
+      "unlink_things",
+      `Remove links you judge wrong between an entry (yours by default, or one you name) and things: e.g. a
+note linked to the wrong "John". Each thing by name and type, or key. Give a short reason.`,
+      {
+        things: z.array(z.object({ name: z.string().min(1), type: z.string().optional(), key: z.string().optional() })).min(1).max(25),
+        entry: z.string().max(200).optional(),
+        reason: z.string().max(300).optional(),
+      },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerUnlink(args, identity)) }] };
+      },
+    );
+    server.tool(
+      "delete_thing",
+      `Delete a stray thing that nothing links to any more (a mis-typed duplicate, a placeholder). Anything
+still linked or related must be unlinked or merged first. Give a short reason.`,
+      { name: z.string().min(1), type: z.string().optional(), key: z.string().optional(), reason: z.string().max(300).optional() },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerDeleteThing(args, identity)) }] };
       },
     );
     server.tool(

@@ -143,7 +143,7 @@
     done: { label: "done", cls: "text-ok" },
     failed: { label: "failed", cls: "text-err" },
   };
-  const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved", relate: "Related", followup: "Queued" };
+  const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved", relate: "Related", followup: "Queued", unlink: "Unlinked", delete: "Deleted" };
   const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const describe = (p: WorkerProposal) => {
     try {

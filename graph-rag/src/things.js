@@ -120,7 +120,10 @@ export function resolve(mention, candidates) {
   const n = normalize(mention.name);
   // a thing keyed to a different record is a different thing, however alike the names
   const same = candidates.filter((c) => c.type === mention.type && !(mention.key && (c.keys ?? []).length && !(c.keys ?? []).includes(mention.key)));
-  const exact = same.find((c) => normalize(c.name) === n || (c.aliases ?? []).some((a) => normalize(a) === n));
+  const exacts = same.filter((c) => normalize(c.name) === n || (c.aliases ?? []).some((a) => normalize(a) === n));
+  // one name, several things ("John" the employee, "John" a vendor's contact): don't guess
+  if (exacts.length > 1) return { ambiguous: exacts.map((c) => c.rid) };
+  const exact = exacts[0];
   if (exact) return { use: exact.rid };
   // identifiers ("3260372", "PO 4471", "EPP-D98-1-A") are equal or not: embeddings
   // can't tell numbers apart, so a name with a digit matches only exactly
