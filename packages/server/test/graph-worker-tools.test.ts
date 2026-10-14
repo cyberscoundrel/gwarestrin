@@ -23,8 +23,8 @@ const agent = (over: Partial<AgentRecord> = {}): AgentRecord => ({
 
 describe("graph worker tools", () => {
   it("read tools: the organization's list, then the server's hints, then known ones; none = none", () => {
-    const dab = [{ name: "describe_entities" }, { name: "read_records" }, { name: "create_record" }, { name: "delete_record" }];
-    expect(readToolsFrom(dab)).toEqual(["describe_entities", "read_records"]);
+    const dab = ["aggregate_records", "create_record", "delete_record", "describe_entities", "execute_entity", "read_records", "update_record"].map((name) => ({ name }));
+    expect(readToolsFrom(dab)).toEqual(["aggregate_records", "describe_entities", "read_records"]);
     expect(readToolsFrom(dab, ["read_records", "not_there"])).toEqual(["read_records"]);
     expect(readToolsFrom([{ name: "q", annotations: { readOnlyHint: true } }, { name: "w" }])).toEqual(["q"]);
     expect(readToolsFrom([{ name: "run_sql" }])).toEqual([]);

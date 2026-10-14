@@ -133,7 +133,7 @@ export async function connectionDigest(name: string, def: { url?: string | undef
  * connection is left out). In order: the organization's own list for the
  * connection, the server's read-only hints, then tools known to only read.
  */
-const KNOWN_READ = new Set(["describe_entities", "read_records"]); // Data API builder
+const KNOWN_READ = new Set(["describe_entities", "read_records", "aggregate_records"]); // Data API builder (execute_entity runs stored procedures: not known to only read)
 const readCache = new Map<string, { at: number; tools: string[] }>();
 
 export function readToolsFrom(tools: Array<{ name: string; annotations?: { readOnlyHint?: boolean } | undefined }>, configured?: string[]): string[] {
