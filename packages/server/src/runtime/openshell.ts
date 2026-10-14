@@ -80,7 +80,28 @@ export class OpenShellProviders {
     this.scope = { workspaceScope: { selection: { case: "workspace", value: workspace } } };
   }
 
+  // agents starting together share profiles (one per model provider or tool
+  // connection): updates to one profile run one at a time, or the gateway
+  // refuses all but the first ("modified concurrently")
+  private readonly profileLocks = new Map<string, Promise<void>>();
+
   async ensureProfile(profile: ProfileInit): Promise<void> {
+    const id = profile.id ?? "";
+    const prev = this.profileLocks.get(id) ?? Promise.resolve();
+    const run = prev.catch(() => undefined).then(() => this.ensureProfileOnce(profile).catch(async (err) => {
+      // another server (or a stale read) got there first: read again and retry once
+      if (!/modified concurrently|resource_version/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      await this.ensureProfileOnce(profile);
+    }));
+    this.profileLocks.set(id, run);
+    try {
+      await run;
+    } finally {
+      if (this.profileLocks.get(id) === run) this.profileLocks.delete(id);
+    }
+  }
+
+  private async ensureProfileOnce(profile: ProfileInit): Promise<void> {
     const id = profile.id ?? "";
     const res = await this.raw.importProviderProfiles({ ...this.scope, profiles: [{ profile, source: "gwarestrin" }] });
     if (res.imported) return;
