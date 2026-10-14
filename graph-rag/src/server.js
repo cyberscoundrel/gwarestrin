@@ -834,6 +834,7 @@ async function queryGraph({ query, language = "cypher" }) {
 }
 
 async function executeGraph({ command, language = "cypher", reason }, identity) {
+  await assertNotWaiting(identity);
   if (!["cypher", "sql"].includes(language)) throw new Error("language must be cypher or sql");
   if (typeof command !== "string" || !command.trim()) throw new Error("command required");
   if (/^\s*(DROP DATABASE|DROP TYPE|TRUNCATE)/i.test(command)) {
@@ -873,6 +874,7 @@ async function executePending(rec) {
 
 /** move entities to another home: restricting applies, widening needs a person */
 async function setHome({ entities, to, reason, propose }, identity, scope) {
+  await assertNotWaiting(identity);
   if (!SCOPED || !positionMap) throw new Error("position scoping is not enabled");
   const target = positionId(to);
   const results = [];
@@ -2379,6 +2381,7 @@ async function resumeThread(jobId, resume) {
 
 /** a thread asks: the liaison (or the admin) answers later; the thread ends its turn meanwhile */
 async function raiseQuestion(identity, { question, options, why }) {
+  await assertNotWaiting(identity);
   const job = identity.role.job;
   const open = await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: job });
   if (Number(open[0]?.n ?? 0) >= 3) throw new Error("this thread already has 3 open questions: end your turn and wait for answers");
@@ -2441,6 +2444,19 @@ async function listProposals() {
   return out;
 }
 
+/**
+ * A thread with a question or proposal waiting is stopped until the admin
+ * decides: graph-rag refuses its further changes (the model may not stop by
+ * itself). Reading still works; the turn should end.
+ */
+async function assertNotWaiting(identity) {
+  const job = identity.role?.kind === "worker" ? identity.role.job : null;
+  if (!job) return;
+  const q = Number((await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: job }).catch(() => []))[0]?.n ?? 0);
+  const p = Number((await adbQuery("SELECT count(*) AS n FROM PendingWrite WHERE job_id = :id AND status = 'pending'", { id: job }).catch(() => []))[0]?.n ?? 0);
+  if (q || p) throw new Error(`You're waiting on the admin (${q ? "your question" : "your proposal"}): nothing more changes until they decide. End your turn now with a short report; you're resumed in this conversation with their answer.`);
+}
+
 /** what a proposal tells the thread: it stops here */
 const PROPOSED_NOTE = "Proposed: nothing changes until the admin decides. End your turn now with a short report; you're resumed in this conversation with the decision.";
 
@@ -2461,6 +2477,7 @@ async function logChange(identity, change) {
  * then it's a proposal and the thread waits for the admin.
  */
 async function workerUpsert(args, identity, scope) {
+  await assertNotWaiting(identity);
   const own = (await adbQuery(`SELECT name, _origin FROM ${identity.role.entry}`).catch(() => []))[0];
   const home = args.home === undefined ? (own?._origin ?? positionMap.root) : resolveWriteHome(scope, args.home);
   const now = Date.now();
@@ -2479,6 +2496,7 @@ async function workerUpsert(args, identity, scope) {
 
 /** a worker links its own entry to things (the same resolution as the one-call step; unsure matches come back to it) */
 async function workerLink(args, identity) {
+  await assertNotWaiting(identity);
   const rid = identity.role.entry;
   const row = (await adbQuery(`SELECT _home FROM ${rid}`).catch(() => []))[0];
   if (!row) throw new Error("your entry is gone");
@@ -2497,6 +2515,7 @@ async function workerLink(args, identity) {
 
 /** a worker merges two things (by name): directly, or as a proposal when it judges it consequential */
 async function workerMerge(args, identity, scope) {
+  await assertNotWaiting(identity);
   const find = async (name, type) =>
     (
       await adbQuery(
