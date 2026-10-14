@@ -379,7 +379,7 @@ function identityText(name, labels, props) {
 
 /** ---- tool implementations ---- */
 
-async function searchGraph({ query, facets, k = 8, temporal_filter, include_expired = false, assertions_only = false }, scope = { homes: null }, readHomes = []) {
+async function searchGraph({ query, facets, k = 8, temporal_filter, include_expired = false, assertions_only = false }, scope = { homes: null }, readHomes = [], { demand = true } = {}) {
   console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter })}`);
   const facetList = (facets?.length ? facets : Object.keys(FACETS)).map((f) => {
     if (typeof f !== "string" || !FACET_RE.test(f)) throw new Error(`invalid facet: ${f}`);
@@ -527,11 +527,14 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
     }
   }
 
-  // what people look for gets processed first (the worker's backlog, by demand)
-  for (const r of results.slice(0, k)) {
-    const kind = firstJob(worker.pool);
-    if (r.kind === "question" || !RID_RE.test(String(r.rid)) || (kind === "mentions" ? r._mentioned : r._reviewed)) continue;
-    void enqueue(kind, { rid: String(r.rid) }, { key: `${kind}:${r.rid}`, priority: 5 }).catch(() => {});
+  // what people look for gets linked first (the one-call linking only: a
+  // search never starts a thread, and a worker's own searches aren't demand,
+  // or one thread would queue threads for everything it looked at)
+  if (demand) {
+    for (const r of results.slice(0, k)) {
+      if (r.kind === "question" || !RID_RE.test(String(r.rid)) || r._mentioned) continue;
+      void enqueue("mentions", { rid: String(r.rid), no_thread: true }, { key: `mentions:${r.rid}`, priority: 5 }).catch(() => {});
+    }
   }
 
   // what the caller has now seen (derived-data tracking; not returned)
@@ -2213,13 +2216,13 @@ async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
  * thread should look (and an unsure match always sends it there instead of
  * to a person). Entries a worker wrote never go back to a thread.
  */
-async function jobMentions({ rid, from_worker }) {
+async function jobMentions({ rid, from_worker, no_thread }) {
   if (!RID_RE.test(String(rid))) return;
   const row = (await adbQuery(`SELECT FROM ${rid}`))[0];
   if (!row?.name || (row._kind && !THING_KINDS_READ.includes(row._kind))) return; // gone, or a question/thing/document entry
   const facets = Object.fromEntries(Object.keys(FACETS).filter((f) => row[`text_${f}`]).map((f) => [f, row[`text_${f}`]]));
   if (Object.keys(facets).length === 0) return;
-  const sort = worker.pool.poolSize > 0 && worker.pool.sortFirst && !from_worker;
+  const sort = worker.pool.poolSize > 0 && worker.pool.sortFirst && !from_worker && !no_thread;
   const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort }));
   const mentions = parseMentions(reply);
   const home = effectiveHome(positionMap, row._home);
@@ -2865,7 +2868,7 @@ lexical matching if embeddings are unavailable.${homeNote}`,
     async (args) => {
       need("read");
       const read = [];
-      const result = await searchGraph(args, scope, read);
+      const result = await searchGraph(args, scope, read, { demand: !role });
       recordReads(identity, read);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
