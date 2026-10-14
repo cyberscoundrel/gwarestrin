@@ -13,9 +13,10 @@
 // only when the tenant is the organization's root with direct writes (its
 // admin); anyone else's claim is ignored and the token is an ordinary agent's:
 //   worker   one queue entry's thread (j: job id, e: the entry's rid). Sees the
-//            whole graph and may run read-only raw queries; its writes are
-//            proposals (queued, with its reason) except the worker tools that
-//            change its own entry.
+//            whole graph and may run read-only raw queries; it writes
+//            directly, and proposes (then waits) what it judges a large
+//            change. Raw writes and widening who sees something are always
+//            proposals.
 //   liaison  relays workers' questions and proposals to the admin: answers
 //            questions and decides workers' proposals, writes nothing itself.
 import { createHmac, timingSafeEqual } from "node:crypto";
@@ -73,7 +74,7 @@ export function resolveAgentToken(token, entryFor, map, now = Date.now()) {
       key: `${entry.user}/agent:${payload.a}`,
       agent: payload.a,
       role: { kind: "worker", job: payload.j, entry: payload.e },
-      caps: { read: true, write: "queued", approve: false, raw: entry.caps?.raw === true },
+      caps: { read: true, write: "direct", approve: false, raw: entry.caps?.raw === true },
       positions: tenantPositions,
     };
   }

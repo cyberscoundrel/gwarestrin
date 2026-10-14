@@ -275,7 +275,7 @@
     <span class="grid gap-0.5">
       <span class="text-sm text-fg">This profile runs the graph worker</span>
       <span class="text-xs text-faint">
-        The graph worker keeps the graph linked and current: every new entry is linked to the people, customers, machines and orders it's about, and entries that need judgement get their own agent thread under this profile. Threads use this profile's model (a labeled model) and its instructions above as guidance (e.g. "customers are named by their ERP code"). They read everything, are read-only on other connections, can't run commands or reach the internet, and bring questions and bigger changes to you. Admins only; one profile at a time. Pool size and limits are in Graph worker.
+        The graph worker keeps the graph linked and current: every new entry is linked to the people, customers, machines and orders it's about, and entries that need judgement get their own agent thread under this profile. Threads use this profile's model (a labeled model) and its instructions above as guidance (e.g. "customers are named by their ERP code"). They read everything, are read-only on other connections, can't run commands or reach the internet, make small changes themselves, and stop to ask you about large or structural ones. Admins only; one profile at a time. Pool size and limits are in Graph worker.
       </span>
     </span>
   </label>

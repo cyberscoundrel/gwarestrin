@@ -51,6 +51,7 @@ describe("graph worker tools", () => {
     const w = buildStandingInstructions({ graph: true, connections: [{ name: "mssql", description: "the ERP" }], profileInstructions: "Customers go by ERP code.", graphRole: "worker" });
     expect(w).toMatch(/mssql \(read-only\): the ERP/);
     expect(w).toMatch(/graph-rag_raise_question/);
+    expect(w).toMatch(/propose: true/);
     expect(w).toMatch(/Customers go by ERP code/);
     expect(w).not.toMatch(/Sharing knowledge/);
     const l = buildStandingInstructions({ graph: true, connections: [], graphRole: "liaison" });

@@ -77,6 +77,8 @@ export interface WorkerThread {
   status: "pending" | "running" | "waiting" | "done" | "failed";
   agent_id: string | null;
   summary: string;
+  /** what it changed without asking */
+  changes: Array<{ kind: string; detail?: string; entries?: string[]; reason?: string; at: string }>;
   error: string | null;
   attempts: number;
   created_at: string;

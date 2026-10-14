@@ -185,12 +185,14 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   one), threads per day, minutes per thread, days finished threads are kept.
   A thread's token (`r: worker`, its job and entry; honoured only for the
   organization's root) sees the whole graph and runs read-only raw queries.
-  Its own entry, links from it to things, and entries that don't exist yet
-  apply directly (the derived-data floor holds anything built from what it
-  read more narrowly); every other change is a **proposal**: a queued write
-  with the thread's reason, decided in Approvals or through the liaison. A
-  thread can **raise a question** and end its turn; an answer (or a
-  rejected proposal) resumes it in the same conversation. The **liaison**
+  It writes directly (the derived-data floor holds anything built from what
+  it read more narrowly), and each direct change is recorded on its thread.
+  What it judges large or structural it **proposes** instead (`propose:
+  true` and a reason on the same tools): a queued write, and the thread
+  stops until the admin decides, then resumes with the decision. Raw writes
+  and widening who sees something are always proposals. A
+  thread can also **raise a question** and end its turn; the answer resumes
+  it in the same conversation. The **liaison**
   (`r: liaison`, made when something waits on the admin) relays questions
   and proposals and records the admin's answers; it writes nothing itself.
   Threads have only pi's `read` and the MCP tools (no shell, no file

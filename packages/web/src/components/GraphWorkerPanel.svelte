@@ -126,6 +126,7 @@
     done: { label: "done", cls: "text-ok" },
     failed: { label: "failed", cls: "text-err" },
   };
+  const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved" };
   const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const describe = (p: WorkerProposal) => {
     try {
@@ -154,7 +155,7 @@
   <PanelHeader
     id="gw-title"
     title="Graph worker"
-    subtitle="Agent threads keep the graph linked and current, one entry each. They read everything, change only their own entry, and bring everything else to you."
+    subtitle="Agent threads keep the graph linked and current, one entry each. They read everything, make small changes themselves, and stop to ask you about large ones."
     icon={Network}
     {onclose}
   />
@@ -259,6 +260,16 @@
                   </div>
                   {#if t.why}<span class="text-xs text-faint">Why: {t.why}</span>{/if}
                   {#if t.summary}<span class="line-clamp-3 text-xs text-dim">{t.summary}</span>{/if}
+                  {#if t.changes?.length}
+                    <details class="text-xs text-faint">
+                      <summary class="cursor-pointer">{t.changes.length} {t.changes.length === 1 ? "change" : "changes"} made without asking</summary>
+                      <ul class="m-0 mt-1 grid list-none gap-0.5 p-0">
+                        {#each t.changes as c, i (i)}
+                          <li>{CHANGE[c.kind] ?? c.kind}: {c.detail ?? (c.entries ?? []).join(", ")}{c.reason ? ` (${c.reason})` : ""}</li>
+                        {/each}
+                      </ul>
+                    </details>
+                  {/if}
                   {#if t.status === "failed" && t.error}<span class="text-xs text-err">{t.error}</span>{/if}
                 </li>
               {/each}
