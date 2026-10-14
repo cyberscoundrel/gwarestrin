@@ -986,7 +986,7 @@ async function danglingEntityGrants(grants) {
   return gone;
 }
 
-const positionName = (id) => positionMap?.positions[id]?.name ?? id;
+const positionName = (id) => (id === EVERYONE ? "Everyone" : (positionMap?.positions[id]?.name ?? id));
 
 /** the people a share can go to: everyone in the token map (tenants) */
 const peopleNames = () => [...entriesByUser.keys()].sort();
