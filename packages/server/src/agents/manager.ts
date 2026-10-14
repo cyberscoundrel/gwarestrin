@@ -245,6 +245,18 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     return String((res?.data as { text?: unknown } | undefined)?.text ?? "");
   }
 
+  /**
+   * Stop an agent and give back what it holds while idle: on OpenShell its
+   * sandbox (a microVM keeps its memory until deleted), keeping its
+   * conversations on the host for the next start. Elsewhere: a stop.
+   */
+  async releaseAgent(id: string): Promise<void> {
+    await this.stop(id);
+    const record = this.store.get(id);
+    if (!record || !this.onOpenShell) return;
+    await (await this.openShellLauncher()).releaseSandbox(id, dirsFor(this.config.stateDir, record).sessions);
+  }
+
   async abortAgent(id: string): Promise<void> {
     await this.running.get(id)?.send("abort", {}, 10_000).catch(() => undefined);
   }

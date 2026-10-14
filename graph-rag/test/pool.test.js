@@ -32,3 +32,14 @@ test("a thread's brief marks the entry as data; resumes carry the answer or the 
   assert.match(resumeBrief({ question: "Which Toro?", answer: "the customer", answered_by: "admin" }), /answered by admin[\s\S]*the customer/);
   assert.match(resumeBrief({ proposal: "merge Toro Co. into Toro", decision: "rejected", reason: "different companies" }), /rejected[\s\S]*different companies[\s\S]*Decide again/);
 });
+
+test("task threads: a survey's brief asks for a map, keyed things, relationships and follow-ups", async () => {
+  const { surveyBrief, taskThreadBrief } = await import("../src/pool.js");
+  const b = surveyBrief("mssql", "production and suppliers");
+  assert.match(b, /mssql: dbo_Customer \(customers\)/);
+  assert.match(b, /mssql:<table>:<key value>/);
+  assert.match(b, /relate_things/);
+  assert.match(b, /queue_followup/);
+  assert.match(b, /Focus \(from the admin\): production and suppliers/);
+  assert.match(taskThreadBrief({ title: "Survey: mssql", brief: b }), /^A task for you: Survey: mssql/);
+});

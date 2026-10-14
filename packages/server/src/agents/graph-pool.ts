@@ -110,7 +110,9 @@ export class GraphPool {
       if (agentId) await this.manager.abortAgent(agentId);
       await this.call(`/api/worker/threads/${t.job}/finish`, { method: "POST", body: { status: "failed", summary: message } }).catch(() => null);
     } finally {
-      if (agentId && this.manager.getRunning(agentId)) await this.manager.stop(agentId).catch(() => undefined);
+      // a finished turn gives back its sandbox (a microVM holds memory while it exists); the conversation is kept
+      const done = agentId;
+      if (done) await this.manager.releaseAgent(done).catch((e) => log.warn(`release ${done.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)}`));
       this.active.delete(t.job);
     }
   }
