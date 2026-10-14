@@ -9,8 +9,10 @@ import { registerAgentRoutes } from "./http/agents.js";
 import { ProfileStore } from "./agents/profiles.js";
 import { registerFileRoutes } from "./http/files.js";
 import { registerGraphQueueRoutes } from "./http/graph-queue.js";
-import { registerKnowledgeRoutes } from "./http/knowledge.js";
+import { graphRag, registerKnowledgeRoutes } from "./http/knowledge.js";
 import { registerInstanceRoutes } from "./http/instances.js";
+import { GraphPool } from "./agents/graph-pool.js";
+import { instanceSettings } from "./instance/settings.js";
 import { registerMcpRoutes } from "./http/mcp.js";
 import { registerProviderRoutes } from "./http/providers.js";
 import { McpRegistryStore } from "./mcp/registry-store.js";
@@ -58,7 +60,7 @@ async function main(): Promise<void> {
   await registerFileRoutes(app, config, manager);
   await registerGraphQueueRoutes(app);
   await registerKnowledgeRoutes(app, manager);
-  await registerInstanceRoutes(app);
+  await registerInstanceRoutes(app, registry);
   await registerMcpRoutes(app, mcpRegistry);
   await registerWs(app, config, manager);
   startSidecarDiscovery(process.env.DOCKER_PROXY_URL, mcpRegistry);
@@ -68,6 +70,8 @@ async function main(): Promise<void> {
   });
   // instance settings apply to running agents too
   onInstanceMetadataChange(() => manager.applyInstanceSettings());
+  // the graph worker pool: threads run here only when graph-rag takes this workspace for the organization's root
+  new GraphPool(manager, (p, init) => graphRag(manager, p, init), () => instanceSettings().maxAgents ?? config.maxAgents).start();
 
   if (existsSync(config.webDistDir)) {
     await app.register(fastifyStatic, {

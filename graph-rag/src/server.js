@@ -32,7 +32,8 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
-import { mentionsPrompt, normalize, parseMentions, resolve, thingName } from "./things.js";
+import { mentionsPrompt, normalize, parseMentions, parseSort, resolve, THING_TYPES, thingName } from "./things.js";
+import { firstJob, POOL_DEFAULTS, poolSettings, resumeBrief, taskBrief } from "./pool.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
@@ -378,7 +379,7 @@ function identityText(name, labels, props) {
 
 /** ---- tool implementations ---- */
 
-async function searchGraph({ query, facets, k = 8, temporal_filter, include_expired = false, assertions_only = false }, scope = { homes: null }, readHomes = []) {
+async function searchGraph({ query, facets, k = 8, temporal_filter, include_expired = false, assertions_only = false }, scope = { homes: null }, readHomes = [], { demand = true } = {}) {
   console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter })}`);
   const facetList = (facets?.length ? facets : Object.keys(FACETS)).map((f) => {
     if (typeof f !== "string" || !FACET_RE.test(f)) throw new Error(`invalid facet: ${f}`);
@@ -466,6 +467,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
           ...validityOf(row),
           ...questionOf(row),
           ...(row._mentions_at ? { _mentioned: true } : {}),
+          ...(row._reviewed_at ? { _reviewed: true } : {}),
           score: b.score,
           facets: b.facets,
           rid,
@@ -525,10 +527,14 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
     }
   }
 
-  // what people look for gets processed first (the worker's backlog, by demand)
-  for (const r of results.slice(0, k)) {
-    if (r.kind === "question" || !RID_RE.test(String(r.rid)) || r._mentioned) continue;
-    void enqueue("mentions", { rid: String(r.rid) }, { key: `mentions:${r.rid}`, priority: 5 }).catch(() => {});
+  // what people look for gets linked first (the one-call linking only: a
+  // search never starts a thread, and a worker's own searches aren't demand,
+  // or one thread would queue threads for everything it looked at)
+  if (demand) {
+    for (const r of results.slice(0, k)) {
+      if (r.kind === "question" || !RID_RE.test(String(r.rid)) || r._mentioned) continue;
+      void enqueue("mentions", { rid: String(r.rid), no_thread: true }, { key: `mentions:${r.rid}`, priority: 5 }).catch(() => {});
+    }
   }
 
   // what the caller has now seen (derived-data tracking; not returned)
@@ -536,7 +542,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
   return {
     query,
     // exactly k results (the schema allows 1..32, default 8)
-    results: results.slice(0, k).map(({ rid: _rid, _mentioned, ...r }) => r),
+    results: results.slice(0, k).map(({ rid: _rid, _mentioned, _reviewed, ...r }) => r),
     relationships,
     ...(embedFailed ? { note: "embedding backend unavailable; lexical fallback used" } : {}),
   };
@@ -662,7 +668,7 @@ async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
-async function upsertEntities({ entities, home, floor, written_at }) {
+async function upsertEntities({ entities, home, floor, written_at, from_worker }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
   // dates in the content ("next Friday") mean the day it was written, not approved
@@ -751,8 +757,11 @@ async function upsertEntities({ entities, home, floor, written_at }) {
         void adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: jobs[i].name, origin: home })
           .then(async (rows) => {
             if (!rows[0]) return;
-            // the graph worker finds what it's about (in the background)
-            await enqueue("mentions", { rid: String(rows[0].rid) }, { key: `mentions:${rows[0].rid}` }).catch(() => {});
+            // the graph worker finds what it's about (in the background): the
+            // one-call linking, or a thread; what a thread wrote only gets linked
+            const rid = String(rows[0].rid);
+            const kind = from_worker ? "mentions" : firstJob(worker.pool);
+            await enqueue(kind, { rid, ...(from_worker ? { from_worker: true } : {}) }, { key: `${kind}:${rid}` }).catch(() => {});
             await meetAssertion(String(rows[0].rid), vec);
           })
           .catch((e) => log.warn(`meeting questions for ${jobs[i].name}: ${String(e).slice(0, 120)}`));
@@ -824,14 +833,17 @@ async function queryGraph({ query, language = "cypher" }) {
   return { rows };
 }
 
-async function executeGraph({ command, language = "cypher" }, identity) {
+async function executeGraph({ command, language = "cypher", reason }, identity) {
+  await assertNotWaiting(identity);
   if (!["cypher", "sql"].includes(language)) throw new Error("language must be cypher or sql");
   if (typeof command !== "string" || !command.trim()) throw new Error("command required");
   if (/^\s*(DROP DATABASE|DROP TYPE|TRUNCATE)/i.test(command)) {
     throw new Error("destructive schema/database operations are not permitted");
   }
-  if (identity.caps.write === "queued") {
-    return queueWrite({ kind: "command", command, language, user: identity.user });
+  // a worker's raw writes are always proposals: they can do anything, and nothing undoes them
+  if (identity.caps.write === "queued" || identity.role?.kind === "worker") {
+    const q = await queueWrite({ kind: "command", command, language, user: identity.user, ...proposalFields(identity, reason) });
+    return identity.role?.kind === "worker" ? { ...q, note: PROPOSED_NOTE } : q;
   }
   const result = await adbCommand(command, language);
   if (DELETE_RE.test(command)) await refreshGrants(); // revoke grants on what it deleted
@@ -861,7 +873,8 @@ async function executePending(rec) {
 }
 
 /** move entities to another home: restricting applies, widening needs a person */
-async function setHome({ entities, to }, identity, scope) {
+async function setHome({ entities, to, reason, propose }, identity, scope) {
+  await assertNotWaiting(identity);
   if (!SCOPED || !positionMap) throw new Error("position scoping is not enabled");
   const target = positionId(to);
   const results = [];
@@ -882,11 +895,13 @@ async function setHome({ entities, to }, identity, scope) {
     }
     const move = { rid: String(node.rid), name: ref.name, from: current, to: target };
     const kind = moveKind(positionMap, current, target);
-    if (kind === "restrict" && identity.caps.write === "direct") {
+    // widening who sees something is always a person's call; a worker may also choose to ask
+    if (kind === "restrict" && identity.caps.write === "direct" && !propose) {
       results.push({ name: ref.name, ...(await applyRehome(move)) });
+      if (identity.role?.kind === "worker") await logChange(identity, { kind: "move", detail: `"${ref.name}" up to ${positionMap.positions[target]?.name ?? target}`, ...(reason ? { reason: String(reason).slice(0, 300) } : {}) });
     } else {
       // only people widen who sees what; queued writers queue restrictions too
-      results.push({ name: ref.name, [kind === "widen" ? "widening" : "restricting"]: true, ...(await queueWrite({ kind: "rehome", payload: JSON.stringify(move), user: identity.user, home: current })) });
+      results.push({ name: ref.name, [kind === "widen" ? "widening" : "restricting"]: true, ...(await queueWrite({ kind: "rehome", payload: JSON.stringify(move), user: identity.user, home: current, ...proposalFields(identity, reason) })) });
     }
   }
   return { results };
@@ -2062,7 +2077,7 @@ async function readDocument({ document, section, count = 3 }, identity, scope) {
 /** ---- the graph worker: a job queue and loop (things and their links; see things.js) ---- */
 
 // the worker's settings come from the admin's "Graph worker" profile (PUT /api/worker)
-let worker = { enabled: true, model: "", instructions: "", profile: null, updated_by: null, updated_at: null };
+let worker = { enabled: true, model: "", instructions: "", profile: null, pool: { ...POOL_DEFAULTS }, updated_by: null, updated_at: null };
 // only a model someone chose: falling back to the grader's would spend its quota on every write
 const workerModel = () => worker.model || WORKER_MODEL;
 const workerUsage = { day: "", calls: 0 }; // model calls today (WORKER_DAILY_CALLS caps them)
@@ -2079,13 +2094,23 @@ async function ensureWorkerSchema() {
   for (const prop of ["_thing_type", "_norm", "_mentions_at"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   for (const prop of ["_homes", "_alias_norms"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS LIST`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_norm) NOTUNIQUE`).catch(() => {});
+  for (const prop of ["agent_id", "summary", "lease_until", "claimed_at", "changes"]) await adbCommand(`CREATE PROPERTY Job.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._reviewed_at IF NOT EXISTS STRING`).catch(() => {});
+  await adbCommand("CREATE DOCUMENT TYPE WorkerQuestion IF NOT EXISTS").catch(() => {});
+  for (const prop of ["id", "job_id", "entry", "entry_name", "question", "options", "why", "asked_by", "status", "answer", "answered_by", "created_at", "answered_at"]) {
+    await adbCommand(`CREATE PROPERTY WorkerQuestion.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  }
+  await adbCommand("CREATE INDEX IF NOT EXISTS ON WorkerQuestion (job_id) NOTUNIQUE").catch(() => {});
   await adbCommand("CREATE EDGE TYPE ABOUT IF NOT EXISTS").catch(() => {});
   await adbCommand("CREATE PROPERTY ABOUT.role IF NOT EXISTS STRING").catch(() => {});
-  // a crash mid-job leaves it running: it runs again
-  await adbCommand("UPDATE Job SET status = 'pending' WHERE status = 'running'").catch(() => {});
+  // a crash mid-job leaves it running: it runs again (threads keep their lease: their workspace may still run them)
+  await adbCommand("UPDATE Job SET status = 'pending' WHERE status = 'running' AND kind <> 'review'").catch(() => {});
   try {
     const row = (await adbQuery("SELECT FROM OrgPolicy WHERE scope = 'worker' LIMIT 1"))[0];
-    if (row) worker = { ...worker, ...JSON.parse(row.json), updated_by: row.updated_by ?? null, updated_at: row.updated_at ?? null };
+    if (row) {
+      const saved = JSON.parse(row.json);
+      worker = { ...worker, ...saved, pool: poolSettings(saved.pool ?? {}, POOL_DEFAULTS), updated_by: row.updated_by ?? null, updated_at: row.updated_at ?? null };
+    }
   } catch {
     /* defaults */
   }
@@ -2133,16 +2158,15 @@ async function aboutOnce(statementRid, thingRid, role) {
   await adbCommand(`CREATE EDGE ABOUT FROM ${statementRid} TO ${thingRid} SET role = :role`, "sql", { role });
 }
 
-/** the job: find the things one statement is about, resolve them, link them */
-async function jobMentions({ rid }) {
-  if (!RID_RE.test(String(rid))) return;
-  const row = (await adbQuery(`SELECT FROM ${rid}`))[0];
-  if (!row?.name || (row._kind && !THING_KINDS_READ.includes(row._kind))) return; // gone, or a question/thing/document entry
-  const facets = Object.fromEntries(Object.keys(FACETS).filter((f) => row[`text_${f}`]).map((f) => [f, row[`text_${f}`]]));
-  if (Object.keys(facets).length === 0) return;
-  const mentions = parseMentions(await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions)));
-  const home = effectiveHome(positionMap, row._home);
+/**
+ * Resolve mentions to things and link a statement to them (see things.js):
+ * exact or very close -> that thing; close but unsure -> a new thing plus a
+ * merge question for a person (or, with `unsure: "skip"`, nothing: a worker
+ * thread decides instead); otherwise a new thing. Returns what happened.
+ */
+async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
   const vecs = mentions.length ? await embedBatch(mentions.map((m) => `${m.type}: ${m.name}`)) : [];
+  const out = [];
   for (const [i, m] of mentions.entries()) {
     const n = normalize(m.name);
     const byName = await adbQuery(
@@ -2157,6 +2181,11 @@ async function jobMentions({ rid }) {
         ).catch(() => []);
     const cands = [...byName, ...near].map((c) => ({ rid: String(c.rid), name: c.label, aliases: c._alias_norms ?? [], type: c._thing_type, score: c.score === undefined ? undefined : Number(c.score) }));
     const r = resolve(m, cands);
+    if (r.create && r.maybe && unsure === "skip") {
+      const other = (await adbQuery(`SELECT label FROM ${r.maybe}`))[0]?.label;
+      out.push({ name: m.name, type: m.type, unsure: other ?? null });
+      continue;
+    }
     let thing = r.use;
     if (r.alias) {
       const cur = (await adbQuery(`SELECT _alias_norms FROM ${thing}`))[0]?._alias_norms ?? [];
@@ -2178,9 +2207,347 @@ async function jobMentions({ rid }) {
     if (!RID_RE.test(String(thing))) continue;
     await thingSeenFrom(thing, home);
     await aboutOnce(rid, thing, m.role);
+    out.push({ name: m.name, type: m.type, role: m.role, [r.create ? "created" : "linked"]: true });
   }
+  return out;
+}
+
+/**
+ * The one-call job: find the things one statement is about and link them.
+ * With a pool that sorts first, the same call decides whether a worker
+ * thread should look (and an unsure match always sends it there instead of
+ * to a person). Entries a worker wrote never go back to a thread.
+ */
+async function jobMentions({ rid, from_worker, no_thread }) {
+  if (!RID_RE.test(String(rid))) return;
+  const row = (await adbQuery(`SELECT FROM ${rid}`))[0];
+  if (!row?.name || (row._kind && !THING_KINDS_READ.includes(row._kind))) return; // gone, or a question/thing/document entry
+  const facets = Object.fromEntries(Object.keys(FACETS).filter((f) => row[`text_${f}`]).map((f) => [f, row[`text_${f}`]]));
+  if (Object.keys(facets).length === 0) return;
+  const sort = worker.pool.poolSize > 0 && worker.pool.sortFirst && !from_worker && !no_thread;
+  const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort }));
+  const mentions = parseMentions(reply);
+  const home = effectiveHome(positionMap, row._home);
+  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask" });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
+  if (sort) {
+    const verdict = parseSort(reply);
+    const unsure = linked.filter((l) => l.unsure);
+    if (verdict.review || unsure.length) {
+      const why = [verdict.why, ...unsure.map((u) => `"${u.name}" may be the existing ${u.type} "${u.unsure}"`)].filter(Boolean).join("; ");
+      await enqueue("review", { rid: String(rid), why }, { key: `review:${rid}` });
+    }
+  }
   return { things: mentions.length };
+}
+
+/** ---- the worker pool (see pool.js): one agent thread per queue entry, run by the admin's workspace ---- */
+
+const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const today = () => new Date().toISOString().slice(0, 10);
+
+/** threads started today (first starts and resumes) */
+async function threadsToday() {
+  const rows = await adbQuery("SELECT count(*) AS n FROM Job WHERE kind = 'review' AND claimed_at >= :day", { day: today() }).catch(() => []);
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** what a thread is told about its entry */
+async function entryForBrief(rid) {
+  const row = (await adbQuery(`SELECT FROM ${rid}`))[0];
+  if (!row?.name) return null;
+  const facets = Object.fromEntries(
+    Object.keys(row)
+      .filter((k) => k.startsWith("text_") && row[k])
+      .map((k) => [k.slice(5), row[k]]),
+  );
+  const edges = await adbQuery(`SELECT @in AS dst, role FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
+  const dsts = edges.map((e) => String(e.dst)).filter((r) => RID_RE.test(r));
+  const things = dsts.length ? await adbQuery(`SELECT @rid AS rid, label, _thing_type FROM [${dsts.join(",")}]`).catch(() => []) : [];
+  const byRid = new Map(things.map((t) => [String(t.rid), t]));
+  const links = edges.filter((e) => byRid.has(String(e.dst))).map((e) => ({ name: byRid.get(String(e.dst)).label, type: byRid.get(String(e.dst))._thing_type, role: e.role }));
+  const home = effectiveHome(positionMap, row._home);
+  return {
+    entry: {
+      name: row.name,
+      home,
+      home_name: positionMap.positions[home]?.name,
+      saved_at: row.updated_at ? String(row.updated_at) : undefined,
+      valid_until: row._valid_until ?? undefined,
+      facets,
+    },
+    links: links.map((l) => ({ name: l.name, type: l.type, role: l.role })),
+    document: row._kind === "section" ? { title: row._doc_title, section: row._section } : null,
+  };
+}
+
+/**
+ * The admin's workspace claims up to `limit` threads to run: due review jobs,
+ * highest priority first, within the day's budget. Each comes with its brief
+ * (a first start) or its resume message (an answered question, a decided
+ * proposal) and the thread's agent if it has one.
+ */
+async function claimThreads(limit) {
+  const room = Math.max(0, Math.min(Number(limit) || 0, worker.pool.poolSize, worker.pool.dailyThreads - (await threadsToday())));
+  if (!room) return { threads: [] };
+  const now = new Date();
+  const due = await adbQuery(`SELECT id, payload, agent_id, attempts FROM Job WHERE kind = 'review' AND status = 'pending' AND run_after <= :now ORDER BY priority DESC, created_at ASC LIMIT ${Math.floor(room)}`, {
+    now: now.toISOString(),
+  });
+  const out = [];
+  for (const job of due) {
+    const lease = new Date(now.getTime() + (worker.pool.threadMinutes + 5) * 60_000).toISOString();
+    const claimed = await adbCommand("UPDATE Job SET status = 'running', claimed_at = :now, lease_until = :lease, updated_at = :now WHERE id = :id AND status = 'pending'", "sql", {
+      now: now.toISOString(),
+      lease,
+      id: job.id,
+    });
+    if (Number(claimed?.[0]?.count ?? 0) !== 1) continue;
+    const payload = JSON.parse(job.payload || "{}");
+    const brief = RID_RE.test(String(payload.rid)) ? await entryForBrief(payload.rid) : null;
+    if (!brief) {
+      await adbCommand("UPDATE Job SET status = 'done', summary = 'the entry is gone', updated_at = :now WHERE id = :id", "sql", { now: now.toISOString(), id: job.id });
+      continue;
+    }
+    out.push({
+      job: job.id,
+      entry: payload.rid,
+      name: brief.entry.name,
+      agent_id: job.agent_id ?? null,
+      minutes: worker.pool.threadMinutes,
+      message: payload.resume ? resumeBrief(payload.resume) : taskBrief({ ...brief, why: payload.why }),
+    });
+  }
+  return { threads: out };
+}
+
+/** a thread's agent (recorded when the workspace makes it) */
+async function threadAgent(jobId, agentId) {
+  if (!JOB_ID_RE.test(String(jobId)) || typeof agentId !== "string" || !/^[\w-]{1,80}$/.test(agentId)) throw Object.assign(new Error("invalid job or agent"), { status: 400 });
+  await adbCommand("UPDATE Job SET agent_id = :a, updated_at = :now WHERE id = :id AND kind = 'review'", "sql", { a: agentId, now: new Date().toISOString(), id: jobId });
+  return { ok: true };
+}
+
+/** the thread ended its turn: done, or waiting on its open questions */
+async function finishThread(jobId, { status, summary }) {
+  if (!JOB_ID_RE.test(String(jobId))) throw Object.assign(new Error("invalid job"), { status: 400 });
+  const job = (await adbQuery("SELECT payload, attempts FROM Job WHERE id = :id AND kind = 'review'", { id: jobId }))[0];
+  if (!job) throw Object.assign(new Error("no such thread"), { status: 404 });
+  // open questions and undecided proposals: it waits for the admin
+  const open =
+    Number((await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: jobId }).catch(() => []))[0]?.n ?? 0) +
+    Number((await adbQuery("SELECT count(*) AS n FROM PendingWrite WHERE job_id = :id AND status = 'pending'", { id: jobId }).catch(() => []))[0]?.n ?? 0);
+  const now = new Date().toISOString();
+  const failed = status === "failed";
+  const attempts = Number(job.attempts ?? 0) + (failed ? 1 : 0);
+  const payload = JSON.parse(job.payload || "{}");
+  delete payload.resume;
+  // answers or decisions that came while it ran: it goes again with the first
+  const queued = !failed && Array.isArray(payload.next_resume) && payload.next_resume.length ? payload.next_resume.shift() : null;
+  if (queued) payload.resume = queued;
+  if (Array.isArray(payload.next_resume) && !payload.next_resume.length) delete payload.next_resume;
+  const next = failed ? (attempts >= 3 ? "failed" : "pending") : queued ? "pending" : open ? "waiting" : "done";
+  await adbCommand("UPDATE Job SET status = :s, attempts = :a, summary = :sum, payload = :p, run_after = :ra, updated_at = :now WHERE id = :id", "sql", {
+    s: next,
+    a: attempts,
+    sum: String(summary ?? "").slice(0, 4000),
+    p: JSON.stringify(payload),
+    ra: new Date(Date.now() + (failed ? 120_000 * attempts : 0)).toISOString(),
+    now,
+    id: jobId,
+  });
+  if (next === "done" && RID_RE.test(String(payload.rid))) await adbCommand(`UPDATE ${payload.rid} SET _reviewed_at = :now`, "sql", { now }).catch(() => {});
+  return { status: next };
+}
+
+/** wake a thread that waited: it resumes with this message */
+async function resumeThread(jobId, resume) {
+  const job = (await adbQuery("SELECT payload, status FROM Job WHERE id = :id AND kind = 'review'", { id: jobId }))[0];
+  if (!job) return;
+  if (job.status === "running" || job.status === "pending") {
+    // still working (or about to): it resumes with this once its turn ends
+    const p = JSON.parse(job.payload || "{}");
+    p.next_resume = [...(p.next_resume ?? []), resume].slice(-5);
+    await adbCommand("UPDATE Job SET payload = :p WHERE id = :id", "sql", { p: JSON.stringify(p), id: jobId });
+    return;
+  }
+  const payload = { ...JSON.parse(job.payload || "{}"), resume };
+  await adbCommand("UPDATE Job SET status = 'pending', payload = :p, priority = 8, run_after = :now, updated_at = :now WHERE id = :id AND status IN ['waiting', 'done']", "sql", {
+    p: JSON.stringify(payload),
+    now: new Date().toISOString(),
+    id: jobId,
+  });
+}
+
+/** a thread asks: the liaison (or the admin) answers later; the thread ends its turn meanwhile */
+async function raiseQuestion(identity, { question, options, why }) {
+  await assertNotWaiting(identity);
+  const job = identity.role.job;
+  const open = await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: job });
+  if (Number(open[0]?.n ?? 0) >= 3) throw new Error("this thread already has 3 open questions: end your turn and wait for answers");
+  const entryName = (await adbQuery(`SELECT name FROM ${identity.role.entry}`).catch(() => []))[0]?.name ?? null;
+  const id = randomUUID();
+  await adbCommand(
+    "INSERT INTO WorkerQuestion SET id = :id, job_id = :job, entry = :entry, entry_name = :ename, question = :q, options = :o, why = :w, asked_by = :u, status = 'open', created_at = :now",
+    "sql",
+    { id, job, entry: identity.role.entry, ename: entryName, q: question, o: JSON.stringify(options ?? []), w: why ?? "", u: identity.user, now: new Date().toISOString() },
+  );
+  return { asked: true, id, note: "Recorded. End your turn now with a short report; you'll be resumed with the answer." };
+}
+
+async function listQuestions(status = "open") {
+  const rows = await adbQuery("SELECT id, job_id, entry_name, question, options, why, status, answer, answered_by, created_at, answered_at FROM WorkerQuestion WHERE status = :s ORDER BY created_at ASC LIMIT 200", { s: status }).catch(() => []);
+  const agents = new Map();
+  for (const r of rows) {
+    if (!agents.has(r.job_id)) agents.set(r.job_id, (await adbQuery("SELECT agent_id FROM Job WHERE id = :id", { id: r.job_id }).catch(() => []))[0]?.agent_id ?? null);
+  }
+  return rows.map((r) => ({ ...r, options: JSON.parse(r.options || "[]"), agent_id: agents.get(r.job_id) }));
+}
+
+/** answer (or dismiss) questions; each one's thread resumes with the answer */
+async function answerQuestions(ids, { answer, dismiss = false }, by) {
+  const done = [];
+  for (const id of ids) {
+    if (!PENDING_ID_RE.test(String(id))) continue;
+    const q = (await adbQuery("SELECT FROM WorkerQuestion WHERE id = :id AND status = 'open'", { id }))[0];
+    if (!q) continue;
+    const now = new Date().toISOString();
+    await adbCommand("UPDATE WorkerQuestion SET status = :s, answer = :a, answered_by = :u, answered_at = :now WHERE id = :id", "sql", {
+      s: dismiss ? "dismissed" : "answered",
+      a: String(answer ?? "").slice(0, 2000),
+      u: by,
+      now,
+      id,
+    });
+    const left = Number((await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: q.job_id }))[0]?.n ?? 0);
+    if (dismiss) {
+      // nothing to resume with: the thread is done once nothing else waits
+      if (!left) await adbCommand("UPDATE Job SET status = 'done', updated_at = :now WHERE id = :id AND status = 'waiting'", "sql", { now, id: q.job_id });
+    } else {
+      await resumeThread(q.job_id, { question: q.question, answer, answered_by: by });
+    }
+    done.push(id);
+  }
+  return { answered: done.length, ids: done };
+}
+
+/** workers' proposals: queued writes from a thread, with its reason */
+async function listProposals() {
+  const rows = await adbQuery("SELECT id, kind, payload, requested_by, created_at, note, job_id, home FROM PendingWrite WHERE status = 'pending' AND job_id IS NOT NULL ORDER BY created_at ASC LIMIT 100").catch(() => []);
+  const out = [];
+  for (const r of rows) {
+    const job = (await adbQuery("SELECT agent_id, payload FROM Job WHERE id = :id", { id: r.job_id }).catch(() => []))[0];
+    const rid = JSON.parse(job?.payload || "{}").rid;
+    const entry = RID_RE.test(String(rid)) ? (await adbQuery(`SELECT name FROM ${rid}`).catch(() => []))[0]?.name : null;
+    out.push({ id: r.id, kind: r.kind, change: String(r.payload).slice(0, 2000), reason: r.note ?? "", proposed_by: r.requested_by, created_at: r.created_at, entry, agent_id: job?.agent_id ?? null });
+  }
+  return out;
+}
+
+/**
+ * A thread with a question or proposal waiting is stopped until the admin
+ * decides: graph-rag refuses its further changes (the model may not stop by
+ * itself). Reading still works; the turn should end.
+ */
+async function assertNotWaiting(identity) {
+  const job = identity.role?.kind === "worker" ? identity.role.job : null;
+  if (!job) return;
+  const q = Number((await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: job }).catch(() => []))[0]?.n ?? 0);
+  const p = Number((await adbQuery("SELECT count(*) AS n FROM PendingWrite WHERE job_id = :id AND status = 'pending'", { id: job }).catch(() => []))[0]?.n ?? 0);
+  if (q || p) throw new Error(`You're waiting on the admin (${q ? "your question" : "your proposal"}): nothing more changes until they decide. End your turn now with a short report; you're resumed in this conversation with their answer.`);
+}
+
+/** what a proposal tells the thread: it stops here */
+const PROPOSED_NOTE = "Proposed: nothing changes until the admin decides. End your turn now with a short report; you're resumed in this conversation with the decision.";
+
+/** a worker's direct changes, kept on its thread (the audit view lists them) */
+async function logChange(identity, change) {
+  const job = identity.role?.job;
+  if (!job) return;
+  const row = (await adbQuery("SELECT changes FROM Job WHERE id = :id", { id: job }).catch(() => []))[0];
+  const list = JSON.parse(row?.changes || "[]");
+  list.push({ ...change, at: new Date().toISOString() });
+  await adbCommand("UPDATE Job SET changes = :c WHERE id = :id", "sql", { c: JSON.stringify(list.slice(-100)), id: job }).catch(() => {});
+}
+
+/**
+ * A worker thread's upsert. It applies directly (with the derived-data floor
+ * like anyone's writes: what it read elsewhere holds them where both are
+ * visible), unless the worker judges it a large change and sets propose:
+ * then it's a proposal and the thread waits for the admin.
+ */
+async function workerUpsert(args, identity, scope) {
+  await assertNotWaiting(identity);
+  const own = (await adbQuery(`SELECT name, _origin FROM ${identity.role.entry}`).catch(() => []))[0];
+  const home = args.home === undefined ? (own?._origin ?? positionMap.root) : resolveWriteHome(scope, args.home);
+  const now = Date.now();
+  const entities = args.entities.map((e) => {
+    const v = parseValidUntil(e.valid_until, now);
+    return v === undefined ? e : { ...e, valid_until: v.valid_until ?? "lasting" };
+  });
+  const write = { entities, home, floor: derivedFloor(identity, home), written_at: new Date(now).toISOString(), from_worker: true };
+  if (args.propose) {
+    return { ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE };
+  }
+  const applied = await upsertEntities(write);
+  await logChange(identity, { kind: "upsert", entries: entities.map((e) => e.name), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return applied;
+}
+
+/** a worker links its own entry to things (the same resolution as the one-call step; unsure matches come back to it) */
+async function workerLink(args, identity) {
+  await assertNotWaiting(identity);
+  const rid = identity.role.entry;
+  const row = (await adbQuery(`SELECT _home FROM ${rid}`).catch(() => []))[0];
+  if (!row) throw new Error("your entry is gone");
+  // a thing's full name ("Toro (customer)", as searches show it) is its name and type
+  const bare = args.things.map((t) => {
+    const m = /^(.*\S)\s*\(([a-z]+)\)$/i.exec(String(t.name));
+    return m && THING_TYPES.includes(m[2].toLowerCase()) ? { ...t, name: m[1], type: t.type ?? m[2].toLowerCase() } : t;
+  });
+  const mentions = parseMentions(JSON.stringify({ things: bare }));
+  const linked = await linkMentions(rid, mentions, effectiveHome(positionMap, row._home), { unsure: "skip" });
+  await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
+  const done = linked.filter((l) => !l.unsure);
+  if (done.length) await logChange(identity, { kind: "link", detail: done.map((l) => `${l.name} (${l.type}${l.created ? ", new" : ""})`).join(", ") });
+  return {
+    linked,
+    ...(linked.some((l) => l.unsure)
+      ? { note: "Unsure ones weren't linked: they may be an existing thing. Check with about_thing, then link the existing name, or propose_merge, or raise_question." }
+      : {}),
+  };
+}
+
+/** a worker merges two things (by name): directly, or as a proposal when it judges it consequential */
+async function workerMerge(args, identity, scope) {
+  await assertNotWaiting(identity);
+  const find = async (name, type) =>
+    (
+      await adbQuery(
+        `SELECT @rid AS rid, label, _thing_type FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n)${type ? " AND _thing_type = :t" : ""}${homeFilter(scope)} LIMIT 2`,
+        { n: normalize(name), t: type },
+      )
+    )[0];
+  const keep = await find(args.keep, args.type);
+  const drop = await find(args.drop, args.type);
+  if (!keep || !drop) throw new Error(`no thing called "${!keep ? args.keep : args.drop}"${args.type ? ` (${args.type})` : ""}`);
+  if (String(keep.rid) === String(drop.rid)) throw new Error("those are the same thing already");
+  if (keep._thing_type !== drop._thing_type) throw new Error(`different types (${keep._thing_type}, ${drop._thing_type}): not merged`);
+  const payload = { keep: String(keep.rid), drop: String(drop.rid), keep_name: keep.label, drop_name: drop.label, type: keep._thing_type };
+  if (args.propose) {
+    return { ...(await queueWrite({ kind: "merge", payload: JSON.stringify(payload), user: identity.user, home: positionMap.root, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE };
+  }
+  const result = await mergeThings(payload);
+  await logChange(identity, { kind: "merge", detail: `"${drop.label}" into "${keep.label}" (${keep._thing_type})`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return result;
+}
+
+/** the admin's decision on a worker's proposal (through the liaison or Approvals); rejected = the thread decides again */
+async function decideProposal(id, approve, reason, identity) {
+  const rec = (await adbQuery("SELECT id FROM PendingWrite WHERE id = :id AND status = 'pending' AND job_id IS NOT NULL", { id }))[0];
+  if (!rec) throw new Error(`no pending proposal ${id}`);
+  // either way the waiting thread resumes with the decision (see approvePending, rejectPending)
+  return approve ? approvePending(id, identity, reason) : rejectPending(id, identity, reason);
 }
 
 /** approved merge: the dropped thing's links move to the kept one */
@@ -2199,7 +2566,15 @@ async function mergeThings({ keep, drop, drop_name }) {
   return { merged: true };
 }
 
+// the jobs graph-rag runs itself (review jobs are threads: the admin's workspace runs them)
 const JOBS = { mentions: jobMentions };
+
+/** a thread whose workspace went quiet past its lease runs again (three times at most) */
+async function expireLeases() {
+  const now = new Date().toISOString();
+  await adbCommand("UPDATE Job SET status = 'failed', error = 'the thread stopped reporting', updated_at = :now WHERE kind = 'review' AND status = 'running' AND lease_until < :now AND attempts >= 2", "sql", { now });
+  await adbCommand("UPDATE Job SET status = 'pending', attempts = attempts + 1, error = 'the thread stopped reporting', updated_at = :now WHERE kind = 'review' AND status = 'running' AND lease_until < :now", "sql", { now });
+}
 
 /** a few jobs per tick, highest priority first; failures back off and give up after a few tries */
 async function workerTick() {
@@ -2207,7 +2582,8 @@ async function workerTick() {
   workerTicking = true;
   try {
     const now = new Date().toISOString();
-    const due = await adbQuery("SELECT id, kind, payload, attempts FROM Job WHERE status = 'pending' AND run_after <= :now ORDER BY priority DESC, created_at ASC LIMIT 3", { now });
+    const kinds = Object.keys(JOBS).map((k) => `'${k}'`).join(", ");
+    const due = await adbQuery(`SELECT id, kind, payload, attempts FROM Job WHERE status = 'pending' AND kind IN [${kinds}] AND run_after <= :now ORDER BY priority DESC, created_at ASC LIMIT 3`, { now });
     for (const job of due) {
       const claimed = await adbCommand("UPDATE Job SET status = 'running', updated_at = :now WHERE id = :id AND status = 'pending'", "sql", { now, id: job.id });
       if (Number(claimed?.[0]?.count ?? 0) !== 1) continue;
@@ -2336,13 +2712,17 @@ async function prunePreview() {
 
 async function ensurePendingSchema() {
   await adbCommand("CREATE DOCUMENT TYPE PendingWrite").catch(() => {});
-  for (const prop of ["id", "kind", "payload", "language", "requested_by", "created_at", "status", "executed_at", "approved_by", "home", "note"]) {
+  for (const prop of ["id", "kind", "payload", "language", "requested_by", "created_at", "status", "executed_at", "approved_by", "home", "note", "job_id"]) {
     await adbCommand(`CREATE PROPERTY PendingWrite.${prop} IF NOT EXISTS STRING`).catch(() => {});
   }
 }
 
 const RID_RE = /^#\d+:\d+$/;
 const PENDING_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** a worker thread's queued write is a proposal: its reason, and the thread to resume when it's decided */
+const proposalFields = (identity, reason) =>
+  identity.role?.kind === "worker" ? { note: String(reason ?? "").trim().slice(0, 600) || "(no reason given)", job: identity.role.job } : {};
 
 async function queueWrite(entry) {
   const id = randomUUID();
@@ -2352,9 +2732,21 @@ async function queueWrite(entry) {
   // awaited: a write is only reported as queued once the record exists
   await adbCommand(
     "INSERT INTO PendingWrite SET id = :id, kind = :kind, payload = :payload, language = :lang, " +
-      "requested_by = :user, created_at = :created, status = :status, home = :home",
+      "requested_by = :user, created_at = :created, status = :status, home = :home, note = :note, job_id = :job",
     "sql",
-    { id, kind: entry.kind, payload, lang: language, user: entry.user, created, home: entry.home ?? null, status: entry.status ?? "pending" },
+    {
+      id,
+      kind: entry.kind,
+      payload,
+      lang: language,
+      user: entry.user,
+      created,
+      home: entry.home ?? null,
+      status: entry.status ?? "pending",
+      // a worker thread's proposal: its reason, and the thread (resumed when it's decided)
+      note: entry.note ?? null,
+      job: entry.job ?? null,
+    },
   );
   console.log(`[graph-rag] write queued by ${entry.user}: ${String(payload).slice(0, 80)} (${id})`);
   return { queued: true, pendingId: id };
@@ -2378,7 +2770,7 @@ function mayReview(identity, rec) {
   return true;
 }
 
-async function approvePending(id, identity) {
+async function approvePending(id, identity, reason = "") {
   const approver = identity.user;
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
   const rows = await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id });
@@ -2408,11 +2800,13 @@ async function approvePending(id, identity) {
     id,
   });
   console.log(`[graph-rag] write ${id} approved by ${approver}`);
+  // a worker thread's proposal: it waited for this, and carries on
+  if (rec.job_id) await resumeThread(rec.job_id, { proposal: rec.note || rec.kind, decision: "approved", reason, answered_by: approver }).catch(() => {});
   // shares that waited on this write can now point at its entities
   if (rec.kind === "upsert") await resolveWaitingShares(id).catch((e) => log.warn(`waiting shares for ${id}: ${String(e).slice(0, 160)}`));
   return { approved: true, result };
 }
-async function rejectPending(id, identity) {
+async function rejectPending(id, identity, reason = "") {
   const rejector = identity.user;
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
   const rows = await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id });
@@ -2426,6 +2820,8 @@ async function rejectPending(id, identity) {
   if (rows[0].kind === "upsert") await dropWaitingShares(id).catch((e) => log.warn(`waiting shares for ${id}: ${String(e).slice(0, 160)}`));
   // a rejected ingest leaves nothing behind
   if (rows[0].kind === "ingest" && docStore) await docStore.remove(JSON.parse(rows[0].payload).doc_id).catch(() => {});
+  // a worker thread's proposal: the thread decides again (wherever it was rejected)
+  if (rows[0].job_id) await resumeThread(rows[0].job_id, { proposal: rows[0].note || rows[0].kind, decision: "rejected", reason, answered_by: rejector }).catch(() => {});
   return { rejected: true };
 }
 
@@ -2442,6 +2838,8 @@ const facetDoc = Object.entries(FACETS)
 function createServer(identity) {
   const caps = identity.caps;
   const scope = scopeOf(identity);
+  // the graph worker's agents (see delegation.js): their own tools, not the sharing and review ones
+  const role = identity.role?.kind;
   const need = (cap) => {
     requireCap(caps, cap);
     // raw queries bypass the home filter: only for the root of the tree
@@ -2494,7 +2892,7 @@ lexical matching if embeddings are unavailable.${homeNote}`,
     async (args) => {
       need("read");
       const read = [];
-      const result = await searchGraph(args, scope, read);
+      const result = await searchGraph(args, scope, read, { demand: !role });
       recordReads(identity, read);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
@@ -2538,9 +2936,11 @@ ${facetDoc}`,
           }),
         )
         .max(64),
+      ...(role === "worker" ? { reason: z.string().max(600).optional(), propose: z.boolean().optional() } : {}),
     },
     async (args) => {
       need("write");
+      if (role === "worker") return { content: [{ type: "text", text: JSON.stringify(await workerUpsert(args, identity, scope)) }] };
       const home = resolveWriteHome(scope, args.home);
       // end dates resolve now ("7d" from today), not when a queued write is approved
       const now = Date.now();
@@ -2564,6 +2964,7 @@ ${facetDoc}`,
     {
       command: z.string().min(1),
       language: z.enum(["cypher", "sql"]).optional(),
+      ...(role === "worker" ? { reason: z.string().max(600).optional(), propose: z.boolean().optional() } : {}),
     },
     async (args) => {
       need("write");
@@ -2572,7 +2973,7 @@ ${facetDoc}`,
     },
   );
 
-  if (caps.write !== "deny") server.tool(
+  if (caps.write !== "deny" && !role) server.tool(
     "embed_backfill",
     "Embed the identity facet for graph nodes written without embeddings. Requires write capability; queued-mode identities store it for approval.",
     { limit: z.number().int().min(1).max(256).optional() },
@@ -2595,14 +2996,17 @@ homes you can see).`,
     {
       entities: z.array(z.object({ name: z.string().min(1), home: z.string().optional() })).min(1).max(32),
       to: z.string().min(1),
+      ...(role === "worker" ? { reason: z.string().max(600).optional(), propose: z.boolean().optional() } : {}),
     },
     async (args) => {
       need("write");
-      return { content: [{ type: "text", text: JSON.stringify(await setHome(args, identity, scope)) }] };
+      const r = await setHome(args, identity, scope);
+      if (role === "worker" && r.results.some((x) => x.queued)) r.note = PROPOSED_NOTE;
+      return { content: [{ type: "text", text: JSON.stringify(r) }] };
     },
   );
 
-  if (SCOPED && caps.write !== "deny") server.tool(
+  if (SCOPED && caps.write !== "deny" && !role) server.tool(
     "ingest_document",
     `Add a long document (a manual, a meeting transcript, a report) to the knowledge graph. Give
 its full text, a short title and a one-sentence description. The text is kept in the document
@@ -2641,6 +3045,78 @@ a search.`,
     },
   );
 
+  // ---- a graph worker thread's own tools (one queue entry: its entry) ----
+  if (SCOPED && role === "worker") {
+    server.tool(
+      "link_things",
+      `Link YOUR entry to the things it's about: people, customers, suppliers, machines, parts, orders,
+places, projects, teams (type one of: person, customer, supplier, machine, part, order, place, project,
+team, other). Existing things are found by name or alias; new ones are created. A name that may be an
+existing thing under another name isn't linked: it comes back as unsure for you to check.`,
+      { things: z.array(z.object({ name: z.string().min(2).max(120), type: z.string(), role: z.string().max(30).optional() })).min(1).max(8) },
+      async (args) => {
+        need("read");
+        return { content: [{ type: "text", text: JSON.stringify(await workerLink(args, identity)) }] };
+      },
+    );
+    server.tool(
+      "merge_things",
+      `Merge two things that are the same (e.g. "Toro Co." and "Toro", both customers): keep one, fold the
+other's links and names into it. Plain duplicates: merge directly. When it matters (things many entries
+point at, or you're not certain), set propose: true with a reason: an admin decides and you wait.`,
+      { keep: z.string().min(2), drop: z.string().min(2), type: z.string().optional(), reason: z.string().max(600).optional(), propose: z.boolean().optional() },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerMerge(args, identity, scope)) }] };
+      },
+    );
+    server.tool(
+      "raise_question",
+      `Ask the admin something you can't settle from the graph or your sources (which customer a name means,
+whether a change is right). Give options when there are clear choices, and why you're asking. Then END
+YOUR TURN with a short report: you're resumed with the answer later, in this same conversation.`,
+      { question: z.string().min(8).max(600), options: z.array(z.string().max(200)).max(6).optional(), why: z.string().max(600).optional() },
+      async (args) => {
+        need("read");
+        return { content: [{ type: "text", text: JSON.stringify(await raiseQuestion(identity, args)) }] };
+      },
+    );
+  }
+
+  // ---- the liaison's tools: workers' questions and proposals, for the admin ----
+  if (SCOPED && role === "liaison") {
+    server.tool(
+      "list_worker_questions",
+      "The questions graph worker threads are waiting on, oldest first: which entry, the question, its options, and why the thread asks.",
+      {},
+      async () => ({ content: [{ type: "text", text: JSON.stringify({ questions: await listQuestions("open") }) }] }),
+    );
+    server.tool(
+      "answer_worker_questions",
+      `Record the admin's answer to one or more questions (several threads asking the same thing can share one
+answer). Each thread resumes with it. Only answer with what the admin said: never decide for them.
+dismiss: true closes the questions without an answer (the threads finish as they are).`,
+      { ids: z.array(z.string()).min(1).max(100), answer: z.string().max(2000).optional(), dismiss: z.boolean().optional() },
+      async (args) => {
+        if (!args.dismiss && !args.answer?.trim()) throw new Error("an answer, or dismiss: true");
+        return { content: [{ type: "text", text: JSON.stringify(await answerQuestions(args.ids, { answer: args.answer ?? "", dismiss: args.dismiss === true }, `${identity.user} (for the admin)`)) }] };
+      },
+    );
+    server.tool(
+      "list_worker_proposals",
+      "Changes graph worker threads proposed (to entries that aren't theirs, merges, raw commands), with each thread's reason.",
+      {},
+      async () => ({ content: [{ type: "text", text: JSON.stringify({ proposals: await listProposals() }) }] }),
+    );
+    server.tool(
+      "decide_worker_proposal",
+      `Apply or reject a worker's proposal, as the admin decided. Only on the admin's say-so. A rejection (and
+an approval with a reason) resumes the thread with the reason.`,
+      { id: z.string(), approve: z.boolean(), reason: z.string().max(1000).optional() },
+      async (args) => ({ content: [{ type: "text", text: JSON.stringify(await decideProposal(args.id, args.approve, args.reason ?? "", identity)) }] }),
+    );
+  }
+
   if (SCOPED) server.tool(
     "read_document",
     `Read a document from the knowledge graph. Search results with kind "section" are parts of a
@@ -2654,7 +3130,7 @@ a section you get its contents (the sections you can see) and the first sections
     },
   );
 
-  if (SCOPED) server.tool(
+  if (SCOPED && !role) server.tool(
     "find_shareable",
     `Find knowledge-graph entries you own (and so may share) by describing them; also lists the
 positions and the people things can be shared with.
@@ -2679,7 +3155,7 @@ this email said", "share the line 2 plan with the floor", "show bob the Toro sch
     },
   );
 
-  if (SCOPED && caps.write !== "deny") server.tool(
+  if (SCOPED && caps.write !== "deny" && !role) server.tool(
     "grant_access",
     `Show data you own to another position, or to one person, for a while: either named entities or
 a whole subtree (a position and everything below it). Name the recipient with "to" (a position:
@@ -2702,7 +3178,7 @@ onward. To find what to share, use find_shareable.`,
     },
   );
 
-  if (SCOPED) server.tool(
+  if (SCOPED && !role) server.tool(
     "request_access",
     `Ask for information the person can't see. When the knowledge graph doesn't answer their
 question (search_graph finds nothing that answers it), offer to ask; if they agree, call this
@@ -2723,7 +3199,7 @@ the card), and you can search again.`,
     },
   );
 
-  if (SCOPED) server.tool(
+  if (SCOPED && !role) server.tool(
     "list_grants",
     "List active grants on data you own (outgoing) and grants that show you data (incoming).",
     {},
@@ -2733,7 +3209,7 @@ the card), and you can search again.`,
     },
   );
 
-  if (SCOPED && caps.write !== "deny") server.tool(
+  if (SCOPED && caps.write !== "deny" && !role) server.tool(
     "revoke_grant",
     "Revoke a grant (takes effect at once). The person who granted it or any owner of the data may revoke.",
     { id: z.string().min(1) },
@@ -2743,7 +3219,7 @@ the card), and you can search again.`,
     },
   );
 
-  if (caps.approve === true) server.tool(
+  if (caps.approve === true && !role) server.tool(
     "list_pending_writes",
     "List queued graph writes awaiting approval (requires approve capability).",
     {},
@@ -2753,7 +3229,7 @@ the card), and you can search again.`,
     },
   );
 
-  if (caps.approve === true) server.tool(
+  if (caps.approve === true && !role) server.tool(
     "approve_write",
     "Approve and execute a queued graph write.",
     { id: z.string().min(1) },
@@ -2763,7 +3239,7 @@ the card), and you can search again.`,
     },
   );
 
-  if (caps.approve === true) server.tool(
+  if (caps.approve === true && !role) server.tool(
     "reject_write",
     "Reject a queued graph write without executing it.",
     { id: z.string().min(1) },
@@ -2945,12 +3421,18 @@ app.get("/api/policy", (req, res) => {
 });
 /** the graph worker: settings (pushed from the admin's Graph worker profile) and its backlog; root only */
 async function workerStatus() {
-  const counts = await adbQuery("SELECT status, count(*) AS n FROM Job GROUP BY status").catch(() => []);
+  const counts = await adbQuery("SELECT status, count(*) AS n FROM Job WHERE kind <> 'review' GROUP BY status").catch(() => []);
+  const threads = await adbQuery("SELECT status, count(*) AS n FROM Job WHERE kind = 'review' GROUP BY status").catch(() => []);
+  const questions = await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE status = 'open'").catch(() => []);
+  const proposals = await adbQuery("SELECT count(*) AS n FROM PendingWrite WHERE status = 'pending' AND job_id IS NOT NULL").catch(() => []);
   const things = await adbQuery(`SELECT count(*) AS n FROM ${ENTITY_LABEL} WHERE _kind = 'thing'`).catch(() => []);
   const failed = await adbQuery("SELECT kind, error, updated_at FROM Job WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 5").catch(() => []);
   return {
     ...worker,
     model: workerModel() || null,
+    threads: { ...Object.fromEntries(threads.map((c) => [c.status, Number(c.n)])), today: await threadsToday() },
+    open_questions: Number(questions[0]?.n ?? 0),
+    open_proposals: Number(proposals[0]?.n ?? 0),
     jobs: Object.fromEntries(counts.map((c) => [c.status, Number(c.n)])),
     things: Number(things[0]?.n ?? 0),
     today: { calls: workerUsage.day === new Date().toISOString().slice(0, 10) ? workerUsage.calls : 0, budget: Number(WORKER_DAILY_CALLS) },
@@ -2973,7 +3455,13 @@ app.put("/api/worker", (req, res) => {
     model: typeof b.model === "string" ? b.model.slice(0, 300) : worker.model,
     instructions: typeof b.instructions === "string" ? b.instructions.slice(0, 4000) : worker.instructions,
     profile: typeof b.profile === "string" ? b.profile.slice(0, 120) : b.profile === null ? null : worker.profile,
+    pool: worker.pool,
   };
+  try {
+    if (b.pool !== undefined) next.pool = poolSettings(b.pool, worker.pool);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
   const now = new Date().toISOString();
   void (async () => {
     const json = JSON.stringify(next);
@@ -2994,14 +3482,84 @@ app.get("/api/worker/models", (req, res) => {
     .then((j) => res.json({ models: (j.data ?? []).map((m) => m.id).filter((id) => typeof id === "string" && !/embed/i.test(id)).sort() }))
     .catch((e) => httpError(res, e));
 });
+/** the worker pool's endpoints: the admin's workspace runs the threads; root only */
+const rootOnly = (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return void res.status(401).json({ error: "unauthenticated" });
+  if (!canEditPolicy(identity, scopeOf(identity))) return void res.status(403).json({ error: "only the organization's root runs graph worker threads" });
+  return identity;
+};
+app.post("/api/worker/threads/claim", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  void claimThreads(req.body?.limit).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/worker/threads/:id/agent", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  void threadAgent(req.params.id, req.body?.agent_id).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/worker/threads/:id/finish", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  void finishThread(req.params.id, req.body ?? {}).then((r) => res.json(r), (e) => httpError(res, e));
+});
+/** recent threads: which entry, how it went, its agent (for the audit view and clean-up) */
+app.get("/api/worker/threads", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  void (async () => {
+    const rows = await adbQuery("SELECT id, payload, status, agent_id, summary, error, attempts, changes, created_at, updated_at, claimed_at FROM Job WHERE kind = 'review' ORDER BY updated_at DESC LIMIT 200");
+    const out = [];
+    for (const r of rows) {
+      const p = JSON.parse(r.payload || "{}");
+      const name = RID_RE.test(String(p.rid)) ? (await adbQuery(`SELECT name FROM ${p.rid}`).catch(() => []))[0]?.name : null;
+      out.push({
+        id: r.id,
+        entry: name ?? null,
+        why: p.why ?? "",
+        status: r.status,
+        agent_id: r.agent_id ?? null,
+        summary: r.summary ?? "",
+        // what it changed without asking (the audit trail for the small things)
+        changes: JSON.parse(r.changes || "[]"),
+        error: r.error ?? null,
+        attempts: Number(r.attempts ?? 0),
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      });
+    }
+    return { threads: out };
+  })().then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.get("/api/worker/questions", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  const status = ["open", "answered", "dismissed"].includes(String(req.query.status)) ? String(req.query.status) : "open";
+  void listQuestions(status).then((questions) => res.json({ questions }), (e) => httpError(res, e));
+});
+app.post("/api/worker/questions/answer", (req, res) => {
+  const identity = rootOnly(req, res);
+  if (!identity) return;
+  const b = req.body ?? {};
+  const ids = Array.isArray(b.ids) ? b.ids.slice(0, 100) : [];
+  if (!b.dismiss && !(typeof b.answer === "string" && b.answer.trim())) return res.status(400).json({ error: "an answer, or dismiss" });
+  void answerQuestions(ids, { answer: b.answer ?? "", dismiss: b.dismiss === true }, identity.user).then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.get("/api/worker/proposals", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  void listProposals().then((proposals) => res.json({ proposals }), (e) => httpError(res, e));
+});
+app.post("/api/worker/proposals/:id", (req, res) => {
+  const identity = rootOnly(req, res);
+  if (!identity) return;
+  void decideProposal(req.params.id, req.body?.approve === true, typeof req.body?.reason === "string" ? req.body.reason.slice(0, 1000) : "", identity).then((r) => res.json(r), (e) => httpError(res, e));
+});
+
 /** queue the entries saved before the worker existed (newest first; demand still goes first) */
 app.post("/api/worker/backfill", (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);
   if (!identity) return res.status(401).json({ error: "unauthenticated" });
   if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root runs a backfill" });
   void (async () => {
-    const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _mentions_at IS NULL AND embed_identity IS NOT NULL${ASSERTIONS}${liveClause()} ORDER BY updated_at DESC LIMIT 500`);
-    for (const r of rows) await enqueue("mentions", { rid: String(r.rid) }, { key: `mentions:${r.rid}` });
+    const kind = firstJob(worker.pool);
+    const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE ${kind === "mentions" ? "_mentions_at" : "_reviewed_at"} IS NULL AND embed_identity IS NOT NULL${ASSERTIONS}${liveClause()} ORDER BY updated_at DESC LIMIT 500`);
+    for (const r of rows) await enqueue(kind, { rid: String(r.rid) }, { key: `${kind}:${r.rid}` });
     return { queued: rows.length };
   })().then((r) => res.json(r), (e) => httpError(res, e));
 });
@@ -3186,6 +3744,7 @@ async function boot() {
     await ensureDocumentSchema();
     await ensureWorkerSchema();
     setInterval(() => void workerTick().catch((e) => log.warn(`worker: ${String(e).slice(0, 160)}`)), 5_000);
+    setInterval(() => void expireLeases().catch((e) => log.warn(`worker leases: ${String(e).slice(0, 160)}`)), 60_000);
     log.info(`graph worker: ${worker.enabled && workerModel() ? `on (${workerModel()}${worker.profile ? `, from profile ${worker.profile}` : ""})` : "off"}`);
     if (!docStore) log.warn(`DOC_STORE=${DOC_STORE} isn't a known store: documents can't be ingested`);
     await expireRequests();

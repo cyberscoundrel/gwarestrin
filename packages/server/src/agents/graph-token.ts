@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import type { InstanceMetadata } from "@gwarestrin/shared";
+import type { GraphRole, InstanceMetadata } from "@gwarestrin/shared";
 import { getInstanceMetadata } from "../instance/metadata.js";
 
 /**
@@ -12,9 +12,13 @@ import { getInstanceMetadata } from "../instance/metadata.js";
  * graph-rag drops any position outside what the instance's user reaches, and
  * never lets an agent token approve or run raw queries. Without a key the
  * agent shares the instance token (the user's own view).
+ *
+ * A graph worker agent's token also names its role (r: worker, with its job
+ * and entry; or liaison). graph-rag honours it only for the organization's
+ * root (the admin's workspace), so no other workspace can mint one.
  */
 export function graphTokenFor(
-  agent: { id: string },
+  agent: { id: string; graphRole?: GraphRole | undefined },
   profile: { positions?: string[] | undefined },
   metadata: InstanceMetadata | undefined = getInstanceMetadata(),
   now = Date.now(),
@@ -23,7 +27,14 @@ export function graphTokenFor(
   const key = typeof graph?.delegationKey === "string" ? graph.delegationKey : undefined;
   const user = metadata?.instance.name;
   if (!key || !user) return typeof graph?.token === "string" ? graph.token : undefined;
-  const payload = { u: user, a: agent.id, p: profile.positions ?? [], iat: Math.floor(now / 1000) };
+  const role = agent.graphRole;
+  const payload = {
+    u: user,
+    a: agent.id,
+    p: profile.positions ?? [],
+    ...(role?.kind === "worker" ? { r: "worker", j: role.job, e: role.entry } : role?.kind === "liaison" ? { r: "liaison" } : {}),
+    iat: Math.floor(now / 1000),
+  };
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const sig = createHmac("sha256", key).update(`gwa1.${body}`).digest("base64url");
   return `gwa1.${body}.${sig}`;

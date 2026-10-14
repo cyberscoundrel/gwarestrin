@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AgentRecord, CreateAgentInput, PatchAgentInput } from "@gwarestrin/shared";
+import type { AgentRecord, CreateAgentInput, GraphRole, PatchAgentInput } from "@gwarestrin/shared";
 import { scoped } from "../util/log.js";
 
 const log = scoped("store");
@@ -46,7 +46,8 @@ export class AgentStore {
     return this.list().find((a) => a.name === name);
   }
 
-  create(input: CreateAgentInput): AgentRecord {
+  /** `graphRole` comes only from the worker pool, never from a request */
+  create(input: CreateAgentInput, internal: { graphRole?: GraphRole } = {}): AgentRecord {
     const name = input.name?.trim();
     if (!name) throw new Error("name required");
     if (this.getByName(name)) throw new Error(`agent name already in use: ${name}`);
@@ -70,6 +71,7 @@ export class AgentStore {
         ...(input.gondolin?.cpus !== undefined ? { cpus: input.gondolin.cpus } : {}),
         ...(input.gondolin?.memoryMB !== undefined ? { memoryMB: input.gondolin.memoryMB } : {}),
       },
+      ...(internal.graphRole ? { graphRole: internal.graphRole } : {}),
     };
     this.agents.set(record.id, record);
     void this.persist();

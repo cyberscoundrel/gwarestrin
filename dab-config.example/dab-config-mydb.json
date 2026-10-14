@@ -15,7 +15,7 @@
         "rest": { "enabled": false },
         "graphql": { "enabled": false }
       },
-      "permissions": [{ "role": "anonymous", "actions": [{ "action": "*" }] }]
+      "permissions": [{ "role": "anonymous", "actions": [{ "action": "read" }] }]
     }
   }
 }

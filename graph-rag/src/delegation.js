@@ -8,6 +8,17 @@
 // the tenant server holds the same key). Even a valid signature can't widen:
 // requested positions outside what the tenant's user sees are dropped, and an
 // agent never gets approve or raw (approving is a person's act).
+//
+// Two roles for the organization's graph worker agents (payload.r), honoured
+// only when the tenant is the organization's root with direct writes (its
+// admin); anyone else's claim is ignored and the token is an ordinary agent's:
+//   worker   one queue entry's thread (j: job id, e: the entry's rid). Sees the
+//            whole graph and may run read-only raw queries; it writes
+//            directly, and proposes (then waits) what it judges a large
+//            change. Raw writes and widening who sees something are always
+//            proposals.
+//   liaison  relays workers' questions and proposals to the admin: answers
+//            questions and decides workers' proposals, writes nothing itself.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { heldPositions, visibleHomes } from "./positions.js";
 
@@ -55,6 +66,27 @@ export function resolveAgentToken(token, entryFor, map, now = Date.now()) {
       const reach = visibleHomes(map, heldPositions(map, tenantPositions)); // null = root: anywhere
       positions = requested.filter((p) => map.positions[p] && (reach === null || reach.has(p)));
     }
+  }
+  const rootTenant = !!map && tenantPositions.includes(map.root) && entry.caps?.write === "direct" && entry.caps?.read === true;
+  if (rootTenant && payload.r === "worker" && typeof payload.j === "string" && /^[0-9a-f-]{36}$/i.test(payload.j) && typeof payload.e === "string" && /^#\d+:\d+$/.test(payload.e)) {
+    return {
+      user: `${entry.user}/worker:${payload.a.slice(0, 8)}`,
+      key: `${entry.user}/agent:${payload.a}`,
+      agent: payload.a,
+      role: { kind: "worker", job: payload.j, entry: payload.e },
+      caps: { read: true, write: "direct", approve: false, raw: entry.caps?.raw === true },
+      positions: tenantPositions,
+    };
+  }
+  if (rootTenant && payload.r === "liaison") {
+    return {
+      user: `${entry.user}/liaison:${payload.a.slice(0, 8)}`,
+      key: `${entry.user}/agent:${payload.a}`,
+      agent: payload.a,
+      role: { kind: "liaison" },
+      caps: { read: true, write: "deny", approve: true, raw: false },
+      positions: tenantPositions,
+    };
   }
   return {
     user: `${entry.user}/agent:${payload.a.slice(0, 8)}`, // for audit trails

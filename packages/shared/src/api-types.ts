@@ -33,7 +33,15 @@ export interface AgentRecord {
   sessionFile?: string | null | undefined;
   /** outcome of the profile context engine at creation time */
   contextStatus?: "skipped" | "ok" | "failed" | undefined;
+  /**
+   * a graph worker agent (made by the worker pool, under the Graph worker
+   * profile): one queue entry's thread, or the liaison relaying threads'
+   * questions and proposals to the admin
+   */
+  graphRole?: GraphRole | undefined;
 }
+
+export type GraphRole = { kind: "worker"; job: string; entry: string; title: string } | { kind: "liaison" };
 
 export interface AgentRuntimeSummary {
   id: string;

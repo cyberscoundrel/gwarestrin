@@ -1,4 +1,4 @@
-import type { AgentRecord, AgentRuntimeSummary, ModelView, ProfileRecord, ProviderView } from "@gwarestrin/shared";
+import type { AgentRecord, AgentRuntimeSummary, ModelLabel, ModelView, ProfileRecord, ProviderView } from "@gwarestrin/shared";
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -55,6 +55,55 @@ export interface GraphWorkerView {
   jobs: Record<string, number>;
   things: number;
   today: { calls: number; budget: number };
+  pool?: PoolSettings;
+  /** threads by status, and how many started today */
+  threads?: Record<string, number> & { today?: number };
+  open_questions?: number;
+  open_proposals?: number;
+}
+
+/** the graph worker pool: agent threads, one per queue entry (see graph-rag/src/pool.js) */
+export interface PoolSettings {
+  poolSize: number;
+  sortFirst: boolean;
+  dailyThreads: number;
+  threadMinutes: number;
+  keepDays: number;
+}
+export interface WorkerThread {
+  id: string;
+  entry: string | null;
+  why: string;
+  status: "pending" | "running" | "waiting" | "done" | "failed";
+  agent_id: string | null;
+  summary: string;
+  /** what it changed without asking */
+  changes: Array<{ kind: string; detail?: string; entries?: string[]; reason?: string; at: string }>;
+  error: string | null;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+}
+export interface WorkerQuestion {
+  id: string;
+  job_id: string;
+  entry_name: string | null;
+  question: string;
+  options: string[];
+  why: string;
+  status: string;
+  agent_id: string | null;
+  created_at: string;
+}
+export interface WorkerProposal {
+  id: string;
+  kind: string;
+  change: string;
+  reason: string;
+  proposed_by: string;
+  created_at: string;
+  entry: string | null;
+  agent_id: string | null;
 }
 
 /** what pruning will remove, and where it goes (the root only) */
@@ -114,6 +163,22 @@ export interface WorkspacesView {
   connections?: Record<string, string>;
   history?: Array<{ at: string; by: string; name: string; prev?: WorkspaceSettings; next?: WorkspaceSettings; connections?: string[] }>;
 }
+
+/** every model the providers offer, with the organization's labels (admins) */
+export interface ModelCatalog {
+  /** false: this workspace's metadata carries no labels yet, so none are enforced */
+  enforced: boolean;
+  providers: Array<{
+    id: string;
+    description: string | null;
+    tier: "local" | "cloud";
+    degraded: boolean;
+    models: Array<{ key: string; id: string; name: string; contextWindow: number; source: string; label: ModelLabel | null }>;
+  }>;
+  /** labeled, but no provider offers it right now */
+  missing: Array<{ key: string; label: ModelLabel }>;
+}
+export type LabelInput = Pick<ModelLabel, "tier" | "hosting" | "notes">;
 
 export interface GrantView {
   id: string;
@@ -250,6 +315,14 @@ export const api = {
   async saveConnections(notes: Record<string, string>): Promise<{ connections: Record<string, string> }> {
     return json(await fetch("/api/instances/connections", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(notes) }));
   },
+  /** every model the providers offer, with labels (admins only: 404 elsewhere) */
+  async modelCatalog(): Promise<ModelCatalog> {
+    return json(await fetch("/api/models/catalog"));
+  },
+  /** label models ({key: label}) or remove labels ({key: null}) */
+  async saveModelLabels(changes: Record<string, LabelInput | null>): Promise<{ models: Record<string, ModelLabel> }> {
+    return json(await fetch("/api/models/labels", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));
+  },
   /** the organization's workspaces (admins only; enabled: false elsewhere) */
   async workspaces(): Promise<WorkspacesView> {
     return json(await fetch("/api/instances"));
@@ -305,6 +378,24 @@ export const api = {
   async graphWorker(): Promise<GraphWorkerView | null> {
     const r = await fetch("/api/graph-worker");
     return r.ok ? json(r) : null;
+  },
+  async savePool(changes: Partial<PoolSettings>): Promise<GraphWorkerView> {
+    return json(await fetch("/api/graph-worker/pool", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));
+  },
+  async workerThreads(): Promise<WorkerThread[]> {
+    return (await json<{ threads: WorkerThread[] }>(await fetch("/api/graph-worker/threads"))).threads;
+  },
+  async workerQuestions(): Promise<WorkerQuestion[]> {
+    return (await json<{ questions: WorkerQuestion[] }>(await fetch("/api/graph-worker/questions"))).questions;
+  },
+  async answerWorkerQuestions(ids: string[], answer: string, dismiss = false): Promise<{ answered: number }> {
+    return json(await fetch("/api/graph-worker/questions/answer", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ ids, answer, dismiss }) }));
+  },
+  async workerProposals(): Promise<WorkerProposal[]> {
+    return (await json<{ proposals: WorkerProposal[] }>(await fetch("/api/graph-worker/proposals"))).proposals;
+  },
+  async decideWorkerProposal(id: string, approve: boolean, reason = ""): Promise<unknown> {
+    return json(await fetch(`/api/graph-worker/proposals/${encodeURIComponent(id)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ approve, reason }) }));
   },
   async graphWorkerModels(): Promise<string[]> {
     return (await json<{ models: string[] }>(await fetch("/api/graph-worker/models"))).models;

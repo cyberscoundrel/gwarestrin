@@ -15,6 +15,9 @@ export interface AgentListItem {
   contextStatus?: "skipped" | "ok" | "failed" | undefined;
   /** sandbox network allow-list from the agent record (egress fact for the trust strip) */
   allowedHosts?: string[] | undefined;
+  createdAt: string;
+  /** a graph worker thread or the liaison (made by the worker pool) */
+  graphRole?: import("@gwarestrin/shared").GraphRole | undefined;
   unread: number;
 }
 
@@ -164,6 +167,8 @@ class Store {
         profileId: a.profileId ?? "default",
         contextStatus: a.contextStatus,
         allowedHosts: a.gondolin?.allowedHosts,
+        createdAt: a.createdAt,
+        graphRole: a.graphRole,
         unread: this.agents.find((x) => x.id === a.id)?.unread ?? 0,
       }));
       for (const a of agents) if (a.runtime) this.runtime.set(a.id, a.runtime);

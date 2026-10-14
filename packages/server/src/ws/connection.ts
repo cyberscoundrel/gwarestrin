@@ -1,5 +1,5 @@
 import type { FastifyInstance } from "fastify";
-import { providerAllowed } from "../instance/settings.js";
+import { modelLabels, modelRefusal } from "../instance/settings.js";
 import websocket from "@fastify/websocket";
 import type { WebSocket } from "ws";
 import {
@@ -128,12 +128,21 @@ export class WsConnection {
       this.sendError(agentId, "agent not running");
       return;
     }
-    // a model switch must stay within the providers this workspace allows
-    // (pi only knows those anyway; this says so plainly)
-    const provider = (msg as { provider?: unknown }).provider;
-    if (type === "set_model" && typeof provider === "string" && !providerAllowed(provider)) {
-      this.sendError(agentId, `model provider ${provider} isn't allowed in this workspace`);
+    // a model switch must stay within the providers this workspace allows and
+    // the models the organization labeled (pi only knows those anyway; this
+    // says so plainly, and covers a label removed while the agent runs)
+    const { provider, modelId } = msg as { provider?: unknown; modelId?: unknown };
+    // cycling walks pi's own list, which may predate a label being removed
+    if (type === "cycle_model" && modelLabels() !== null) {
+      this.sendError(agentId, "pick a model by name (set_model): only labeled models may be used");
       return;
+    }
+    if (type === "set_model") {
+      const refused = typeof provider === "string" && typeof modelId === "string" ? modelRefusal(provider, modelId) : "set_model needs a provider and a modelId";
+      if (refused) {
+        this.sendError(agentId, refused);
+        return;
+      }
     }
     // strip envelope fields; pass the rest through as the RPC payload
     const { v: _v, kind: _k, agentId: _a, type: _t, id: _id, ...payload } = msg;

@@ -9,7 +9,7 @@ import type { ProviderRegistry } from "../providers/registry.js";
 import { buildGeneratedProviders, generatedProvidersPath, writeGeneratedProviders } from "../providers/generate.js";
 import { scoped } from "../util/log.js";
 import { graphTokenFor } from "./graph-token.js";
-import { connectionDigest } from "./connection-digest.js";
+import { connectionDigest, readTools } from "./connection-digest.js";
 import { buildStandingInstructions } from "./standing-instructions.js";
 
 /** read by the graph-context extension at every turn */
@@ -17,6 +17,16 @@ export const STANDING_INSTRUCTIONS_FILE = "standing-instructions.md";
 import { agentDir } from "./store.js";
 
 const log = scoped("scaffold");
+
+/** the knowledge graph's tool connection */
+export const GRAPH_MCP = "graph-rag";
+
+/**
+ * pi's tools for a graph worker agent: reading files and the MCP tools (the
+ * graph in full, other connections' read tools). No shell, no writing files:
+ * nothing to reach a connection around its read-only list.
+ */
+export const WORKER_TOOLS = ["read", "mcp"];
 
 export interface AgentDirs {
   root: string;
@@ -49,7 +59,12 @@ export async function scaffoldAgent(
   registry: ProviderRegistry,
   extensionsRoot: string,
   mcpRegistry?: McpRegistryStore,
-  instanceOpts?: { sharedTools?: { enabled: boolean; hostDir: string }; profileInstructions?: string | undefined },
+  instanceOpts?: {
+    sharedTools?: { enabled: boolean; hostDir: string };
+    profileInstructions?: string | undefined;
+    /** under the Graph worker profile: read-only everywhere but the graph (see WORKER_TOOLS) */
+    graphWorker?: boolean | undefined;
+  },
 ): Promise<AgentDirs> {
   const dirs = dirsFor(stateDir, agent);
   await Promise.all([
@@ -97,7 +112,8 @@ export async function scaffoldAgent(
       ...(agent.gondolin.image !== undefined ? { image: agent.gondolin.image } : {}),
       ...(agent.gondolin.cpus !== undefined ? { cpus: agent.gondolin.cpus } : {}),
       ...(agent.gondolin.memoryMB !== undefined ? { memoryMB: agent.gondolin.memoryMB } : {}),
-      allowedHosts: agent.gondolin.allowedHosts,
+      // a graph worker reaches nothing on the internet
+      allowedHosts: instanceOpts?.graphWorker ? [] : agent.gondolin.allowedHosts,
       ...(agent.gondolin.allowedInternalHosts !== undefined ? { allowedInternalHosts: agent.gondolin.allowedInternalHosts } : {}),
       secrets: agent.gondolin.secrets,
     },
@@ -118,22 +134,39 @@ export async function scaffoldAgent(
         log.warn(`mcp server ${name} omitted for ${agent.name}: unresolvable instance references`);
         continue;
       }
+      if (instanceOpts?.graphWorker && name !== GRAPH_MCP) {
+        // a graph worker only reads here: only the connection's read tools
+        // (none known = left out); it has no shell to reach around them
+        const tools = await readTools(name, { ...applied, readTools: mcpRegistry.list()[name]?.readTools });
+        if (!tools.length) {
+          log.warn(`mcp server ${name} omitted for graph worker ${agent.name}: no tool is known to only read`);
+          continue;
+        }
+        resolved[name] = { ...applied, includeTools: tools } as typeof applied;
+        continue;
+      }
       resolved[name] = applied;
     }
     await writeFile(
       path.join(dirs.workspace, ".mcp.json"),
-      JSON.stringify({ mcpServers: resolved }, null, 2) + "\n",
+      // a graph worker gets no MCP scripting tool (scripts could call around the read-only lists)
+      JSON.stringify({ mcpServers: resolved, ...(instanceOpts?.graphWorker ? { settings: { scriptMode: false } } : {}) }, null, 2) + "\n",
       "utf8",
     );
     // standing instructions on every turn: its sources (what each is for, what a database
     // holds), what its profile says it's for, and the knowledge-graph procedures
     const instructions = path.join(dirs.home, STANDING_INSTRUCTIONS_FILE);
     const notes = getInstanceMetadata()?.connections ?? {};
-    const others = Object.keys(resolved).filter((n) => n !== "graph-rag");
+    const others = Object.keys(resolved).filter((n) => n !== GRAPH_MCP);
     const connections = await Promise.all(
       others.map(async (name) => ({ name, description: notes[name], digest: await connectionDigest(name, resolved[name] as { url?: string; headers?: Record<string, string> }, notes[name]) })),
     );
-    const text = buildStandingInstructions({ graph: Object.keys(resolved).includes("graph-rag"), connections, profileInstructions: instanceOpts?.profileInstructions });
+    const text = buildStandingInstructions({
+      graph: Object.keys(resolved).includes(GRAPH_MCP),
+      connections,
+      profileInstructions: instanceOpts?.profileInstructions,
+      ...(instanceOpts?.graphWorker ? { graphRole: agent.graphRole?.kind ?? "worker" } : {}),
+    });
     if (text) await writeFile(instructions, text + "\n", "utf8");
     else await rm(instructions, { force: true });
   }

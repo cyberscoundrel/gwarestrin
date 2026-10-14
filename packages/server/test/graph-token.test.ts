@@ -21,6 +21,15 @@ describe("graphTokenFor", () => {
     expect(JSON.parse(Buffer.from(token!.split(".")[1]!, "base64url").toString()).p).toEqual([]);
   });
 
+  it("a graph worker agent's token names its role, its job and its entry", () => {
+    const decode = (t: string | undefined) => JSON.parse(Buffer.from(t!.split(".")[1]!, "base64url").toString());
+    const job = "0f8fad5b-d9cb-469f-a165-70867728950e";
+    const w = graphTokenFor({ id: "a1", graphRole: { kind: "worker", job, entry: "#12:3", title: "Toro PO" } }, {}, md({ token: "inst", delegationKey: KEY }), 1_000_000);
+    expect(decode(w)).toEqual({ u: "alice", a: "a1", p: [], r: "worker", j: job, e: "#12:3", iat: 1000 });
+    const l = graphTokenFor({ id: "a2", graphRole: { kind: "liaison" } }, {}, md({ token: "inst", delegationKey: KEY }), 1_000_000);
+    expect(decode(l).r).toBe("liaison");
+  });
+
   it("falls back to the instance token without a delegation key", () => {
     expect(graphTokenFor({ id: "agent-1" }, { positions: ["x"] }, md({ token: "inst" }))).toBe("inst");
     expect(graphTokenFor({ id: "agent-1" }, {}, undefined)).toBeUndefined();

@@ -126,3 +126,39 @@ export async function connectionDigest(name: string, def: { url?: string | undef
   cache.set(key, { at: Date.now(), digest });
   return digest;
 }
+
+/**
+ * Which of a connection's tools only read. Graph worker agents get only
+ * these on every connection but the graph (fail closed: none known = the
+ * connection is left out). In order: the organization's own list for the
+ * connection, the server's read-only hints, then tools known to only read.
+ */
+const KNOWN_READ = new Set(["describe_entities", "read_records", "aggregate_records"]); // Data API builder (execute_entity runs stored procedures: not known to only read)
+const readCache = new Map<string, { at: number; tools: string[] }>();
+
+export function readToolsFrom(tools: Array<{ name: string; annotations?: { readOnlyHint?: boolean } | undefined }>, configured?: string[]): string[] {
+  const names = new Set(tools.map((t) => t.name));
+  if (configured?.length) return configured.filter((n) => names.has(n));
+  const hinted = tools.filter((t) => t.annotations?.readOnlyHint === true).map((t) => t.name);
+  if (hinted.length) return hinted;
+  return tools.map((t) => t.name).filter((n) => KNOWN_READ.has(n));
+}
+
+export async function readTools(name: string, def: { url?: string | undefined; headers?: Record<string, string> | undefined; readTools?: string[] | undefined }): Promise<string[]> {
+  const key = `${name}|${(def.readTools ?? []).join(",")}`;
+  const hit = readCache.get(key);
+  if (hit && Date.now() - hit.at < TTL_MS) return hit.tools;
+  let tools: string[] = [];
+  if (def.url) {
+    try {
+      const headers = def.headers ?? {};
+      const init = await rpc(def.url, headers, null, 1, "initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "gwarestrin", version: "1" } });
+      const list = await rpc(def.url, headers, init.session, 2, "tools/list", {});
+      tools = readToolsFrom((list.body.result?.tools ?? []) as Array<{ name: string; annotations?: { readOnlyHint?: boolean } }>, def.readTools);
+    } catch (e) {
+      log.warn(`no read-only tool list for ${name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  if (tools.length) readCache.set(key, { at: Date.now(), tools });
+  return tools;
+}

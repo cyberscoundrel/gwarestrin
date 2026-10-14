@@ -1,5 +1,5 @@
 import { writeFile } from "node:fs/promises";
-import { providerAllowed } from "../instance/settings.js";
+import { modelAllowed, modelLabels, providerAllowed } from "../instance/settings.js";
 import path from "node:path";
 import type { ProviderRegistry } from "./registry.js";
 
@@ -38,7 +38,13 @@ export function envVarForProviderKey(providerId: string): string {
 export function buildGeneratedProviders(registry: ProviderRegistry, allow?: string[]): GeneratedProvidersFile {
   const providers: Record<string, GeneratedProviderEntry> = {};
   // the instance's allowed providers (settings) bound every agent's list
-  const allowed = registry.forAgent(allow).filter((p) => providerAllowed(p.id));
+  // and only labeled models exist for agents (when the organization labels them)
+  const labels = modelLabels();
+  const allowed = registry
+    .forAgent(allow)
+    .filter((p) => providerAllowed(p.id))
+    .map((p) => ({ ...p, models: p.models.filter((m) => modelAllowed(p.id, m.id, labels)) }))
+    .filter((p) => labels === null || p.models.length > 0);
   for (const p of allowed) {
     providers[p.id] = {
       type: p.type,

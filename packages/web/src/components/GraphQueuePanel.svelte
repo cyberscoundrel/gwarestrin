@@ -19,6 +19,9 @@
     created_at?: string;
     payload?: string;
     language?: string;
+    /** a graph worker thread's proposal: its reason */
+    note?: string;
+    fromWorker?: boolean;
   }
 
   // position names, so proposals read in words
@@ -107,6 +110,8 @@
         created_at: String(p.created_at ?? ""),
         payload: String(p.payload ?? ""),
         language: String(p.language ?? "sql"),
+        ...(typeof p.note === "string" && p.note ? { note: p.note } : {}),
+        ...(typeof p.job_id === "string" && p.job_id ? { fromWorker: true } : {}),
       }));
       loaded = true;
     } catch (e) {
@@ -170,10 +175,13 @@
           {@const d = describe(p)}
           <li class="animate-enter grid gap-3 rounded-lg border border-edge bg-panel p-4">
             <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-              <span class="text-sm text-fg">Requested by <span class="font-medium">{p.requested_by}</span></span>
+              <span class="text-sm text-fg">{p.fromWorker ? "Proposed by a graph worker thread" : "Requested by"} <span class="font-medium">{p.requested_by}</span></span>
               <span class="text-xs text-faint" title={p.created_at}>{ago(p.created_at)}</span>
               <span class="ml-auto font-mono text-2xs text-faint" title="request id">{p.id.slice(0, 8)}</span>
             </div>
+            {#if p.note}
+              <span class="text-xs text-dim">Why: {p.note}</span>
+            {/if}
             {#if d}
               <div class="grid gap-1">
                 <span class="text-sm text-fg">{d.title}</span>

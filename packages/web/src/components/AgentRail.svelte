@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Building2, ChevronRight, Inbox, Pencil, Plus, Share2, ShieldCheck, UserPlus, X } from "lucide";
+  import { Building2, ChevronRight, Cpu, Network, Inbox, Pencil, Plus, Share2, ShieldCheck, UserPlus, X } from "lucide";
   import { store } from "../lib/stores.svelte.js";
   import { modelDisplayName } from "../lib/format.js";
   import DeleteAgentModal from "./DeleteAgentModal.svelte";
@@ -7,6 +7,8 @@
   import GrantsPanel from "./GrantsPanel.svelte";
   import OrgSettingsPanel from "./OrgSettingsPanel.svelte";
   import WorkspacesPanel from "./WorkspacesPanel.svelte";
+  import ModelsPanel from "./ModelsPanel.svelte";
+  import GraphWorkerPanel from "./GraphWorkerPanel.svelte";
   import { api } from "../lib/api.js";
   import Icon from "./Icon.svelte";
 
@@ -28,6 +30,28 @@
   let showGrants = $state(false);
   let showSettings = $state(false);
   let showWorkspaces = $state(false);
+  let showModels = $state(false);
+  let showWorker = $state(false);
+  // what the graph worker's threads wait on the admin for (questions, proposals)
+  let workerWaiting = $state<number | null>(null);
+  $effect(() => {
+    if (showWorker || !store.profiles.some((p) => p.graphWorker)) return;
+    const count = () =>
+      void api
+        .graphWorker()
+        .then((w) => (workerWaiting = w ? (w.open_questions ?? 0) + (w.open_proposals ?? 0) : null))
+        .catch(() => (workerWaiting = null));
+    count();
+    const t = setInterval(count, 60_000);
+    return () => clearInterval(t);
+  });
+  /** a worker profile can hold hundreds of threads: the liaison, the busy ones, the newest few */
+  function workerShown(members: import("../lib/stores.svelte.js").AgentListItem[]): import("../lib/stores.svelte.js").AgentListItem[] {
+    const liaison = members.filter((a) => a.graphRole?.kind === "liaison");
+    const busy = members.filter((a) => a.graphRole?.kind !== "liaison" && (a.status !== "stopped" || a.id === store.selectedId));
+    const newest = [...members].filter((a) => a.graphRole?.kind !== "liaison").sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5);
+    return [...new Map([...liaison, ...busy, ...newest].map((a) => [a.id, a])).values()];
+  }
   // admins manage the organization's workspaces (the instance holds the ops credential)
   let canManageWorkspaces = $state(false);
   $effect(() => {
@@ -102,7 +126,8 @@
   <!-- agent profiles > agents -->
   <div class="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pt-1 pb-4">
     {#each groupedProfiles as profile (profile.id)}
-      {@const members = store.agentsInProfile(profile.id)}
+      {@const all = store.agentsInProfile(profile.id)}
+      {@const members = profile.graphWorker ? workerShown(all) : all}
       {@const isCollapsed = collapsed[profile.id] ?? false}
       <section class="flex flex-col gap-0.5">
         <div class="group flex items-center gap-1 pr-1">
@@ -114,7 +139,7 @@
           >
             <Icon icon={ChevronRight} size={12} class="transition-transform duration-150 {isCollapsed ? '' : 'rotate-90'}" />
             <span class="truncate">{profile.name}</span>
-            <span class="tabular ml-auto text-2xs text-faint">{members.length}</span>
+            <span class="tabular ml-auto text-2xs text-faint">{all.length}</span>
           </button>
           <button
             class="grid h-6 w-6 cursor-pointer place-items-center rounded-md text-faint opacity-0 transition hover:bg-hover hover:text-fg
@@ -176,6 +201,11 @@
               </li>
             {/each}
           </ul>
+          {#if all.length > members.length}
+            <button class="ml-5 cursor-pointer px-2 py-1 text-left text-xs text-faint hover:text-fg" onclick={() => (showWorker = true)}>
+              {all.length - members.length} more threads: see Graph worker
+            </button>
+          {/if}
         {/if}
       </section>
     {/each}
@@ -206,6 +236,15 @@
         <span class="tabular ml-auto rounded-full bg-signal-soft px-1.5 text-2xs font-medium text-signal" aria-label="{askedOfYou} asked of you">{askedOfYou}</span>
       {/if}
     </button>
+    {#if canEditSettings && workerWaiting !== null}
+      <button class={ghost} onclick={() => (showWorker = true)}>
+        <Icon icon={Network} size={14} />
+        Graph worker
+        {#if workerWaiting > 0}
+          <span class="tabular ml-auto rounded-full bg-warn-soft px-1.5 text-2xs font-medium text-warn" aria-label="{workerWaiting} waiting on you">{workerWaiting}</span>
+        {/if}
+      </button>
+    {/if}
     {#if canEditSettings}
       <button class={ghost} onclick={() => (showSettings = true)}>
         <Icon icon={ShieldCheck} size={14} />
@@ -216,6 +255,10 @@
       <button class={ghost} onclick={() => (showWorkspaces = true)}>
         <Icon icon={Building2} size={14} />
         Workspaces
+      </button>
+      <button class={ghost} onclick={() => (showModels = true)}>
+        <Icon icon={Cpu} size={14} />
+        Models
       </button>
     {/if}
   </div>
@@ -232,6 +275,24 @@
 {/if}
 {#if showWorkspaces}
   <WorkspacesPanel onclose={() => (showWorkspaces = false)} />
+{/if}
+{#if showWorker}
+  <GraphWorkerPanel
+    onclose={() => {
+      showWorker = false;
+      void store.refreshAgents();
+    }}
+  />
+{/if}
+{#if showModels}
+  <ModelsPanel
+    onclose={() => {
+      showModels = false;
+      // the workspace picks up new labels within seconds (metadata reload)
+      void store.refreshProviders();
+      setTimeout(() => void store.refreshProviders(), 4000);
+    }}
+  />
 {/if}
 
 {#if deleteTarget}

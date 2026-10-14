@@ -21,6 +21,12 @@ privilege model inside SQL:
 - **One DAB instance per access level**, each with its own SQL login whose
   grants a DBA scopes in the database's own tools (tables/views, read-only
   where appropriate). The login is the boundary.
+- **Read-only by default** (2026-10-14): the DAB role is read only
+  (`"action": "read"`), so agents can describe, read and aggregate
+  (`aggregate_records`: count/sum/avg/min/max with group-by and having) but
+  DAB refuses create, update, delete and stored procedures. DAB's REST and
+  GraphQL endpoints stay off; agents reach only `/mcp`. A workspace that
+  should write gets a separate DAB instance with its own role and login.
 - **gwarestrin decides reachability only**: which positions (below) get which
   DAB instances. Discovery is filtered per tenant, and OpenShell's sandbox
   policy gives an agent no network path to the others. A leaked URL still only
@@ -174,6 +180,38 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   model one graph-rag reaches through litellm, its instructions the
   guidance), pushed to graph-rag on save; only the root's workspace can.
   Without such a profile (or `WORKER_MODEL`) the worker is off: jobs wait.
+- **Graph worker threads** (graph-rag/src/pool.js, agent server
+  agents/graph-pool.ts): entries that need judgement get an agent thread of
+  their own, under the Graph worker profile, run by the admin's workspace
+  (it claims `review` jobs, makes the agent, sends it its brief, reports back
+  and stops it; a lease brings back threads whose workspace went quiet). The
+  pool's settings (Graph worker panel): threads at once (0 = only the
+  one-call linking), sort first (the one-call step sends only entries that
+  need judgement, and every unsure match, to a thread; off = every entry gets
+  one), threads per day, minutes per thread, days finished threads are kept.
+  A thread's token (`r: worker`, its job and entry; honoured only for the
+  organization's root) sees the whole graph and runs read-only raw queries.
+  It writes directly (the derived-data floor holds anything built from what
+  it read more narrowly), and each direct change is recorded on its thread.
+  What it judges large or structural it **proposes** instead (`propose:
+  true` and a reason on the same tools): a queued write, and the thread
+  stops until the admin decides, then resumes with the decision. Raw writes
+  and widening who sees something are always proposals. A
+  thread can also **raise a question** and end its turn; the answer resumes
+  it in the same conversation. The **liaison**
+  (`r: liaison`, made when something waits on the admin) relays questions
+  and proposals and records the admin's answers; it writes nothing itself.
+  Threads have only pi's `read` and the MCP tools (no shell, no file
+  writes, no MCP scripting), no internet, and on other connections only the
+  tools that read (the connection's `readTools`, its read-only hints, or
+  known ones; none known = left out). The profile and its agents are the
+  admin's alone. Entries a thread writes only get the one-call linking.
+- **Model labels** (provisioner model-labels.mjs; Models, admins): the admin
+  labels models (tier: basic, standard, frontier; hosting: on-prem, private
+  cloud, public API; notes). Once labels are saved, only labeled models run
+  agents in any workspace: unlabeled ones aren't offered to pi, the picker
+  or the API, and an agent whose model loses its label stops. Policies on
+  the labels (which tier or hosting for which work or data) come later.
 - **Agents' sources** (agent server: standing-instructions.ts,
   connection-digest.ts): every agent's standing instructions start with its
   sources in order: the knowledge graph, then each tool connection with the
