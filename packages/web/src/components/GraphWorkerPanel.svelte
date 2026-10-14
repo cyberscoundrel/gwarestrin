@@ -26,12 +26,13 @@
   // a survey of a connection: a task thread maps it, seeds its records, relates them
   let surveyConn = $state("mssql");
   let surveyFocus = $state("");
+  let surveyAudience = $state<"everyone" | "admin">("everyone");
   let surveyMsg = $state("");
   async function startSurvey(): Promise<void> {
     busy = "survey";
     surveyMsg = "";
     try {
-      const r = await api.startSurvey(surveyConn.trim(), surveyFocus.trim());
+      const r = await api.startSurvey(surveyConn.trim(), surveyFocus.trim(), surveyAudience);
       surveyMsg = `Queued "${r.task}". It runs when the pool has room (threads at once above 0).`;
       await refresh();
     } catch (e) {
@@ -268,6 +269,14 @@
             <input class="input w-36 font-mono text-xs" aria-label="connection" bind:value={surveyConn} />
             <input class="input min-w-48 flex-1 text-xs" maxlength="1000" placeholder="Focus (optional): e.g. production scheduling and suppliers" aria-label="focus" bind:value={surveyFocus} />
             <button class="btn btn-primary btn-sm" disabled={busy !== null || !surveyConn.trim()} onclick={() => void startSurvey()}>{busy === "survey" ? "Queuing…" : "Survey"}</button>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-xs text-dim">What it builds is seen by</span>
+            <div class="segmented" role="group" aria-label="who sees the survey's results">
+              <button type="button" aria-pressed={surveyAudience === "everyone"} onclick={() => (surveyAudience = "everyone")}>Everyone</button>
+              <button type="button" aria-pressed={surveyAudience === "admin"} onclick={() => (surveyAudience = "admin")}>Only you</button>
+            </div>
+            <span class="text-xs text-faint">{surveyAudience === "everyone" ? "The map and the records it seeds are for the whole organization (never personal details)." : "You decide later what to share."}</span>
           </div>
           {#if surveyMsg}<span class="text-xs text-dim" role="status">{surveyMsg}</span>{/if}
         </section>

@@ -26,6 +26,8 @@ export interface PositionsView {
   held: string[];
   /** positions the user reaches (theirs and below) */
   positions: PositionView[];
+  /** the home everyone in the organization sees (not a position) */
+  everyone?: { id: string; name: string };
   /** the whole tree's names (grants may go anywhere in it) */
   tree?: Array<{ id: string; name: string; parent: string | null }>;
   /** everyone else a share can go to, with their positions' names */
@@ -383,8 +385,8 @@ export const api = {
     return json(await fetch("/api/graph-worker/pool", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(changes) }));
   },
   /** start a survey of a tool connection: a task thread maps it, seeds its records and relates them */
-  async startSurvey(connection: string, focus: string): Promise<{ task: string; job: string }> {
-    return json(await fetch("/api/graph-worker/survey", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ connection, focus }) }));
+  async startSurvey(connection: string, focus: string, audience: "everyone" | "admin" = "everyone"): Promise<{ task: string; job: string }> {
+    return json(await fetch("/api/graph-worker/survey", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ connection, focus, audience }) }));
   },
   async workerThreads(): Promise<WorkerThread[]> {
     return (await json<{ threads: WorkerThread[] }>(await fetch("/api/graph-worker/threads"))).threads;

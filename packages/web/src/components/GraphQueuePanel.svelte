@@ -29,10 +29,10 @@
   $effect(() => {
     void api
       .positions()
-      .then((t) => (names = new Map((t.tree ?? t.positions).map((p) => [p.id, p.parent === null ? "the whole organization" : p.name]))))
+      .then((t) => (names = new Map([...(t.tree ?? t.positions).map((p) => [p.id, p.parent === null ? "the top of the organization (admins only)" : p.name] as [string, string]), ["everyone", "everyone in the organization"]])))
       .catch(() => {});
   });
-  const pos = (id: unknown) => (typeof id === "string" ? (names.get(id) ?? "an unknown position") : "the whole organization");
+  const pos = (id: unknown) => (typeof id === "string" ? (names.get(id) ?? "an unknown position") : "the top of the organization");
 
   /** what a queued write would do, in a sentence (raw payload stays one click away) */
   function describe(p: Pending): { title: string; detail?: string } | null {
