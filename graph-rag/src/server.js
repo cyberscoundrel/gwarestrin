@@ -2238,7 +2238,7 @@ async function jobMentions({ rid, from_worker }) {
 
 /** ---- the worker pool (see pool.js): one agent thread per queue entry, run by the admin's workspace ---- */
 
-const JOB_ID_RE = PENDING_ID_RE;
+const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const today = () => new Date().toISOString().slice(0, 10);
 
 /** threads started today (first starts and resumes) */
