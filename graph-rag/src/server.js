@@ -2626,9 +2626,9 @@ async function createTask({ title, brief, minutes, parent, by }) {
   if (name.length < 4) throw Object.assign(new Error("a task needs a title"), { status: 400 });
   const now = new Date().toISOString();
   await adbCommand(
-    `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'task', _home = :root, _origin = :root, text_identity = :brief, _task_by = :by, updated_at = :now`,
+    `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'task', _home = :root, _origin = :root, text_identity = :brief, _task_by = :taskby, updated_at = :now`,
     "sql",
-    { name, root: positionMap.root, brief: String(brief).slice(0, 6000), by: by ?? "", now },
+    { name, root: positionMap.root, brief: String(brief).slice(0, 6000), taskby: by ?? "", now },
   );
   const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _kind = 'task' ORDER BY @rid DESC LIMIT 1`, { name }))[0]?.rid);
   const job = await enqueue("review", { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}) }, { key: `task:${rid}`, priority: 3 });
