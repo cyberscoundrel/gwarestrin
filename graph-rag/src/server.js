@@ -2703,6 +2703,17 @@ async function expireLeases() {
   await adbCommand("UPDATE Job SET status = 'pending', attempts = attempts + 1, error = 'the thread stopped reporting', updated_at = :now WHERE kind = 'review' AND status = 'running' AND lease_until < :now", "sql", { now });
 }
 
+/** a thread left waiting with nothing open (its proposals were handled some other way) carries on */
+async function wakeIdleWaiting() {
+  const cutoff = new Date(Date.now() - 10 * 60_000).toISOString();
+  const rows = await adbQuery("SELECT id FROM Job WHERE kind = 'review' AND status = 'waiting' AND updated_at < :c LIMIT 50", { c: cutoff });
+  for (const r of rows) {
+    const q = Number((await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: r.id }))[0]?.n ?? 0);
+    const p = Number((await adbQuery("SELECT count(*) AS n FROM PendingWrite WHERE job_id = :id AND status = 'pending'", { id: r.id }))[0]?.n ?? 0);
+    if (!q && !p) await resumeThread(r.id, { proposal: "your last proposal", decision: "handled", reason: "nothing of yours is waiting any more: check what's in place now and finish." });
+  }
+}
+
 /** a few jobs per tick, highest priority first; failures back off and give up after a few tries */
 async function workerTick() {
   if (workerTicking || !worker.enabled || !workerModel() || !SCOPED || !positionMap) return;
@@ -2934,6 +2945,8 @@ async function approvePending(id, identity, reason = "") {
       now: new Date().toISOString(),
       id,
     }).catch(() => {});
+    // a worker's proposal that couldn't be applied: the waiting thread hears why
+    if (rec.job_id) await resumeThread(rec.job_id, { proposal: rec.note || rec.kind, decision: "failed", reason: String(err?.message ?? err).slice(0, 600), answered_by: approver }).catch(() => {});
     throw err;
   }
   await adbCommand("UPDATE PendingWrite SET status = 'approved', executed_at = :now WHERE id = :id", "sql", {
@@ -3101,7 +3114,7 @@ ${facetDoc}`,
 
   if (caps.raw === true && scope.root) server.tool(
     "execute_graph",
-    "Execute a WRITE command against the knowledge graph (openCypher or SQL). Depending on your identity capabilities this executes immediately or is queued for review.",
+    "Execute a WRITE command against the knowledge graph (openCypher or SQL): ONE statement per call (no ';'-separated statements). Depending on your identity capabilities this executes immediately or is queued for review.",
     {
       command: z.string().min(1),
       language: z.enum(["cypher", "sql"]).optional(),
@@ -3935,7 +3948,7 @@ async function boot() {
     await ensureDocumentSchema();
     await ensureWorkerSchema();
     setInterval(() => void workerTick().catch((e) => log.warn(`worker: ${String(e).slice(0, 160)}`)), 5_000);
-    setInterval(() => void expireLeases().catch((e) => log.warn(`worker leases: ${String(e).slice(0, 160)}`)), 60_000);
+    setInterval(() => void expireLeases().then(wakeIdleWaiting).catch((e) => log.warn(`worker leases: ${String(e).slice(0, 160)}`)), 60_000);
     log.info(`graph worker: ${worker.enabled && workerModel() ? `on (${workerModel()}${worker.profile ? `, from profile ${worker.profile}` : ""})` : "off"}`);
     if (!docStore) log.warn(`DOC_STORE=${DOC_STORE} isn't a known store: documents can't be ingested`);
     await expireRequests();
