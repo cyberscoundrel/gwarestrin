@@ -206,6 +206,19 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   tools that read (the connection's `readTools`, its read-only hints, or
   known ones; none known = left out). The profile and its agents are the
   admin's alone. Entries a thread writes only get the one-call linking.
+- **Everyone** (positions.js `EVERYONE`): one home that isn't a position.
+  Everyone in the organization sees what's homed there, as if it sat below
+  every position: moving something to it widens who sees it (always a
+  person's approval, like any widening); moving it from it to any position
+  restricts. Reading it never raises the derived-data floor, so a worker
+  that read the organization's map doesn't lift the notes it edits. The
+  admin writes for Everyone directly; anyone else saves at their position
+  and moves it to Everyone (`set_home`, queued for approval). A survey has an
+  audience: Everyone (the default: its map, patterns and the records it
+  seeds are the organization's shared knowledge, never personal details)
+  or the admin only. Things are visible to everyone once an Everyone entry
+  links to them. The root position is "Top of the organization": what's
+  homed there only the top sees.
 - **Model labels** (provisioner model-labels.mjs; Models, admins): the admin
   labels models (tier: basic, standard, frontier; hosting: on-prem, private
   cloud, public API; notes). Once labels are saved, only labeled models run

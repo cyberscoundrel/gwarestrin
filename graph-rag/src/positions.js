@@ -7,7 +7,15 @@
 // means seeing everything. Entities without a home count as homed at the root
 // (fail upward: unclassified data is visible to the root only).
 //
+// One home is not a position: `everyone` (EVERYONE). Everyone in the
+// organization sees what's homed there, as if it sat below every position.
+// Moving something to it widens who sees it (a person decides); moving it from
+// it to any position restricts. Reading it never raises the derived-data floor
+// (everyone could see it anyway).
+//
 // Pure functions over the parsed map; the server wires them into queries.
+
+export const EVERYONE = "everyone";
 
 /**
  * @typedef {{ name: string, parent: string | null, description?: string }} Position
@@ -22,6 +30,7 @@ export function parsePositionMap(doc) {
   if (!positions || typeof positions !== "object" || !positions[root]) throw new Error("root position missing from positions");
   const out = {};
   for (const [id, p] of Object.entries(positions)) {
+    if (id === EVERYONE) throw new Error(`"${EVERYONE}" is reserved: it is the home everyone sees`);
     if (!p || typeof p.name !== "string") throw new Error(`position ${id} needs a name`);
     const parent = id === root ? null : typeof p.parent === "string" && positions[p.parent] ? p.parent : root;
     out[id] = { name: p.name, parent, ...(typeof p.description === "string" ? { description: p.description } : {}) };
@@ -48,8 +57,12 @@ function childIndex(map) {
   return kids;
 }
 
-/** ancestors of id, nearest first, ending at the root (excludes id) */
+/** ancestors of id, nearest first, ending at the root (excludes id); everyone's are every position, deepest first */
 export function ancestors(map, id) {
+  if (id === EVERYONE) {
+    const depth = (p) => ancestors(map, p).length;
+    return Object.keys(map.positions).sort((a, b) => depth(b) - depth(a));
+  }
   const out = [];
   for (let cur = map.positions[id]?.parent; cur; cur = map.positions[cur]?.parent ?? null) out.push(cur);
   return out;
@@ -68,7 +81,8 @@ export function visibleHomes(map, held) {
   const mine = heldPositions(map, held);
   if (mine.includes(map.root)) return null;
   const kids = childIndex(map);
-  const out = new Set();
+  // everyone sees what's homed at everyone, holding a position or not
+  const out = new Set([EVERYONE]);
   const stack = [...mine];
   while (stack.length) {
     const id = stack.pop();
@@ -88,7 +102,14 @@ export function canSee(map, held, home) {
 
 /** stored home -> the position it counts as (unknown or missing = root) */
 export function effectiveHome(map, home) {
+  if (home === EVERYONE) return EVERYONE;
   return typeof home === "string" && map.positions[home] ? home : map.root;
+}
+
+/** a home's name, for people ("Everyone" for everyone) */
+export function homeName(map, home) {
+  const id = effectiveHome(map, home);
+  return id === EVERYONE ? "Everyone" : map.positions[id].name;
 }
 
 /** default home for a caller's writes: deepest held position, then by name */
@@ -119,6 +140,7 @@ export function writableHomes(map, held) {
  */
 export function moveKind(map, from, to) {
   const f = effectiveHome(map, from);
+  if (to === EVERYONE) return f === EVERYONE ? "restrict" : "widen";
   if (to === f || ancestors(map, f).includes(to)) return "restrict";
   return "widen";
 }
@@ -130,8 +152,10 @@ export function moveKind(map, from, to) {
  * only be seen by positions that can see all of them.
  */
 export function commonAncestor(map, homes) {
-  const list = [...homes].map((h) => effectiveHome(map, h));
-  if (list.length === 0) return map.root;
+  const all = [...homes].map((h) => effectiveHome(map, h));
+  // everyone's entries constrain nothing: everyone could see them
+  const list = all.filter((h) => h !== EVERYONE);
+  if (list.length === 0) return all.length ? EVERYONE : map.root;
   let chain = [list[0], ...ancestors(map, list[0])];
   for (const h of list.slice(1)) {
     const up = new Set([h, ...ancestors(map, h)]);

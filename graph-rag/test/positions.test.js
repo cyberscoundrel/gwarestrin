@@ -30,11 +30,11 @@ const map = parsePositionMap({
 
 test("root sees everything, positions see themselves and below", () => {
   assert.equal(visibleHomes(map, ["org"]), null);
-  assert.deepEqual([...visibleHomes(map, ["ops"])].sort(), ["eng", "floor", "ops"]);
-  assert.deepEqual([...visibleHomes(map, ["floor"])], ["floor"]);
-  assert.deepEqual([...visibleHomes(map, ["floor", "reps"])].sort(), ["floor", "reps"]);
-  assert.deepEqual([...visibleHomes(map, [])], []);
-  assert.deepEqual([...visibleHomes(map, ["ghost"])], [], "unknown positions grant nothing");
+  assert.deepEqual([...visibleHomes(map, ["ops"])].sort(), ["eng", "everyone", "floor", "ops"]);
+  assert.deepEqual([...visibleHomes(map, ["floor"])].sort(), ["everyone", "floor"]);
+  assert.deepEqual([...visibleHomes(map, ["floor", "reps"])].sort(), ["everyone", "floor", "reps"]);
+  assert.deepEqual([...visibleHomes(map, [])], ["everyone"], "no position: only what everyone sees");
+  assert.deepEqual([...visibleHomes(map, ["ghost"])], ["everyone"], "unknown positions grant nothing more");
 });
 
 test("the manager's email stays above the floor; siblings don't see each other", () => {
@@ -87,4 +87,21 @@ test("commonAncestor: the lowest point that sees every source", async () => {
   assert.equal(commonAncestor(map, ["floor", "reps"]), "org", "across branches only the root sees both");
   assert.equal(commonAncestor(map, ["floor", undefined]), "org", "an unhomed source counts as root");
   assert.equal(commonAncestor(map, []), "org");
+});
+
+test("everyone: seen by every position, below them all; reading it raises nothing", async () => {
+  const { EVERYONE, ancestors, canSee, commonAncestor, homeName, moveKind, parsePositionMap, visibleHomes } = await import("../src/positions.js");
+  const m = parsePositionMap({ root: "org", positions: { org: { name: "Org" }, ops: { name: "Ops", parent: "org" }, floor: { name: "Floor", parent: "ops" }, sales: { name: "Sales", parent: "org" } } });
+  assert.ok(canSee(m, ["floor"], EVERYONE));
+  assert.ok(canSee(m, [], EVERYONE), "even holding no position");
+  assert.ok(visibleHomes(m, ["sales"]).has(EVERYONE));
+  assert.equal(visibleHomes(m, ["org"]), null, "the root sees everything anyway");
+  assert.equal(moveKind(m, "floor", EVERYONE), "widen");
+  assert.equal(moveKind(m, EVERYONE, "floor"), "restrict");
+  assert.equal(commonAncestor(m, ["floor", EVERYONE]), "floor");
+  assert.equal(commonAncestor(m, [EVERYONE, EVERYONE]), EVERYONE);
+  assert.equal(commonAncestor(m, ["floor", "sales", EVERYONE]), "org");
+  assert.ok(ancestors(m, EVERYONE).includes("floor") && ancestors(m, EVERYONE).at(-1) === "org", "deepest first, the root last");
+  assert.equal(homeName(m, EVERYONE), "Everyone");
+  assert.throws(() => parsePositionMap({ root: "org", positions: { org: { name: "Org" }, everyone: { name: "x", parent: "org" } } }), /reserved/);
 });

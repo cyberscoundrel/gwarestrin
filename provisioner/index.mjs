@@ -240,7 +240,7 @@ async function ensurePositionTree() {
   if (writeIfChanged(`${GRAPH_CONFIG_DIR}/position-map.json`, JSON.stringify(doc, null, 1) + "\n")) {
     log(`positions: map written (${positionGroups.length} position(s))`);
   }
-  return { root: root.pk, heldBy, names: new Map(positionGroups.map((g) => [g.pk, g.pk === root.pk ? "Whole organization" : g.name])) };
+  return { root: root.pk, heldBy, names: new Map(positionGroups.map((g) => [g.pk, g.pk === root.pk ? "Top of the organization" : g.name])) };
 }
 
 // ---------- per-workspace settings (instance-settings.mjs) ----------

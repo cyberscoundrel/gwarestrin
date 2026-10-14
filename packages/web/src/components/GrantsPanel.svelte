@@ -83,10 +83,10 @@
   function path(id: string): string {
     const parts: string[] = [];
     for (let cur = byId.get(id); cur; cur = cur.parent ? byId.get(cur.parent) : undefined) {
-      if (cur.parent === null) break; // the root reads as "Whole organization"
+      if (cur.parent === null) break; // the root reads as "Top of the organization"
       parts.unshift(cur.name);
     }
-    return parts.length ? parts.join(" › ") : "Whole organization";
+    return parts.length ? parts.join(" › ") : "Top of the organization";
   }
   const sortedTree = $derived([...(tree?.tree ?? [])].sort((a, b) => path(a.id).localeCompare(path(b.id))));
   /** branches you can share: the positions you reach */

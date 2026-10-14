@@ -22,7 +22,9 @@ import {
   commonAncestor,
   defaultHome,
   effectiveHome,
+  EVERYONE,
   heldPositions,
+  homeName,
   moveKind,
   parsePositionMap,
   visibleHomes,
@@ -172,7 +174,7 @@ function homeFilter(scope, { own = false } = {}) {
 const ownsHome = (scope, home) => scope.homes === null || scope.homes.has(effectiveHome(positionMap, home));
 
 /** where a write lands: the caller's choice if it may write there, else its default */
-function resolveWriteHome(scope, requested) {
+function resolveWriteHome(scope, requested, { everyoneOk = true } = {}) {
   if (!SCOPED || scope.writeHome === undefined) return undefined;
   if (!positionMap) throw new Error("position map not loaded; graph writes are refused");
   if (requested === undefined || requested === null || requested === "") {
@@ -180,6 +182,12 @@ function resolveWriteHome(scope, requested) {
     return scope.writeHome;
   }
   const id = positionId(requested);
+  // writing for everyone: the organization's root (its admin) decides that; anyone
+  // else writes at their position and moves it to Everyone, which a person approves
+  if (id === EVERYONE) {
+    if (scope.root && everyoneOk) return EVERYONE;
+    throw new Error(`only the organization's admin writes for Everyone directly: write at your position, then move it to Everyone (set_home), which asks for approval`);
+  }
   if (!writableHomes(positionMap, scope.held).has(id)) {
     throw new Error(`cannot home a write at ${requested}: only at your own positions or above them`);
   }
@@ -188,6 +196,7 @@ function resolveWriteHome(scope, requested) {
 
 /** accept a position id or its exact name */
 function positionId(ref) {
+  if (String(ref).trim().toLowerCase() === EVERYONE) return EVERYONE;
   if (positionMap?.positions[ref]) return ref;
   const hit = Object.entries(positionMap?.positions ?? {}).find(([, p]) => p.name === ref);
   if (!hit) throw new Error(`unknown position: ${ref}`);
@@ -197,7 +206,7 @@ function positionId(ref) {
 const homeLabel = (home) => {
   if (!SCOPED || !positionMap) return undefined;
   const id = effectiveHome(positionMap, home);
-  return { id, name: positionMap.positions[id].name };
+  return { id, name: homeName(positionMap, id) };
 };
 
 /** resolve an Authorization header to capabilities; null = unauthenticated */
@@ -614,7 +623,7 @@ function applyFloor(place, origin, floor) {
   if (!raises) return rest;
   return {
     home: floor,
-    note: `held at ${positionMap.positions[floor]?.name}: built from what its writer read there or below (${place.note})`,
+    note: `held at ${homeName(positionMap, floor)}: built from what its writer read there or below (${place.note})`,
   };
 }
 
@@ -660,6 +669,10 @@ async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
   const verdicts = await gradeBatch(origin, entities, writtenAt);
   // the end date the grader judged; an unsure verdict means lasting, a failed one leaves it be
   const until = (v) => (v ? (v.confidence >= policy.gradingConfidence ? v.until : null) : undefined);
+  if (origin === EVERYONE) {
+    // written for everyone on purpose (the admin, or a survey for everyone): graded for its end date only
+    return entities.map((_, i) => ({ ...applyFloor({ home: existing[i] ?? origin, note: "for everyone" }, origin, floor), until: until(verdicts[i]) }));
+  }
   if (origin === positionMap.root) {
     // nothing above the root to restrict to: graded for its end date only
     return entities.map((_, i) => ({ ...applyFloor({ home: existing[i] ?? origin, note: "at the root" }, origin, floor), until: until(verdicts[i]) }));
@@ -774,7 +787,7 @@ async function upsertEntities({ entities, home, floor, written_at, from_worker }
   if (placements) {
     for (const [i, e] of entities.entries()) {
       const p = placements[i];
-      placed.push({ name: e.name, home: positionMap.positions[p.home]?.name, note: p.note, ...(validities[i] !== undefined ? { valid_until: validities[i] } : {}) });
+      placed.push({ name: e.name, home: homeName(positionMap, p.home), note: p.note, ...(validities[i] !== undefined ? { valid_until: validities[i] } : {}) });
       const ask = p.release ?? p.review;
       if (!ask) continue;
       const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin: home });
@@ -898,7 +911,7 @@ async function setHome({ entities, to, reason, propose }, identity, scope) {
     // widening who sees something is always a person's call; a worker may also choose to ask
     if (kind === "restrict" && identity.caps.write === "direct" && !propose) {
       results.push({ name: ref.name, ...(await applyRehome(move)) });
-      if (identity.role?.kind === "worker") await logChange(identity, { kind: "move", detail: `"${ref.name}" up to ${positionMap.positions[target]?.name ?? target}`, ...(reason ? { reason: String(reason).slice(0, 300) } : {}) });
+      if (identity.role?.kind === "worker") await logChange(identity, { kind: "move", detail: `"${ref.name}" up to ${homeName(positionMap, target)}`, ...(reason ? { reason: String(reason).slice(0, 300) } : {}) });
     } else {
       // only people widen who sees what; queued writers queue restrictions too
       results.push({ name: ref.name, [kind === "widen" ? "widening" : "restricting"]: true, ...(await queueWrite({ kind: "rehome", payload: JSON.stringify(move), user: identity.user, home: current, ...proposalFields(identity, reason) })) });
@@ -913,8 +926,13 @@ async function applyRehome({ rid, name, from, to }) {
   if (!rows.length) throw new Error(`entity ${name} no longer exists`);
   if (effectiveHome(positionMap, rows[0]._home) !== from) throw new Error(`entity ${name} moved since the request`);
   await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
-  log.info(`entity ${name} rehomed ${positionMap.positions[from]?.name} -> ${positionMap.positions[to]?.name}`);
-  return { moved: true, from: positionMap.positions[from]?.name, to: positionMap.positions[to]?.name };
+  // made visible to everyone: so are the things it's about
+  if (to === EVERYONE) {
+    const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
+    for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), EVERYONE).catch(() => {});
+  }
+  log.info(`entity ${name} rehomed ${homeName(positionMap, from)} -> ${homeName(positionMap, to)}`);
+  return { moved: true, from: homeName(positionMap, from), to: homeName(positionMap, to) };
 }
 
 /** ---- grants (see grants.js) ---- */
@@ -1009,7 +1027,7 @@ function peopleView(self) {
     .filter((n) => n !== self)
     .map((name) => ({
       name,
-      positions: heldPositions(positionMap, entriesByUser.get(name)?.positions).map((id) => (id === positionMap.root ? "Whole organization" : positionName(id))),
+      positions: heldPositions(positionMap, entriesByUser.get(name)?.positions).map((id) => (id === positionMap.root ? "Top of the organization" : positionName(id))),
     }));
 }
 
@@ -2300,7 +2318,7 @@ async function entryForBrief(rid) {
     entry: {
       name: row.name,
       home,
-      home_name: positionMap.positions[home]?.name,
+      home_name: homeName(positionMap, home),
       saved_at: row.updated_at ? String(row.updated_at) : undefined,
       valid_until: row._valid_until ?? undefined,
       facets,
@@ -2511,7 +2529,7 @@ async function logChange(identity, change) {
 async function workerUpsert(args, identity, scope) {
   await assertNotWaiting(identity);
   const own = (await adbQuery(`SELECT name, _origin FROM ${identity.role.entry}`).catch(() => []))[0];
-  const home = args.home === undefined ? (own?._origin ?? positionMap.root) : resolveWriteHome(scope, args.home);
+  const home = args.home === undefined ? (own?._origin ?? positionMap.root) : resolveWriteHome(scope, args.home, { everyoneOk: (await threadAudience(identity)) === EVERYONE });
   const now = Date.now();
   const entities = args.entities.map((e) => {
     const v = parseValidUntil(e.valid_until, now);
@@ -2524,6 +2542,14 @@ async function workerUpsert(args, identity, scope) {
   const applied = await upsertEntities(write);
   await logChange(identity, { kind: "upsert", entries: entities.map((e) => e.name), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return applied;
+}
+
+/** who a task thread writes for: "everyone" when the admin started its survey for everyone */
+async function threadAudience(identity) {
+  const job = identity.role?.job;
+  if (!job) return null;
+  const row = (await adbQuery("SELECT payload FROM Job WHERE id = :id", { id: job }).catch(() => []))[0];
+  return JSON.parse(row?.payload || "{}").audience ?? null;
 }
 
 /** a worker links its own entry to things (the same resolution as the one-call step; unsure matches come back to it) */
@@ -2666,7 +2692,7 @@ async function workerRelate(args, identity) {
  * (_kind 'task', at the root: only the admin sees it) that holds its brief
  * and, once done, what it found.
  */
-async function createTask({ title, brief, minutes, parent, by }) {
+async function createTask({ title, brief, minutes, parent, by, audience }) {
   const name = String(title).replace(/\s+/g, " ").trim().slice(0, 120);
   if (name.length < 4) throw Object.assign(new Error("a task needs a title"), { status: 400 });
   const now = new Date().toISOString();
@@ -2676,7 +2702,11 @@ async function createTask({ title, brief, minutes, parent, by }) {
     { name, root: positionMap.root, brief: String(brief).slice(0, 6000), taskby: by ?? "", now },
   );
   const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _kind = 'task' ORDER BY @rid DESC LIMIT 1`, { name }))[0]?.rid);
-  const job = await enqueue("review", { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}) }, { key: `task:${rid}`, priority: 3 });
+  const job = await enqueue(
+    "review",
+    { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}), ...(audience === EVERYONE ? { audience } : {}) },
+    { key: `task:${rid}`, priority: 3 },
+  );
   return { task: name, job };
 }
 
@@ -2685,7 +2715,8 @@ async function workerFollowup(args, identity) {
   await assertNotWaiting(identity);
   const queued = Number((await adbQuery("SELECT count(*) AS n FROM Job WHERE kind = 'review' AND payload LIKE :p", { p: `%"parent":"${identity.role.job}"%` }))[0]?.n ?? 0);
   if (queued >= 20) throw new Error("this thread already queued 20 follow-ups: finish with what's queued");
-  const r = await createTask({ title: args.title, brief: args.brief, minutes: args.minutes, parent: identity.role.job, by: identity.user });
+  // follow-ups write for whoever their survey wrote for
+  const r = await createTask({ title: args.title, brief: args.brief, minutes: args.minutes, parent: identity.role.job, by: identity.user, audience: await threadAudience(identity) });
   await logChange(identity, { kind: "followup", detail: r.task });
   return { ...r, note: "Queued: another thread does it. Don't wait for it." };
 }
@@ -3589,7 +3620,7 @@ app.get("/api/positions", (req, res) => {
   // the whole tree's names: grants may go to positions outside the caller's
   // reach (that is their point); this says nothing about anyone's data
   const tree = Object.entries(positionMap.positions).map(([id, p]) => ({ id, name: p.name, parent: p.parent }));
-  res.json({ scoped: true, root: positionMap.root, held, positions, tree, people: peopleView(personOf(identity.user)), canGrantStanding: reach === null && !identity.agent && policy.standingGrants === "root" });
+  res.json({ scoped: true, root: positionMap.root, everyone: { id: EVERYONE, name: "Everyone" }, held, positions, tree, people: peopleView(personOf(identity.user)), canGrantStanding: reach === null && !identity.agent && policy.standingGrants === "root" });
 });
 
 /** ---- organization policy (Organization settings; see policy.js) ---- */
@@ -3796,7 +3827,9 @@ app.post("/api/worker/survey", (req, res) => {
   const connection = String(req.body?.connection ?? "").trim();
   if (!/^[a-z0-9][a-z0-9_-]{0,62}$/i.test(connection)) return res.status(400).json({ error: "which connection (its name)" });
   const focus = typeof req.body?.focus === "string" ? req.body.focus.slice(0, 1000) : "";
-  void createTask({ title: `Survey: ${connection}`, brief: surveyBrief(connection, focus), minutes: Number(req.body?.minutes) || 60, by: identity.user }).then(
+  // who sees what the survey builds: everyone (the default: it's the organization's map) or the admin only
+  const audience = req.body?.audience === "admin" ? "admin" : EVERYONE;
+  void createTask({ title: `Survey: ${connection}`, brief: surveyBrief(connection, focus, audience), minutes: Number(req.body?.minutes) || 60, by: identity.user, audience }).then(
     (r) => res.json(r),
     (e) => httpError(res, e),
   );
