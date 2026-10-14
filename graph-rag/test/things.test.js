@@ -73,3 +73,8 @@ test("record keys: kept on mentions, and the same key is the same thing whatever
   );
   assert.equal(parseMentions(JSON.stringify({ things: Array.from({ length: 30 }, (_, i) => ({ name: `Customer ${i}`, type: "customer" })) }), 25).length, 25);
 });
+
+test("identifiers match exactly or not at all: close embeddings of numbers are different things", () => {
+  assert.deepEqual(resolve({ name: "3260364", type: "order" }, [{ rid: "#1:1", name: "3260372", type: "order", score: 0.97 }]), { create: true });
+  assert.deepEqual(resolve({ name: "PO 4471", type: "order" }, [{ rid: "#1:1", name: "PO-4471", type: "order" }]), { use: "#1:1" }, "the same number written differently is the same");
+});

@@ -122,6 +122,9 @@ export function resolve(mention, candidates) {
   const same = candidates.filter((c) => c.type === mention.type && !(mention.key && (c.keys ?? []).length && !(c.keys ?? []).includes(mention.key)));
   const exact = same.find((c) => normalize(c.name) === n || (c.aliases ?? []).some((a) => normalize(a) === n));
   if (exact) return { use: exact.rid };
+  // identifiers ("3260372", "PO 4471", "EPP-D98-1-A") are equal or not: embeddings
+  // can't tell numbers apart, so a name with a digit matches only exactly
+  if (/\d/.test(n)) return { create: true };
   const ranked = same.filter((c) => Number.isFinite(c.score)).sort((a, b) => b.score - a.score);
   const best = ranked[0];
   if (best && best.score >= SAME_MIN) return { use: best.rid, alias: mention.name };
