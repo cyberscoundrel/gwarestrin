@@ -2252,7 +2252,11 @@ async function entryForBrief(rid) {
       .filter((k) => k.startsWith("text_") && row[k])
       .map((k) => [k.slice(5), row[k]]),
   );
-  const links = await adbQuery(`SELECT @in.label AS name, @in._thing_type AS type, role FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
+  const edges = await adbQuery(`SELECT @in AS dst, role FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
+  const dsts = edges.map((e) => String(e.dst)).filter((r) => RID_RE.test(r));
+  const things = dsts.length ? await adbQuery(`SELECT @rid AS rid, label, _thing_type FROM [${dsts.join(",")}]`).catch(() => []) : [];
+  const byRid = new Map(things.map((t) => [String(t.rid), t]));
+  const links = edges.filter((e) => byRid.has(String(e.dst))).map((e) => ({ name: byRid.get(String(e.dst)).label, type: byRid.get(String(e.dst))._thing_type, role: e.role }));
   const home = effectiveHome(positionMap, row._home);
   return {
     entry: {
@@ -2278,9 +2282,8 @@ async function claimThreads(limit) {
   const room = Math.max(0, Math.min(Number(limit) || 0, worker.pool.poolSize, worker.pool.dailyThreads - (await threadsToday())));
   if (!room) return { threads: [] };
   const now = new Date();
-  const due = await adbQuery("SELECT id, payload, agent_id, attempts FROM Job WHERE kind = 'review' AND status = 'pending' AND run_after <= :now ORDER BY priority DESC, created_at ASC LIMIT :n", {
+  const due = await adbQuery(`SELECT id, payload, agent_id, attempts FROM Job WHERE kind = 'review' AND status = 'pending' AND run_after <= :now ORDER BY priority DESC, created_at ASC LIMIT ${Math.floor(room)}`, {
     now: now.toISOString(),
-    n: room,
   });
   const out = [];
   for (const job of due) {
