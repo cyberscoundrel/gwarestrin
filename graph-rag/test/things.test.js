@@ -47,3 +47,13 @@ test("resolution: exact or alias match uses it; very close uses it as an alias; 
   assert.deepEqual(resolve({ name: "Acme", type: "customer" }, [{ rid: "#1:1", name: "Toro", type: "customer", score: 0.4 }]), { create: true });
   assert.equal(thingName("customer", "Toro"), "Toro (customer)");
 });
+
+test("the sorting step: asks whether a worker should look, and reads the verdict", async () => {
+  const { parseSort } = await import("../src/things.js");
+  const [sys] = mentionsPrompt({ name: "x", facets: {} }, "", { sort: true });
+  assert.match(sys.content, /review/);
+  assert.doesNotMatch(mentionsPrompt({ name: "x", facets: {} })[0].content, /review/);
+  assert.deepEqual(parseSort('{"things":[],"review":true,"why":"PO 4471 is in the ERP"}'), { review: true, why: "PO 4471 is in the ERP" });
+  assert.deepEqual(parseSort('{"things":[],"review":"yes"}'), { review: false, why: "" });
+  assert.deepEqual(parseSort("garbage"), { review: false, why: "" });
+});

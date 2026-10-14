@@ -64,3 +64,28 @@ test("without a position map an agent with a placement sees nothing", () => {
   const id = resolveAgentToken(signAgentToken(KEY, { u: "alice", a: "a1", p: ["floor"], iat: 1 }), entryFor, null);
   assert.deepEqual(id.positions, []);
 });
+
+test("graph worker roles: only the organization's admin can give them; anyone else's claim is ignored", () => {
+  const job = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const w = resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "worker-1234567", p: ["floor"], r: "worker", j: job, e: "#12:3", iat: 1 }), entryFor, map);
+  assert.deepEqual(w.role, { kind: "worker", job, entry: "#12:3" });
+  assert.equal(w.user, "admin/worker:worker-1");
+  assert.deepEqual(w.positions, ["org"], "a worker sees the whole graph, whatever it asked for");
+  assert.equal(w.caps.write, "queued", "its writes are proposals");
+  assert.equal(w.caps.approve, false);
+  assert.equal(w.caps.raw, true, "read-only raw queries (raw writes queue like any other)");
+  const l = resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "l1", p: [], r: "liaison", iat: 1 }), entryFor, map);
+  assert.deepEqual(l.role, { kind: "liaison" });
+  assert.equal(l.caps.write, "deny");
+  assert.equal(l.caps.approve, true);
+  // alice isn't the root: her claim gives an ordinary agent
+  const a = resolveAgentToken(signAgentToken(KEY, { u: "alice", a: "a1", p: [], r: "worker", j: job, e: "#12:3", iat: 1 }), entryFor, map);
+  assert.equal(a.role, undefined);
+  assert.equal(a.caps.approve, false);
+  assert.equal(a.caps.raw, false);
+  const al = resolveAgentToken(signAgentToken(KEY, { u: "alice", a: "a1", p: [], r: "liaison", iat: 1 }), entryFor, map);
+  assert.equal(al.role, undefined);
+  // a malformed job or entry: no role
+  const bad = resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "a1", p: [], r: "worker", j: "x", e: "DROP", iat: 1 }), entryFor, map);
+  assert.equal(bad.role, undefined);
+});
