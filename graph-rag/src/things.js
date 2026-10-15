@@ -137,3 +137,25 @@ export function resolve(mention, candidates) {
 
 /** a thing's entity name: readable in traversal, unique per type */
 export const thingName = (type, name) => `${name} (${type})`;
+
+/**
+ * A person written partially ("John", "John F.", "Diep N."): the parts to
+ * look candidates up by (first name, and the initial of the second when
+ * given). Null for a full name or anything that isn't one.
+ */
+export function partialPerson(name) {
+  const words = String(name ?? "").trim().split(/\s+/);
+  if (!words[0] || words[0].length < 2 || !/^\p{L}/u.test(words[0])) return null;
+  if (words.length === 1) return { first: normalize(words[0]), initial: null };
+  if (words.length === 2 && /^\p{L}\.?$/u.test(words[1])) return { first: normalize(words[0]), initial: words[1][0].toLowerCase() };
+  return null;
+}
+
+/** known people a partial name could mean: same first name, same initial when given */
+export function personCandidates(partial, people) {
+  return people.filter((p) => {
+    const w = normalize(p.label).split(" ");
+    if (w[0] !== partial.first || w.length < 2) return false;
+    return !partial.initial || (w[1] ?? "").startsWith(partial.initial);
+  });
+}

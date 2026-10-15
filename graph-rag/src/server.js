@@ -34,7 +34,7 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
-import { mentionsPrompt, normalize, normalizeKey, normalizeRel, parseMentions, parseSort, resolve, THING_TYPES, thingName } from "./things.js";
+import { mentionsPrompt, normalize, normalizeKey, normalizeRel, parseMentions, parseSort, partialPerson, personCandidates, resolve, THING_TYPES, thingName } from "./things.js";
 import { askDecisionModel, triageRequest, triageVerdict } from "./decisions.js";
 import { firstJob, handlerBrief, signalsMessage, POOL_DEFAULTS, poolSettings, resumeBrief, surveyBrief, taskBrief, taskThreadBrief } from "./pool.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
@@ -2224,7 +2224,14 @@ async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
       keys: c._keys ?? [],
       score: c.score === undefined ? undefined : Number(c.score),
     }));
-    const r = resolve(m, cands);
+    let r = resolve(m, cands);
+    // a person written partially ("John F.") that would become a new thing: known people it could mean are candidates
+    if (r.create && !r.maybe && m.type === "person" && !m.key && partialPerson(m.name)) {
+      const part = partialPerson(m.name);
+      const people = await adbQuery(`SELECT @rid AS rid, label FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = 'person' AND _norm LIKE :p LIMIT 40`, { p: `${part.first} %` }).catch(() => []);
+      const found = personCandidates(part, people).slice(0, 6);
+      if (found.length) r = { ambiguous: found.map((c) => String(c.rid)) };
+    }
     if (r.ambiguous) {
       // several things go by this name: nothing is linked; a thread (or the sorting step's escalation) picks
       const names = await adbQuery(`SELECT label, _keys FROM [${r.ambiguous.join(",")}]`).catch(() => []);

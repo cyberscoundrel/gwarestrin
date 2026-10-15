@@ -87,3 +87,14 @@ test("a name several things share is ambiguous, not the first one found", () => 
   assert.deepEqual(resolve({ name: "John", type: "person" }, cands), { ambiguous: ["#1:1", "#1:2"] });
   assert.deepEqual(resolve({ name: "John", type: "person", key: "mssql:dbo_Contact:281" }, cands), { use: "#1:2" }, "a key settles it");
 });
+
+test("partial names of people: looked up by first name and initial", async () => {
+  const { partialPerson, personCandidates } = await import("../src/things.js");
+  assert.deepEqual(partialPerson("John F."), { first: "john", initial: "f" });
+  assert.deepEqual(partialPerson("Michael"), { first: "michael", initial: null });
+  assert.equal(partialPerson("Michael Gustafson"), null);
+  assert.equal(partialPerson("3260372"), null);
+  const people = [{ label: "John Francis" }, { label: "JOHN" }, { label: "John Smith" }, { label: "Johnny Cash" }];
+  assert.deepEqual(personCandidates({ first: "john", initial: "f" }, people).map((p) => p.label), ["John Francis"]);
+  assert.deepEqual(personCandidates({ first: "john", initial: null }, people).map((p) => p.label), ["John Francis", "John Smith"]);
+});
