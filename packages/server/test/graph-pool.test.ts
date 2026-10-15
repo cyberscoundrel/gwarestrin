@@ -172,3 +172,23 @@ describe("graph master", () => {
     expect(running.size).toBe(0);
   });
 });
+
+describe("giving back idle graph agents", () => {
+  it("a decided handler is given back; one still waiting on the operator stays", async () => {
+    const { manager, records, running } = fakeManager();
+    const decided = await manager.createAgent({ name: "h1", profileId: "worker-profile" } as never, { graphRole: { kind: "handler", job: "0f8fad5b-0000-0000-0000-0000000000d1", worker: "w", title: "t" } });
+    const open = await manager.createAgent({ name: "h2", profileId: "worker-profile" } as never, { graphRole: { kind: "handler", job: "0f8fad5b-0000-0000-0000-0000000000d2", worker: "w", title: "t" } });
+    for (const a of [decided, open]) {
+      await manager.start(a.id);
+      Object.assign(running.get(a.id)!, { busy: false, idleMs: () => 60_000 });
+    }
+    const call: GraphCall = async (path) =>
+      path === "/api/worker/handlers"
+        ? { status: 200, body: { handlers: [{ id: "0f8fad5b-0000-0000-0000-0000000000d1", status: "done" }, { id: "0f8fad5b-0000-0000-0000-0000000000d2", status: "waiting" }] } }
+        : { status: 200, body: {} };
+    await new GraphPool(manager, call, () => 8).releaseIdle();
+    expect(running.has(decided.id)).toBe(false);
+    expect(running.has(open.id)).toBe(true);
+    expect(records.size).toBe(2);
+  });
+});

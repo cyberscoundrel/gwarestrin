@@ -66,7 +66,48 @@ export class GraphPool {
     private readonly maxAgents: () => number = () => instanceSettings().maxAgents ?? 2,
   ) {}
 
+  /**
+   * Graph agents that ran before a restart lost their process but not their
+   * sandbox (a microVM keeps its memory while it exists): give those back,
+   * keeping their conversations.
+   */
+  async releaseOrphans(): Promise<number> {
+    let n = 0;
+    for (const a of this.manager.store.list()) {
+      if (!a.graphRole || this.manager.getRunning(a.id)) continue;
+      await this.manager.releaseAgent(a.id).then(() => n++, () => undefined);
+    }
+    if (n) log.info(`gave back ${n} graph agent sandbox(es) left from before the restart`);
+    return n;
+  }
+
+  /**
+   * Running handlers and workers the operator opened hold a slot until given
+   * back: a handler once its decision is recorded, any of them after a
+   * quarter of an hour idle. (The master gives itself back in its own turn.)
+   */
+  async releaseIdle(): Promise<void> {
+    let decided: Set<string> | null = null;
+    for (const a of this.manager.store.list()) {
+      const role = a.graphRole;
+      if (!role || role.kind === "master" || role.kind === "liaison") continue;
+      if (role.kind === "worker" && this.active.has(role.job)) continue; // the pool is running it
+      const agent = this.manager.getRunning(a.id);
+      if (!agent || agent.busy) continue;
+      let release = agent.idleMs() > 15 * 60_000;
+      if (!release && role.kind === "handler") {
+        if (!decided) {
+          const hs = await this.call("/api/worker/handlers");
+          decided = new Set(((hs?.status === 200 ? (hs.body as { handlers?: Array<{ id: string; status: string }> }).handlers : []) ?? []).filter((h) => h.status === "done").map((h) => h.id));
+        }
+        release = decided.has(role.job) && agent.idleMs() > 30_000;
+      }
+      if (release) await this.manager.releaseAgent(a.id).catch((e) => log.warn(`release ${a.name}: ${e instanceof Error ? e.message : String(e)}`));
+    }
+  }
+
   start(intervalMs = 15_000): void {
+    void this.releaseOrphans().catch(() => undefined);
     this.timer = setInterval(() => void this.tick().catch((e) => log.warn(`tick: ${e instanceof Error ? e.message : String(e)}`)), intervalMs);
     this.timer.unref?.();
   }
@@ -86,6 +127,7 @@ export class GraphPool {
       if (st?.status !== 200) return { started: 0 }; // not the organization's root, or no graph
       const status = st.body as PoolStatus;
       const size = status.pool?.poolSize ?? 0;
+      await this.releaseIdle().catch((e) => log.warn(`release idle: ${e instanceof Error ? e.message : String(e)}`));
       if (status.master?.on) {
         // the master's inbox and the handlers run alongside the pool (they don't take worker slots)
         void this.masterTurn(profile.id).catch((e) => log.warn(`master: ${e instanceof Error ? e.message : String(e)}`));
