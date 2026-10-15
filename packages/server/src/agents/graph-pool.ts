@@ -10,7 +10,7 @@
  * anything from the claim endpoint, so other workspaces just idle.
  */
 import type { AgentRecord, GraphRole } from "@gwarestrin/shared";
-import { instanceSettings } from "../instance/settings.js";
+import { instanceSettings, modelRefusal } from "../instance/settings.js";
 import { scoped } from "../util/log.js";
 import type { AgentManager } from "./manager.js";
 
@@ -20,6 +20,8 @@ export type GraphCall = (path: string, init?: { method?: "GET" | "PUT" | "POST";
 
 export interface ClaimedThread {
   job: string;
+  /** the level of work the master gave it (1 quick check, 2 investigation, 3 broad): picks its model */
+  level?: number | undefined;
   entry: string;
   name: string;
   agent_id: string | null;
@@ -157,7 +159,9 @@ export class GraphPool {
     try {
       if (!agentId) {
         const role: GraphRole = { kind: "worker", job: t.job, entry: t.entry, title: t.name };
-        const record = await this.manager.createAgent({ name: threadName(t.name, t.job), profileId }, { graphRole: role });
+        // the model for its level of work, when the profile names one (else the profile's own)
+        const levelModel = this.manager.profiles.graphWorker()?.graphWorker?.levelModels?.[String(t.level) as "1" | "2" | "3"];
+        const record = await this.manager.createAgent({ name: threadName(t.name, t.job), profileId, ...(levelModel && !modelRefusal(levelModel.provider, levelModel.modelId) ? { model: levelModel } : {}) }, { graphRole: role });
         agentId = record.id;
         await this.call(`/api/worker/threads/${t.job}/agent`, { method: "POST", body: { agent_id: agentId } });
       }

@@ -447,7 +447,7 @@ export const api = {
   async graphWorkerModels(): Promise<string[]> {
     return (await json<{ models: string[] }>(await fetch("/api/graph-worker/models"))).models;
   },
-  async saveProfile(id: string, input: Partial<Omit<ProfileRecord, "graphWorker">> & { name: string; mcpServers: string[] | "all"; graphWorker?: { model: string } | null }): Promise<ProfileRecord> {
+  async saveProfile(id: string, input: Partial<Omit<ProfileRecord, "graphWorker">> & { name: string; mcpServers: string[] | "all"; graphWorker?: import("@gwarestrin/shared").GraphWorkerSettings | null }): Promise<ProfileRecord> {
     const r = await json<{ profile: ProfileRecord }>(
       await fetch(`/api/profiles/${encodeURIComponent(id)}`, {
         method: "PUT",

@@ -2380,6 +2380,7 @@ async function claimThreads(limit) {
       entry: payload.rid,
       name: brief.entry.name,
       agent_id: job.agent_id ?? null,
+      ...(payload.level ? { level: payload.level } : {}),
       minutes: Number(payload.minutes) || worker.pool.threadMinutes,
       message: payload.resume ? resumeBrief(payload.resume) : payload.task ? taskThreadBrief(payload.task) : taskBrief({ ...brief, why: payload.why }),
     });
@@ -2736,7 +2737,7 @@ async function workerRelate(args, identity) {
  * (_kind 'task', at the root: only the admin sees it) that holds its brief
  * and, once done, what it found.
  */
-async function createTask({ title, brief, minutes, parent, from, by, audience, entries }) {
+async function createTask({ title, brief, minutes, parent, from, by, audience, entries, level }) {
   const name = String(title).replace(/\s+/g, " ").trim().slice(0, 120);
   if (name.length < 4) throw Object.assign(new Error("a task needs a title"), { status: 400 });
   const now = new Date().toISOString();
@@ -2748,7 +2749,7 @@ async function createTask({ title, brief, minutes, parent, from, by, audience, e
   const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _kind = 'task' ORDER BY @rid DESC LIMIT 1`, { name }))[0]?.rid);
   const job = await enqueue(
     "review",
-    { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}), ...(from ? { from } : {}), ...(audience === EVERYONE ? { audience } : {}), ...(entries?.length ? { entries } : {}) },
+    { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}), ...(from ? { from } : {}), ...(audience === EVERYONE ? { audience } : {}), ...(entries?.length ? { entries } : {}), ...(level ? { level: Math.max(1, Math.min(3, Number(level))) } : {}) },
     { key: `task:${rid}`, priority: 3 },
   );
   return { task: name, job };
@@ -2770,6 +2771,7 @@ async function workerFollowup(args, identity) {
     from: identity.role.job,
     by: identity.user,
     audience: await threadAudience(identity),
+    level: Number(args.level) || own.level,
   });
   await logChange(identity, { kind: "followup", detail: r.task });
   return { ...r, note: "Queued: another thread does it. Don't wait for it." };
@@ -2993,7 +2995,15 @@ async function batchTick() {
 async function masterStartWorker(args, identity) {
   const names = (args.entries ?? []).slice(0, 25);
   const brief = [String(args.brief), ...(names.length ? ["", `The entries this is about: ${names.map((n) => `"${n}"`).join(", ")} (read them in the graph).`] : [])].join("\n");
-  const r = await createTask({ title: args.title, brief, minutes: args.minutes, parent: MASTER, by: identity.user, audience: args.audience === "everyone" ? EVERYONE : undefined, entries: names });
+  // its level of work (which model runs it): the master's call, else the highest triage level among its entries, else an investigation
+  let level = Number(args.level) || 0;
+  if (!level && names.length) {
+    for (const n of names) {
+      const t = (await adbQuery("SELECT level FROM Triage WHERE name = :n ORDER BY created_at DESC LIMIT 1", { n }).catch(() => []))[0];
+      level = Math.max(level, Number(t?.level ?? 0));
+    }
+  }
+  const r = await createTask({ title: args.title, brief, minutes: args.minutes, parent: MASTER, by: identity.user, audience: args.audience === "everyone" ? EVERYONE : undefined, entries: names, level: level || 2 });
   return { ...r, note: "Started: you'll get a signal when it's done or stopped." };
 }
 
@@ -3661,7 +3671,7 @@ by name and type, or by key. Up to 25 a call. A relationship shows only to peopl
       "queue_followup",
       `Queue a follow-up task for another thread: a title and a precise brief (which tables, what to seed,
 which relationships). For a survey's topics that don't fit this conversation. A few per thread.`,
-      { title: z.string().min(4).max(120), brief: z.string().min(20).max(6000), minutes: z.number().int().min(5).max(180).optional() },
+      { title: z.string().min(4).max(120), brief: z.string().min(20).max(6000), minutes: z.number().int().min(5).max(180).optional(), level: z.number().int().min(1).max(3).optional() },
       async (args) => {
         need("write");
         return { content: [{ type: "text", text: JSON.stringify(await workerFollowup(args, identity)) }] };
@@ -3722,13 +3732,16 @@ YOUR TURN with a short report: you're resumed with the answer later, in this sam
       `Start a worker on a piece of work: a title, a precise brief (what to do, which entries, what a good
 result is) and the entries it's about (by name: the worker reads them). Group entries that belong
 together into one worker. audience "everyone" lets it write for Everyone (only for organization-wide
-knowledge). You get a signal when it's done or stopped.`,
+knowledge). level picks the model it runs on: 1 a quick check, 2 an investigation, 3 a broad or
+structural matter (default: the highest triage level among its entries). You get a signal when it's
+done or stopped.`,
       {
         title: z.string().min(4).max(120),
         brief: z.string().min(20).max(6000),
         entries: z.array(z.string().max(200)).max(25).optional(),
         minutes: z.number().int().min(5).max(180).optional(),
         audience: z.enum(["everyone", "default"]).optional(),
+        level: z.number().int().min(1).max(3).optional(),
       },
       async (args) => ({ content: [{ type: "text", text: JSON.stringify(await masterStartWorker(args, identity)) }] }),
     );
@@ -4287,6 +4300,7 @@ app.get("/api/worker/threads", (req, res) => {
         id: r.id,
         entry: name ?? null,
         why: p.why ?? "",
+        ...(p.level ? { level: p.level } : {}),
         status: r.status,
         agent_id: r.agent_id ?? null,
         summary: r.summary ?? "",
@@ -4310,7 +4324,7 @@ app.post("/api/worker/survey", (req, res) => {
   const focus = typeof req.body?.focus === "string" ? req.body.focus.slice(0, 1000) : "";
   // who sees what the survey builds: everyone (the default: it's the organization's map) or the admin only
   const audience = req.body?.audience === "admin" ? "admin" : EVERYONE;
-  void createTask({ title: `Survey: ${connection}`, brief: surveyBrief(connection, focus, audience), minutes: Number(req.body?.minutes) || 60, by: identity.user, audience }).then(
+  void createTask({ title: `Survey: ${connection}`, brief: surveyBrief(connection, focus, audience), minutes: Number(req.body?.minutes) || 60, by: identity.user, audience, level: 3 }).then(
     (r) => res.json(r),
     (e) => httpError(res, e),
   );

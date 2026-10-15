@@ -5,16 +5,16 @@ import { GraphPool, threadName, type GraphCall } from "../src/agents/graph-pool.
 import type { AgentManager } from "../src/agents/manager.js";
 
 // a manager that runs no pi: agents "settle" as soon as they're prompted
-function fakeManager(opts: { settle?: "ok" | "never" | "stop" } = {}) {
+function fakeManager(opts: { settle?: "ok" | "never" | "stop"; levelModels?: Record<string, { provider: string; modelId: string }> } = {}) {
   const records = new Map<string, AgentRecord>();
   const running = new Map<string, EventEmitter>();
   const prompts: Array<[string, string]> = [];
   let n = 0;
   const m = {
-    profiles: { graphWorker: () => ({ id: "worker-profile" }) },
+    profiles: { graphWorker: () => ({ id: "worker-profile", graphWorker: { model: "ds-flash", ...(opts.levelModels ? { levelModels: opts.levelModels } : {}) } }) },
     store: { get: (id: string) => records.get(id), list: () => [...records.values()] },
-    async createAgent(input: { name: string; profileId: string }, internal: { graphRole?: GraphRole }) {
-      const r = { id: `a${++n}`, name: input.name, profileId: input.profileId, createdAt: new Date().toISOString(), status: "stopped", model: null, mcpServers: [], gondolin: { allowedHosts: [], secrets: {} }, graphRole: internal.graphRole } as AgentRecord;
+    async createAgent(input: { name: string; profileId: string; model?: { provider: string; modelId: string } }, internal: { graphRole?: GraphRole }) {
+      const r = { id: `a${++n}`, name: input.name, profileId: input.profileId, createdAt: new Date().toISOString(), status: "stopped", model: input.model ?? null, mcpServers: [], gondolin: { allowedHosts: [], secrets: {} }, graphRole: internal.graphRole } as AgentRecord;
       records.set(r.id, r);
       return r;
     },
@@ -190,5 +190,18 @@ describe("giving back idle graph agents", () => {
     expect(running.has(decided.id)).toBe(false);
     expect(running.has(open.id)).toBe(true);
     expect(records.size).toBe(2);
+  });
+});
+
+describe("models by level", () => {
+  it("a worker runs on its level's model; a level without one uses the profile's", async () => {
+    const quick = { provider: "openrouter", modelId: "cheap" };
+    const { manager, records } = fakeManager({ levelModels: { "1": quick } });
+    const { call } = fakeGraph([thread("0f8fad5b-0000-0000-0000-0000000000e1", { level: 1 }), thread("0f8fad5b-0000-0000-0000-0000000000e2", { level: 2 })]);
+    await new GraphPool(manager, call, () => 8).tick();
+    await flush();
+    const byJob = Object.fromEntries([...records.values()].map((a) => [(a.graphRole as { job: string }).job, a.model]));
+    expect(byJob["0f8fad5b-0000-0000-0000-0000000000e1"]).toEqual(quick);
+    expect(byJob["0f8fad5b-0000-0000-0000-0000000000e2"]).toBeNull();
   });
 });
