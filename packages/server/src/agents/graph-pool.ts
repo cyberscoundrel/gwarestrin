@@ -31,14 +31,31 @@ interface PoolStatus {
   pool?: { poolSize: number; keepDays: number };
   open_questions?: number;
   open_proposals?: number;
+  master?: { on: boolean; halted: boolean; handlers: number; signals: number } | null;
+}
+
+interface ClaimedHandler {
+  job: string;
+  worker: string;
+  title: string;
+  message: string;
 }
 
 /** a thread's agent name: readable in the rail, unique */
 export const threadName = (title: string, job: string): string => `graph · ${title.replace(/\s+/g, " ").trim().slice(0, 48)} · ${job.slice(0, 4)}`;
 export const LIAISON_NAME = "Graph liaison";
+export const MASTER_NAME = "Graph master";
+/** a handler's agent name: in the rail, for the operator to open */
+export const handlerName = (title: string, job: string): string => `handler · ${title.replace(/\s+/g, " ").trim().slice(0, 44)} · ${job.slice(0, 4)}`;
+const MASTER_IDLE_MS = 10 * 60_000;
+const MASTER_TURN_MS = 60 * 60_000;
+const HANDLER_TURN_MS = 20 * 60_000;
 
 export class GraphPool {
   private readonly active = new Set<string>();
+  private masterBusy = false;
+  private lastMasterTurn = 0;
+  private handlersBusy = false;
   private ticking = false;
   private lastCleanup = 0;
   private timer: NodeJS.Timeout | null = null;
@@ -69,7 +86,11 @@ export class GraphPool {
       if (st?.status !== 200) return { started: 0 }; // not the organization's root, or no graph
       const status = st.body as PoolStatus;
       const size = status.pool?.poolSize ?? 0;
-      if ((status.open_questions ?? 0) + (status.open_proposals ?? 0) > 0) await this.ensureLiaison(profile.id);
+      if (status.master?.on) {
+        // the master's inbox and the handlers run alongside the pool (they don't take worker slots)
+        void this.masterTurn(profile.id).catch((e) => log.warn(`master: ${e instanceof Error ? e.message : String(e)}`));
+        void this.startHandlers(profile.id).catch((e) => log.warn(`handlers: ${e instanceof Error ? e.message : String(e)}`));
+      } else if ((status.open_questions ?? 0) + (status.open_proposals ?? 0) > 0) await this.ensureLiaison(profile.id);
       if (Date.now() - this.lastCleanup > 3_600_000) {
         this.lastCleanup = Date.now();
         await this.cleanup(status.pool?.keepDays ?? 14).catch((e) => log.warn(`cleanup: ${e instanceof Error ? e.message : String(e)}`));
@@ -117,6 +138,84 @@ export class GraphPool {
     }
   }
 
+  /**
+   * The master's turn: when signals wait, wake it (one at a time), give it
+   * them as one message, and wait for its turn to end; compact its context
+   * after a batch; give back its sandbox when it's been idle a while (its
+   * conversation is kept: it runs for a long time, not continuously).
+   */
+  async masterTurn(profileId: string): Promise<void> {
+    if (this.masterBusy) return;
+    this.masterBusy = true;
+    try {
+      const master = await this.ensureMaster(profileId);
+      const res = await this.call("/api/worker/signals");
+      const body = (res?.status === 200 ? res.body : null) as { signals?: Array<{ id: string; kind: string }>; message?: string } | null;
+      const signals = body?.signals ?? [];
+      if (!signals.length) {
+        if (this.manager.getRunning(master.id) && Date.now() - this.lastMasterTurn > MASTER_IDLE_MS) {
+          await this.manager.releaseAgent(master.id).catch((e) => log.warn(`release master: ${e instanceof Error ? e.message : String(e)}`));
+        }
+        return;
+      }
+      if (!this.manager.getRunning(master.id)) {
+        if (this.manager.runningCount() >= this.maxAgents()) return; // no room right now: next tick
+        await this.manager.start(master.id);
+      }
+      const settled = this.manager.waitSettled(master.id, MASTER_TURN_MS);
+      settled.catch(() => undefined);
+      await this.manager.promptAgent(master.id, body?.message ?? "");
+      await this.call("/api/worker/signals/ack", { method: "POST", body: { ids: signals.map((x) => x.id) } });
+      await settled;
+      this.lastMasterTurn = Date.now();
+      // a batch is a lot to keep: compact between batches
+      if (signals.some((x) => x.kind === "batch")) await this.manager.compactAgent(master.id).catch((e) => log.warn(`compact master: ${e instanceof Error ? e.message : String(e)}`));
+      log.info(`master handled ${signals.length} signal(s)`);
+    } finally {
+      this.masterBusy = false;
+    }
+  }
+
+  async ensureMaster(profileId: string): Promise<AgentRecord> {
+    const existing = this.manager.store.list().find((a) => a.graphRole?.kind === "master");
+    if (existing) return existing;
+    log.info("making the graph master");
+    return this.manager.createAgent({ name: MASTER_NAME, profileId }, { graphRole: { kind: "master" } });
+  }
+
+  /**
+   * Start handlers the master asked for, one at a time: each explains its
+   * stopped worker to the operator in its first turn, then waits in the rail
+   * (its sandbox given back) until the operator opens it and decides.
+   */
+  async startHandlers(profileId: string): Promise<void> {
+    if (this.handlersBusy || this.manager.runningCount() >= this.maxAgents()) return;
+    this.handlersBusy = true;
+    try {
+      const res = await this.call("/api/worker/handlers/claim", { method: "POST", body: {} });
+      const handlers = res?.status === 200 ? ((res.body as { handlers?: ClaimedHandler[] }).handlers ?? []) : [];
+      for (const h of handlers) {
+        let id: string | null = null;
+        try {
+          const record = await this.manager.createAgent({ name: handlerName(h.title, h.job), profileId }, { graphRole: { kind: "handler", job: h.job, worker: h.worker, title: h.title } });
+          id = record.id;
+          await this.manager.start(id);
+          const settled = this.manager.waitSettled(id, HANDLER_TURN_MS);
+          settled.catch(() => undefined);
+          await this.manager.promptAgent(id, h.message);
+          await settled;
+        } catch (e) {
+          log.warn(`handler ${h.job.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+          await this.call(`/api/worker/handlers/${h.job}/waiting`, { method: "POST", body: { agent_id: id } }).catch(() => null);
+          if (id) await this.manager.releaseAgent(id).catch(() => undefined);
+        }
+      }
+    } finally {
+      this.handlersBusy = false;
+    }
+  }
+
   /** the liaison exists (stopped until an admin opens it) whenever something waits on the admin */
   async ensureLiaison(profileId: string): Promise<AgentRecord> {
     const existing = this.manager.store.list().find((a) => a.graphRole?.kind === "liaison");
@@ -139,6 +238,17 @@ export class GraphPool {
       const last = Date.parse(job?.updated_at ?? a.createdAt);
       if (finished && Number.isFinite(last) && last < cutoff) {
         await this.manager.deleteAgent(a.id, true).catch((e) => log.warn(`delete ${a.name}: ${e instanceof Error ? e.message : String(e)}`));
+        removed++;
+      }
+    }
+    // handlers whose stop was settled a day ago leave the rail
+    const hs = await this.call("/api/worker/handlers");
+    const handlerJobs = new Map(((hs?.status === 200 ? (hs.body as { handlers?: Array<{ id: string; status: string; updated_at?: string }> }).handlers : []) ?? []).map((h) => [h.id, h]));
+    for (const a of this.manager.store.list()) {
+      if (a.graphRole?.kind !== "handler" || this.manager.getRunning(a.id)) continue;
+      const h = handlerJobs.get(a.graphRole.job);
+      if (h?.status === "done" && Date.parse(h.updated_at ?? "") < Date.now() - 86_400_000) {
+        await this.manager.deleteAgent(a.id, true).catch(() => undefined);
         removed++;
       }
     }

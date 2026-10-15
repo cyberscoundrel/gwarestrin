@@ -62,6 +62,7 @@ export interface GraphWorkerView {
   threads?: Record<string, number> & { today?: number };
   open_questions?: number;
   open_proposals?: number;
+  master?: MasterStatus | null;
 }
 
 /** the graph worker pool: agent threads, one per queue entry (see graph-rag/src/pool.js) */
@@ -71,12 +72,37 @@ export interface PoolSettings {
   dailyThreads: number;
   threadMinutes: number;
   keepDays: number;
+  /** a long-running master thread plans batches and starts the workers */
+  master: boolean;
+  batchSize: number;
+  batchMinutes: number;
+  /** stopped workers waiting on the operator, at most (past it the queue halts) */
+  maxHandlers: number;
+}
+export interface MasterStatus {
+  on: boolean;
+  halted: boolean;
+  handlers: number;
+  maxHandlers: number;
+  intake: number;
+  signals: number;
+}
+export interface WorkerHandler {
+  id: string;
+  for_job: string;
+  title: string;
+  description: string;
+  status: "pending" | "running" | "waiting" | "done";
+  agent_id: string | null;
+  decision: string;
+  created_at: string;
+  updated_at: string;
 }
 export interface WorkerThread {
   id: string;
   entry: string | null;
   why: string;
-  status: "pending" | "running" | "waiting" | "done" | "failed";
+  status: "pending" | "running" | "waiting" | "done" | "failed" | "closed";
   agent_id: string | null;
   summary: string;
   /** what it changed without asking */
@@ -387,6 +413,9 @@ export const api = {
   /** start a survey of a tool connection: a task thread maps it, seeds its records and relates them */
   async startSurvey(connection: string, focus: string, audience: "everyone" | "admin" = "everyone"): Promise<{ task: string; job: string }> {
     return json(await fetch("/api/graph-worker/survey", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ connection, focus, audience }) }));
+  },
+  async workerHandlers(): Promise<WorkerHandler[]> {
+    return (await json<{ handlers: WorkerHandler[] }>(await fetch("/api/graph-worker/handlers"))).handlers;
   },
   async workerThreads(): Promise<WorkerThread[]> {
     return (await json<{ threads: WorkerThread[] }>(await fetch("/api/graph-worker/threads"))).threads;

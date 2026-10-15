@@ -41,7 +41,13 @@ export interface AgentRecord {
   graphRole?: GraphRole | undefined;
 }
 
-export type GraphRole = { kind: "worker"; job: string; entry: string; title: string } | { kind: "liaison" };
+export type GraphRole =
+  | { kind: "worker"; job: string; entry: string; title: string }
+  | { kind: "liaison" }
+  /** the long-running master: plans batches, starts workers, settles or hands on their stops */
+  | { kind: "master" }
+  /** settles one stopped worker with the operator (job: its handler job; worker: the stopped worker's job) */
+  | { kind: "handler"; job: string; worker: string; title: string };
 
 export interface AgentRuntimeSummary {
   id: string;

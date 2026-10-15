@@ -52,8 +52,12 @@ function fakeManager(opts: { settle?: "ok" | "never" | "stop" } = {}) {
       return "Linked it to Toro (customer).";
     },
     async abortAgent() {},
+    compacted: 0,
+    async compactAgent() {
+      (m as { compacted: number }).compacted++;
+    },
   };
-  return { manager: m as unknown as AgentManager, records, prompts, running };
+  return { manager: m as unknown as AgentManager, records, prompts, running, compacted: () => (m as { compacted: number }).compacted };
 }
 
 function fakeGraph(threads: Array<Record<string, unknown>>, status: Record<string, unknown> = { pool: { poolSize: 2, keepDays: 14 } }) {
@@ -129,5 +133,42 @@ describe("graph worker pool", () => {
     await pool.tick();
     const liaisons = [...records.values()].filter((a) => a.graphRole?.kind === "liaison");
     expect(liaisons).toHaveLength(1);
+  });
+});
+
+describe("graph master", () => {
+  it("wakes the master with its signals as one message, acks them, compacts after a batch", async () => {
+    const { manager, records, prompts, compacted } = fakeManager();
+    const calls: Array<[string, unknown]> = [];
+    const call: GraphCall = async (path, init) => {
+      calls.push([path, init?.body]);
+      if (path === "/api/worker/signals") return { status: 200, body: { signals: [{ id: "s1", kind: "batch" }, { id: "s2", kind: "done" }], message: "Signals for you (2)." } };
+      return { status: 200, body: {} };
+    };
+    const pool = new GraphPool(manager, call, () => 8);
+    await pool.masterTurn("worker-profile");
+    const master = [...records.values()].find((a) => a.graphRole?.kind === "master");
+    expect(master?.name).toBe("Graph master");
+    expect(prompts).toEqual([[master!.id, "Signals for you (2)."]]);
+    expect(calls.find(([p]) => p === "/api/worker/signals/ack")?.[1]).toEqual({ ids: ["s1", "s2"] });
+    expect(compacted()).toBe(1);
+    await pool.masterTurn("worker-profile");
+    expect([...records.values()].filter((a) => a.graphRole?.kind === "master")).toHaveLength(1);
+  });
+
+  it("starts each handler, gives it its brief, then leaves it waiting in the rail with its sandbox given back", async () => {
+    const { manager, records, prompts, running } = fakeManager();
+    const calls: Array<[string, unknown]> = [];
+    const call: GraphCall = async (path, init) => {
+      calls.push([path, init?.body]);
+      if (path === "/api/worker/handlers/claim") return { status: 200, body: { handlers: [{ job: "0f8fad5b-0000-0000-0000-0000000000a1", worker: "w1", title: "Which Toro", message: "A stopped worker needs a decision." }] } };
+      return { status: 200, body: {} };
+    };
+    await new GraphPool(manager, call, () => 8).startHandlers("worker-profile");
+    const h = [...records.values()].find((a) => a.graphRole?.kind === "handler");
+    expect(h?.name).toMatch(/^handler · Which Toro · 0f8f$/);
+    expect(prompts.map(([, m]) => m)).toEqual(["A stopped worker needs a decision."]);
+    expect(calls.find(([p]) => p.endsWith("/waiting"))?.[1]).toEqual({ agent_id: h!.id });
+    expect(running.size).toBe(0);
   });
 });

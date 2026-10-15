@@ -119,6 +119,7 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
   // the worker pool: its settings, its threads (audit), and what waits on the admin
   app.put("/api/graph-worker/pool", async (req, reply) => proxy(reply, "/api/worker", { method: "PUT", body: { pool: req.body ?? {} } }));
   app.get("/api/graph-worker/threads", async (_req, reply) => proxy(reply, "/api/worker/threads"));
+  app.get("/api/graph-worker/handlers", async (_req, reply) => proxy(reply, "/api/worker/handlers"));
   app.post("/api/graph-worker/survey", async (req, reply) => proxy(reply, "/api/worker/survey", { method: "POST", body: req.body ?? {} }));
   app.get("/api/graph-worker/questions", async (req, reply) => {
     const status = (req.query as { status?: string }).status;

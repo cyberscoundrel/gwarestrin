@@ -39,18 +39,24 @@
     const count = () =>
       void api
         .graphWorker()
-        .then((w) => (workerWaiting = w ? (w.open_questions ?? 0) + (w.open_proposals ?? 0) : null))
+        // with a master: the handlers waiting on the operator; otherwise the questions and proposals
+        .then((w) => (workerWaiting = w ? (w.master?.on ? w.master.handlers : (w.open_questions ?? 0) + (w.open_proposals ?? 0)) : null))
         .catch(() => (workerWaiting = null));
     count();
     const t = setInterval(count, 60_000);
     return () => clearInterval(t);
   });
-  /** a worker profile can hold hundreds of threads: the liaison, the busy ones, the newest few */
+  /**
+   * The Graph worker profile's rail: the master and the handlers (stopped
+   * workers waiting on the operator, to open and answer), not the workers
+   * themselves (they're in the Graph worker panel); a worker opened from
+   * there stays listed while selected.
+   */
   function workerShown(members: import("../lib/stores.svelte.js").AgentListItem[]): import("../lib/stores.svelte.js").AgentListItem[] {
-    const liaison = members.filter((a) => a.graphRole?.kind === "liaison");
-    const busy = members.filter((a) => a.graphRole?.kind !== "liaison" && (a.status !== "stopped" || a.id === store.selectedId));
-    const newest = [...members].filter((a) => a.graphRole?.kind !== "liaison").sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 5);
-    return [...new Map([...liaison, ...busy, ...newest].map((a) => [a.id, a])).values()];
+    const rank = (a: (typeof members)[number]) => (a.graphRole?.kind === "master" ? 0 : a.graphRole?.kind === "handler" ? 1 : 2);
+    return members
+      .filter((a) => a.graphRole?.kind !== "worker" || a.id === store.selectedId)
+      .sort((a, b) => rank(a) - rank(b) || b.createdAt.localeCompare(a.createdAt));
   }
   // admins manage the organization's workspaces (the instance holds the ops credential)
   let canManageWorkspaces = $state(false);
@@ -203,7 +209,7 @@
           </ul>
           {#if all.length > members.length}
             <button class="ml-5 cursor-pointer px-2 py-1 text-left text-xs text-faint hover:text-fg" onclick={() => (showWorker = true)}>
-              {all.length - members.length} more threads: see Graph worker
+              {all.length - members.length} worker threads: see Graph worker
             </button>
           {/if}
         {/if}

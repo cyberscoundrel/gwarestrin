@@ -257,6 +257,14 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     await (await this.openShellLauncher()).releaseSandbox(id, dirsFor(this.config.stateDir, record).sessions);
   }
 
+  /** compact a running agent's conversation (pi summarizes the older part) */
+  async compactAgent(id: string): Promise<void> {
+    const agent = this.running.get(id);
+    if (!agent) return;
+    const res = await agent.send("compact", {}, 300_000);
+    if (!res.success) throw new Error(res.error ?? "compact failed");
+  }
+
   async abortAgent(id: string): Promise<void> {
     await this.running.get(id)?.send("abort", {}, 10_000).catch(() => undefined);
   }

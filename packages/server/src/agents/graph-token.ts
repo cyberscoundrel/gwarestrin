@@ -32,7 +32,13 @@ export function graphTokenFor(
     u: user,
     a: agent.id,
     p: profile.positions ?? [],
-    ...(role?.kind === "worker" ? { r: "worker", j: role.job, e: role.entry } : role?.kind === "liaison" ? { r: "liaison" } : {}),
+    ...(role?.kind === "worker"
+      ? { r: "worker", j: role.job, e: role.entry }
+      : role?.kind === "handler"
+        ? { r: "handler", j: role.job }
+        : role?.kind === "liaison" || role?.kind === "master"
+          ? { r: role.kind }
+          : {}),
     iat: Math.floor(now / 1000),
   };
   const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
