@@ -95,7 +95,9 @@ export class GraphPool {
         this.lastCleanup = Date.now();
         await this.cleanup(status.pool?.keepDays ?? 14).catch((e) => log.warn(`cleanup: ${e instanceof Error ? e.message : String(e)}`));
       }
-      const room = Math.min(size - this.active.size, this.maxAgents() - this.manager.runningCount());
+      // with a master, workers leave one agent slot free: the master's turns and handlers never starve
+      const reserve = status.master?.on ? 1 : 0;
+      const room = Math.min(size - this.active.size, this.maxAgents() - this.manager.runningCount() - reserve);
       if (room <= 0) return { started: 0 };
       const claimed = await this.call("/api/worker/threads/claim", { method: "POST", body: { limit: room } });
       const threads = claimed?.status === 200 ? ((claimed.body as { threads?: ClaimedThread[] }).threads ?? []) : [];
