@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { Network, TriangleAlert } from "lucide";
-  import { api, type GraphWorkerView, type PoolSettings, type WorkerProposal, type WorkerQuestion, type WorkerThread } from "../lib/api.js";
+  import { api, type GraphWorkerView, type PoolSettings, type WorkerHandler, type WorkerProposal, type WorkerQuestion, type WorkerThread } from "../lib/api.js";
   import { store } from "../lib/stores.svelte.js";
   import Dialog from "./Dialog.svelte";
   import Icon from "./Icon.svelte";
@@ -15,6 +15,7 @@
   let threads = $state<WorkerThread[]>([]);
   let questions = $state<WorkerQuestion[]>([]);
   let proposals = $state<WorkerProposal[]>([]);
+  let handlers = $state<WorkerHandler[]>([]);
   let loadError = $state("");
   let draft = $state<PoolSettings | null>(null);
   let saving = $state(false);
@@ -53,7 +54,7 @@
       }
       status = w;
       draft = w.pool ? { ...w.pool } : null;
-      [threads, questions, proposals] = await Promise.all([api.workerThreads(), api.workerQuestions(), api.workerProposals()]);
+      [threads, questions, proposals, handlers] = await Promise.all([api.workerThreads(), api.workerQuestions(), api.workerProposals(), api.workerHandlers().catch(() => [])]);
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
     }
@@ -69,7 +70,7 @@
       const w = await api.graphWorker();
       // the saved settings stay what the form compares against until the admin saves
       if (w) status = { ...w, ...(status?.pool ? { pool: status.pool } : {}) };
-      [threads, questions, proposals] = await Promise.all([api.workerThreads(), api.workerQuestions(), api.workerProposals()]);
+      [threads, questions, proposals, handlers] = await Promise.all([api.workerThreads(), api.workerQuestions(), api.workerProposals(), api.workerHandlers().catch(() => [])]);
     } catch {
       /* the next refresh tries again */
     }
@@ -143,6 +144,7 @@
     waiting: { label: "waiting on you", cls: "text-warn" },
     done: { label: "done", cls: "text-ok" },
     failed: { label: "failed", cls: "text-err" },
+    closed: { label: "closed", cls: "text-faint" },
   };
   const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved", relate: "Related", followup: "Queued", unlink: "Unlinked", delete: "Deleted" };
   const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -159,7 +161,7 @@
   };
 </script>
 
-{#snippet num(label: string, key: "poolSize" | "dailyThreads" | "threadMinutes" | "keepDays", min: number, max: number, hint: string)}
+{#snippet num(label: string, key: "poolSize" | "dailyThreads" | "threadMinutes" | "keepDays" | "batchSize" | "batchMinutes" | "maxHandlers", min: number, max: number, hint: string)}
   {#if draft}
     <div class="field">
       <label class="field-label" for="gw-{key}">{label}</label>
@@ -193,6 +195,25 @@
           {status.threads?.running ?? 0} working · {status.threads?.waiting ?? 0} waiting on you · {status.threads?.pending ?? 0} queued ·
           {status.threads?.today ?? 0}{status.pool ? ` of ${status.pool.dailyThreads}` : ""} started today · {status.things} things known
         </p>
+
+        {#if status.master?.on}
+          <section class="grid gap-2">
+            {#if status.master.halted}
+              <p class="m-0 rounded-md border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn" role="status">
+                Halted: {status.master.handlers} stopped workers wait on you (at most {status.master.maxHandlers}). No new batch starts until some are settled.
+              </p>
+            {/if}
+            <span class="text-xs text-faint">
+              Master on · {status.master.intake} entries waiting for the next batch · {status.master.signals} signals for the master · {status.master.handlers} handlers waiting on you
+            </span>
+            {#each handlers.filter((h) => h.status !== "done") as h (h.id)}
+              <div class="flex flex-wrap items-center gap-2 rounded-lg border border-edge2 bg-panel p-3">
+                <span class="min-w-0 flex-1 text-sm text-fg">{h.title}<span class="block text-xs text-faint">{h.description.slice(0, 220)}</span></span>
+                {#if h.agent_id}<button class="btn btn-primary btn-sm" onclick={() => open(h.agent_id)}>Open</button>{:else}<span class="text-2xs text-faint">starting…</span>{/if}
+              </div>
+            {/each}
+          </section>
+        {/if}
 
         {#if groups.length || proposals.length}
           <section class="grid gap-3">
@@ -252,6 +273,20 @@
                 <span class="text-xs text-faint">One model call per entry links the plain ones and sends only the ones that need judgement to a thread. Off: every entry gets a thread (more thorough, many more model calls).</span>
               </span>
             </label>
+            <label class="flex items-start gap-3">
+              <Switch checked={draft.master} label="run a master" onchange={(v) => draft && (draft.master = v)} />
+              <span class="grid gap-0.5">
+                <span class="text-sm text-fg">Run a master</span>
+                <span class="text-xs text-faint">Saved entries batch up for one long-running master thread, which groups them, starts workers, settles what it can of their stops and hands the rest to handlers that ask you. Off: each entry is sorted and threaded on its own.</span>
+              </span>
+            </label>
+            {#if draft.master}
+              <div class="grid gap-4 sm:grid-cols-3">
+                {@render num("Batch size", "batchSize", 1, 200, "A batch goes to the master at this many entries…")}
+                {@render num("Batch minutes", "batchMinutes", 1, 1440, "…or when its oldest entry has waited this long.")}
+                {@render num("Handlers waiting, at most", "maxHandlers", 1, 50, "Past this, no new batch starts until you've answered some.")}
+              </div>
+            {/if}
             <span class="text-xs text-faint">Threads use the Graph worker profile's model, which must be a labeled model. They can't run commands or reach the internet, and other connections are read-only for them.</span>
             <div class="flex items-center gap-3">
               {#if saveMsg}<span class="text-xs text-dim" role="status">{saveMsg}</span>{/if}

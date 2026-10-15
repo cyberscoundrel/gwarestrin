@@ -43,3 +43,28 @@ test("task threads: a survey's brief asks for a map, keyed things, relationships
   assert.match(b, /Focus \(from the admin\): production and suppliers/);
   assert.match(taskThreadBrief({ title: "Survey: mssql", brief: b }), /^A task for you: Survey: mssql/);
 });
+
+test("master mode: saved entries are linked then batched; the inbox and the handler brief", async () => {
+  const { handlerBrief, signalsMessage } = await import("../src/pool.js");
+  assert.equal(firstJob({ poolSize: 2, sortFirst: true, master: true }), "mentions");
+  const s = poolSettings({ master: true, batchSize: 30, maxHandlers: 3 });
+  assert.equal(s.master, true);
+  assert.throws(() => poolSettings({ maxHandlers: 0 }), /1 to 50/);
+  const m = signalsMessage(
+    [
+      { kind: "batch", batch_id: "b1", data: { entries: [{ name: "ux-note 03", home: "Operations", links: ["BSE (customer)"], unsure: ['"John" (person) may be John Francis or JOHN'] }] } },
+      { kind: "stopped", job_id: "j1", data: { title: "Fix Toro jobs", reason: "it's waiting on a decision", questions: [{ id: "q1", question: "Which Toro?", options: ["customer", "supplier"] }], proposals: [] } },
+      { kind: "resolved", job_id: "j2", data: { decision: "The operator: keep both" } },
+    ],
+    { halted: true, handlers: 3, maxHandlers: 3 },
+  );
+  assert.match(m, /HALTED/);
+  assert.match(m, /BATCH b1/);
+  assert.match(m, /unsure: "John"/);
+  assert.match(m, /question q1: Which Toro\? \(options: customer \| supplier\)/);
+  assert.match(m, /graph-rag_start_handler/);
+  assert.match(m, /RESOLVED worker j2/);
+  const h = handlerBrief({ worker: { job: "j1", title: "Fix Toro jobs" }, description: "It can't tell which Toro" });
+  assert.match(h, /Fix Toro jobs \(job j1\)/);
+  assert.match(h, /Never decide for them/);
+});

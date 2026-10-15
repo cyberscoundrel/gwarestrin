@@ -219,6 +219,22 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   or the admin only. Things are visible to everyone once an Everyone entry
   links to them. The root position is "Top of the organization": what's
   homed there only the top sees.
+- **The master** (pool `master`; graph-rag Signal, Batch, Job kinds `intake`
+  and `handler`; agents/graph-pool.ts): every graph thread is an instance of
+  the one Graph worker profile, in a role. Saved entries are linked, then
+  wait for a batch (batchSize entries or batchMinutes). The master, one
+  long-running thread (compacted between batches, its sandbox given back
+  when idle), gets its signals as messages: batches, workers done or
+  stopped, stops resolved. It reads (never edits), groups entries into
+  workers (`start_worker`), settles what it can of a stopped worker
+  (`answer_worker`, `decide_proposal`, `close_worker`; raw commands and
+  widening are never its call) and hands the rest to a handler
+  (`start_handler`). Workers count toward the pool and stay out of the rail;
+  handlers don't count toward the pool, wait in the rail for the operator,
+  can't raise stops of their own, and record the operator's decision
+  (`decide_for_worker`), which resumes the worker and signals the master.
+  At maxHandlers waiting handlers the pool halts: no new batches until some
+  are settled.
 - **Model labels** (provisioner model-labels.mjs; Models, admins): the admin
   labels models (tier: basic, standard, frontier; hosting: on-prem, private
   cloud, public API; notes). Once labels are saved, only labeled models run

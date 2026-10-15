@@ -30,6 +30,10 @@ export class RpcAgent extends EventEmitter<RpcAgentEvents> {
     this.pid = proc.pid;
 
     proc.on("event", (ev) => {
+      // when it last did anything, and whether a run is in progress (idle agents can be given back)
+      this.lastActivity = Date.now();
+      if (ev.type === "agent_start") this.busy = true;
+      if (ev.type === "agent_settled") this.busy = false;
       if (ev.type === "extension_ui_request") this.emit("uiRequest", ev);
       else this.emit("event", ev);
     });
@@ -46,6 +50,14 @@ export class RpcAgent extends EventEmitter<RpcAgentEvents> {
 
   get exited(): boolean {
     return this.closed;
+  }
+
+  /** a run in progress (pi's agent_start until agent_settled) */
+  busy = false;
+  lastActivity = Date.now();
+  /** milliseconds since it last did anything, or 0 while a run is in progress */
+  idleMs(): number {
+    return this.busy ? 0 : Date.now() - this.lastActivity;
   }
 
   summary(): AgentRuntimeSummary {
