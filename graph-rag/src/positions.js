@@ -109,8 +109,14 @@ export function effectiveHome(map, home) {
 /** a home's name, for people ("Everyone" for everyone) */
 export function homeName(map, home) {
   const id = effectiveHome(map, home);
-  return id === EVERYONE ? "Everyone" : map.positions[id].name;
+  if (id === EVERYONE) return "Everyone";
+  // the root's own name ("org", "Whole organization") reads as the widest audience; it's the narrowest
+  if (id === map.root) return ROOT_NAME;
+  return map.positions[id].name;
 }
+
+/** what the root home is called wherever a home is shown */
+export const ROOT_NAME = "Top of the organization (admins only)";
 
 /** default home for a caller's writes: deepest held position, then by name */
 export function defaultHome(map, held) {

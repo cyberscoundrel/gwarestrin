@@ -26,6 +26,7 @@ import {
   heldPositions,
   homeName,
   moveKind,
+  ROOT_NAME,
   parsePositionMap,
   visibleHomes,
   writableHomes,
@@ -202,6 +203,7 @@ function resolveWriteHome(scope, requested, { everyoneOk = true } = {}) {
 /** accept a position id or its exact name */
 function positionId(ref) {
   if (String(ref).trim().toLowerCase() === EVERYONE) return EVERYONE;
+  if (positionMap && (ref === ROOT_NAME || ref === "Top of the organization")) return positionMap.root;
   if (positionMap?.positions[ref]) return ref;
   const hit = Object.entries(positionMap?.positions ?? {}).find(([, p]) => p.name === ref);
   if (!hit) throw new Error(`unknown position: ${ref}`);
@@ -994,7 +996,7 @@ async function danglingEntityGrants(grants) {
   return gone;
 }
 
-const positionName = (id) => (id === EVERYONE ? "Everyone" : (positionMap?.positions[id]?.name ?? id));
+const positionName = (id) => (positionMap && (id === EVERYONE || positionMap.positions[id]) ? homeName(positionMap, id) : id);
 
 /** the people a share can go to: everyone in the token map (tenants) */
 const peopleNames = () => [...entriesByUser.keys()].sort();
@@ -4058,10 +4060,10 @@ app.get("/api/positions", (req, res) => {
   const reach = visibleHomes(positionMap, held);
   const positions = Object.entries(positionMap.positions)
     .filter(([id]) => reach === null || reach.has(id))
-    .map(([id, p]) => ({ id, name: p.name, parent: p.parent, ...(p.description ? { description: p.description } : {}) }));
+    .map(([id, p]) => ({ id, name: homeName(positionMap, id), parent: p.parent, ...(p.description ? { description: p.description } : {}) }));
   // the whole tree's names: grants may go to positions outside the caller's
   // reach (that is their point); this says nothing about anyone's data
-  const tree = Object.entries(positionMap.positions).map(([id, p]) => ({ id, name: p.name, parent: p.parent }));
+  const tree = Object.entries(positionMap.positions).map(([id, p]) => ({ id, name: homeName(positionMap, id), parent: p.parent }));
   res.json({ scoped: true, root: positionMap.root, everyone: { id: EVERYONE, name: "Everyone" }, held, positions, tree, people: peopleView(personOf(identity.user)), canGrantStanding: reach === null && !identity.agent && policy.standingGrants === "root" });
 });
 
