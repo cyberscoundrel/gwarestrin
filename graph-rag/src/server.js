@@ -2776,9 +2776,10 @@ async function workerMerge(args, identity, scope) {
 const MASTER = "master";
 
 async function ensureMasterSchema() {
-  for (const type of ["Signal", "Batch"]) await adbCommand(`CREATE DOCUMENT TYPE ${type} IF NOT EXISTS`).catch(() => {});
+  // (BATCH is a reserved word in ArcadeDB SQL: the type is WorkBatch)
+  for (const type of ["Signal", "WorkBatch"]) await adbCommand(`CREATE DOCUMENT TYPE ${type} IF NOT EXISTS`).catch(() => {});
   for (const prop of ["id", "kind", "job_id", "batch_id", "data", "status", "created_at"]) await adbCommand(`CREATE PROPERTY Signal.${prop} IF NOT EXISTS STRING`).catch(() => {});
-  for (const prop of ["id", "entries", "status", "created_at"]) await adbCommand(`CREATE PROPERTY Batch.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["id", "entries", "status", "created_at"]) await adbCommand(`CREATE PROPERTY WorkBatch.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand("CREATE INDEX IF NOT EXISTS ON Signal (status) NOTUNIQUE").catch(() => {});
 }
 
@@ -2822,21 +2823,24 @@ async function batchTick() {
   if (rows.length < worker.pool.batchSize && !(Date.now() - oldest >= worker.pool.batchMinutes * 60_000)) return;
   const batch = randomUUID();
   const entries = [];
+  const taken = [];
   for (const r of rows) {
-    const claimed = await adbCommand("UPDATE Job SET status = 'done', summary = :b, updated_at = :now WHERE id = :id AND status = 'pending'", "sql", { b: `batch ${batch}`, now: new Date().toISOString(), id: r.id });
-    if (Number(claimed?.[0]?.count ?? 0) !== 1) continue;
     const p = JSON.parse(r.payload || "{}");
-    if (!RID_RE.test(String(p.rid))) continue;
-    const row = (await adbQuery(`SELECT name, _home FROM ${p.rid}`).catch(() => []))[0];
-    if (!row?.name) continue;
+    const row = RID_RE.test(String(p.rid)) ? (await adbQuery(`SELECT name, _home FROM ${p.rid}`).catch(() => []))[0] : null;
+    taken.push(r.id);
+    if (!row?.name) continue; // gone since it was saved
     const edges = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${p.rid})`).catch(() => []);
     const dsts = edges.map((e) => String(e.dst)).filter((x) => RID_RE.test(x));
     const things = dsts.length ? await adbQuery(`SELECT label, _thing_type FROM [${dsts.join(",")}]`).catch(() => []) : [];
     entries.push({ name: row.name, home: homeName(positionMap, row._home), links: things.map((t) => `${t.label} (${t._thing_type})`), unsure: p.unsure ?? [] });
   }
+  // the batch and its signal first: entries leave the intake only once the master will hear of them
+  if (entries.length) {
+    await adbCommand("INSERT INTO WorkBatch SET id = :id, entries = :e, status = 'open', created_at = :now", "sql", { id: batch, e: JSON.stringify(entries.map((e) => e.name)), now: new Date().toISOString() });
+    await emitSignal("batch", { batch_id: batch, data: { entries } });
+  }
+  for (const id of taken) await adbCommand("UPDATE Job SET status = 'done', summary = :b, updated_at = :now WHERE id = :id AND status = 'pending'", "sql", { b: `batch ${batch}`, now: new Date().toISOString(), id });
   if (!entries.length) return;
-  await adbCommand("INSERT INTO Batch SET id = :id, entries = :e, status = 'open', created_at = :now", "sql", { id: batch, e: JSON.stringify(entries.map((e) => e.name)), now: new Date().toISOString() });
-  await emitSignal("batch", { batch_id: batch, data: { entries } });
   log.info(`batch ${batch.slice(0, 8)}: ${entries.length} entries for the master`);
 }
 
