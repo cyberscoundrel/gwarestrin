@@ -164,6 +164,15 @@ services:
       # semantic grading of new writes (litellm model alias; empty = off).
       # Entity text goes to whatever this routes to: keep it local for real data.
       GRADER_MODEL: grader
+      # triage of saved entries by a Jev-style decision model (empty key = no triage).
+      # Entry text goes to the decision model's host: keep it local for real data.
+      DECISION_API_KEY: ${OPENROUTER_API_KEY:-}
+      DECISION_MODEL: ${DECISION_MODEL:-~typesafe/jev-latest}
+      DECISION_URL: ${DECISION_URL:-https://openrouter.ai/api/alpha/decisions}
+    # public resolvers past WARP's DNS interception (the decision model's host), as for litellm
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
     volumes:
       # the directory, not single files: a file that doesn't exist yet would
       # become an empty directory mount

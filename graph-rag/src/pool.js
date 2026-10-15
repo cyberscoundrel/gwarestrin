@@ -137,9 +137,11 @@ export function signalsMessage(signals, status = {}) {
     if (s.kind === "batch") {
       lines.push("", `BATCH ${s.batch_id} (${(d.entries ?? []).length} entries saved since the last one):`);
       for (const e of d.entries ?? []) {
-        lines.push(`- "${e.name}" [${e.home}]${e.links?.length ? `: linked to ${e.links.join(", ")}` : ""}${e.unsure?.length ? `; unsure: ${e.unsure.join("; ")}` : ""}`);
+        const t = e.triage;
+        const tri = t ? ` (triage: level ${t.level}${t.reason ? `, ${t.reason}` : ""}${t.sample ? ", a sample of no-work entries: check it needs nothing" : ""})` : "";
+        lines.push(`- "${e.name}" [${e.home}]${tri}${e.links?.length ? `: linked to ${e.links.join(", ")}` : ""}${t?.settled?.length ? `; settled: ${t.settled.join("; ")}` : ""}${e.unsure?.length ? `; unsure: ${e.unsure.join("; ")}` : ""}`);
       }
-      lines.push("Read what you need (graph-rag_search_graph, graph-rag_about_thing), group what belongs together, and start workers for the work (graph-rag_start_worker). Plain entries need nothing.");
+      lines.push("Triage levels: 1 a quick check, 2 an investigation, 3 a broad or structural matter (entries needing nothing were kept out). Read what you need (graph-rag_search_graph, graph-rag_about_thing), group what belongs together, and start workers for the work (graph-rag_start_worker), giving each the entries it's about. A worker's brief can match its level: a quick check needs a short, narrow brief.");
     } else if (s.kind === "done") {
       lines.push("", `DONE worker ${s.job_id} ("${d.title}"): ${String(d.summary ?? "").slice(0, 1200)}`);
     } else if (s.kind === "stopped") {

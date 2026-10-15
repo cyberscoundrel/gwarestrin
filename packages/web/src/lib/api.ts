@@ -63,6 +63,18 @@ export interface GraphWorkerView {
   open_questions?: number;
   open_proposals?: number;
   master?: MasterStatus | null;
+  /** triage of saved entries by a decision model (today) */
+  triage?: TriageStats | null;
+}
+export interface TriageStats {
+  on: boolean;
+  model: string | null;
+  today: number;
+  byLevel: Record<string, number>;
+  settledNames: number;
+  sampled: number;
+  /** of triaged entries a worker then handled: it found something to do, or nothing */
+  outcomes: { needed: number; nothing_done: number };
 }
 
 /** the graph worker pool: agent threads, one per queue entry (see graph-rag/src/pool.js) */

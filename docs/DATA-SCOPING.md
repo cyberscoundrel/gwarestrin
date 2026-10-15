@@ -235,6 +235,17 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   (`decide_for_worker`), which resumes the worker and signals the master.
   At maxHandlers waiting handlers the pool halts: no new batches until some
   are settled.
+- **Triage** (graph-rag/src/decisions.js; `DECISION_API_KEY`, `DECISION_MODEL`,
+  `DECISION_URL`): with a master, each linked entry gets one call to a
+  Jev-style decision model (typed questions, probabilities back): a level
+  (0 nothing, 1 a quick check, 2 an investigation, 3 broad), a reason, a
+  contradiction check against entries about the same things, and for each
+  name linking couldn't settle, which candidate it means. A name chosen at
+  p ≥ 0.75 is linked directly; an entry that needs nothing (P(level 0) ≥ 0.6,
+  every name settled, no contradiction) stays out of the batch, but for a
+  5% sample. The rest reach the master with their level and reason. Each
+  decision is recorded (Triage) with what the worker then did, to tune the
+  thresholds. The entry's text goes to the decision model's host.
 - **Model labels** (provisioner model-labels.mjs; Models, admins): the admin
   labels models (tier: basic, standard, frontier; hosting: on-prem, private
   cloud, public API; notes). Once labels are saved, only labeled models run
