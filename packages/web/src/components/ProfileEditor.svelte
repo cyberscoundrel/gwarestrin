@@ -51,6 +51,17 @@
   // the graph worker: only on the organization's admin workspace (graph-rag answers there only)
   let isWorker = $state(!duplicating && existing?.graphWorker !== undefined);
   let workerModel = $state(existing?.graphWorker?.model ?? "");
+  // a labeled model per level of graph work (unset: the profile's own model)
+  let levelModels = $state<Record<"1" | "2" | "3", { provider: string; modelId: string } | null>>({
+    "1": existing?.graphWorker?.levelModels?.["1"] ?? null,
+    "2": existing?.graphWorker?.levelModels?.["2"] ?? null,
+    "3": existing?.graphWorker?.levelModels?.["3"] ?? null,
+  });
+  const LEVELS: Array<{ id: "1" | "2" | "3"; label: string; hint: string }> = [
+    { id: "1", label: "Quick checks", hint: "one name or record: a basic-tier model is enough" },
+    { id: "2", label: "Investigations", hint: "several records, updates, corrections: a standard-tier model" },
+    { id: "3", label: "Broad work", hint: "patterns, structure, surveys: a frontier-tier model" },
+  ];
   let worker = $state<GraphWorkerView | null>(null);
   let workerModels = $state<string[]>([]);
   $effect(() => {
@@ -175,7 +186,13 @@
         // empty = where the workspace's user stands
         positions: positionMode === "pick" ? [...pickedPositions] : [],
         instructions: instructions.trim(),
-        ...(worker ? { graphWorker: isWorker ? { model: workerModel } : null } : {}),
+        ...(worker
+          ? {
+              graphWorker: isWorker
+                ? { model: workerModel, levelModels: Object.fromEntries(Object.entries($state.snapshot(levelModels)).filter(([, m]) => m)) as Record<string, { provider: string; modelId: string }> }
+                : null,
+            }
+          : {}),
       });
       await store.refreshProfiles();
       store.editingProfileId = saved.id;
@@ -285,6 +302,18 @@
       <Dropdown full label="graph worker model" value={workerModel} options={[{ value: "", label: "Pick a model" }, ...workerModels.map((m) => ({ value: m, label: m.split("/").at(-1) ?? m }))]} onchange={(v) => (workerModel = v)} searchable />
       <span class="field-hint">Links each new entry and decides whether it needs a thread. Models graph-rag reaches through the deployment's model gateway; a local model keeps your entries on your hardware.</span>
       {#if workerError}<span class="field-error">{workerError}</span>{/if}
+    </div>
+    <div class="field">
+      <span class="field-label">Models by level of work</span>
+      <div class="grid gap-2">
+        {#each LEVELS as l (l.id)}
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="w-32 text-sm text-fg">{l.label}</span>
+            <ModelPicker value={levelModels[l.id]} noneLabel="This profile's model" label="model for {l.label.toLowerCase()}" onchange={(v) => (levelModels[l.id] = v)} />
+          </div>
+        {/each}
+      </div>
+      <span class="field-hint">The master gives each worker a level: {LEVELS.map((l) => `${l.label.toLowerCase()} (${l.hint})`).join("; ")}. Only labeled models are offered.</span>
     </div>
   {/if}
   {#if worker}

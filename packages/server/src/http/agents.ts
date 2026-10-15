@@ -9,6 +9,7 @@ import { Value } from "typebox/value";
 import type { AgentManager } from "../agents/manager.js";
 import { dirsFor } from "../agents/scaffold.js";
 import { canSetGraphWorker, syncGraphWorker } from "./knowledge.js";
+import { modelRefusal } from "../instance/settings.js";
 import { runContextEngine, type ContextEngineInput } from "../analyze/engines.js";
 import { getInstanceMetadata } from "../instance/metadata.js";
 import type { ServerConfig } from "../config.js";
@@ -278,7 +279,20 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
       sharedTools: Type.Optional(Type.Boolean()),
       positions: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { maxItems: 16 })),
       instructions: Type.Optional(Type.String({ maxLength: 4000 })),
-      graphWorker: Type.Optional(Type.Union([Type.Object({ model: Type.String({ minLength: 1, maxLength: 300 }) }), Type.Null()])),
+      graphWorker: Type.Optional(
+        Type.Union([
+          Type.Object({
+            model: Type.String({ minLength: 1, maxLength: 300 }),
+            levelModels: Type.Optional(
+              Type.Object(
+                Object.fromEntries(["1", "2", "3"].map((l) => [l, Type.Optional(Type.Object({ provider: Type.String({ minLength: 1 }), modelId: Type.String({ minLength: 1 }) }))])),
+                { additionalProperties: false },
+              ),
+            ),
+          }),
+          Type.Null(),
+        ]),
+      ),
     },
     { additionalProperties: false },
   );
@@ -301,6 +315,11 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
     }
     const input = req.body as UpsertProfileInput;
     // the graph worker belongs to the organization's root: graph-rag says whether this instance is it
+    // each level's model must be one this workspace may run (labeled, an allowed provider)
+    for (const [level, m] of Object.entries(input.graphWorker?.levelModels ?? {})) {
+      const refused = m ? modelRefusal(m.provider, m.modelId) : null;
+      if (refused) return reply.code(400).send({ error: `level ${level}: ${refused}` });
+    }
     if (input.graphWorker && !(await canSetGraphWorker(manager))) {
       return reply.code(403).send({ error: "only the organization's admin workspace can set the graph worker" });
     }

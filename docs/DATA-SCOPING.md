@@ -245,7 +245,11 @@ allowed to use it; otherwise defining a profile would escalate privileges.
   every name settled, no contradiction) stays out of the batch, but for a
   5% sample. The rest reach the master with their level and reason. Each
   decision is recorded (Triage) with what the worker then did, to tune the
-  thresholds. The entry's text goes to the decision model's host.
+  thresholds. The entry's text goes to the decision model's host. Each
+  worker has a level (the master's call, else the highest triage level of
+  its entries; surveys are 3), and the Graph worker profile names a labeled
+  model per level (`graphWorker.levelModels`; unset = the profile's model),
+  so quick checks can run on a cheap model and broad work on a strong one.
 - **Model labels** (provisioner model-labels.mjs; Models, admins): the admin
   labels models (tier: basic, standard, frontier; hosting: on-prem, private
   cloud, public API; notes). Once labels are saved, only labeled models run

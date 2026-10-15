@@ -132,7 +132,7 @@ export interface ProfileRecord {
    * reaches through litellm) and, from `instructions`, its guidance. One
    * profile at most, on the organization's admin instance.
    */
-  graphWorker?: { model: string } | undefined;
+  graphWorker?: GraphWorkerSettings | undefined;
 }
 
 export interface UpsertProfileInput {
@@ -145,5 +145,18 @@ export interface UpsertProfileInput {
   positions?: string[] | undefined;
   instructions?: string | undefined;
   /** null clears it */
-  graphWorker?: { model: string } | null | undefined;
+  graphWorker?: GraphWorkerSettings | null | undefined;
+}
+
+export type WorkerLevel = "1" | "2" | "3";
+
+/**
+ * The Graph worker profile's graph-work settings: the one-call linking model
+ * (a model graph-rag reaches through litellm), and a labeled model per level
+ * of work (1 a quick check, 2 an investigation, 3 a broad or structural
+ * matter). A level without one uses the profile's own model.
+ */
+export interface GraphWorkerSettings {
+  model: string;
+  levelModels?: Partial<Record<WorkerLevel, { provider: string; modelId: string }>> | undefined;
 }

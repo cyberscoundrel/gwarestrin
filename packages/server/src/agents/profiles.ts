@@ -98,7 +98,7 @@ export class ProfileStore {
           : {}),
       ...(input.graphWorker !== undefined
         ? input.graphWorker
-          ? { graphWorker: { model: input.graphWorker.model } }
+          ? { graphWorker: { model: input.graphWorker.model, ...(input.graphWorker.levelModels && Object.keys(input.graphWorker.levelModels).length ? { levelModels: input.graphWorker.levelModels } : {}) } }
           : {}
         : existing?.graphWorker
           ? { graphWorker: existing.graphWorker }
