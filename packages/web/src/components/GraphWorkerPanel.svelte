@@ -203,6 +203,11 @@
                 Halted: {status.master.handlers} stopped workers wait on you (at most {status.master.maxHandlers}). No new batch starts until some are settled.
               </p>
             {/if}
+            {#if status.triage?.on}
+              <span class="text-xs text-faint">
+                Triage ({status.triage.model}) today: {status.triage.today} entries · {status.triage.byLevel["0"] ?? 0} needed nothing{status.triage.sampled ? ` (${status.triage.sampled} sampled anyway)` : ""} · {status.triage.byLevel["1"] ?? 0} quick checks · {status.triage.byLevel["2"] ?? 0} investigations · {status.triage.byLevel["3"] ?? 0} broad · {status.triage.settledNames} names settled without a worker{status.triage.outcomes.needed + status.triage.outcomes.nothing_done ? ` · workers found something to do for ${status.triage.outcomes.needed} of ${status.triage.outcomes.needed + status.triage.outcomes.nothing_done}` : ""}
+              </span>
+            {/if}
             <span class="text-xs text-faint">
               Master on · {status.master.intake} entries waiting for the next batch · {status.master.signals} signals for the master · {status.master.handlers} handlers waiting on you
             </span>

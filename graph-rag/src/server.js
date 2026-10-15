@@ -34,7 +34,8 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
-import { mentionsPrompt, normalize, normalizeKey, normalizeRel, parseMentions, parseSort, resolve, THING_TYPES, thingName } from "./things.js";
+import { mentionsPrompt, normalize, normalizeKey, normalizeRel, parseMentions, parseSort, partialPerson, personCandidates, resolve, THING_TYPES, thingName } from "./things.js";
+import { askDecisionModel, triageRequest, triageVerdict } from "./decisions.js";
 import { firstJob, handlerBrief, signalsMessage, POOL_DEFAULTS, poolSettings, resumeBrief, surveyBrief, taskBrief, taskThreadBrief } from "./pool.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
@@ -72,6 +73,10 @@ const {
   // the graph worker (finds the things statements are about); its model and instructions
   // normally come from the admin's Graph worker profile; these are fallbacks and limits
   WORKER_MODEL = "",
+  // a Jev-style decision model for triage (TypeSafe's Jev through OpenRouter, or a compatible one); no key = no triage
+  DECISION_URL = "https://openrouter.ai/api/alpha/decisions",
+  DECISION_API_KEY = "",
+  DECISION_MODEL = "~typesafe/jev-latest",
   WORKER_TIMEOUT_MS = "120000",
   WORKER_DAILY_CALLS = "300",
   // policy defaults (MAX_GRANT_DAYS, DEFAULT_SHARE_DAYS, STANDING_GRANTS,
@@ -2219,16 +2224,23 @@ async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
       keys: c._keys ?? [],
       score: c.score === undefined ? undefined : Number(c.score),
     }));
-    const r = resolve(m, cands);
+    let r = resolve(m, cands);
+    // a person written partially ("John F.") that would become a new thing: known people it could mean are candidates
+    if (r.create && !r.maybe && m.type === "person" && !m.key && partialPerson(m.name)) {
+      const part = partialPerson(m.name);
+      const people = await adbQuery(`SELECT @rid AS rid, label FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = 'person' AND _norm LIKE :p LIMIT 40`, { p: `${part.first} %` }).catch(() => []);
+      const found = personCandidates(part, people).slice(0, 6);
+      if (found.length) r = { ambiguous: found.map((c) => String(c.rid)) };
+    }
     if (r.ambiguous) {
       // several things go by this name: nothing is linked; a thread (or the sorting step's escalation) picks
       const names = await adbQuery(`SELECT label, _keys FROM [${r.ambiguous.join(",")}]`).catch(() => []);
-      out.push({ name: m.name, type: m.type, unsure: names.map((x) => `${x.label}${(x._keys ?? [])[0] ? ` [${x._keys[0]}]` : ""}`).join(" or ") });
+      out.push({ name: m.name, type: m.type, role: m.role, candidates: r.ambiguous, unsure: names.map((x) => `${x.label}${(x._keys ?? [])[0] ? ` [${x._keys[0]}]` : ""}`).join(" or ") });
       continue;
     }
     if (r.create && r.maybe && unsure === "skip") {
       const other = (await adbQuery(`SELECT label FROM ${r.maybe}`))[0]?.label;
-      out.push({ name: m.name, type: m.type, unsure: other ?? null });
+      out.push({ name: m.name, type: m.type, role: m.role, candidates: [r.maybe], unsure: other ?? null });
       continue;
     }
     let thing = r.use;
@@ -2282,7 +2294,7 @@ async function jobMentions({ rid, from_worker, no_thread, intake }) {
   const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask" });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
   // with a master: into the next batch, with what linking couldn't settle
-  if (intake) await enqueue("intake", { rid: String(rid), unsure: linked.filter((l) => l.unsure).map((l) => `"${l.name}" (${l.type}) may be ${l.unsure}`) }, { key: `intake:${rid}` });
+  if (intake) await intakeWithTriage(String(rid), row, linked, home);
   if (sort) {
     const verdict = parseSort(reply);
     const unsure = linked.filter((l) => l.unsure);
@@ -2412,6 +2424,10 @@ async function finishThread(jobId, { status, summary }) {
   });
   if (next === "done" && RID_RE.test(String(payload.rid))) await adbCommand(`UPDATE ${payload.rid} SET _reviewed_at = :now`, "sql", { now }).catch(() => {});
   // the master hears how its worker ended: done, or stopped (waiting on a decision, or failed for good)
+  if (payload.parent === MASTER && payload.entries?.length && (next === "done" || next === "waiting" || next === "failed")) {
+    const meaningful = JSON.parse((await adbQuery("SELECT changes FROM Job WHERE id = :id", { id: jobId }))[0]?.changes || "[]").filter((c) => ["link", "merge", "relate", "unlink", "delete", "upsert", "move"].includes(c.kind)).length;
+    await recordTriageOutcome(payload.entries, { job: jobId, status: next, changes: meaningful, stopped: next !== "done" });
+  }
   if (payload.parent === MASTER && (next === "done" || next === "waiting" || next === "failed")) {
     const title = payload.task?.title ?? "a worker";
     if (next === "done") await emitSignal("done", { job_id: jobId, data: { title, summary: String(summary ?? "").slice(0, 2000) } });
@@ -2720,7 +2736,7 @@ async function workerRelate(args, identity) {
  * (_kind 'task', at the root: only the admin sees it) that holds its brief
  * and, once done, what it found.
  */
-async function createTask({ title, brief, minutes, parent, from, by, audience }) {
+async function createTask({ title, brief, minutes, parent, from, by, audience, entries }) {
   const name = String(title).replace(/\s+/g, " ").trim().slice(0, 120);
   if (name.length < 4) throw Object.assign(new Error("a task needs a title"), { status: 400 });
   const now = new Date().toISOString();
@@ -2732,7 +2748,7 @@ async function createTask({ title, brief, minutes, parent, from, by, audience })
   const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _kind = 'task' ORDER BY @rid DESC LIMIT 1`, { name }))[0]?.rid);
   const job = await enqueue(
     "review",
-    { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}), ...(from ? { from } : {}), ...(audience === EVERYONE ? { audience } : {}) },
+    { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}), ...(from ? { from } : {}), ...(audience === EVERYONE ? { audience } : {}), ...(entries?.length ? { entries } : {}) },
     { key: `task:${rid}`, priority: 3 },
   );
   return { task: name, job };
@@ -2781,6 +2797,119 @@ async function workerMerge(args, identity, scope) {
   const result = await mergeThings(payload);
   await logChange(identity, { kind: "merge", detail: `"${drop.label}" into "${keep.label}" (${keep._thing_type})`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return result;
+}
+
+/** ---- triage (see decisions.js): what a saved entry needs, decided before the master sees it ---- */
+
+const decisionConfig = () => ({ url: DECISION_URL, key: DECISION_API_KEY, model: DECISION_MODEL });
+
+async function ensureTriageSchema() {
+  await adbCommand("CREATE DOCUMENT TYPE Triage IF NOT EXISTS").catch(() => {});
+  for (const prop of ["id", "rid", "name", "reason", "verdict", "outcome", "model", "created_at"]) await adbCommand(`CREATE PROPERTY Triage.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["level"]) await adbCommand(`CREATE PROPERTY Triage.${prop} IF NOT EXISTS INTEGER`).catch(() => {});
+  await adbCommand("CREATE INDEX IF NOT EXISTS ON Triage (name) NOTUNIQUE").catch(() => {});
+}
+
+/**
+ * A linked entry joins the next batch, triaged first when a decision model
+ * is configured: confident name choices are linked now; an entry that needs
+ * nothing stays out of the batch (but for a small sample); the rest go with
+ * their level and reason.
+ */
+async function intakeWithTriage(rid, row, linked, home) {
+  const plain = linked.filter((l) => l.unsure).map((l) => `"${l.name}" (${l.type}) may be ${l.unsure}`);
+  if (!DECISION_API_KEY) return void (await enqueue("intake", { rid, unsure: plain }, { key: `intake:${rid}` }));
+  // the names linking couldn't settle, with what each candidate is
+  const unsure = [];
+  for (const u of linked.filter((l) => l.unsure && l.candidates?.length)) {
+    const cands = await adbQuery(`SELECT @rid AS rid, label, _thing_type, _keys FROM [${u.candidates.filter((c) => RID_RE.test(String(c))).join(",")}]`).catch(() => []);
+    const candidates = [];
+    for (const c of cands) {
+      const about = (await adbQuery(`SELECT name FROM (SELECT expand(in('ABOUT')) FROM ${c.rid}) WHERE name IS NOT NULL LIMIT 1`).catch(() => []))[0]?.name;
+      candidates.push({ rid: String(c.rid), label: c.label, type: c._thing_type, detail: [(c._keys ?? [])[0], about ? `known from "${about}"` : ""].filter(Boolean).join("; ") });
+    }
+    if (candidates.length) unsure.push({ name: u.name, type: u.type, role: u.role, candidates });
+  }
+  // a few entries about the same things, to tell an update or a contradiction
+  const dsts = (await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => [])).map((e) => String(e.dst)).filter((x) => RID_RE.test(x));
+  const related = dsts.length
+    ? (await adbQuery(`SELECT @rid AS rid, name, text_identity FROM (SELECT expand(in('ABOUT')) FROM [${dsts.slice(0, 6).join(",")}]) WHERE name IS NOT NULL AND text_identity IS NOT NULL LIMIT 8`).catch(() => []))
+        .filter((r) => String(r.rid) !== rid)
+        .slice(0, 3)
+        .map((r) => ({ name: r.name, text: r.text_identity }))
+    : [];
+  const text = Object.keys(row).filter((k) => k.startsWith("text_") && row[k]).map((k) => row[k]).join(" ");
+  let verdict = null;
+  let model = null;
+  try {
+    const res = await askDecisionModel(decisionConfig(), triageRequest({ name: row.name, text }, unsure, related));
+    if (res) {
+      verdict = triageVerdict(res.answers, unsure);
+      model = res.model;
+    }
+  } catch (e) {
+    log.warn(`triage ${row.name}: ${String(e?.message ?? e).slice(0, 160)}`);
+  }
+  if (!verdict) return void (await enqueue("intake", { rid, unsure: plain }, { key: `intake:${rid}` }));
+  // names it's confident about: linked now, the name kept as an alias
+  for (const st of verdict.settled) {
+    const u = unsure.find((x) => x.name === st.name);
+    await thingSeenFrom(st.rid, home).catch(() => {});
+    await aboutOnce(rid, st.rid, u?.role || "mentions").catch(() => {});
+    const t = (await adbQuery(`SELECT _norm, _alias_norms FROM ${st.rid}`).catch(() => []))[0];
+    const n = normalize(st.name);
+    if (t && t._norm !== n && !(t._alias_norms ?? []).includes(n)) await adbCommand(`UPDATE ${st.rid} SET _alias_norms = :a`, "sql", { a: [...(t._alias_norms ?? []), n] }).catch(() => {});
+  }
+  await adbCommand("INSERT INTO Triage SET id = :id, rid = :rid, name = :name, level = :level, reason = :reason, verdict = :v, model = :m, created_at = :now", "sql", {
+    id: randomUUID(),
+    rid,
+    name: row.name,
+    level: verdict.level,
+    reason: verdict.reason ?? "",
+    v: JSON.stringify({ score: verdict.score, pNothing: verdict.pNothing, reasonP: verdict.reasonP, contradiction: verdict.contradiction, settled: verdict.settled.map((x) => ({ name: x.name, label: x.label, p: x.p })), open: verdict.open, sample: verdict.sample }),
+    m: model ?? "",
+    now: new Date().toISOString(),
+  }).catch((e) => log.warn(`triage record: ${String(e).slice(0, 120)}`));
+  if (!verdict.toMaster) return;
+  await enqueue(
+    "intake",
+    {
+      rid,
+      unsure: verdict.open.map((o) => `"${o.name}" unsettled${o.pick ? ` (perhaps ${o.pick}, p ${o.p.toFixed(2)})` : ""}`),
+      triage: { level: verdict.level, reason: verdict.reason, ...(verdict.sample ? { sample: true } : {}), ...(verdict.settled.length ? { settled: verdict.settled.map((x) => `"${x.name}" = ${x.label}`) } : {}) },
+    },
+    { key: `intake:${rid}` },
+  );
+}
+
+/** what the worker then did with triaged entries: the labels triage is tuned on */
+async function recordTriageOutcome(names, outcome) {
+  for (const name of (names ?? []).slice(0, 25)) {
+    const t = (await adbQuery("SELECT id FROM Triage WHERE name = :n ORDER BY created_at DESC LIMIT 1", { n: name }).catch(() => []))[0];
+    if (t) await adbCommand("UPDATE Triage SET outcome = :o WHERE id = :id", "sql", { o: JSON.stringify(outcome), id: t.id }).catch(() => {});
+  }
+}
+
+/** today's triage: entries by level, how many went to the master, names settled, and how its levels matched what workers did */
+async function triageStats() {
+  const day = new Date().toISOString().slice(0, 10);
+  const rows = await adbQuery("SELECT level, verdict, outcome FROM Triage WHERE created_at >= :d LIMIT 5000", { d: day }).catch(() => []);
+  const byLevel = { 0: 0, 1: 0, 2: 0, 3: 0 };
+  let settled = 0;
+  let sampled = 0;
+  const outcomes = { needed: 0, nothing_done: 0 };
+  for (const r of rows) {
+    byLevel[r.level] = (byLevel[r.level] ?? 0) + 1;
+    const v = JSON.parse(r.verdict || "{}");
+    settled += (v.settled ?? []).length;
+    if (v.sample) sampled++;
+    if (r.outcome) {
+      const o = JSON.parse(r.outcome);
+      if (o.changes > 0 || o.stopped) outcomes.needed++;
+      else outcomes.nothing_done++;
+    }
+  }
+  return { on: !!DECISION_API_KEY, model: DECISION_API_KEY ? DECISION_MODEL : null, today: rows.length, byLevel, settledNames: settled, sampled, outcomes };
 }
 
 /**
@@ -2848,7 +2977,7 @@ async function batchTick() {
     const edges = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${p.rid})`).catch(() => []);
     const dsts = edges.map((e) => String(e.dst)).filter((x) => RID_RE.test(x));
     const things = dsts.length ? await adbQuery(`SELECT label, _thing_type FROM [${dsts.join(",")}]`).catch(() => []) : [];
-    entries.push({ name: row.name, home: homeName(positionMap, row._home), links: things.map((t) => `${t.label} (${t._thing_type})`), unsure: p.unsure ?? [] });
+    entries.push({ name: row.name, home: homeName(positionMap, row._home), links: things.map((t) => `${t.label} (${t._thing_type})`), unsure: p.unsure ?? [], ...(p.triage ? { triage: p.triage } : {}) });
   }
   // the batch and its signal first: entries leave the intake only once the master will hear of them
   if (entries.length) {
@@ -2864,7 +2993,7 @@ async function batchTick() {
 async function masterStartWorker(args, identity) {
   const names = (args.entries ?? []).slice(0, 25);
   const brief = [String(args.brief), ...(names.length ? ["", `The entries this is about: ${names.map((n) => `"${n}"`).join(", ")} (read them in the graph).`] : [])].join("\n");
-  const r = await createTask({ title: args.title, brief, minutes: args.minutes, parent: MASTER, by: identity.user, audience: args.audience === "everyone" ? EVERYONE : undefined });
+  const r = await createTask({ title: args.title, brief, minutes: args.minutes, parent: MASTER, by: identity.user, audience: args.audience === "everyone" ? EVERYONE : undefined, entries: names });
   return { ...r, note: "Started: you'll get a signal when it's done or stopped." };
 }
 
@@ -4024,6 +4153,7 @@ async function workerStatus() {
     model: workerModel() || null,
     threads: { ...Object.fromEntries(threads.map((c) => [c.status, Number(c.n)])), today: await threadsToday() },
     master: await masterStatus().catch(() => null),
+    triage: await triageStats().catch(() => null),
     open_questions: Number(questions[0]?.n ?? 0),
     open_proposals: Number(proposals[0]?.n ?? 0),
     jobs: Object.fromEntries(counts.map((c) => [c.status, Number(c.n)])),
@@ -4403,6 +4533,7 @@ async function boot() {
     setInterval(() => void workerTick().catch((e) => log.warn(`worker: ${String(e).slice(0, 160)}`)), 5_000);
     setInterval(() => void expireLeases().then(wakeIdleWaiting).catch((e) => log.warn(`worker leases: ${String(e).slice(0, 160)}`)), 60_000);
     await ensureMasterSchema();
+    await ensureTriageSchema();
     setInterval(() => void batchTick().catch((e) => log.warn(`batches: ${String(e).slice(0, 160)}`)), 30_000);
     log.info(`graph worker: ${worker.enabled && workerModel() ? `on (${workerModel()}${worker.profile ? `, from profile ${worker.profile}` : ""})` : "off"}`);
     if (!docStore) log.warn(`DOC_STORE=${DOC_STORE} isn't a known store: documents can't be ingested`);
