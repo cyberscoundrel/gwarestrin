@@ -2541,19 +2541,35 @@ async function logChange(identity, change) {
 async function workerUpsert(args, identity, scope) {
   await assertNotWaiting(identity);
   const own = (await adbQuery(`SELECT name, _origin FROM ${identity.role.entry}`).catch(() => []))[0];
-  const home = args.home === undefined ? (own?._origin ?? positionMap.root) : resolveWriteHome(scope, args.home, { everyoneOk: (await threadAudience(identity)) === EVERYONE });
   const now = Date.now();
   const entities = args.entities.map((e) => {
     const v = parseValidUntil(e.valid_until, now);
     return v === undefined ? e : { ...e, valid_until: v.valid_until ?? "lasting" };
   });
-  const write = { entities, home, floor: derivedFloor(identity, home), written_at: new Date(now).toISOString(), from_worker: true };
-  if (args.propose) {
-    return { ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE };
+  // where each lands: the home asked for; else an existing entry's own home (it's updated where it
+  // lives, never copied next to it); else the worker's own entry's
+  const asked = args.home === undefined ? undefined : resolveWriteHome(scope, args.home, { everyoneOk: (await threadAudience(identity)) === EVERYONE });
+  const byHome = new Map();
+  for (const e of entities) {
+    let home = asked;
+    if (home === undefined) {
+      const found = await adbQuery(`SELECT _origin FROM ${ENTITY_LABEL} WHERE name = :n AND (_kind IS NULL OR _kind IN ['document', 'section', 'task']) LIMIT 2`, { n: e.name }).catch(() => []);
+      home = found.length === 1 && found[0]._origin ? found[0]._origin : (own?._origin ?? positionMap.root);
+    }
+    if (!byHome.has(home)) byHome.set(home, []);
+    byHome.get(home).push(e);
   }
-  const applied = await upsertEntities(write);
-  await logChange(identity, { kind: "upsert", entries: entities.map((e) => e.name), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
-  return applied;
+  const results = [];
+  for (const [home, list] of byHome) {
+    const write = { entities: list, home, floor: derivedFloor(identity, home), written_at: new Date(now).toISOString(), from_worker: true };
+    if (args.propose) {
+      results.push({ ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE });
+      continue;
+    }
+    results.push(await upsertEntities(write));
+  }
+  if (!args.propose) await logChange(identity, { kind: "upsert", entries: entities.map((e) => e.name), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return results.length === 1 ? results[0] : { results };
 }
 
 /** who a task thread writes for: "everyone" when the admin started its survey for everyone */
