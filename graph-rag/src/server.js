@@ -35,7 +35,7 @@ import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
 import { mentionsPrompt, normalize, normalizeKey, normalizeRel, parseMentions, parseSort, resolve, THING_TYPES, thingName } from "./things.js";
-import { firstJob, POOL_DEFAULTS, poolSettings, resumeBrief, surveyBrief, taskBrief, taskThreadBrief } from "./pool.js";
+import { firstJob, handlerBrief, signalsMessage, POOL_DEFAULTS, poolSettings, resumeBrief, surveyBrief, taskBrief, taskThreadBrief } from "./pool.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
@@ -775,7 +775,10 @@ async function upsertEntities({ entities, home, floor, written_at, from_worker }
             // one-call linking, or a thread; what a thread wrote only gets linked
             const rid = String(rows[0].rid);
             const kind = from_worker ? "mentions" : firstJob(worker.pool);
-            await enqueue(kind, { rid, ...(from_worker ? { from_worker: true } : {}) }, { key: `${kind}:${rid}` }).catch(() => {});
+            // with a master: linked first (when there's a linking model), then into the next batch
+            const toMaster = !from_worker && worker.pool.master && worker.pool.poolSize > 0;
+            if (toMaster && !workerModel()) await enqueue("intake", { rid }, { key: `intake:${rid}` }).catch(() => {});
+            else await enqueue(kind, { rid, ...(from_worker ? { from_worker: true } : {}), ...(toMaster ? { intake: true } : {}) }, { key: `${kind}:${rid}` }).catch(() => {});
             await meetAssertion(String(rows[0].rid), vec);
           })
           .catch((e) => log.warn(`meeting questions for ${jobs[i].name}: ${String(e).slice(0, 120)}`));
@@ -2266,18 +2269,20 @@ async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
  * thread should look (and an unsure match always sends it there instead of
  * to a person). Entries a worker wrote never go back to a thread.
  */
-async function jobMentions({ rid, from_worker, no_thread }) {
+async function jobMentions({ rid, from_worker, no_thread, intake }) {
   if (!RID_RE.test(String(rid))) return;
   const row = (await adbQuery(`SELECT FROM ${rid}`))[0];
   if (!row?.name || (row._kind && !THING_KINDS_READ.includes(row._kind))) return; // gone, or a question/thing/document entry
   const facets = Object.fromEntries(Object.keys(FACETS).filter((f) => row[`text_${f}`]).map((f) => [f, row[`text_${f}`]]));
   if (Object.keys(facets).length === 0) return;
-  const sort = worker.pool.poolSize > 0 && worker.pool.sortFirst && !from_worker && !no_thread;
+  const sort = worker.pool.poolSize > 0 && worker.pool.sortFirst && !worker.pool.master && !from_worker && !no_thread && !intake;
   const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort }));
   const mentions = parseMentions(reply);
   const home = effectiveHome(positionMap, row._home);
   const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask" });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
+  // with a master: into the next batch, with what linking couldn't settle
+  if (intake) await enqueue("intake", { rid: String(rid), unsure: linked.filter((l) => l.unsure).map((l) => `"${l.name}" (${l.type}) may be ${l.unsure}`) }, { key: `intake:${rid}` });
   if (sort) {
     const verdict = parseSort(reply);
     const unsure = linked.filter((l) => l.unsure);
@@ -2406,6 +2411,12 @@ async function finishThread(jobId, { status, summary }) {
     id: jobId,
   });
   if (next === "done" && RID_RE.test(String(payload.rid))) await adbCommand(`UPDATE ${payload.rid} SET _reviewed_at = :now`, "sql", { now }).catch(() => {});
+  // the master hears how its worker ended: done, or stopped (waiting on a decision, or failed for good)
+  if (payload.parent === MASTER && (next === "done" || next === "waiting" || next === "failed")) {
+    const title = payload.task?.title ?? "a worker";
+    if (next === "done") await emitSignal("done", { job_id: jobId, data: { title, summary: String(summary ?? "").slice(0, 2000) } });
+    else await emitSignal("stopped", { job_id: jobId, data: { title, reason: next === "failed" ? "it failed three times" : "it's waiting on a decision", ...(next === "failed" ? { error: String(summary ?? "").slice(0, 600) } : { ...(await openItems(jobId)), summary: String(summary ?? "").slice(0, 1200) }) } });
+  }
   // a task's report stays on its task entry (what the survey found, for the admin and later tasks)
   if (payload.task && RID_RE.test(String(payload.rid)) && summary) await adbCommand(`UPDATE ${payload.rid} SET text_state = :sum`, "sql", { sum: String(summary).slice(0, 6000) }).catch(() => {});
   return { status: next };
@@ -2456,7 +2467,7 @@ async function listQuestions(status = "open") {
 }
 
 /** answer (or dismiss) questions; each one's thread resumes with the answer */
-async function answerQuestions(ids, { answer, dismiss = false }, by) {
+async function answerQuestions(ids, { answer, dismiss = false, quiet = false }, by) {
   const done = [];
   for (const id of ids) {
     if (!PENDING_ID_RE.test(String(id))) continue;
@@ -2474,7 +2485,7 @@ async function answerQuestions(ids, { answer, dismiss = false }, by) {
     if (dismiss) {
       // nothing to resume with: the thread is done once nothing else waits
       if (!left) await adbCommand("UPDATE Job SET status = 'done', updated_at = :now WHERE id = :id AND status = 'waiting'", "sql", { now, id: q.job_id });
-    } else {
+    } else if (!quiet) {
       await resumeThread(q.job_id, { question: q.question, answer, answered_by: by });
     }
     done.push(id);
@@ -2693,7 +2704,7 @@ async function workerRelate(args, identity) {
  * (_kind 'task', at the root: only the admin sees it) that holds its brief
  * and, once done, what it found.
  */
-async function createTask({ title, brief, minutes, parent, by, audience }) {
+async function createTask({ title, brief, minutes, parent, from, by, audience }) {
   const name = String(title).replace(/\s+/g, " ").trim().slice(0, 120);
   if (name.length < 4) throw Object.assign(new Error("a task needs a title"), { status: 400 });
   const now = new Date().toISOString();
@@ -2705,7 +2716,7 @@ async function createTask({ title, brief, minutes, parent, by, audience }) {
   const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _kind = 'task' ORDER BY @rid DESC LIMIT 1`, { name }))[0]?.rid);
   const job = await enqueue(
     "review",
-    { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}), ...(audience === EVERYONE ? { audience } : {}) },
+    { rid, task: { title: name, brief: String(brief).slice(0, 6000) }, minutes: Math.max(5, Math.min(180, Number(minutes) || 60)), ...(parent ? { parent } : {}), ...(from ? { from } : {}), ...(audience === EVERYONE ? { audience } : {}) },
     { key: `task:${rid}`, priority: 3 },
   );
   return { task: name, job };
@@ -2714,10 +2725,20 @@ async function createTask({ title, brief, minutes, parent, by, audience }) {
 /** a worker queues follow-up work (a survey fanning out by topic); a few per thread */
 async function workerFollowup(args, identity) {
   await assertNotWaiting(identity);
-  const queued = Number((await adbQuery("SELECT count(*) AS n FROM Job WHERE kind = 'review' AND payload LIKE :p", { p: `%"parent":"${identity.role.job}"%` }))[0]?.n ?? 0);
+  const queued = Number((await adbQuery("SELECT count(*) AS n FROM Job WHERE kind = 'review' AND (payload LIKE :p OR payload LIKE :f)", { p: `%"parent":"${identity.role.job}"%`, f: `%"from":"${identity.role.job}"%` }))[0]?.n ?? 0);
+  // a master's worker's follow-ups report to the master too
+  const own = JSON.parse((await adbQuery("SELECT payload FROM Job WHERE id = :id", { id: identity.role.job }))[0]?.payload || "{}");
   if (queued >= 20) throw new Error("this thread already queued 20 follow-ups: finish with what's queued");
   // follow-ups write for whoever their survey wrote for
-  const r = await createTask({ title: args.title, brief: args.brief, minutes: args.minutes, parent: identity.role.job, by: identity.user, audience: await threadAudience(identity) });
+  const r = await createTask({
+    title: args.title,
+    brief: args.brief,
+    minutes: args.minutes,
+    parent: own.parent === MASTER ? MASTER : identity.role.job,
+    from: identity.role.job,
+    by: identity.user,
+    audience: await threadAudience(identity),
+  });
   await logChange(identity, { kind: "followup", detail: r.task });
   return { ...r, note: "Queued: another thread does it. Don't wait for it." };
 }
@@ -2744,6 +2765,175 @@ async function workerMerge(args, identity, scope) {
   const result = await mergeThings(payload);
   await logChange(identity, { kind: "merge", detail: `"${drop.label}" into "${keep.label}" (${keep._thing_type})`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return result;
+}
+
+/**
+ * ---- the master (pool.master): a long-running thread plans batches of saved
+ * entries and starts workers; graph-rag keeps its inbox (Signal), the batches
+ * (Batch) and the handlers (Job kind "handler": one stopped worker each, which
+ * the operator settles). Workers started by the master have parent MASTER.
+ */
+const MASTER = "master";
+
+async function ensureMasterSchema() {
+  for (const type of ["Signal", "Batch"]) await adbCommand(`CREATE DOCUMENT TYPE ${type} IF NOT EXISTS`).catch(() => {});
+  for (const prop of ["id", "kind", "job_id", "batch_id", "data", "status", "created_at"]) await adbCommand(`CREATE PROPERTY Signal.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["id", "entries", "status", "created_at"]) await adbCommand(`CREATE PROPERTY Batch.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  await adbCommand("CREATE INDEX IF NOT EXISTS ON Signal (status) NOTUNIQUE").catch(() => {});
+}
+
+async function emitSignal(kind, { job_id = null, batch_id = null, data = {} } = {}) {
+  await adbCommand("INSERT INTO Signal SET id = :id, kind = :k, job_id = :j, batch_id = :b, data = :d, status = 'new', created_at = :now", "sql", {
+    id: randomUUID(),
+    k: kind,
+    j: job_id,
+    b: batch_id,
+    d: JSON.stringify(data),
+    now: new Date().toISOString(),
+  });
+}
+
+/** a stopped worker's open questions and undecided proposals */
+async function openItems(jobId) {
+  const questions = await adbQuery("SELECT id, question, options FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: jobId }).catch(() => []);
+  const proposals = await adbQuery("SELECT id, kind, note FROM PendingWrite WHERE job_id = :id AND status = 'pending'", { id: jobId }).catch(() => []);
+  return {
+    questions: questions.map((q) => ({ id: q.id, question: q.question, options: JSON.parse(q.options || "[]") })),
+    proposals: proposals.map((p) => ({ id: p.id, kind: p.kind, reason: p.note ?? "" })),
+  };
+}
+
+const openHandlers = async () => Number((await adbQuery("SELECT count(*) AS n FROM Job WHERE kind = 'handler' AND status IN ['pending', 'running', 'waiting']").catch(() => []))[0]?.n ?? 0);
+
+/** the master's status: halted when too many stopped workers wait on the operator */
+async function masterStatus() {
+  const handlers = await openHandlers();
+  const intake = Number((await adbQuery("SELECT count(*) AS n FROM Job WHERE kind = 'intake' AND status = 'pending'").catch(() => []))[0]?.n ?? 0);
+  const signals = Number((await adbQuery("SELECT count(*) AS n FROM Signal WHERE status = 'new'").catch(() => []))[0]?.n ?? 0);
+  return { on: !!worker.pool.master && worker.pool.poolSize > 0, handlers, maxHandlers: worker.pool.maxHandlers, halted: handlers >= worker.pool.maxHandlers, intake, signals };
+}
+
+/** a batch closes at batchSize entries or when its oldest has waited batchMinutes; not while halted */
+async function batchTick() {
+  const st = await masterStatus();
+  if (!st.on || st.halted || !st.intake) return;
+  const rows = await adbQuery("SELECT id, payload, created_at FROM Job WHERE kind = 'intake' AND status = 'pending' ORDER BY created_at ASC LIMIT " + Math.floor(worker.pool.batchSize));
+  const oldest = Date.parse(rows[0]?.created_at ?? "");
+  if (rows.length < worker.pool.batchSize && !(Date.now() - oldest >= worker.pool.batchMinutes * 60_000)) return;
+  const batch = randomUUID();
+  const entries = [];
+  for (const r of rows) {
+    const claimed = await adbCommand("UPDATE Job SET status = 'done', summary = :b, updated_at = :now WHERE id = :id AND status = 'pending'", "sql", { b: `batch ${batch}`, now: new Date().toISOString(), id: r.id });
+    if (Number(claimed?.[0]?.count ?? 0) !== 1) continue;
+    const p = JSON.parse(r.payload || "{}");
+    if (!RID_RE.test(String(p.rid))) continue;
+    const row = (await adbQuery(`SELECT name, _home FROM ${p.rid}`).catch(() => []))[0];
+    if (!row?.name) continue;
+    const edges = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${p.rid})`).catch(() => []);
+    const dsts = edges.map((e) => String(e.dst)).filter((x) => RID_RE.test(x));
+    const things = dsts.length ? await adbQuery(`SELECT label, _thing_type FROM [${dsts.join(",")}]`).catch(() => []) : [];
+    entries.push({ name: row.name, home: homeName(positionMap, row._home), links: things.map((t) => `${t.label} (${t._thing_type})`), unsure: p.unsure ?? [] });
+  }
+  if (!entries.length) return;
+  await adbCommand("INSERT INTO Batch SET id = :id, entries = :e, status = 'open', created_at = :now", "sql", { id: batch, e: JSON.stringify(entries.map((e) => e.name)), now: new Date().toISOString() });
+  await emitSignal("batch", { batch_id: batch, data: { entries } });
+  log.info(`batch ${batch.slice(0, 8)}: ${entries.length} entries for the master`);
+}
+
+/** the master starts a worker: a task (a brief, the entries it's about), run by the pool */
+async function masterStartWorker(args, identity) {
+  const names = (args.entries ?? []).slice(0, 25);
+  const brief = [String(args.brief), ...(names.length ? ["", `The entries this is about: ${names.map((n) => `"${n}"`).join(", ")} (read them in the graph).`] : [])].join("\n");
+  const r = await createTask({ title: args.title, brief, minutes: args.minutes, parent: MASTER, by: identity.user, audience: args.audience === "everyone" ? EVERYONE : undefined });
+  return { ...r, note: "Started: you'll get a signal when it's done or stopped." };
+}
+
+/** one worker's situation, for the master or its handler */
+async function workerSituation(jobId) {
+  if (!JOB_ID_RE.test(String(jobId))) throw new Error("which worker (its job id)");
+  const job = (await adbQuery("SELECT status, payload, summary, changes, agent_id, updated_at FROM Job WHERE id = :id AND kind = 'review'", { id: jobId }))[0];
+  if (!job) throw new Error(`no worker ${jobId}`);
+  const p = JSON.parse(job.payload || "{}");
+  return {
+    job: jobId,
+    title: p.task?.title ?? null,
+    status: job.status,
+    brief: String(p.task?.brief ?? "").slice(0, 3000),
+    report: String(job.summary ?? "").slice(0, 3000),
+    changes: JSON.parse(job.changes || "[]").slice(-30),
+    ...(await openItems(jobId)),
+  };
+}
+
+/** the master (or a handler, on the operator's word) answers a stopped worker: it resumes with the message */
+async function answerWorker(jobId, answer, by) {
+  const items = await openItems(jobId);
+  if (items.questions.length) await answerQuestions(items.questions.map((q) => q.id), { answer, quiet: true }, by);
+  await resumeThread(jobId, { message: String(answer).slice(0, 3000), answered_by: by });
+  return { resumed: true, answered: items.questions.length };
+}
+
+/** raw commands and widening who sees something are the operator's, whatever the master thinks */
+async function needsOperator(id) {
+  const rec = (await adbQuery("SELECT kind, payload FROM PendingWrite WHERE id = :id", { id }))[0];
+  if (!rec) return null;
+  if (rec.kind === "command") return "a raw command";
+  if (rec.kind === "rehome") {
+    const m = JSON.parse(rec.payload);
+    if (moveKind(positionMap, m.from, m.to) === "widen") return "widening who sees something";
+  }
+  return null;
+}
+
+/** the master closes a worker it won't pursue: questions dismissed, proposals rejected, no resume */
+async function closeWorker(jobId, summary, identity) {
+  await adbCommand("UPDATE Job SET status = 'closed', summary = :s, updated_at = :now WHERE id = :id AND kind = 'review'", "sql", { s: String(summary ?? "closed by the master").slice(0, 2000), now: new Date().toISOString(), id: jobId });
+  const items = await openItems(jobId);
+  if (items.questions.length) await answerQuestions(items.questions.map((q) => q.id), { answer: "", dismiss: true }, identity.user);
+  for (const p of items.proposals) await rejectPending(p.id, identity, "closed by the master").catch(() => {});
+  return { closed: true };
+}
+
+/** the master hands a stop it can't decide to a handler, who settles it with the operator */
+async function startHandler(jobId, description, identity) {
+  const sit = await workerSituation(jobId);
+  if (sit.status !== "waiting") throw new Error(`worker ${jobId} isn't waiting (${sit.status})`);
+  const st = await masterStatus();
+  if (st.halted) throw new Error(`${st.handlers} handlers already wait on the operator (at most ${st.maxHandlers}): settle what you can, the rest waits`);
+  const id = randomUUID();
+  const now = new Date().toISOString();
+  await adbCommand(
+    "INSERT INTO Job SET id = :id, kind = 'handler', job_key = :k, payload = :p, status = 'pending', attempts = 0, priority = 9, run_after = :now, created_at = :now, updated_at = :now",
+    "sql",
+    { id, k: `handler:${jobId}:${id.slice(0, 8)}`, p: JSON.stringify({ for_job: jobId, title: sit.title, description: String(description).slice(0, 3000), by: identity.user }), now },
+  );
+  return { handler: id, note: "Handed to the operator: you'll get a signal when it's resolved." };
+}
+
+/** the handler records the operator's decision: answers, applies or rejects proposals; the worker resumes; the master hears */
+async function handlerDecide(args, identity) {
+  const h = (await adbQuery("SELECT payload, status FROM Job WHERE id = :id AND kind = 'handler'", { id: identity.role.job }))[0];
+  if (!h) throw new Error("no such handler");
+  if (h.status === "done") throw new Error("already decided");
+  const { for_job } = JSON.parse(h.payload || "{}");
+  const items = await openItems(for_job);
+  const mine = new Set(items.proposals.map((p) => p.id));
+  const by = `${identity.user} (on the operator's word)`;
+  const done = [];
+  for (const id of args.approve ?? []) {
+    if (!mine.has(id)) continue;
+    await approvePending(id, { ...identity, user: by }, "", { quiet: true }).then(() => done.push(`applied ${id.slice(0, 8)}`), (e) => done.push(`couldn't apply ${id.slice(0, 8)}: ${String(e.message ?? e).slice(0, 120)}`));
+  }
+  for (const r of args.reject ?? []) {
+    if (!mine.has(r.id)) continue;
+    await rejectPending(r.id, { ...identity, user: by }, r.reason ?? "", { quiet: true }).then(() => done.push(`rejected ${r.id.slice(0, 8)}`));
+  }
+  if (items.questions.length && args.answer) await answerQuestions(items.questions.map((q) => q.id), { answer: args.answer, quiet: true }, by);
+  const decision = [args.answer ? `The operator: ${args.answer}` : "", ...done].filter(Boolean).join("; ");
+  await resumeThread(for_job, { message: decision || "The operator looked at it: carry on.", answered_by: by });
+  await adbCommand("UPDATE Job SET status = 'done', summary = :s, updated_at = :now WHERE id = :id", "sql", { s: decision.slice(0, 2000), now: new Date().toISOString(), id: identity.role.job });
+  await emitSignal("resolved", { job_id: for_job, data: { decision } });
+  return { decided: true, worker_resumes: for_job, note: "Recorded: the worker resumes and the master knows. Tell the operator what you recorded." };
 }
 
 /** the admin's decision on a worker's proposal (through the liaison or Approvals); rejected = the thread decides again */
@@ -2999,7 +3189,7 @@ function mayReview(identity, rec) {
   return true;
 }
 
-async function approvePending(id, identity, reason = "") {
+async function approvePending(id, identity, reason = "", { quiet = false } = {}) {
   const approver = identity.user;
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
   const rows = await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id });
@@ -3023,7 +3213,7 @@ async function approvePending(id, identity, reason = "") {
       id,
     }).catch(() => {});
     // a worker's proposal that couldn't be applied: the waiting thread hears why
-    if (rec.job_id) await resumeThread(rec.job_id, { proposal: rec.note || rec.kind, decision: "failed", reason: String(err?.message ?? err).slice(0, 600), answered_by: approver }).catch(() => {});
+    if (rec.job_id && !quiet) await resumeThread(rec.job_id, { proposal: rec.note || rec.kind, decision: "failed", reason: String(err?.message ?? err).slice(0, 600), answered_by: approver }).catch(() => {});
     throw err;
   }
   await adbCommand("UPDATE PendingWrite SET status = 'approved', executed_at = :now WHERE id = :id", "sql", {
@@ -3032,12 +3222,12 @@ async function approvePending(id, identity, reason = "") {
   });
   console.log(`[graph-rag] write ${id} approved by ${approver}`);
   // a worker thread's proposal: it waited for this, and carries on
-  if (rec.job_id) await resumeThread(rec.job_id, { proposal: rec.note || rec.kind, decision: "approved", reason, answered_by: approver }).catch(() => {});
+  if (rec.job_id && !quiet) await resumeThread(rec.job_id, { proposal: rec.note || rec.kind, decision: "approved", reason, answered_by: approver }).catch(() => {});
   // shares that waited on this write can now point at its entities
   if (rec.kind === "upsert") await resolveWaitingShares(id).catch((e) => log.warn(`waiting shares for ${id}: ${String(e).slice(0, 160)}`));
   return { approved: true, result };
 }
-async function rejectPending(id, identity, reason = "") {
+async function rejectPending(id, identity, reason = "", { quiet = false } = {}) {
   const rejector = identity.user;
   if (!PENDING_ID_RE.test(id)) throw new Error("invalid pending id");
   const rows = await adbQuery("SELECT FROM PendingWrite WHERE id = :id AND status = 'pending'", { id });
@@ -3052,7 +3242,7 @@ async function rejectPending(id, identity, reason = "") {
   // a rejected ingest leaves nothing behind
   if (rows[0].kind === "ingest" && docStore) await docStore.remove(JSON.parse(rows[0].payload).doc_id).catch(() => {});
   // a worker thread's proposal: the thread decides again (wherever it was rejected)
-  if (rows[0].job_id) await resumeThread(rows[0].job_id, { proposal: rows[0].note || rows[0].kind, decision: "rejected", reason, answered_by: rejector }).catch(() => {});
+  if (rows[0].job_id && !quiet) await resumeThread(rows[0].job_id, { proposal: rows[0].note || rows[0].kind, decision: "rejected", reason, answered_by: rejector }).catch(() => {});
   return { rejected: true };
 }
 
@@ -3373,6 +3563,95 @@ YOUR TURN with a short report: you're resumed with the answer later, in this sam
         need("read");
         return { content: [{ type: "text", text: JSON.stringify(await raiseQuestion(identity, args)) }] };
       },
+    );
+  }
+
+  // ---- the master's tools: start workers, settle stops, hand the rest to the operator ----
+  if (SCOPED && role === "master") {
+    server.tool(
+      "start_worker",
+      `Start a worker on a piece of work: a title, a precise brief (what to do, which entries, what a good
+result is) and the entries it's about (by name: the worker reads them). Group entries that belong
+together into one worker. audience "everyone" lets it write for Everyone (only for organization-wide
+knowledge). You get a signal when it's done or stopped.`,
+      {
+        title: z.string().min(4).max(120),
+        brief: z.string().min(20).max(6000),
+        entries: z.array(z.string().max(200)).max(25).optional(),
+        minutes: z.number().int().min(5).max(180).optional(),
+        audience: z.enum(["everyone", "default"]).optional(),
+      },
+      async (args) => ({ content: [{ type: "text", text: JSON.stringify(await masterStartWorker(args, identity)) }] }),
+    );
+    server.tool(
+      "worker_status",
+      "A worker's situation: its status, brief, report, changes, and the questions and proposals it's waiting on.",
+      { job: z.string() },
+      async (args) => ({ content: [{ type: "text", text: JSON.stringify(await workerSituation(args.job)) }] }),
+    );
+    server.tool(
+      "answer_worker",
+      `Settle a stopped worker yourself when you can: your answer to its questions, or what to do next. It
+resumes in its own conversation.`,
+      { job: z.string(), answer: z.string().min(2).max(3000) },
+      async (args) => ({ content: [{ type: "text", text: JSON.stringify(await answerWorker(args.job, args.answer, identity.user)) }] }),
+    );
+    server.tool(
+      "decide_proposal",
+      `Apply or reject a worker's proposal yourself (its worker resumes with your decision). Raw commands and
+widening who sees something are the operator's: hand those to a handler.`,
+      { id: z.string(), approve: z.boolean(), reason: z.string().max(1000).optional() },
+      async (args) => {
+        const why = await needsOperator(args.id);
+        if (why) throw new Error(`${why} is the operator's decision: start a handler for this worker`);
+        return { content: [{ type: "text", text: JSON.stringify(await decideProposal(args.id, args.approve, args.reason ?? "", identity)) }] };
+      },
+    );
+    server.tool(
+      "close_worker",
+      "Close a worker you won't pursue (its questions dismissed, its proposals rejected). Say why.",
+      { job: z.string(), summary: z.string().min(3).max(2000) },
+      async (args) => ({ content: [{ type: "text", text: JSON.stringify(await closeWorker(args.job, args.summary, identity)) }] }),
+    );
+    server.tool(
+      "start_handler",
+      `Hand a stopped worker you can't decide for to the operator: a handler thread explains it to them and
+records their decision. Describe what's going on and what needs deciding, plainly.`,
+      { job: z.string(), description: z.string().min(10).max(3000) },
+      async (args) => ({ content: [{ type: "text", text: JSON.stringify(await startHandler(args.job, args.description, identity)) }] }),
+    );
+    server.tool(
+      "pool_status",
+      "How the pool stands: workers by status, handlers waiting on the operator (and whether that halts new batches), entries waiting for the next batch.",
+      {},
+      async () => {
+        const counts = await adbQuery("SELECT status, count(*) AS n FROM Job WHERE kind = 'review' GROUP BY status").catch(() => []);
+        return { content: [{ type: "text", text: JSON.stringify({ workers: Object.fromEntries(counts.map((c) => [c.status, Number(c.n)])), ...(await masterStatus()) }) }] };
+      },
+    );
+  }
+
+  // ---- a handler's tools: one stopped worker, settled with the operator ----
+  if (SCOPED && role === "handler") {
+    server.tool(
+      "worker_status",
+      "The stopped worker you handle: its brief, report, changes, and the questions and proposals it waits on.",
+      {},
+      async () => {
+        const h = (await adbQuery("SELECT payload FROM Job WHERE id = :id AND kind = 'handler'", { id: identity.role.job }))[0];
+        return { content: [{ type: "text", text: JSON.stringify(await workerSituation(JSON.parse(h?.payload || "{}").for_job)) }] };
+      },
+    );
+    server.tool(
+      "decide_for_worker",
+      `Record the operator's decision, only on their word: their answer to the worker's questions, which
+proposals to apply, which to reject (with their reason). The worker resumes and the master is told.`,
+      {
+        answer: z.string().max(3000).optional(),
+        approve: z.array(z.string()).max(20).optional(),
+        reject: z.array(z.object({ id: z.string(), reason: z.string().max(600).optional() })).max(20).optional(),
+      },
+      async (args) => ({ content: [{ type: "text", text: JSON.stringify(await handlerDecide(args, identity)) }] }),
     );
   }
 
@@ -3724,6 +4003,7 @@ async function workerStatus() {
     ...worker,
     model: workerModel() || null,
     threads: { ...Object.fromEntries(threads.map((c) => [c.status, Number(c.n)])), today: await threadsToday() },
+    master: await masterStatus().catch(() => null),
     open_questions: Number(questions[0]?.n ?? 0),
     open_proposals: Number(proposals[0]?.n ?? 0),
     jobs: Object.fromEntries(counts.map((c) => [c.status, Number(c.n)])),
@@ -3794,6 +4074,56 @@ app.post("/api/worker/threads/:id/finish", (req, res) => {
   if (!rootOnly(req, res)) return;
   void finishThread(req.params.id, req.body ?? {}).then((r) => res.json(r), (e) => httpError(res, e));
 });
+/** the master's inbox: new signals (the workspace delivers them to the master thread) */
+app.get("/api/worker/signals", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  void (async () => {
+    const rows = await adbQuery("SELECT id, kind, job_id, batch_id, data, created_at FROM Signal WHERE status = 'new' ORDER BY created_at ASC LIMIT 50");
+    const signals = rows.map((r) => ({ ...r, data: JSON.parse(r.data || "{}") }));
+    const status = await masterStatus();
+    return { signals, status, message: signals.length ? signalsMessage(signals, status) : "" };
+  })().then((r) => res.json(r), (e) => httpError(res, e));
+});
+app.post("/api/worker/signals/ack", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).filter((i) => JOB_ID_RE.test(String(i))).slice(0, 100);
+  void (async () => {
+    for (const id of ids) await adbCommand("UPDATE Signal SET status = 'delivered' WHERE id = :id", "sql", { id });
+    return { acked: ids.length };
+  })().then((r) => res.json(r), (e) => httpError(res, e));
+});
+/** handlers to start (not limited by the pool: they wait on the operator) */
+app.post("/api/worker/handlers/claim", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  void (async () => {
+    const rows = await adbQuery("SELECT id, payload FROM Job WHERE kind = 'handler' AND status = 'pending' ORDER BY created_at ASC LIMIT 10");
+    const out = [];
+    for (const r of rows) {
+      const ok = await adbCommand("UPDATE Job SET status = 'running', updated_at = :now WHERE id = :id AND status = 'pending'", "sql", { now: new Date().toISOString(), id: r.id });
+      if (Number(ok?.[0]?.count ?? 0) !== 1) continue;
+      const p = JSON.parse(r.payload || "{}");
+      out.push({ job: r.id, worker: p.for_job, title: p.title ?? "a stopped worker", message: handlerBrief({ worker: { job: p.for_job, title: p.title ?? "" }, description: p.description }) });
+    }
+    return { handlers: out };
+  })().then((r) => res.json(r), (e) => httpError(res, e));
+});
+/** a handler's thread asked the operator: it waits (it stays in the rail) */
+app.post("/api/worker/handlers/:id/waiting", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  void adbCommand("UPDATE Job SET status = 'waiting', agent_id = :a, updated_at = :now WHERE id = :id AND kind = 'handler' AND status IN ['running', 'pending']", "sql", {
+    a: typeof req.body?.agent_id === "string" ? req.body.agent_id.slice(0, 80) : null,
+    now: new Date().toISOString(),
+    id: req.params.id,
+  }).then(() => res.json({ ok: true }), (e) => httpError(res, e));
+});
+app.get("/api/worker/handlers", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  void (async () => {
+    const rows = await adbQuery("SELECT id, payload, status, agent_id, summary, created_at, updated_at FROM Job WHERE kind = 'handler' ORDER BY created_at DESC LIMIT 100");
+    return { handlers: rows.map((r) => ({ id: r.id, ...JSON.parse(r.payload || "{}"), status: r.status, agent_id: r.agent_id ?? null, decision: r.summary ?? "", created_at: r.created_at, updated_at: r.updated_at })) };
+  })().then((r) => res.json(r), (e) => httpError(res, e));
+});
+
 /** recent threads: which entry, how it went, its agent (for the audit view and clean-up) */
 app.get("/api/worker/threads", (req, res) => {
   if (!rootOnly(req, res)) return;
@@ -4052,6 +4382,8 @@ async function boot() {
     await ensureWorkerSchema();
     setInterval(() => void workerTick().catch((e) => log.warn(`worker: ${String(e).slice(0, 160)}`)), 5_000);
     setInterval(() => void expireLeases().then(wakeIdleWaiting).catch((e) => log.warn(`worker leases: ${String(e).slice(0, 160)}`)), 60_000);
+    await ensureMasterSchema();
+    setInterval(() => void batchTick().catch((e) => log.warn(`batches: ${String(e).slice(0, 160)}`)), 30_000);
     log.info(`graph worker: ${worker.enabled && workerModel() ? `on (${workerModel()}${worker.profile ? `, from profile ${worker.profile}` : ""})` : "off"}`);
     if (!docStore) log.warn(`DOC_STORE=${DOC_STORE} isn't a known store: documents can't be ingested`);
     await expireRequests();

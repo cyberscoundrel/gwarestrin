@@ -89,3 +89,16 @@ test("graph worker roles: only the organization's admin can give them; anyone el
   const bad = resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "a1", p: [], r: "worker", j: "x", e: "DROP", iat: 1 }), entryFor, map);
   assert.equal(bad.role, undefined);
 });
+
+test("the master and handler roles: the admin's only; read, never write", () => {
+  const job = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const m = resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "master-1", p: [], r: "master", iat: 1 }), entryFor, map);
+  assert.deepEqual(m.role, { kind: "master" });
+  assert.equal(m.caps.write, "deny");
+  assert.deepEqual(m.positions, ["org"]);
+  const h = resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "h1", p: [], r: "handler", j: job, iat: 1 }), entryFor, map);
+  assert.deepEqual(h.role, { kind: "handler", job });
+  assert.equal(h.caps.write, "deny");
+  assert.equal(resolveAgentToken(signAgentToken(KEY, { u: "alice", a: "a1", p: [], r: "master", iat: 1 }), entryFor, map).role, undefined);
+  assert.equal(resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "h1", p: [], r: "handler", j: "nope", iat: 1 }), entryFor, map).role, undefined);
+});

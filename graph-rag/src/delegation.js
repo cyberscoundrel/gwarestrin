@@ -19,6 +19,12 @@
 //            proposals.
 //   liaison  relays workers' questions and proposals to the admin: answers
 //            questions and decides workers' proposals, writes nothing itself.
+//   master   the long-running coordinator: reads everything, plans batches,
+//            starts workers and handlers, settles what it can of a stopped
+//            worker; changes the graph only through workers.
+//   handler  settles one stopped worker with the operator (j: its handler
+//            job): answers its questions and decides its proposals on the
+//            operator's word; writes nothing itself.
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { heldPositions, visibleHomes } from "./positions.js";
 
@@ -75,6 +81,26 @@ export function resolveAgentToken(token, entryFor, map, now = Date.now()) {
       agent: payload.a,
       role: { kind: "worker", job: payload.j, entry: payload.e },
       caps: { read: true, write: "direct", approve: false, raw: entry.caps?.raw === true },
+      positions: tenantPositions,
+    };
+  }
+  if (rootTenant && payload.r === "master") {
+    return {
+      user: `${entry.user}/master:${payload.a.slice(0, 8)}`,
+      key: `${entry.user}/agent:${payload.a}`,
+      agent: payload.a,
+      role: { kind: "master" },
+      caps: { read: true, write: "deny", approve: true, raw: entry.caps?.raw === true },
+      positions: tenantPositions,
+    };
+  }
+  if (rootTenant && payload.r === "handler" && typeof payload.j === "string" && /^[0-9a-f-]{36}$/i.test(payload.j)) {
+    return {
+      user: `${entry.user}/handler:${payload.a.slice(0, 8)}`,
+      key: `${entry.user}/agent:${payload.a}`,
+      agent: payload.a,
+      role: { kind: "handler", job: payload.j },
+      caps: { read: true, write: "deny", approve: true, raw: false },
       positions: tenantPositions,
     };
   }
