@@ -30,6 +30,7 @@ export const REASONS = {
 export const SETTLE_MIN = 0.75;
 export const NOTHING_MIN = 0.6;
 export const CONTRADICTION_MIN = 0.5;
+export const PLAIN_MIN = 0.5;
 /** this share of no-work entries still goes to the master, so misses can be measured */
 export const SAMPLE_RATE = 0.05;
 
@@ -81,8 +82,12 @@ export function triageVerdict(answers, unsure = [], { random = Math.random } = {
   const score = Number(answers?.level?.score ?? 0);
   const contradiction = Number(answers?.contradiction?.noul ?? 0);
   const reason = answers?.reason?.choice ?? null;
-  // nothing to do: the model is sure enough, every name is settled, nothing contradicts
-  const nothing = pNothing >= NOTHING_MIN && open.length === 0 && contradiction < CONTRADICTION_MIN;
+  const reasonP = Number(answers?.reason?.probabilities?.[reason] ?? 0);
+  // nothing to do: every name settled, nothing contradicts, and either the model is sure
+  // of level 0 or it calls it a plain fact and scores it under a quick check (Jev spreads
+  // probability across neighbouring levels, so P(level 0) alone rarely clears the bar)
+  const plain = reason === "plain_fact" && reasonP >= PLAIN_MIN && score < 1;
+  const nothing = open.length === 0 && contradiction < CONTRADICTION_MIN && (pNothing >= NOTHING_MIN || plain);
   const level = nothing ? 0 : Math.max(1, Math.min(3, Math.round(score)));
   const sample = nothing && random() < SAMPLE_RATE;
   return {
@@ -90,6 +95,7 @@ export function triageVerdict(answers, unsure = [], { random = Math.random } = {
     reason: nothing ? "plain_fact" : contradiction >= CONTRADICTION_MIN ? "contradiction" : open.length ? "ambiguous_name" : reason,
     score,
     pNothing,
+    reasonP,
     contradiction,
     settled,
     open,

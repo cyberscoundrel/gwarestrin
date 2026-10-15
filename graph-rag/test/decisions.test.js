@@ -45,3 +45,13 @@ test("a small sample of no-work entries still goes to the master", () => {
   assert.equal(v.sample, true);
   assert.equal(v.toMaster, true);
 });
+
+test("a plain fact scored under a quick check needs nothing, even when P(level 0) is spread out", () => {
+  // what Jev answered for "The break room fridge gets cleaned out every Friday at 3pm."
+  const fridge = triageVerdict({ level: { score: 0.76, probabilities: { 0: 0.46, 1: 0.5, 2: 0.04 } }, reason: { choice: "plain_fact", probabilities: { plain_fact: 0.7 } }, contradiction: { noul: 0 } }, [], { random: () => 0.5 });
+  assert.equal(fridge.level, 0);
+  assert.equal(fridge.toMaster, false);
+  // "Michael is training on cnc 2 this week." scored over a quick check: still goes
+  const michael = triageVerdict({ level: { score: 1.16, probabilities: { 0: 0.09 } }, reason: { choice: "plain_fact", probabilities: { plain_fact: 0.6 } } }, [], { random: () => 0.5 });
+  assert.equal(michael.toMaster, true);
+});

@@ -2859,7 +2859,7 @@ async function intakeWithTriage(rid, row, linked, home) {
     name: row.name,
     level: verdict.level,
     reason: verdict.reason ?? "",
-    v: JSON.stringify({ score: verdict.score, pNothing: verdict.pNothing, contradiction: verdict.contradiction, settled: verdict.settled.map((x) => ({ name: x.name, label: x.label, p: x.p })), open: verdict.open, sample: verdict.sample }),
+    v: JSON.stringify({ score: verdict.score, pNothing: verdict.pNothing, reasonP: verdict.reasonP, contradiction: verdict.contradiction, settled: verdict.settled.map((x) => ({ name: x.name, label: x.label, p: x.p })), open: verdict.open, sample: verdict.sample }),
     m: model ?? "",
     now: new Date().toISOString(),
   }).catch((e) => log.warn(`triage record: ${String(e).slice(0, 120)}`));
