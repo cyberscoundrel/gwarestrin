@@ -886,6 +886,7 @@ async function executePending(rec) {
   if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
   if (rec.kind === "merge") return mergeThings(JSON.parse(rec.payload));
   if (rec.kind === "fold") return foldEntries(JSON.parse(rec.payload));
+  if (rec.kind === "delete_entry") return deleteEntry(JSON.parse(rec.payload));
   // approved: runs in the background (minutes for a long document)
   if (rec.kind === "ingest") {
     const p = JSON.parse(rec.payload);
@@ -2577,7 +2578,9 @@ async function workerUpsert(args, identity, scope) {
   for (const e of entities) {
     let home = asked;
     if (home === undefined) {
-      const found = await adbQuery(`SELECT _origin FROM ${ENTITY_LABEL} WHERE name = :n AND (_kind IS NULL OR _kind IN ['document', 'section', 'task']) LIMIT 2`, { n: e.name }).catch(() => []);
+      const found = await adbQuery(`SELECT @rid AS rid, _origin FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 2`, { n: e.name }).catch(() => []);
+      // two entries by this name: which one is meant isn't for a guess (update_entry takes the id)
+      if (found.length > 1) await findEntry(e.name);
       home = found.length === 1 && found[0]._origin ? found[0]._origin : (own?._origin ?? positionMap.root);
     }
     if (!byHome.has(home)) byHome.set(home, []);
@@ -2907,6 +2910,42 @@ async function foldEntries({ keep, drop }) {
   await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE @rid = ${drop}`);
   await refreshGrants();
   return { folded: true, kept: keep, deleted: drop, moved };
+}
+
+/**
+ * A worker deletes an entry by id or name: directly when nothing links it
+ * and it links nothing (a stray copy its own write made); otherwise a
+ * proposal. Its text is kept in the thread's change log.
+ */
+async function workerDeleteEntry(args, identity) {
+  await assertNotWaiting(identity);
+  const row = await findEntry(args.entry);
+  const rid = String(row.rid);
+  if (rid === identity.role.entry) throw new Error("that's your own entry");
+  const full = (await adbQuery(`SELECT * FROM ${rid}`))[0] ?? {};
+  if (full._kind === "task") throw new Error("a task entry isn't deleted: it's the record of a thread's work");
+  const edges = Number((await adbQuery(`SELECT count(*) AS n FROM (SELECT expand(bothE()) FROM ${rid})`))[0]?.n ?? 0);
+  const text = Object.keys(full).filter((k) => k.startsWith("text_") && full[k]).map((k) => `${k.slice(5)}: ${full[k]}`).join(" | ").slice(0, 400);
+  if (args.propose || edges > 0) {
+    return {
+      ...(await queueWrite({ kind: "delete_entry", payload: JSON.stringify({ rid, name: row.name, home: row._home ?? null, text }), user: identity.user, home: positionMap.root, ...proposalFields(identity, args.reason) })),
+      note: edges > 0 ? `It has ${edges} link(s), so deleting it is a proposal (fold it into the copy it duplicates with merge_entries instead, if that's what it is). ${PROPOSED_NOTE}` : PROPOSED_NOTE,
+    };
+  }
+  const result = await deleteEntry({ rid });
+  await logChange(identity, { kind: "delete", detail: `entry ${rid} "${row.name}"${text ? ` (${text.slice(0, 200)})` : ""}`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return result;
+}
+
+/** delete an entry (approved, or a stray nothing links) */
+async function deleteEntry({ rid }) {
+  if (!RID_RE.test(String(rid))) throw new Error("invalid entry");
+  const row = (await adbQuery(`SELECT name, _kind FROM ${rid} WHERE name IS NOT NULL AND ${ENTRY_KINDS}`))[0];
+  if (!row) throw new Error("that entry is gone");
+  if (row._kind === "task") throw new Error("a task entry isn't deleted");
+  await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE @rid = ${rid}`);
+  await refreshGrants();
+  return { deleted: rid, name: row.name };
 }
 
 /** a worker removes relationships it judges wrong (all of them between the two when no verb is given) */
@@ -3900,6 +3939,17 @@ relationship from the one to the other goes. Give a short reason.`,
       async (args) => {
         need("write");
         return { content: [{ type: "text", text: JSON.stringify(await workerUnrelate(args, identity)) }] };
+      },
+    );
+    server.tool(
+      "delete_entry",
+      `Delete an entry by name or id ("#971:0"): a stray copy a write made by mistake, a placeholder. With
+nothing linking it and no links of its own it goes directly; otherwise it's a proposal (a duplicate of
+another entry is folded with merge_entries instead). Use this, not raw commands. Give a short reason.`,
+      { entry: z.string().min(2).max(200), reason: z.string().max(300).optional(), propose: z.boolean().optional() },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerDeleteEntry(args, identity)) }] };
       },
     );
     server.tool(

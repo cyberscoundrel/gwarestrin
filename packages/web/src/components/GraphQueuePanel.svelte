@@ -56,6 +56,9 @@
         detail: "The graph worker wasn't sure. Approve to merge them into one; reject to keep them apart.",
       };
     }
+    if (p.kind === "delete_entry") {
+      return { title: `Delete the entry "${String(body.name ?? "")}" (${String(body.rid ?? "")})`, detail: String(body.text ?? "") || "It holds no text." };
+    }
     if (p.kind === "fold") {
       return {
         title: `Fold the entry "${String(body.drop_name ?? "")}" (${String(body.drop ?? "")}) into "${String(body.keep_name ?? "")}" (${String(body.keep ?? "")})`,
