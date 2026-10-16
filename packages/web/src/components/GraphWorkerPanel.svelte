@@ -152,6 +152,7 @@
     try {
       const c = JSON.parse(p.change);
       if (p.kind === "merge") return `Merge "${c.drop_name}" into "${c.keep_name}" (${c.type})`;
+      if (p.kind === "delete_entry") return `Delete entry ${c.rid} "${c.name}"`;
       if (p.kind === "fold") return `Fold entry ${c.drop} "${c.drop_name}" into ${c.keep} "${c.keep_name}"`;
       if (p.kind === "upsert") return `Change ${(c.entities ?? []).map((e: { name: string }) => `"${e.name}"`).join(", ")}`;
       if (p.kind === "rehome") return `Move "${c.name}"`;
