@@ -35,7 +35,7 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
-import { duplicateEntries, entryId, mentionsPrompt, normalize, normalizeKey, normalizeRel, parseMentions, parseSort, partialPerson, personCandidates, resolve, THING_TYPES, thingName } from "./things.js";
+import { duplicateEntries, entryId, mentionsPrompt, normalize, splitThingName, thingClash, normalizeKey, normalizeRel, parseMentions, parseSort, partialPerson, personCandidates, resolve, THING_TYPES, thingName } from "./things.js";
 import { askDecisionModel, triageRequest, triageVerdict } from "./decisions.js";
 import { firstJob, handlerBrief, signalsMessage, POOL_DEFAULTS, poolSettings, resumeBrief, surveyBrief, taskBrief, taskThreadBrief } from "./pool.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
@@ -2560,6 +2560,10 @@ async function logChange(identity, change) {
  */
 async function workerUpsert(args, identity, scope) {
   await assertNotWaiting(identity);
+  for (const e of args.entities) {
+    const clash = await thingNamed(e.name);
+    if (clash) throw new Error(thingClash(e.name, { ...clash, rid: String(clash.rid) }));
+  }
   const own = (await adbQuery(`SELECT name, _origin FROM ${identity.role.entry}`).catch(() => []))[0];
   const now = Date.now();
   const entities = args.entities.map((e) => {
@@ -2662,8 +2666,53 @@ async function workerDeleteThing(args, identity) {
 
 /** a thing's full name ("Toro (customer)", as searches show it) is its name and type */
 function bareThing(t) {
-  const m = /^(.*\S)\s*\(([a-z]+)\)$/i.exec(String(t?.name ?? ""));
-  return m && THING_TYPES.includes(m[2].toLowerCase()) ? { ...t, name: m[1], type: t.type ?? m[2].toLowerCase() } : t;
+  const m = splitThingName(t?.name);
+  return m ? { ...t, name: m.name, type: t.type ?? m.type } : t;
+}
+
+/**
+ * An entry write naming a thing ("CNC 2 (machine)", or a bare "CNC 2" with
+ * no entry of that name yet) would make a copy beside the thing: the thing it
+ * clashes with, or null.
+ */
+async function thingNamed(name) {
+  const full = splitThingName(name);
+  const n = normalize(full ? full.name : name);
+  const things = await adbQuery(
+    `SELECT @rid AS rid, label, _thing_type FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (name = :full OR _norm = :n OR _alias_norms CONTAINS :n)${full ? " AND _thing_type = :t" : ""} LIMIT 1`,
+    { full: name, n, t: full?.type },
+  ).catch(() => []);
+  if (!things.length) return null;
+  if (full) return things[0];
+  const entry = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 1`, { n: name }).catch(() => []);
+  return entry.length ? null : things[0];
+}
+
+/** a worker corrects a thing's name (a work center stored as "cnc" that is "CNC 2"); the old name stays an alias */
+async function workerRenameThing(args, identity) {
+  await assertNotWaiting(identity);
+  const t = await findThing(args.thing);
+  if (!t) throw new Error(`no single thing called "${args.thing.name}"${args.thing.type ? ` (${args.thing.type})` : ""}: give its type or key`);
+  const label = String(args.name).replace(/\s+/g, " ").trim();
+  const n = normalize(label);
+  if (n.length < 1) throw new Error("a name is needed");
+  const row = (await adbQuery(`SELECT _norm, _alias_norms FROM ${t.rid}`))[0];
+  if (row?._norm === n && t.label === label) return { already: true, name: thingName(t._thing_type, label) };
+  const other = (await adbQuery(`SELECT @rid AS rid, label FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 2`, { t: t._thing_type, n }).catch(() => [])).find(
+    (o) => String(o.rid) !== String(t.rid),
+  );
+  if (other) throw new Error(`another ${t._thing_type} is already called that (${other.label}, ${other.rid}): if they're the same, merge_things instead`);
+  const [vec] = await embedBatch([`${t._thing_type}: ${label}`]);
+  const aliases = [...new Set([...(row?._alias_norms ?? []), row?._norm].filter((a) => a && a !== n))];
+  await adbCommand(`UPDATE ${t.rid} SET name = :name, label = :label, _norm = :n, _alias_norms = :a, embed_thing = [${vec.join(",")}], updated_at = :now`, "sql", {
+    name: thingName(t._thing_type, label),
+    label,
+    n,
+    a: aliases,
+    now: new Date().toISOString(),
+  });
+  await logChange(identity, { kind: "rename", detail: `${t.label} -> ${label} (${t._thing_type})`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return { renamed: true, from: t.label, to: thingName(t._thing_type, label), aliases };
 }
 
 /** one thing by key, or by name/alias and type; null when there's none (or several) */
@@ -3851,6 +3900,21 @@ relationship from the one to the other goes. Give a short reason.`,
       async (args) => {
         need("write");
         return { content: [{ type: "text", text: JSON.stringify(await workerUnrelate(args, identity)) }] };
+      },
+    );
+    server.tool(
+      "rename_thing",
+      `Correct a thing's name (a work center stored as "cnc" that the ERP calls "CNC 2"). The thing by name
+and type, or key; the new name without its type. The old name stays as an alias, so searches still find
+it. Don't write a thing's name as an entry: that makes a second copy beside it.`,
+      {
+        thing: z.object({ name: z.string().min(1), type: z.string().optional(), key: z.string().optional() }),
+        name: z.string().min(1).max(120),
+        reason: z.string().max(300).optional(),
+      },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerRenameThing(args, identity)) }] };
       },
     );
     server.tool(

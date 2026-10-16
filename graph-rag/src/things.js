@@ -171,3 +171,14 @@ export function duplicateEntries(name, rows) {
   const list = rows.map((r) => `${r.rid} (${[r.home, r.updated_at ? `updated ${String(r.updated_at).slice(0, 10)}` : "", r.links !== undefined ? `${r.links} link${r.links === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ")})`);
   return `${rows.length} entries are called "${name}": ${list.join("; ")}. Give the one you mean by its id; merge_entries folds a duplicate into the one it duplicates.`;
 }
+
+/** a thing's full name ("CNC 2 (machine)", as searches show it) split into its name and type; null otherwise */
+export function splitThingName(full) {
+  const m = /^(.*\S)\s*\(([a-z]+)\)$/i.exec(String(full ?? ""));
+  return m && THING_TYPES.includes(m[2].toLowerCase()) ? { name: m[1], type: m[2].toLowerCase() } : null;
+}
+
+/** why an entry write that names a thing is refused: entries are statements about things, not things */
+export function thingClash(entryName, thing) {
+  return `"${entryName}" is a thing (${thing.label}, ${thing._thing_type}, ${thing.rid}), not an entry: writing it would make a second copy beside it. To fix its name use rename_thing; to change what it's linked to use link_things or unlink_things; to note something about it, write an entry with its own name and link it.`;
+}

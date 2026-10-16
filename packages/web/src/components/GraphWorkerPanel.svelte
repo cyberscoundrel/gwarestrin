@@ -146,7 +146,7 @@
     failed: { label: "failed", cls: "text-err" },
     closed: { label: "closed", cls: "text-faint" },
   };
-  const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved", relate: "Related", followup: "Queued", unlink: "Unlinked", delete: "Deleted", fold: "Folded", unrelate: "Unrelated", update: "Corrected" };
+  const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved", relate: "Related", followup: "Queued", unlink: "Unlinked", delete: "Deleted", fold: "Folded", unrelate: "Unrelated", update: "Corrected", rename: "Renamed" };
   const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const describe = (p: WorkerProposal) => {
     try {
