@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { duplicateEntries, entryId, mentionsPrompt, normalize, parseMentions, resolve, thingName } from "../src/things.js";
+import { duplicateEntries, entryId, splitThingName, thingClash, mentionsPrompt, normalize, parseMentions, resolve, thingName } from "../src/things.js";
 
 test("names normalize for matching", () => {
   assert.equal(normalize("Toro Co."), "toro co");
@@ -115,4 +115,17 @@ test("duplicateEntries lists each copy with its id, home and links", () => {
   assert.match(msg, /#1:354316 \(Operations, updated 2026-10-14, 8 links\)/);
   assert.match(msg, /#1:352258 \(Operations, 1 link\)/);
   assert.match(msg, /merge_entries/);
+});
+
+test("splitThingName: a full thing name, not any parenthesis", () => {
+  assert.deepEqual(splitThingName("CNC 2 (machine)"), { name: "CNC 2", type: "machine" });
+  assert.deepEqual(splitThingName("Toro (Customer)"), { name: "Toro", type: "customer" });
+  assert.equal(splitThingName("CNC 2"), null);
+  assert.equal(splitThingName("Quote 12 (draft)"), null);
+});
+
+test("thingClash points at the right tools", () => {
+  const msg = thingClash("CNC 2 (machine)", { label: "cnc", _thing_type: "machine", rid: "#1:57347" });
+  assert.match(msg, /is a thing \(cnc, machine, #1:57347\)/);
+  assert.match(msg, /rename_thing/);
 });
