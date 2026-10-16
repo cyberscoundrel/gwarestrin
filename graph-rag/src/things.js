@@ -159,3 +159,15 @@ export function personCandidates(partial, people) {
     return !partial.initial || (w[1] ?? "").startsWith(partial.initial);
   });
 }
+
+/** an entry's id as tools take it ("#1:352258"), or null for a name */
+export function entryId(ref) {
+  const r = String(ref ?? "").trim();
+  return /^#\d+:\d+$/.test(r) ? r : null;
+}
+
+/** several entries share a name: say which is which, so the caller picks one by its id */
+export function duplicateEntries(name, rows) {
+  const list = rows.map((r) => `${r.rid} (${[r.home, r.updated_at ? `updated ${String(r.updated_at).slice(0, 10)}` : "", r.links !== undefined ? `${r.links} link${r.links === 1 ? "" : "s"}` : ""].filter(Boolean).join(", ")})`);
+  return `${rows.length} entries are called "${name}": ${list.join("; ")}. Give the one you mean by its id; merge_entries folds a duplicate into the one it duplicates.`;
+}

@@ -103,5 +103,7 @@ test("everyone: seen by every position, below them all; reading it raises nothin
   assert.equal(commonAncestor(m, ["floor", "sales", EVERYONE]), "org");
   assert.ok(ancestors(m, EVERYONE).includes("floor") && ancestors(m, EVERYONE).at(-1) === "org", "deepest first, the root last");
   assert.equal(homeName(m, EVERYONE), "Everyone");
+  assert.equal(homeName(m, "org"), "Top of the organization (admins only)", "the root never reads as the widest audience");
+  assert.equal(homeName(m, "floor"), "Floor");
   assert.throws(() => parsePositionMap({ root: "org", positions: { org: { name: "Org" }, everyone: { name: "x", parent: "org" } } }), /reserved/);
 });

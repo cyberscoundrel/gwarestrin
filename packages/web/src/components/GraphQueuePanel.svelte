@@ -56,6 +56,12 @@
         detail: "The graph worker wasn't sure. Approve to merge them into one; reject to keep them apart.",
       };
     }
+    if (p.kind === "fold") {
+      return {
+        title: `Fold the entry "${String(body.drop_name ?? "")}" (${String(body.drop ?? "")}) into "${String(body.keep_name ?? "")}" (${String(body.keep ?? "")})`,
+        detail: "Its links move to the kept copy, then it's deleted.",
+      };
+    }
     if (p.kind === "ingest") {
       const n = Number(body.sections ?? 0);
       return {
