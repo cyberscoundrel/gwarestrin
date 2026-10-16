@@ -35,7 +35,7 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
-import { mentionsPrompt, normalize, normalizeKey, normalizeRel, parseMentions, parseSort, partialPerson, personCandidates, resolve, THING_TYPES, thingName } from "./things.js";
+import { duplicateEntries, entryId, mentionsPrompt, normalize, normalizeKey, normalizeRel, parseMentions, parseSort, partialPerson, personCandidates, resolve, THING_TYPES, thingName } from "./things.js";
 import { askDecisionModel, triageRequest, triageVerdict } from "./decisions.js";
 import { firstJob, handlerBrief, signalsMessage, POOL_DEFAULTS, poolSettings, resumeBrief, surveyBrief, taskBrief, taskThreadBrief } from "./pool.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
@@ -885,6 +885,7 @@ async function executePending(rec) {
   if (rec.kind === "grant") return storeGrant(JSON.parse(rec.payload));
   if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
   if (rec.kind === "merge") return mergeThings(JSON.parse(rec.payload));
+  if (rec.kind === "fold") return foldEntries(JSON.parse(rec.payload));
   // approved: runs in the background (minutes for a long document)
   if (rec.kind === "ingest") {
     const p = JSON.parse(rec.payload);
@@ -2603,12 +2604,7 @@ async function threadAudience(identity) {
 async function workerLink(args, identity) {
   await assertNotWaiting(identity);
   // its own entry by default; or another entry it names (a table's entry listing its records)
-  let rid = identity.role.entry;
-  if (args.entry) {
-    const found = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :n AND (_kind IS NULL OR _kind IN ['document', 'section', 'task']) LIMIT 2`, { n: args.entry }))[0];
-    if (!found) throw new Error(`no entry called "${args.entry}"`);
-    rid = String(found.rid);
-  }
+  const rid = args.entry ? String((await findEntry(args.entry)).rid) : identity.role.entry;
   const row = (await adbQuery(`SELECT _home FROM ${rid}`).catch(() => []))[0];
   if (!row) throw new Error("that entry is gone");
   const mentions = parseMentions(JSON.stringify({ things: args.things.map(bareThing) }), 25);
@@ -2633,12 +2629,7 @@ async function workerLink(args, identity) {
 /** a worker removes links it judges wrong (from its entry by default, or the entry it names) */
 async function workerUnlink(args, identity) {
   await assertNotWaiting(identity);
-  let rid = identity.role.entry;
-  if (args.entry) {
-    const found = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :n AND (_kind IS NULL OR _kind IN ['document', 'section', 'task']) LIMIT 2`, { n: args.entry }))[0];
-    if (!found) throw new Error(`no entry called "${args.entry}"`);
-    rid = String(found.rid);
-  }
+  const rid = args.entry ? String((await findEntry(args.entry)).rid) : identity.role.entry;
   const edges = await adbQuery(`SELECT @rid AS edge, @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
   const out = [];
   for (const ref of args.things) {
@@ -2800,6 +2791,119 @@ async function workerMerge(args, identity, scope) {
   }
   const result = await mergeThings(payload);
   await logChange(identity, { kind: "merge", detail: `"${drop.label}" into "${keep.label}" (${keep._thing_type})`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return result;
+}
+
+const ENTRY_KINDS = "(_kind IS NULL OR _kind IN ['document', 'section', 'task'])";
+
+/** an entry by its id ("#1:352258") or its name; when several share the name, the id is needed */
+async function findEntry(ref) {
+  const id = entryId(ref);
+  if (id) {
+    const row = (await adbQuery(`SELECT @rid AS rid, name, _home, _origin FROM ${id} WHERE name IS NOT NULL AND ${ENTRY_KINDS}`).catch(() => []))[0];
+    if (!row) throw new Error(`no entry ${id}`);
+    return row;
+  }
+  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _origin, updated_at FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 6`, { n: String(ref) });
+  if (!rows.length) throw new Error(`no entry called "${ref}"`);
+  if (rows.length > 1) {
+    for (const r of rows) {
+      r.home = homeName(positionMap, r._home);
+      r.links = Number((await adbQuery(`SELECT count(*) AS n FROM (SELECT expand(outE('ABOUT')) FROM ${r.rid})`).catch(() => []))[0]?.n ?? 0);
+    }
+    throw new Error(duplicateEntries(String(ref), rows.map((r) => ({ ...r, rid: String(r.rid) }))));
+  }
+  return rows[0];
+}
+
+/**
+ * A worker folds a duplicate entry into the one it duplicates: the drop's
+ * links move to the keep, then the drop is deleted. Direct when both live at
+ * the same home; otherwise a proposal (the drop's audience would lose it, the
+ * keep's would gain its links).
+ */
+async function workerFoldEntries(args, identity) {
+  await assertNotWaiting(identity);
+  const keep = await findEntry(args.keep);
+  const drop = await findEntry(args.drop);
+  if (String(keep.rid) === String(drop.rid)) throw new Error("those are the same entry");
+  if (String(drop.rid) === identity.role.entry) throw new Error("that's your own entry: fold the other into it instead");
+  const payload = { keep: String(keep.rid), drop: String(drop.rid), keep_name: keep.name, drop_name: drop.name };
+  const sameHome = effectiveHome(positionMap, keep._home) === effectiveHome(positionMap, drop._home);
+  if (args.propose || !sameHome) {
+    const why = sameHome ? args.reason : `${args.reason ? `${args.reason} ` : ""}(${homeName(positionMap, drop._home)} -> ${homeName(positionMap, keep._home)})`;
+    return { ...(await queueWrite({ kind: "fold", payload: JSON.stringify(payload), user: identity.user, home: positionMap.root, ...proposalFields(identity, why) })), note: sameHome ? PROPOSED_NOTE : `The two live at different homes, so this is a proposal. ${PROPOSED_NOTE}` };
+  }
+  const result = await foldEntries(payload);
+  await logChange(identity, { kind: "fold", detail: `${drop.rid} "${drop.name}" into ${keep.rid} "${keep.name}" (${result.moved} link${result.moved === 1 ? "" : "s"} moved)`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return result;
+}
+
+/** fold an entry into another: its ABOUT links move (the things seen from the keep's home), then it's deleted */
+async function foldEntries({ keep, drop }) {
+  if (!RID_RE.test(String(keep)) || !RID_RE.test(String(drop))) throw new Error("invalid fold");
+  const k = (await adbQuery(`SELECT _home FROM ${keep} WHERE ${ENTRY_KINDS}`))[0];
+  const d = (await adbQuery(`SELECT name FROM ${drop} WHERE ${ENTRY_KINDS}`))[0];
+  if (!k || !d) throw new Error("one of the entries is gone");
+  const edges = await adbQuery(`SELECT @in AS dst, role FROM (SELECT expand(outE('ABOUT')) FROM ${drop})`).catch(() => []);
+  const home = effectiveHome(positionMap, k._home);
+  let moved = 0;
+  for (const e of edges) {
+    const dst = String(e.dst);
+    if (!RID_RE.test(dst)) continue;
+    await aboutOnce(keep, dst, e.role ?? "mentions");
+    await thingSeenFrom(dst, home);
+    moved++;
+  }
+  await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE @rid = ${drop}`);
+  await refreshGrants();
+  return { folded: true, kept: keep, deleted: drop, moved };
+}
+
+/** a worker removes relationships it judges wrong (all of them between the two when no verb is given) */
+async function workerUnrelate(args, identity) {
+  await assertNotWaiting(identity);
+  const out = [];
+  for (const r of args.relations) {
+    const rel = r.rel ? normalizeRel(r.rel) : null;
+    const from = await findThing(r.from);
+    const to = await findThing(r.to);
+    if (!from || !to) {
+      out.push({ from: r.from.name, rel, to: r.to.name, skipped: `no single thing called "${!from ? r.from.name : r.to.name}": give its type or key` });
+      continue;
+    }
+    const edges = (await adbQuery(`SELECT @rid AS edge, @in AS dst, rel FROM (SELECT expand(outE('RELATES')) FROM ${from.rid})`).catch(() => [])).filter(
+      (e) => String(e.dst) === String(to.rid) && (!rel || e.rel === rel),
+    );
+    for (const e of edges) if (RID_RE.test(String(e.edge))) await adbCommand(`DELETE FROM ${e.edge}`);
+    out.push({ from: from.label, rel: rel ?? edges.map((e) => e.rel).join(", "), to: to.label, ...(edges.length ? { removed: edges.length } : { wasnt_related: true }) });
+  }
+  const done = out.filter((o) => o.removed);
+  if (done.length) await logChange(identity, { kind: "unrelate", detail: done.map((o) => `${o.from} ${o.rel} ${o.to}`).join("; "), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return { relations: out };
+}
+
+/**
+ * A worker corrects an entry it names by id or name (a stale version, a wrong
+ * field, a facet's text): the same write as an upsert, at that entry's own
+ * origin, with the derived-data floor.
+ */
+async function workerUpdateEntry(args, identity) {
+  await assertNotWaiting(identity);
+  const row = await findEntry(args.entry);
+  const origin = row._origin ?? positionMap.root;
+  const twins = Number((await adbQuery(`SELECT count(*) AS n FROM ${ENTITY_LABEL} WHERE name = :n AND _origin = :o`, { n: row.name, o: origin }))[0]?.n ?? 0);
+  if (twins > 1) throw new Error(`${twins} entries are called "${row.name}" at the same home: fold the duplicate first (merge_entries), then update the one left`);
+  if (!args.properties && !args.facets && args.valid_until === undefined) throw new Error("nothing to change: give properties, facets or valid_until");
+  const entity = { name: row.name, ...(args.properties ? { properties: args.properties } : {}), ...(args.facets ? { facets: args.facets } : {}), ...(args.valid_until !== undefined ? { valid_until: args.valid_until } : {}) };
+  const now = Date.now();
+  const v = parseValidUntil(entity.valid_until, now);
+  if (v !== undefined) entity.valid_until = v.valid_until ?? "lasting";
+  const write = { entities: [entity], home: origin, floor: derivedFloor(identity, origin), written_at: new Date(now).toISOString(), from_worker: true };
+  if (args.propose) return { ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home: origin, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE };
+  const result = await upsertEntities(write);
+  const changed = [...Object.keys(args.properties ?? {}), ...Object.keys(args.facets ?? {}).map((f) => `${f} facet`), ...(args.valid_until !== undefined ? ["valid_until"] : [])];
+  await logChange(identity, { kind: "update", detail: `${row.rid} "${row.name}": ${changed.join(", ")}`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return result;
 }
 
@@ -3631,7 +3735,7 @@ a search.`,
   if (SCOPED && role === "worker") {
     server.tool(
       "link_things",
-      `Link an entry (yours by default; or name one in entry, e.g. a table's entry listing its records) to
+      `Link an entry (yours by default; or name one in entry by name or id, e.g. a table's entry) to
 the things it's about: people, customers, suppliers, machines, parts, orders, places, projects, teams
 (type one of: person, customer, supplier, machine, part, order, place, project, team, other). Up to 25
 a call. Give a record's key when you know it ("mssql:dbo_Customer:TORO"): the same key is always the
@@ -3681,8 +3785,8 @@ which relationships). For a survey's topics that don't fit this conversation. A 
     );
     server.tool(
       "unlink_things",
-      `Remove links you judge wrong between an entry (yours by default, or one you name) and things: e.g. a
-note linked to the wrong "John". Each thing by name and type, or key. Give a short reason.`,
+      `Remove links you judge wrong between an entry (yours by default, or one you name by name or id) and
+things: e.g. a note linked to the wrong "John". Each thing by name and type, or key. Give a short reason.`,
       {
         things: z.array(z.object({ name: z.string().min(1), type: z.string().optional(), key: z.string().optional() })).min(1).max(25),
         entry: z.string().max(200).optional(),
@@ -3712,6 +3816,59 @@ point at, or you're not certain), set propose: true with a reason: an admin deci
       async (args) => {
         need("write");
         return { content: [{ type: "text", text: JSON.stringify(await workerMerge(args, identity, scope)) }] };
+      },
+    );
+    server.tool(
+      "merge_entries",
+      `Fold a duplicate entry into the one it duplicates (two copies of one note): the drop's links move to
+the keep, then the drop is deleted. Name each by name, or by its id ("#1:352258") when several share a
+name. Two copies at the same home fold directly; at different homes, or with propose: true, it's a
+proposal and you wait. Give a short reason.`,
+      { keep: z.string().min(2).max(200), drop: z.string().min(2).max(200), reason: z.string().max(600).optional(), propose: z.boolean().optional() },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerFoldEntries(args, identity)) }] };
+      },
+    );
+    server.tool(
+      "unrelate_things",
+      `Remove relationships you judge wrong or stale between things (a works_in the current data no longer
+supports). Each by from, rel and to (each thing by name and type, or key); without rel, every
+relationship from the one to the other goes. Give a short reason.`,
+      {
+        relations: z
+          .array(
+            z.object({
+              from: z.object({ name: z.string().min(2), type: z.string().optional(), key: z.string().optional() }),
+              rel: z.string().max(40).optional(),
+              to: z.object({ name: z.string().min(2), type: z.string().optional(), key: z.string().optional() }),
+            }),
+          )
+          .min(1)
+          .max(25),
+        reason: z.string().max(300).optional(),
+      },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerUnrelate(args, identity)) }] };
+      },
+    );
+    server.tool(
+      "update_entry",
+      `Correct an entry you name by name or id ("#13:0"): set properties (a stale version, a wrong field),
+rewrite a facet's text, or set its valid_until. It's updated where it lives, with the usual floor. Use
+this, not raw commands, for corrections. Set propose: true with a reason when it matters.`,
+      {
+        entry: z.string().min(2).max(200),
+        properties: z.record(z.union([z.string().max(2000), z.number(), z.boolean()])).optional(),
+        facets: z.record(z.string().max(4000)).optional(),
+        valid_until: z.string().max(40).optional(),
+        reason: z.string().max(600).optional(),
+        propose: z.boolean().optional(),
+      },
+      async (args) => {
+        need("write");
+        return { content: [{ type: "text", text: JSON.stringify(await workerUpdateEntry(args, identity)) }] };
       },
     );
     server.tool(

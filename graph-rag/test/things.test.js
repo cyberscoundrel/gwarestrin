@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mentionsPrompt, normalize, parseMentions, resolve, thingName } from "../src/things.js";
+import { duplicateEntries, entryId, mentionsPrompt, normalize, parseMentions, resolve, thingName } from "../src/things.js";
 
 test("names normalize for matching", () => {
   assert.equal(normalize("Toro Co."), "toro co");
@@ -97,4 +97,22 @@ test("partial names of people: looked up by first name and initial", async () =>
   const people = [{ label: "John Francis" }, { label: "JOHN" }, { label: "John Smith" }, { label: "Johnny Cash" }];
   assert.deepEqual(personCandidates({ first: "john", initial: "f" }, people).map((p) => p.label), ["John Francis"]);
   assert.deepEqual(personCandidates({ first: "john", initial: null }, people).map((p) => p.label), ["John Francis", "John Smith"]);
+});
+
+test("entryId: an id, not a name", () => {
+  assert.equal(entryId("#1:352258"), "#1:352258");
+  assert.equal(entryId(" #13:0 "), "#13:0");
+  assert.equal(entryId("ux-m01 inspect-2 down"), null);
+  assert.equal(entryId("#1:abc"), null);
+});
+
+test("duplicateEntries lists each copy with its id, home and links", () => {
+  const msg = duplicateEntries("ux-m01 inspect-2 down", [
+    { rid: "#1:354316", home: "Operations", updated_at: "2026-10-14T10:00:00Z", links: 8 },
+    { rid: "#1:352258", home: "Operations", links: 1 },
+  ]);
+  assert.match(msg, /^2 entries are called "ux-m01 inspect-2 down"/);
+  assert.match(msg, /#1:354316 \(Operations, updated 2026-10-14, 8 links\)/);
+  assert.match(msg, /#1:352258 \(Operations, 1 link\)/);
+  assert.match(msg, /merge_entries/);
 });

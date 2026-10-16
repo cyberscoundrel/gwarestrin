@@ -146,12 +146,13 @@
     failed: { label: "failed", cls: "text-err" },
     closed: { label: "closed", cls: "text-faint" },
   };
-  const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved", relate: "Related", followup: "Queued", unlink: "Unlinked", delete: "Deleted" };
+  const CHANGE: Record<string, string> = { link: "Linked", upsert: "Wrote", merge: "Merged", move: "Moved", relate: "Related", followup: "Queued", unlink: "Unlinked", delete: "Deleted", fold: "Folded", unrelate: "Unrelated", update: "Corrected" };
   const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const describe = (p: WorkerProposal) => {
     try {
       const c = JSON.parse(p.change);
       if (p.kind === "merge") return `Merge "${c.drop_name}" into "${c.keep_name}" (${c.type})`;
+      if (p.kind === "fold") return `Fold entry ${c.drop} "${c.drop_name}" into ${c.keep} "${c.keep_name}"`;
       if (p.kind === "upsert") return `Change ${(c.entities ?? []).map((e: { name: string }) => `"${e.name}"`).join(", ")}`;
       if (p.kind === "rehome") return `Move "${c.name}"`;
     } catch {
