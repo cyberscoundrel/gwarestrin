@@ -886,6 +886,7 @@ async function executePending(rec) {
   if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
   if (rec.kind === "merge") return mergeThings(JSON.parse(rec.payload));
   if (rec.kind === "fold") return foldEntries(JSON.parse(rec.payload));
+  if (rec.kind === "typed_update") return applyTypedUpdate(JSON.parse(rec.payload));
   if (rec.kind === "delete_entry") return deleteEntry(JSON.parse(rec.payload));
   // approved: runs in the background (minutes for a long document)
   if (rec.kind === "ingest") {
@@ -2948,6 +2949,64 @@ async function deleteEntry({ rid }) {
   return { deleted: rid, name: row.name };
 }
 
+/**
+ * A typed record (a Database, a Host: another type than entries) is
+ * corrected in place, not upserted (that would make an entry beside it).
+ * Directly when what the worker read can be seen wherever the record is;
+ * otherwise a proposal.
+ */
+async function typedUpdate(row, type, args, identity) {
+  if (args.valid_until !== undefined) throw new Error(`"${row.name}" is a ${type} record: it has no end date; set properties or facets`);
+  const change = typedChange(args);
+  const home = effectiveHome(positionMap, row._home);
+  const floor = derivedFloor(identity, home);
+  const payload = { rid: String(row.rid), name: row.name, type, ...change };
+  if (args.propose || (floor !== undefined && floor !== home)) {
+    return {
+      ...(await queueWrite({ kind: "typed_update", payload: JSON.stringify(payload), user: identity.user, home: positionMap.root, ...proposalFields(identity, args.reason) })),
+      note: args.propose ? PROPOSED_NOTE : `What you read reaches fewer people than this record does, so the correction is a proposal. ${PROPOSED_NOTE}`,
+    };
+  }
+  const result = await applyTypedUpdate(payload);
+  await logChange(identity, { kind: "update", detail: `${row.rid} "${row.name}" (${type}): ${[...Object.keys(change.properties), ...Object.keys(change.facets).map((f) => `${f} facet`)].join(", ")}`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return result;
+}
+
+/** the fields a typed correction may set: plain names and values only */
+function typedChange(args) {
+  const properties = {};
+  for (const [k, v] of Object.entries(args.properties ?? {})) {
+    if (!PROP_RE.test(k) || k === "name") throw new Error(`can't set "${k}"`);
+    if (["string", "number", "boolean"].includes(typeof v)) properties[k] = v;
+  }
+  const facets = {};
+  for (const [f, text] of Object.entries(args.facets ?? {})) if (typeof text === "string" && text.trim()) facets[sanitizeFacet(f)] = text.slice(0, 4000);
+  if (!Object.keys(properties).length && !Object.keys(facets).length) throw new Error("nothing to change");
+  return { properties, facets };
+}
+
+/** apply a typed record's correction (direct, or approved) */
+async function applyTypedUpdate({ rid, properties, facets }) {
+  if (!RID_RE.test(String(rid))) throw new Error("invalid record");
+  if (!(await adbQuery(`SELECT @rid FROM ${rid}`).catch(() => [])).length) throw new Error("that record is gone");
+  const sets = [];
+  const params = { now: new Date().toISOString() };
+  for (const [i, [k, v]] of Object.entries(properties ?? {}).entries()) {
+    if (!PROP_RE.test(k)) throw new Error(`can't set "${k}"`);
+    sets.push(`${k} = :p${i}`);
+    params[`p${i}`] = v;
+  }
+  const list = Object.entries(facets ?? {});
+  const vecs = list.length ? await embedBatch(list.map(([, t]) => t)) : [];
+  for (const [i, [f, text]] of list.entries()) {
+    const facet = sanitizeFacet(f);
+    sets.push(`text_${facet} = :f${i}`, `embed_${facet} = [${vecs[i].join(",")}]`);
+    params[`f${i}`] = text;
+  }
+  await adbCommand(`UPDATE ${rid} SET ${[...sets, "updated_at = :now"].join(", ")}`, "sql", params);
+  return { updated: rid, properties: Object.keys(properties ?? {}), facets: list.map(([f]) => f) };
+}
+
 /** a worker removes relationships it judges wrong (all of them between the two when no verb is given) */
 async function workerUnrelate(args, identity) {
   await assertNotWaiting(identity);
@@ -2979,10 +3038,12 @@ async function workerUnrelate(args, identity) {
 async function workerUpdateEntry(args, identity) {
   await assertNotWaiting(identity);
   const row = await findEntry(args.entry);
+  if (!args.properties && !args.facets && args.valid_until === undefined) throw new Error("nothing to change: give properties, facets or valid_until");
+  const type = String((await adbQuery(`SELECT @type AS t FROM ${row.rid}`))[0]?.t ?? ENTITY_LABEL);
+  if (type !== ENTITY_LABEL && !type.startsWith(`${ENTITY_LABEL}~`)) return typedUpdate(row, type, args, identity);
   const origin = row._origin ?? positionMap.root;
   const twins = Number((await adbQuery(`SELECT count(*) AS n FROM ${ENTITY_LABEL} WHERE name = :n AND _origin = :o`, { n: row.name, o: origin }))[0]?.n ?? 0);
   if (twins > 1) throw new Error(`${twins} entries are called "${row.name}" at the same home: fold the duplicate first (merge_entries), then update the one left`);
-  if (!args.properties && !args.facets && args.valid_until === undefined) throw new Error("nothing to change: give properties, facets or valid_until");
   const entity = { name: row.name, ...(args.properties ? { properties: args.properties } : {}), ...(args.facets ? { facets: args.facets } : {}), ...(args.valid_until !== undefined ? { valid_until: args.valid_until } : {}) };
   const now = Date.now();
   const v = parseValidUntil(entity.valid_until, now);
@@ -3969,9 +4030,10 @@ it. Don't write a thing's name as an entry: that makes a second copy beside it.`
     );
     server.tool(
       "update_entry",
-      `Correct an entry you name by name or id ("#13:0"): set properties (a stale version, a wrong field),
-rewrite a facet's text, or set its valid_until. It's updated where it lives, with the usual floor. Use
-this, not raw commands, for corrections. Set propose: true with a reason when it matters.`,
+      `Correct an entry you name by name or id: set properties (a stale version, a wrong field), rewrite a
+facet's text, or set its valid_until. A typed record (a Database, a Host: give its id, "#13:0") is
+corrected in place the same way, without an end date. It's updated where it lives, with the usual
+floor. Use this, not raw commands, for corrections. Set propose: true with a reason when it matters.`,
       {
         entry: z.string().min(2).max(200),
         properties: z.record(z.union([z.string().max(2000), z.number(), z.boolean()])).optional(),
