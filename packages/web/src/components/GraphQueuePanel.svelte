@@ -59,6 +59,11 @@
     if (p.kind === "delete_entry") {
       return { title: `Delete the entry "${String(body.name ?? "")}" (${String(body.rid ?? "")})`, detail: String(body.text ?? "") || "It holds no text." };
     }
+    if (p.kind === "typed_update") {
+      const props = Object.entries((body.properties as Record<string, unknown> | undefined) ?? {}).map(([k, v]) => `${k} = ${String(v)}`);
+      const facets = Object.keys((body.facets as Record<string, unknown> | undefined) ?? {}).map((f) => `${f} text`);
+      return { title: `Correct the ${String(body.type ?? "record")} "${String(body.name ?? "")}" (${String(body.rid ?? "")})`, detail: [...props, ...facets].join("; ").slice(0, 400) };
+    }
     if (p.kind === "fold") {
       return {
         title: `Fold the entry "${String(body.drop_name ?? "")}" (${String(body.drop ?? "")}) into "${String(body.keep_name ?? "")}" (${String(body.keep ?? "")})`,
