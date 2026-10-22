@@ -51,6 +51,11 @@ export const MASTER_NAME = "Graph master";
 export const handlerName = (title: string, job: string): string => `handler · ${title.replace(/\s+/g, " ").trim().slice(0, 44)} · ${job.slice(0, 4)}`;
 const MASTER_IDLE_MS = 10 * 60_000;
 const MASTER_TURN_MS = 60 * 60_000;
+/** a master turn with no event this long is a stalled request: aborted, and the master told to carry on */
+const MASTER_STALL_MS = 5 * 60_000;
+const MASTER_NUDGES = 2;
+const CARRY_ON =
+  "Your last request stalled and was stopped. Carry on with the signals above from where you were: check what you already started (worker_status) before starting anything again.";
 const HANDLER_TURN_MS = 20 * 60_000;
 
 export class GraphPool {
@@ -66,6 +71,7 @@ export class GraphPool {
     private readonly manager: AgentManager,
     private readonly call: GraphCall,
     private readonly maxAgents: () => number = () => instanceSettings().maxAgents ?? 2,
+    private readonly stallMs: number = MASTER_STALL_MS,
   ) {}
 
   /**
@@ -210,11 +216,22 @@ export class GraphPool {
         if (this.manager.runningCount() >= this.maxAgents()) return; // no room right now: next tick
         await this.manager.start(master.id);
       }
-      const settled = this.manager.waitSettled(master.id, MASTER_TURN_MS);
-      settled.catch(() => undefined);
-      await this.manager.promptAgent(master.id, body?.message ?? "");
-      await this.call("/api/worker/signals/ack", { method: "POST", body: { ids: signals.map((x) => x.id) } });
-      await settled;
+      for (let nudge = 0; ; nudge++) {
+        const settled = this.manager.waitSettled(master.id, MASTER_TURN_MS);
+        settled.catch(() => undefined);
+        await this.manager.promptAgent(master.id, nudge === 0 ? (body?.message ?? "") : CARRY_ON);
+        if (nudge === 0) await this.call("/api/worker/signals/ack", { method: "POST", body: { ids: signals.map((x) => x.id) } });
+        if ((await this.settleOrStall(master.id, settled)) === "settled") break;
+        // a stalled request: stop it (that ends the turn) and carry on, a couple of times; then start it afresh next tick
+        await this.manager.abortAgent(master.id);
+        await settled.catch(() => undefined);
+        if (nudge >= MASTER_NUDGES) {
+          log.warn("the master stalled again: given back, it starts afresh with its conversation next tick");
+          await this.manager.releaseAgent(master.id).catch(() => undefined);
+          return;
+        }
+        log.warn(`the master's request stalled (${Math.round(this.stallMs / 60_000)} min without an event): stopped, told to carry on`);
+      }
       this.lastMasterTurn = Date.now();
       // a batch is a lot to keep: compact between batches
       if (signals.some((x) => x.kind === "batch")) await this.manager.compactAgent(master.id).catch((e) => log.warn(`compact master: ${e instanceof Error ? e.message : String(e)}`));
@@ -222,6 +239,23 @@ export class GraphPool {
     } finally {
       this.masterBusy = false;
     }
+  }
+
+  /** the turn ends, or goes quiet past the stall limit */
+  private settleOrStall(id: string, settled: Promise<void>): Promise<"settled" | "stalled"> {
+    return new Promise((resolve, reject) => {
+      const timer = setInterval(() => {
+        const agent = this.manager.getRunning(id) as { quietMs?: () => number } | undefined;
+        if ((agent?.quietMs?.() ?? 0) > this.stallMs) {
+          clearInterval(timer);
+          resolve("stalled");
+        }
+      }, Math.max(10, Math.min(30_000, this.stallMs / 4)));
+      settled.then(
+        () => (clearInterval(timer), resolve("settled")),
+        (e) => (clearInterval(timer), reject(e)),
+      );
+    });
   }
 
   async ensureMaster(profileId: string): Promise<AgentRecord> {

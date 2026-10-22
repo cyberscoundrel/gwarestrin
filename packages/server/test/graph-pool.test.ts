@@ -5,7 +5,7 @@ import { GraphPool, threadName, type GraphCall } from "../src/agents/graph-pool.
 import type { AgentManager } from "../src/agents/manager.js";
 
 // a manager that runs no pi: agents "settle" as soon as they're prompted
-function fakeManager(opts: { settle?: "ok" | "never" | "stop"; levelModels?: Record<string, { provider: string; modelId: string }> } = {}) {
+function fakeManager(opts: { settle?: "ok" | "never" | "stop" | "stall"; levelModels?: Record<string, { provider: string; modelId: string }> } = {}) {
   const records = new Map<string, AgentRecord>();
   const running = new Map<string, EventEmitter>();
   const prompts: Array<[string, string]> = [];
@@ -19,7 +19,10 @@ function fakeManager(opts: { settle?: "ok" | "never" | "stop"; levelModels?: Rec
       return r;
     },
     async start(id: string) {
-      running.set(id, new EventEmitter());
+      const ev = new EventEmitter() as EventEmitter & { quietMs?: () => number };
+      // a stalled request: a run in progress with no events
+      if (opts.settle === "stall") ev.quietMs = () => 60_000;
+      running.set(id, ev);
     },
     async stop(id: string) {
       running.get(id)?.emit("closed");
@@ -51,13 +54,17 @@ function fakeManager(opts: { settle?: "ok" | "never" | "stop"; levelModels?: Rec
     async lastAssistantText() {
       return "Linked it to Toro (customer).";
     },
-    async abortAgent() {},
+    aborted: 0,
+    async abortAgent(id: string) {
+      (m as { aborted: number }).aborted++;
+      running.get(id)?.emit("event", { type: "agent_settled" });
+    },
     compacted: 0,
     async compactAgent() {
       (m as { compacted: number }).compacted++;
     },
   };
-  return { manager: m as unknown as AgentManager, records, prompts, running, compacted: () => (m as { compacted: number }).compacted };
+  return { manager: m as unknown as AgentManager, records, prompts, running, compacted: () => (m as { compacted: number }).compacted, aborted: () => (m as { aborted: number }).aborted };
 }
 
 function fakeGraph(threads: Array<Record<string, unknown>>, status: Record<string, unknown> = { pool: { poolSize: 2, keepDays: 14 } }) {
@@ -154,6 +161,22 @@ describe("graph master", () => {
     expect(compacted()).toBe(1);
     await pool.masterTurn("worker-profile");
     expect([...records.values()].filter((a) => a.graphRole?.kind === "master")).toHaveLength(1);
+  });
+
+  it("a master request that goes quiet is stopped and told to carry on; after a couple it's given back to start afresh", async () => {
+    const { manager, records, prompts, running, aborted } = fakeManager({ settle: "stall" });
+    const calls: Array<[string, unknown]> = [];
+    const call: GraphCall = async (path, init) => {
+      calls.push([path, init?.body]);
+      if (path === "/api/worker/signals") return { status: 200, body: { signals: [{ id: "s1", kind: "batch" }], message: "A batch for you." } };
+      return { status: 200, body: {} };
+    };
+    await new GraphPool(manager, call, () => 8, 20).masterTurn("worker-profile");
+    const master = [...records.values()].find((a) => a.graphRole?.kind === "master")!;
+    expect(prompts.map(([, p]) => p)).toEqual(["A batch for you.", expect.stringMatching(/stalled/), expect.stringMatching(/stalled/)]);
+    expect(calls.filter(([p]) => p === "/api/worker/signals/ack")).toHaveLength(1);
+    expect(aborted()).toBe(3);
+    expect(running.has(master.id)).toBe(false);
   });
 
   it("starts each handler, gives it its brief, then leaves it waiting in the rail with its sandbox given back", async () => {
