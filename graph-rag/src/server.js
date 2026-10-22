@@ -395,7 +395,7 @@ function identityText(name, labels, props) {
 
 /** ---- tool implementations ---- */
 
-async function searchGraph({ query, facets, k = 8, temporal_filter, include_expired = false, assertions_only = false }, scope = { homes: null }, readHomes = [], { demand = true } = {}) {
+async function searchGraph({ query, facets, k = 8, temporal_filter, include_expired = false, assertions_only = false }, scope = { homes: null }, readHomes = [], { demand = true, ownEntry = null } = {}) {
   console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter })}`);
   const facetList = (facets?.length ? facets : Object.keys(FACETS)).map((f) => {
     if (typeof f !== "string" || !FACET_RE.test(f)) throw new Error(`invalid facet: ${f}`);
@@ -553,8 +553,17 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
     }
   }
 
-  // what the caller has now seen (derived-data tracking; not returned)
-  readHomes.push(...results.slice(0, k).filter((r) => r.kind !== "question").map((r) => r.home?.id), ...neighbourHomes.map((h) => (SCOPED && positionMap ? effectiveHome(positionMap, h) : h)));
+  // what the caller has now seen (derived-data tracking; not returned). A
+  // thing isn't content (it's seen wherever its statements are, though it's
+  // stored at the root), and a thread's own task entry is its brief: neither
+  // bounds where its writes land, or every search would hold them at the root.
+  const shown = results.slice(0, k).filter((r) => r.kind !== "question");
+  const rids = shown.map((r) => String(r.rid)).filter((x) => RID_RE.test(x));
+  const skip = new Set(
+    rids.length ? (await adbQuery(`SELECT @rid AS rid FROM [${rids.join(",")}] WHERE _kind = 'thing'`).catch(() => [])).map((r) => String(r.rid)) : [],
+  );
+  if (ownEntry) skip.add(String(ownEntry));
+  readHomes.push(...shown.filter((r) => !skip.has(String(r.rid))).map((r) => r.home?.id), ...neighbourHomes.map((h) => (SCOPED && positionMap ? effectiveHome(positionMap, h) : h)));
   return {
     query,
     // exactly k results (the schema allows 1..32, default 8)
@@ -3727,7 +3736,7 @@ lexical matching if embeddings are unavailable.${homeNote}`,
     async (args) => {
       need("read");
       const read = [];
-      const result = await searchGraph(args, scope, read, { demand: !role });
+      const result = await searchGraph(args, scope, read, { demand: !role, ownEntry: identity.role?.entry ?? null });
       recordReads(identity, read);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
