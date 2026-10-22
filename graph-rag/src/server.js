@@ -2208,7 +2208,7 @@ async function aboutOnce(statementRid, thingRid, role) {
  * merge question for a person (or, with `unsure: "skip"`, nothing: a worker
  * thread decides instead); otherwise a new thing. Returns what happened.
  */
-async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
+async function linkMentions(rid, mentions, home, { unsure = "ask", create = true } = {}) {
   const vecs = mentions.length ? await embedBatch(mentions.map((m) => `${m.type}: ${m.name}`)) : [];
   const out = [];
   for (const [i, m] of mentions.entries()) {
@@ -2245,6 +2245,19 @@ async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
       const people = await adbQuery(`SELECT @rid AS rid, label FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = 'person' AND _norm LIKE :p LIMIT 40`, { p: `${part.first} %` }).catch(() => []);
       const found = personCandidates(part, people).slice(0, 6);
       if (found.length) r = { ambiguous: found.map((c) => String(c.rid)) };
+    }
+    if (r.create && !m.key) {
+      // another entry's name ("ux-t06 bse certs") is a cross-reference, not a thing: no placeholder for it
+      const entry = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 1`, { n: m.name }).catch(() => []);
+      if (entry.length) {
+        out.push({ name: m.name, type: m.type, role: m.role, skipped: "that's an entry, not a thing: mention it in the text instead" });
+        continue;
+      }
+    }
+    if (r.create && !create) {
+      // what a worker wrote links only to things that exist (it makes new ones on purpose, with link_things)
+      out.push({ name: m.name, type: m.type, role: m.role, skipped: "not an existing thing" });
+      continue;
     }
     if (r.ambiguous) {
       // several things go by this name: nothing is linked; a thread (or the sorting step's escalation) picks
@@ -2305,7 +2318,7 @@ async function jobMentions({ rid, from_worker, no_thread, intake }) {
   const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort }));
   const mentions = parseMentions(reply);
   const home = effectiveHome(positionMap, row._home);
-  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask" });
+  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: !from_worker });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
   // with a master: into the next batch, with what linking couldn't settle
   if (intake) await intakeWithTriage(String(rid), row, linked, home);
@@ -2627,7 +2640,7 @@ async function workerLink(args, identity) {
   const mentions = parseMentions(JSON.stringify({ things: args.things.map(bareThing) }), 25);
   const linked = await linkMentions(rid, mentions, effectiveHome(positionMap, row._home), { unsure: "skip" });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
-  const done = linked.filter((l) => !l.unsure);
+  const done = linked.filter((l) => !l.unsure && !l.skipped);
   if (done.length) {
     const created = done.filter((l) => l.created).length;
     await logChange(identity, {
@@ -3898,7 +3911,8 @@ the things it's about: people, customers, suppliers, machines, parts, orders, pl
 (type one of: person, customer, supplier, machine, part, order, place, project, team, other). Up to 25
 a call. Give a record's key when you know it ("mssql:dbo_Customer:TORO"): the same key is always the
 same thing. Existing things are found by key, name or alias; new ones are created. A name that may be
-an existing thing under another name isn't linked: it comes back as unsure for you to check.`,
+an existing thing under another name isn't linked: it comes back as unsure for you to check. Another
+entry is never a thing: cross-reference entries by name in the text, not with a link.`,
       {
         things: z.array(z.object({ name: z.string().min(2).max(120), type: z.string(), role: z.string().max(30).optional(), key: z.string().max(200).optional() })).min(1).max(25),
         entry: z.string().max(200).optional(),
