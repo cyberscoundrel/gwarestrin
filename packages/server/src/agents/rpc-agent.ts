@@ -59,6 +59,10 @@ export class RpcAgent extends EventEmitter<RpcAgentEvents> {
   idleMs(): number {
     return this.busy ? 0 : Date.now() - this.lastActivity;
   }
+  /** milliseconds a run in progress has gone without any event (a stalled model request), or 0 when none is */
+  quietMs(): number {
+    return this.busy ? Date.now() - this.lastActivity : 0;
+  }
 
   summary(): AgentRuntimeSummary {
     return {
