@@ -3707,7 +3707,8 @@ async function rejectPending(id, identity, reason = "", { quiet = false } = {}) 
 
 function sanitizeFacet(name) {
   if (typeof name !== "string" || !FACET_RE.test(name)) throw new Error(`invalid facet name: ${String(name)}`);
-  return name.toLowerCase();
+  // a facet named as it's stored ("text_state") is that facet, not a second one ("text_text_state")
+  return name.toLowerCase().replace(/^(?:text_|embed_)+/, "") || name.toLowerCase();
 }
 
 /** ---- MCP server (fresh instance per request: stateless) ---- */
