@@ -627,6 +627,26 @@ function derivedFloor(identity, origin) {
 }
 
 /**
+ * Would the floor hold this worker's write above where the entry lives? Then
+ * not silently: the worker is told what it read, and either leaves the entry
+ * or proposes the write (an admin decides who sees it). Null when it wouldn't.
+ */
+function workerLift(identity, home) {
+  if (!SCOPED || !positionMap || home === undefined) return null;
+  const at = effectiveHome(positionMap, home);
+  const floor = derivedFloor(identity, at);
+  if (!floor || floor === at || at === EVERYONE || !ancestors(positionMap, at).includes(floor)) return null;
+  const cutoff = Date.now() - windowMs();
+  const above = [...(readMarks.get(markKey(identity)) ?? new Map())]
+    .filter(([h, t]) => t > cutoff && commonAncestor(positionMap, [at, h]) !== at)
+    .map(([h]) => homeName(positionMap, h));
+  return { floor, home: at, read: [...new Set(above)] };
+}
+
+const liftRefusal = (name, lift) =>
+  `Not written: "${name}" lives at ${homeName(positionMap, lift.home)}, but in the last ${policy.derivedWindowHours} hours you read entries at ${lift.read.join(", ") || homeName(positionMap, lift.floor)} that people there can't see, so this write would be held at ${homeName(positionMap, lift.floor)} instead. Either leave the entry as it is, or write it again with propose: true and a reason that says what it rests on: an admin then decides whether it's written at ${homeName(positionMap, lift.home)}.`;
+
+/**
  * Apply a derived-data floor to a placement. The floor is at or above the
  * origin, so it and the placement lie on one line through the origin. The
  * entry goes at least as high as the floor, and nothing is proposed below it
@@ -949,11 +969,9 @@ async function applyRehome({ rid, name, from, to }) {
   if (!rows.length) throw new Error(`entity ${name} no longer exists`);
   if (effectiveHome(positionMap, rows[0]._home) !== from) throw new Error(`entity ${name} moved since the request`);
   await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
-  // made visible to everyone: so are the things it's about
-  if (to === EVERYONE) {
-    const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
-    for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), EVERYONE).catch(() => {});
-  }
+  // seen from its new home: so are the things it's about
+  const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
+  for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to).catch(() => {});
   log.info(`entity ${name} rehomed ${homeName(positionMap, from)} -> ${homeName(positionMap, to)}`);
   return { moved: true, from: homeName(positionMap, from), to: homeName(positionMap, to) };
 }
@@ -2611,7 +2629,10 @@ async function workerUpsert(args, identity, scope) {
   }
   const results = [];
   for (const [home, list] of byHome) {
-    const write = { entities: list, home, floor: derivedFloor(identity, home), written_at: new Date(now).toISOString(), from_worker: true };
+    const lift = workerLift(identity, home);
+    if (lift && !args.propose) throw new Error(liftRefusal(list.map((e) => e.name).join(", "), lift));
+    // proposed past the floor: an admin who approves it writes it where it lives
+    const write = { entities: list, home, floor: lift ? lift.home : derivedFloor(identity, home), written_at: new Date(now).toISOString(), from_worker: true };
     if (args.propose) {
       results.push({ ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE });
       continue;
@@ -3070,7 +3091,9 @@ async function workerUpdateEntry(args, identity) {
   const now = Date.now();
   const v = parseValidUntil(entity.valid_until, now);
   if (v !== undefined) entity.valid_until = v.valid_until ?? "lasting";
-  const write = { entities: [entity], home: origin, floor: derivedFloor(identity, origin), written_at: new Date(now).toISOString(), from_worker: true };
+  const lift = workerLift(identity, row._home ?? origin) ?? workerLift(identity, origin);
+  if (lift && !args.propose) throw new Error(liftRefusal(row.name, lift));
+  const write = { entities: [entity], home: origin, floor: lift ? origin : derivedFloor(identity, origin), written_at: new Date(now).toISOString(), from_worker: true };
   if (args.propose) return { ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home: origin, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE };
   const result = await upsertEntities(write);
   const changed = [...Object.keys(args.properties ?? {}), ...Object.keys(args.facets ?? {}).map((f) => `${f} facet`), ...(args.valid_until !== undefined ? ["valid_until"] : [])];
