@@ -2265,8 +2265,11 @@ async function linkMentions(rid, mentions, home, { unsure = "ask", create = true
       if (found.length) r = { ambiguous: found.map((c) => String(c.rid)) };
     }
     if (r.create && !m.key) {
-      // another entry's name ("ux-t06 bse certs") is a cross-reference, not a thing: no placeholder for it
-      const entry = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 1`, { n: m.name }).catch(() => []);
+      // another entry's name ("ux-t06 bse certs"), or the code it starts with ("ux-t06"), is a cross-reference, not a thing: no placeholder for it
+      const entry = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE (name = :n OR name LIKE :code) AND ${ENTRY_KINDS} LIMIT 1`, {
+        n: m.name,
+        code: `${String(m.name).trim().replace(/[%_\\]/g, "")} %`,
+      }).catch(() => []);
       if (entry.length) {
         out.push({ name: m.name, type: m.type, role: m.role, skipped: "that's an entry, not a thing: mention it in the text instead" });
         continue;
