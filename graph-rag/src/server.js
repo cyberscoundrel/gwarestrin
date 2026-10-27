@@ -1901,7 +1901,8 @@ async function chat(model, messages, timeoutMs = Number(GRADER_TIMEOUT_MS) * 2) 
     body: JSON.stringify({ model, messages, temperature: 0 }),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!res.ok) throw new Error(`${model} HTTP ${res.status}`);
+  // out of credit or rate-limited is the provider's outage, not the job's fault: wait without spending a retry
+  if (!res.ok) throw Object.assign(new Error(`${model} HTTP ${res.status}`), res.status === 402 || res.status === 429 ? { later: true } : {});
   return (await res.json()).choices?.[0]?.message?.content ?? "";
 }
 
