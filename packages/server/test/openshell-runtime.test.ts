@@ -153,13 +153,13 @@ describe("openShellTransport", () => {
 });
 
 describe("OpenShellRuntime", () => {
-  function fakeApi(existing: boolean) {
+  function fakeApi(existing: boolean, phase?: string) {
     const calls: Array<[string, unknown]> = [];
     const api = {
       get: async (name: string, opts: unknown) => {
         calls.push(["get", { name, opts }]);
         if (!existing) throw new SdkError("not_found", "no such sandbox");
-        return {};
+        return phase ? { phase } : {};
       },
       create: async (spec: unknown) => (calls.push(["create", spec]), {}),
       waitReady: async (name: string, secs: number) => (calls.push(["waitReady", { name, secs }]), {}),
@@ -194,6 +194,12 @@ describe("OpenShellRuntime", () => {
     const rt = new OpenShellRuntime(api, { image: "img" });
     expect(await rt.ensureSandbox("1b2c")).toEqual({ name: sandboxNameFor("1b2c"), created: false });
     expect(calls.map((c) => c[0])).toEqual(["get", "waitReady"]);
+  });
+
+  it("replaces a sandbox left in error (its microVM gone) instead of waiting on it", async () => {
+    const { api, calls } = fakeApi(true, "error");
+    expect(await new OpenShellRuntime(api, { image: "img" }).ensureSandbox("1b2c")).toEqual({ name: sandboxNameFor("1b2c"), created: true });
+    expect(calls.map((c) => c[0])).toEqual(["get", "delete", "waitDeleted", "create", "waitReady"]);
   });
 
   it("deletes tolerantly", async () => {

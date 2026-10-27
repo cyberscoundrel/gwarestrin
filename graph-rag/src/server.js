@@ -627,6 +627,26 @@ function derivedFloor(identity, origin) {
 }
 
 /**
+ * Would the floor hold this worker's write above where the entry lives? Then
+ * not silently: the worker is told what it read, and either leaves the entry
+ * or proposes the write (an admin decides who sees it). Null when it wouldn't.
+ */
+function workerLift(identity, home) {
+  if (!SCOPED || !positionMap || home === undefined) return null;
+  const at = effectiveHome(positionMap, home);
+  const floor = derivedFloor(identity, at);
+  if (!floor || floor === at || at === EVERYONE || !ancestors(positionMap, at).includes(floor)) return null;
+  const cutoff = Date.now() - windowMs();
+  const above = [...(readMarks.get(markKey(identity)) ?? new Map())]
+    .filter(([h, t]) => t > cutoff && commonAncestor(positionMap, [at, h]) !== at)
+    .map(([h]) => homeName(positionMap, h));
+  return { floor, home: at, read: [...new Set(above)] };
+}
+
+const liftRefusal = (name, lift) =>
+  `Not written: "${name}" lives at ${homeName(positionMap, lift.home)}, but in the last ${policy.derivedWindowHours} hours you read entries at ${lift.read.join(", ") || homeName(positionMap, lift.floor)} that people there can't see, so this write would be held at ${homeName(positionMap, lift.floor)} instead. Either leave the entry as it is, or write it again with propose: true and a reason that says what it rests on: an admin then decides whether it's written at ${homeName(positionMap, lift.home)}.`;
+
+/**
  * Apply a derived-data floor to a placement. The floor is at or above the
  * origin, so it and the placement lie on one line through the origin. The
  * entry goes at least as high as the floor, and nothing is proposed below it
@@ -949,11 +969,9 @@ async function applyRehome({ rid, name, from, to }) {
   if (!rows.length) throw new Error(`entity ${name} no longer exists`);
   if (effectiveHome(positionMap, rows[0]._home) !== from) throw new Error(`entity ${name} moved since the request`);
   await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
-  // made visible to everyone: so are the things it's about
-  if (to === EVERYONE) {
-    const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
-    for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), EVERYONE).catch(() => {});
-  }
+  // seen from its new home: so are the things it's about
+  const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
+  for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to).catch(() => {});
   log.info(`entity ${name} rehomed ${homeName(positionMap, from)} -> ${homeName(positionMap, to)}`);
   return { moved: true, from: homeName(positionMap, from), to: homeName(positionMap, to) };
 }
@@ -2208,7 +2226,7 @@ async function aboutOnce(statementRid, thingRid, role) {
  * merge question for a person (or, with `unsure: "skip"`, nothing: a worker
  * thread decides instead); otherwise a new thing. Returns what happened.
  */
-async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
+async function linkMentions(rid, mentions, home, { unsure = "ask", create = true } = {}) {
   const vecs = mentions.length ? await embedBatch(mentions.map((m) => `${m.type}: ${m.name}`)) : [];
   const out = [];
   for (const [i, m] of mentions.entries()) {
@@ -2245,6 +2263,19 @@ async function linkMentions(rid, mentions, home, { unsure = "ask" } = {}) {
       const people = await adbQuery(`SELECT @rid AS rid, label FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = 'person' AND _norm LIKE :p LIMIT 40`, { p: `${part.first} %` }).catch(() => []);
       const found = personCandidates(part, people).slice(0, 6);
       if (found.length) r = { ambiguous: found.map((c) => String(c.rid)) };
+    }
+    if (r.create && !m.key) {
+      // another entry's name ("ux-t06 bse certs") is a cross-reference, not a thing: no placeholder for it
+      const entry = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 1`, { n: m.name }).catch(() => []);
+      if (entry.length) {
+        out.push({ name: m.name, type: m.type, role: m.role, skipped: "that's an entry, not a thing: mention it in the text instead" });
+        continue;
+      }
+    }
+    if (r.create && !create) {
+      // what a worker wrote links only to things that exist (it makes new ones on purpose, with link_things)
+      out.push({ name: m.name, type: m.type, role: m.role, skipped: "not an existing thing" });
+      continue;
     }
     if (r.ambiguous) {
       // several things go by this name: nothing is linked; a thread (or the sorting step's escalation) picks
@@ -2305,7 +2336,7 @@ async function jobMentions({ rid, from_worker, no_thread, intake }) {
   const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort }));
   const mentions = parseMentions(reply);
   const home = effectiveHome(positionMap, row._home);
-  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask" });
+  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: !from_worker });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
   // with a master: into the next batch, with what linking couldn't settle
   if (intake) await intakeWithTriage(String(rid), row, linked, home);
@@ -2598,7 +2629,10 @@ async function workerUpsert(args, identity, scope) {
   }
   const results = [];
   for (const [home, list] of byHome) {
-    const write = { entities: list, home, floor: derivedFloor(identity, home), written_at: new Date(now).toISOString(), from_worker: true };
+    const lift = workerLift(identity, home);
+    if (lift && !args.propose) throw new Error(liftRefusal(list.map((e) => e.name).join(", "), lift));
+    // proposed past the floor: an admin who approves it writes it where it lives
+    const write = { entities: list, home, floor: lift ? lift.home : derivedFloor(identity, home), written_at: new Date(now).toISOString(), from_worker: true };
     if (args.propose) {
       results.push({ ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE });
       continue;
@@ -2627,7 +2661,7 @@ async function workerLink(args, identity) {
   const mentions = parseMentions(JSON.stringify({ things: args.things.map(bareThing) }), 25);
   const linked = await linkMentions(rid, mentions, effectiveHome(positionMap, row._home), { unsure: "skip" });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
-  const done = linked.filter((l) => !l.unsure);
+  const done = linked.filter((l) => !l.unsure && !l.skipped);
   if (done.length) {
     const created = done.filter((l) => l.created).length;
     await logChange(identity, {
@@ -3057,7 +3091,9 @@ async function workerUpdateEntry(args, identity) {
   const now = Date.now();
   const v = parseValidUntil(entity.valid_until, now);
   if (v !== undefined) entity.valid_until = v.valid_until ?? "lasting";
-  const write = { entities: [entity], home: origin, floor: derivedFloor(identity, origin), written_at: new Date(now).toISOString(), from_worker: true };
+  const lift = workerLift(identity, row._home ?? origin) ?? workerLift(identity, origin);
+  if (lift && !args.propose) throw new Error(liftRefusal(row.name, lift));
+  const write = { entities: [entity], home: origin, floor: lift ? origin : derivedFloor(identity, origin), written_at: new Date(now).toISOString(), from_worker: true };
   if (args.propose) return { ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home: origin, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE };
   const result = await upsertEntities(write);
   const changed = [...Object.keys(args.properties ?? {}), ...Object.keys(args.facets ?? {}).map((f) => `${f} facet`), ...(args.valid_until !== undefined ? ["valid_until"] : [])];
@@ -3671,7 +3707,8 @@ async function rejectPending(id, identity, reason = "", { quiet = false } = {}) 
 
 function sanitizeFacet(name) {
   if (typeof name !== "string" || !FACET_RE.test(name)) throw new Error(`invalid facet name: ${String(name)}`);
-  return name.toLowerCase();
+  // a facet named as it's stored ("text_state") is that facet, not a second one ("text_text_state")
+  return name.toLowerCase().replace(/^(?:text_|embed_)+/, "") || name.toLowerCase();
 }
 
 /** ---- MCP server (fresh instance per request: stateless) ---- */
@@ -3898,7 +3935,8 @@ the things it's about: people, customers, suppliers, machines, parts, orders, pl
 (type one of: person, customer, supplier, machine, part, order, place, project, team, other). Up to 25
 a call. Give a record's key when you know it ("mssql:dbo_Customer:TORO"): the same key is always the
 same thing. Existing things are found by key, name or alias; new ones are created. A name that may be
-an existing thing under another name isn't linked: it comes back as unsure for you to check.`,
+an existing thing under another name isn't linked: it comes back as unsure for you to check. Another
+entry is never a thing: cross-reference entries by name in the text, not with a link.`,
       {
         things: z.array(z.object({ name: z.string().min(2).max(120), type: z.string(), role: z.string().max(30).optional(), key: z.string().max(200).optional() })).min(1).max(25),
         entry: z.string().max(200).optional(),
