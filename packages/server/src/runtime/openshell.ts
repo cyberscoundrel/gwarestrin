@@ -164,11 +164,22 @@ export class OpenShellRuntime {
     const name = sandboxNameFor(agentId);
     const scope = this.cfg.workspace ? { workspace: this.cfg.workspace } : {};
     let created = false;
+    let exists = true;
     try {
-      await this.client.get(name, scope);
-      log.info(`reusing sandbox ${name}`);
+      const ref = (await this.client.get(name, scope)) as { phase?: string } | undefined;
+      // a sandbox whose microVM is gone (the host rebooted or moved) stays in error:
+      // replaced, its conversations come back from the host copy
+      if (ref?.phase === "error" || ref?.phase === "stopped") {
+        log.warn(`sandbox ${name} is in ${ref.phase}: replacing it`);
+        await this.client.delete(name, { ...scope, allowMissing: true });
+        await this.client.waitDeleted(name, 120, scope);
+        exists = false;
+      } else log.info(`reusing sandbox ${name}`);
     } catch (err) {
       if (errorCode(err) !== "not_found") throw err;
+      exists = false;
+    }
+    if (!exists) {
       log.info(`creating sandbox ${name} (${this.cfg.image})`);
       await this.client.create({
         name,
