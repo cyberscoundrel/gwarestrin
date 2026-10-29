@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { Network, TriangleAlert } from "lucide";
-  import { api, type GraphWorkerView, type PoolSettings, type WorkerHandler, type WorkerProposal, type WorkerQuestion, type WorkerThread } from "../lib/api.js";
+  import { api, type DependencyHealth, type GraphWorkerView, type LoopHealth, type PoolSettings, type WorkerHandler, type WorkerProposal, type WorkerQuestion, type WorkerThread } from "../lib/api.js";
   import { store } from "../lib/stores.svelte.js";
   import Dialog from "./Dialog.svelte";
   import Icon from "./Icon.svelte";
@@ -75,6 +75,11 @@
       /* the next refresh tries again */
     }
   }
+
+  // what's out and what keeps failing (graph-rag/src/health.js)
+  const outages = $derived(Object.entries(status?.dependencies ?? {}).filter((e): e is [string, Extract<DependencyHealth, { ok: false }>] => !e[1].ok));
+  const failingLoops = $derived(Object.entries(status?.loops ?? {}).filter((e): e is [string, Extract<LoopHealth, { ok: false }>] => !e[1].ok));
+  const depName = (dep: string) => (dep === "decisions" ? "Triage (the decision API)" : dep.startsWith("model:") ? `The model route ${dep.slice(6)}` : dep);
 
   const dirty = $derived(!!draft && !!status?.pool && JSON.stringify(draft) !== JSON.stringify(status.pool));
   async function savePool(): Promise<void> {
@@ -198,6 +203,20 @@
           {status.threads?.running ?? 0} working · {status.threads?.waiting ?? 0} waiting on you · {status.threads?.pending ?? 0} queued ·
           {status.threads?.today ?? 0}{status.pool ? ` of ${status.pool.dailyThreads}` : ""} started today · {status.things} things known
         </p>
+
+        {#if outages.length || failingLoops.length || status.awaiting_grading}
+          <section class="grid gap-1 rounded-md border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn" role="status">
+            {#each outages as [dep, d] (dep)}
+              <span>{depName(dep)} is out since {when(d.since)}: {d.reason}. Its work waits (nothing fails meanwhile); next try {when(d.retry_at)}.</span>
+            {/each}
+            {#each failingLoops as [name, l] (name)}
+              <span>The {name} loop has failed {l.failures} time{l.failures === 1 ? "" : "s"} since {when(l.since)}: {l.error.slice(0, 200)}</span>
+            {/each}
+            {#if status.awaiting_grading}
+              <span>{status.awaiting_grading} entr{status.awaiting_grading === 1 ? "y waits" : "ies wait"} one level up for the grader; they're placed on their own once it answers.</span>
+            {/if}
+          </section>
+        {/if}
 
         {#if status.master?.on}
           <section class="grid gap-2">
