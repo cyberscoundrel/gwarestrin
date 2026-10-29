@@ -112,6 +112,13 @@ allowed to use it; otherwise defining a profile would escalate privileges.
 - **Reads**: search (vector + lexical) and the 1-hop traversal only return
   entities homed at the caller's positions or below; edges to hidden
   entities are dropped. Raw query tools need the root position.
+- **Writers**: every entry records the person who first wrote it
+  (`_written_by`; an agent's write counts as the person it acts for, a
+  queued write as the person who asked, never the approver or a graph
+  worker). A person always reads what they wrote, wherever grading put it:
+  they already know what it says, and losing sight of it looks like lost
+  work. Reading isn't owning: moving or sharing it onward still goes by home,
+  and others at the writer's position still don't see a restricted entry.
 - **Moves**: `set_home` restricts directly (direct writers) and queues every
   widening for a person; approvers only see queued writes they can see.
 - **Legacy data** (no `_home`) is root-only until released with `set_home`.
