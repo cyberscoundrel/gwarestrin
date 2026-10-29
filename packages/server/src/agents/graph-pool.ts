@@ -16,6 +16,16 @@ import type { AgentManager } from "./manager.js";
 
 const log = scoped("graph-pool");
 
+/**
+ * A turn that died on the model's connection or availability (the provider
+ * dropped, timed out, ran out of credit, rate-limited, or failed), as pi
+ * reports it after its own retries: an outage, not something wrong with the
+ * work. Matches graph-rag's isOutage for its own calls (health.js).
+ */
+export function isModelOutage(ended: string): boolean {
+  return /connection error|terminated|timed? ?out|fetch failed|socket hang up|ECONN|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|overloaded|rate.?limit|\b(402|408|429|5\d\d)\b|insufficient credits|service unavailable|bad gateway/i.test(ended);
+}
+
 export type GraphCall = (path: string, init?: { method?: "GET" | "PUT" | "POST"; body?: unknown }) => Promise<{ status: number; body: unknown } | null>;
 
 export interface ClaimedThread {
@@ -182,7 +192,9 @@ export class GraphPool {
       if (turn.ended) {
         log.warn(`thread ${t.job.slice(0, 8)} (${t.name}): ${turn.ended}`);
         const summary = turn.text ? `${turn.text}\n\n(${turn.ended})` : turn.ended;
-        await this.call(`/api/worker/threads/${t.job}/finish`, { method: "POST", body: { status: "failed", summary } });
+        // the model's connection, not the work: graph-rag waits it out without spending a try
+        const outage = isModelOutage(turn.ended) ? turn.ended : undefined;
+        await this.call(`/api/worker/threads/${t.job}/finish`, { method: "POST", body: { status: "failed", summary, ...(outage ? { outage } : {}) } });
       } else {
         await this.call(`/api/worker/threads/${t.job}/finish`, { method: "POST", body: { status: "done", summary: turn.text } });
         log.info(`thread ${t.job.slice(0, 8)} (${t.name}) finished`);

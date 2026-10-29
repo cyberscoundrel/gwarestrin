@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { AgentRecord, GraphRole } from "@gwarestrin/shared";
 import { describe, expect, it } from "vitest";
-import { GraphPool, threadName, type GraphCall } from "../src/agents/graph-pool.js";
+import { GraphPool, isModelOutage, threadName, type GraphCall } from "../src/agents/graph-pool.js";
 import type { AgentManager } from "../src/agents/manager.js";
 
 // a manager that runs no pi: agents "settle" as soon as they're prompted
@@ -131,7 +131,21 @@ describe("graph worker pool", () => {
     const { call, calls } = fakeGraph([thread("0f8fad5b-0000-0000-0000-00000000000d")]);
     await new GraphPool(manager, call, () => 8).tick();
     await flush();
-    expect(calls.find(([p]) => p.endsWith("/finish"))?.[1]).toEqual({ status: "failed", summary: "Checking the jobs next.\n\n(the turn ended with an error: Request timed out.)" });
+    expect(calls.find(([p]) => p.endsWith("/finish"))?.[1]).toEqual({ status: "failed", summary: "Checking the jobs next.\n\n(the turn ended with an error: Request timed out.)", outage: "the turn ended with an error: Request timed out." });
+  });
+
+  it("a turn that died on the model connection is reported as an outage (graph-rag keeps its tries)", async () => {
+    const { manager } = fakeManager({ ended: "the turn ended with an error: Connection error." });
+    const { call, calls } = fakeGraph([thread("0f8fad5b-0000-0000-0000-00000000000e")]);
+    await new GraphPool(manager, call, () => 8).tick();
+    await flush();
+    expect(calls.find(([p]) => p.endsWith("/finish"))?.[1]).toMatchObject({ status: "failed", outage: "the turn ended with an error: Connection error." });
+  });
+
+  it("tells a model outage from the work's own failure", () => {
+    for (const e of ["the turn ended with an error: Connection error.", "the turn ended with an error: terminated", "the turn ended with an error: Request timed out.", "the turn ended with an error: 429 Too Many Requests", "the turn ended with an error: 402 insufficient credits", "the turn ended with an error: 503 Service Unavailable"])
+      expect(isModelOutage(e), e).toBe(true);
+    for (const e of ["the turn was stopped", "the turn ended with an error: 400 context length exceeded", "the turn ended with an error: invalid tool arguments"]) expect(isModelOutage(e), e).toBe(false);
   });
 
   it("no room, no profile, or not the root: nothing is claimed", async () => {
