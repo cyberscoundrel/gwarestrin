@@ -2519,18 +2519,37 @@ async function entryForBrief(rid) {
  * (a first start) or its resume message (an answered question, a decided
  * proposal) and the thread's agent if it has one.
  */
-async function claimThreads(limit) {
+/**
+ * A level's share of a model with a limit: [{levels, room}] from the
+ * workspace (levels on one model share it; 0 = a thread with no level). A
+ * thread of a full group stays pending, keeping its tries, for the next claim.
+ */
+function levelRoom(groups) {
+  const room = new Map(); // level -> its group's counter
+  for (const g of Array.isArray(groups) ? groups.slice(0, 8) : []) {
+    const counter = { left: Math.max(0, Math.floor(Number(g?.room) || 0)) };
+    for (const l of Array.isArray(g?.levels) ? g.levels : []) if ([0, 1, 2, 3].includes(Number(l))) room.set(Number(l), counter);
+  }
+  return room;
+}
+
+async function claimThreads(limit, groups) {
   // a thread on a model that's out would only fail: none start until it's back
   const paused = health.outage(`model:${workerModel()}`);
   if (paused) return { threads: [], paused: paused.message };
   const room = Math.max(0, Math.min(Number(limit) || 0, worker.pool.poolSize, worker.pool.dailyThreads - (await threadsToday())));
   if (!room) return { threads: [] };
   const now = new Date();
-  const due = await adbQuery(`SELECT id, payload, agent_id, attempts FROM Job WHERE kind = 'review' AND status = 'pending' AND run_after <= :now ORDER BY priority DESC, created_at ASC LIMIT ${Math.floor(room)}`, {
+  const limited = levelRoom(groups);
+  // with a full model, look past its threads for ones that can run
+  const due = await adbQuery(`SELECT id, payload, agent_id, attempts FROM Job WHERE kind = 'review' AND status = 'pending' AND run_after <= :now ORDER BY priority DESC, created_at ASC LIMIT ${limited.size ? Math.min(200, Math.floor(room) * 10) : Math.floor(room)}`, {
     now: now.toISOString(),
   });
   const out = [];
   for (const job of due) {
+    if (out.length >= room) break;
+    const counter = limited.get(Number(JSON.parse(job.payload || "{}").level) || 0);
+    if (counter && counter.left <= 0) continue;
     const minutes = Number(JSON.parse(job.payload || "{}").minutes) || worker.pool.threadMinutes;
     const lease = new Date(now.getTime() + (minutes + 5) * 60_000).toISOString();
     const claimed = await adbCommand("UPDATE Job SET status = 'running', claimed_at = :now, lease_until = :lease, updated_at = :now WHERE id = :id AND status = 'pending'", "sql", {
@@ -2539,6 +2558,7 @@ async function claimThreads(limit) {
       id: job.id,
     });
     if (Number(claimed?.[0]?.count ?? 0) !== 1) continue;
+    if (counter) counter.left--;
     const payload = JSON.parse(job.payload || "{}");
     const brief = RID_RE.test(String(payload.rid)) ? await entryForBrief(payload.rid) : null;
     if (!brief) {
@@ -4786,7 +4806,7 @@ const rootOnly = (req, res) => {
 };
 app.post("/api/worker/threads/claim", (req, res) => {
   if (!rootOnly(req, res)) return;
-  void claimThreads(req.body?.limit).then((r) => res.json(r), (e) => httpError(res, e));
+  void claimThreads(req.body?.limit, req.body?.groups).then((r) => res.json(r), (e) => httpError(res, e));
 });
 app.post("/api/worker/threads/:id/agent", (req, res) => {
   if (!rootOnly(req, res)) return;

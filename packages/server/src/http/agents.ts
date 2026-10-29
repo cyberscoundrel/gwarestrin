@@ -289,6 +289,9 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
                 { additionalProperties: false },
               ),
             ),
+            levelLimits: Type.Optional(
+              Type.Object(Object.fromEntries(["1", "2", "3"].map((l) => [l, Type.Optional(Type.Integer({ minimum: 1, maximum: 32 }))])), { additionalProperties: false }),
+            ),
           }),
           Type.Null(),
         ]),

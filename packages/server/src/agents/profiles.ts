@@ -98,7 +98,13 @@ export class ProfileStore {
           : {}),
       ...(input.graphWorker !== undefined
         ? input.graphWorker
-          ? { graphWorker: { model: input.graphWorker.model, ...(input.graphWorker.levelModels && Object.keys(input.graphWorker.levelModels).length ? { levelModels: input.graphWorker.levelModels } : {}) } }
+          ? {
+              graphWorker: {
+                model: input.graphWorker.model,
+                ...(input.graphWorker.levelModels && Object.keys(input.graphWorker.levelModels).length ? { levelModels: input.graphWorker.levelModels } : {}),
+                ...(input.graphWorker.levelLimits && Object.keys(input.graphWorker.levelLimits).length ? { levelLimits: input.graphWorker.levelLimits } : {}),
+              },
+            }
           : {}
         : existing?.graphWorker
           ? { graphWorker: existing.graphWorker }

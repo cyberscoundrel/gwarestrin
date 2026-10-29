@@ -212,6 +212,37 @@ await scenario("a thread whose turn died on the model connection waits it out wi
   check(Number((await row()).attempts) === 1, "a failure of its own spends a try");
 });
 
+await scenario("a model with a limit gets no more threads than it serves; the rest wait without spending a try", async () => {
+  const before = (await api("/api/worker")).pool;
+  await api("/api/worker", { method: "PUT", body: JSON.stringify({ pool: { poolSize: 5 } }) });
+  try {
+    await save("alice", "e2e-l1 capacity note", "The capacity test note.");
+    const rid = String((await entry("e2e-l1 capacity note")).rid);
+    const now = new Date(Date.now() - 1000).toISOString();
+    const ids = [];
+    for (const level of [1, 1, 1, 2]) {
+      const jid = randomUUID();
+      ids.push(jid);
+      const payload = JSON.stringify({ rid, level }).replace(/'/g, "\\'");
+      const r = await tool("admin", "execute_graph", { command: `INSERT INTO Job SET id = '${jid}', kind = 'review', job_key = 'e2e:${jid}', payload = '${payload}', status = 'pending', attempts = 0, priority = 9, run_after = '${now}', created_at = '${now}', updated_at = '${now}'`, language: "sql" });
+      check(!r.error, `job inserted: ${JSON.stringify(r).slice(0, 200)}`);
+    }
+    // level 1's model has room for one: one level-1 thread and the level-2 one start
+    const got = await api("/api/worker/threads/claim", { method: "POST", body: JSON.stringify({ limit: 5, groups: [{ levels: [1], room: 1 }] }) });
+    const mine = (got.threads ?? []).filter((t) => ids.includes(t.job));
+    check(mine.filter((t) => t.level === 1).length === 1, `one level-1 thread: ${JSON.stringify(mine.map((t) => t.level))}`);
+    check(mine.filter((t) => t.level === 2).length === 1, `the level-2 thread too: ${JSON.stringify(mine.map((t) => t.level))}`);
+    const rows = await sql(`SELECT id, status, attempts FROM Job WHERE id IN [${ids.map((i) => `'${i}'`).join(",")}]`);
+    check(rows.filter((r) => r.status === "pending").length === 2 && rows.every((r) => Number(r.attempts) === 0), `the other two wait, no try spent: ${JSON.stringify(rows)}`);
+    // a full model: none of its threads start
+    const none = await api("/api/worker/threads/claim", { method: "POST", body: JSON.stringify({ limit: 5, groups: [{ levels: [1], room: 0 }] }) });
+    check(!(none.threads ?? []).some((t) => ids.includes(t.job)), "none while it's full");
+    await tool("admin", "execute_graph", { command: `UPDATE Job SET status = 'done' WHERE id IN [${ids.map((i) => `'${i}'`).join(",")}]`, language: "sql" });
+  } finally {
+    await api("/api/worker", { method: "PUT", body: JSON.stringify({ pool: before }) });
+  }
+});
+
 await scenario("nothing in the background kept failing", async () => {
   const st = await api("/api/worker");
   const failing = Object.entries(st.loops ?? {}).filter(([, l]) => !l.ok);

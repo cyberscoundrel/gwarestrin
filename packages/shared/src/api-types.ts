@@ -159,4 +159,11 @@ export type WorkerLevel = "1" | "2" | "3";
 export interface GraphWorkerSettings {
   model: string;
   levelModels?: Partial<Record<WorkerLevel, { provider: string; modelId: string }>> | undefined;
+  /**
+   * At most this many threads of a level at once. Levels on the same model
+   * share the lowest of their limits: a model on the organization's own
+   * hardware serves a few requests at a time, and more queue until they time
+   * out. No limit = only the pool's size.
+   */
+  levelLimits?: Partial<Record<WorkerLevel, number>> | undefined;
 }

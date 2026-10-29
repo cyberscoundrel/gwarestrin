@@ -9,7 +9,7 @@
  * Only a workspace graph-rag accepts as the organization's root gets
  * anything from the claim endpoint, so other workspaces just idle.
  */
-import type { AgentRecord, GraphRole } from "@gwarestrin/shared";
+import type { AgentRecord, GraphRole, WorkerLevel } from "@gwarestrin/shared";
 import { instanceSettings, modelRefusal } from "../instance/settings.js";
 import { scoped } from "../util/log.js";
 import type { AgentManager } from "./manager.js";
@@ -69,7 +69,8 @@ const CARRY_ON =
 const HANDLER_TURN_MS = 20 * 60_000;
 
 export class GraphPool {
-  private readonly active = new Set<string>();
+  /** threads running now: job -> the model it runs on ("provider/modelId", or "" for the profile's own) */
+  private readonly active = new Map<string, string>();
   private masterBusy = false;
   private lastMasterTurn = 0;
   private handlersBusy = false;
@@ -159,7 +160,9 @@ export class GraphPool {
       const reserve = status.master?.on ? 1 : 0;
       const room = Math.min(size - this.active.size, this.maxAgents() - this.manager.runningCount() - reserve);
       if (room <= 0) return { started: 0 };
-      const claimed = await this.call("/api/worker/threads/claim", { method: "POST", body: { limit: room } });
+      // a model with a limit (one on the organization's own hardware) gets no more threads than it can serve at once
+      const groups = this.levelGroups();
+      const claimed = await this.call("/api/worker/threads/claim", { method: "POST", body: { limit: room, ...(groups.length ? { groups } : {}) } });
       const threads = claimed?.status === 200 ? ((claimed.body as { threads?: ClaimedThread[] }).threads ?? []) : [];
       for (const t of threads) void this.run(t, profile.id);
       return { started: threads.length };
@@ -168,9 +171,41 @@ export class GraphPool {
     }
   }
 
+  /** the model a level's threads run on: its level model, else the profile's own ("") */
+  private levelModelKey(level: number | undefined): string {
+    const m = this.manager.profiles.graphWorker()?.graphWorker?.levelModels?.[String(level) as WorkerLevel];
+    return m ? `${m.provider}/${m.modelId}` : "";
+  }
+
+  /**
+   * The levels whose model has a limit, grouped by model, with how many more
+   * threads that model takes now (levels on one model share the lowest limit).
+   */
+  levelGroups(): Array<{ levels: number[]; room: number }> {
+    const gw = this.manager.profiles.graphWorker()?.graphWorker;
+    const limits = gw?.levelLimits ?? {};
+    const byModel = new Map<string, { levels: number[]; cap: number }>();
+    for (const l of ["1", "2", "3"] as WorkerLevel[]) {
+      const key = this.levelModelKey(Number(l));
+      const g = byModel.get(key) ?? { levels: [], cap: Infinity };
+      g.levels.push(Number(l));
+      const lim = limits[l];
+      if (typeof lim === "number" && lim > 0) g.cap = Math.min(g.cap, lim);
+      byModel.set(key, g);
+    }
+    const out: Array<{ levels: number[]; room: number }> = [];
+    for (const [key, g] of byModel) {
+      if (!Number.isFinite(g.cap)) continue;
+      const busy = [...this.active.values()].filter((k) => k === key).length;
+      // a thread with no level runs on the profile's own model
+      out.push({ levels: key === "" ? [0, ...g.levels] : g.levels, room: Math.max(0, g.cap - busy) });
+    }
+    return out;
+  }
+
   /** one thread's turn, start to report */
   async run(t: ClaimedThread, profileId: string): Promise<void> {
-    this.active.add(t.job);
+    this.active.set(t.job, this.levelModelKey(t.level));
     let agentId: string | null = t.agent_id && this.manager.store.get(t.agent_id) ? t.agent_id : null;
     try {
       if (!agentId) {
@@ -181,6 +216,9 @@ export class GraphPool {
         agentId = record.id;
         await this.call(`/api/worker/threads/${t.job}/agent`, { method: "POST", body: { agent_id: agentId } });
       }
+      // a resumed thread runs on its agent's own model
+      const own = this.manager.store.get(agentId)?.model;
+      if (own) this.active.set(t.job, `${own.provider}/${own.modelId}`);
       if (!this.manager.getRunning(agentId)) await this.manager.start(agentId);
       const settled = this.manager.waitSettled(agentId, t.minutes * 60_000);
       settled.catch(() => undefined); // awaited below; never unhandled
