@@ -57,6 +57,18 @@
     "2": existing?.graphWorker?.levelModels?.["2"] ?? null,
     "3": existing?.graphWorker?.levelModels?.["3"] ?? null,
   });
+  // at most this many of a level's threads at once ("" = no limit): a model on your own hardware serves a few at a time
+  let levelLimits = $state<Record<"1" | "2" | "3", string>>({
+    "1": String(existing?.graphWorker?.levelLimits?.["1"] ?? ""),
+    "2": String(existing?.graphWorker?.levelLimits?.["2"] ?? ""),
+    "3": String(existing?.graphWorker?.levelLimits?.["3"] ?? ""),
+  });
+  const limitsOf = (v: Record<string, string>) =>
+    Object.fromEntries(
+      Object.entries(v)
+        .map(([l, n]) => [l, Math.floor(Number(n))] as const)
+        .filter(([, n]) => Number.isFinite(n) && n >= 1 && n <= 32),
+    ) as Record<string, number>;
   const LEVELS: Array<{ id: "1" | "2" | "3"; label: string; hint: string }> = [
     { id: "1", label: "Quick checks", hint: "one name or record: a basic-tier model is enough" },
     { id: "2", label: "Investigations", hint: "several records, updates, corrections: a standard-tier model" },
@@ -189,7 +201,11 @@
         ...(worker
           ? {
               graphWorker: isWorker
-                ? { model: workerModel, levelModels: Object.fromEntries(Object.entries($state.snapshot(levelModels)).filter(([, m]) => m)) as Record<string, { provider: string; modelId: string }> }
+                ? {
+                    model: workerModel,
+                    levelModels: Object.fromEntries(Object.entries($state.snapshot(levelModels)).filter(([, m]) => m)) as Record<string, { provider: string; modelId: string }>,
+                    levelLimits: limitsOf($state.snapshot(levelLimits)),
+                  }
                 : null,
             }
           : {}),
@@ -310,10 +326,15 @@
           <div class="flex flex-wrap items-center gap-3">
             <span class="w-32 text-sm text-fg">{l.label}</span>
             <ModelPicker value={levelModels[l.id]} noneLabel="This profile's model" label="model for {l.label.toLowerCase()}" onchange={(v) => (levelModels[l.id] = v)} />
+            <label class="flex items-center gap-1.5 text-xs text-muted">
+              at most
+              <input class="input w-16" type="number" min="1" max="32" placeholder="any" aria-label="most {l.label.toLowerCase()} at once" bind:value={levelLimits[l.id]} />
+              at once
+            </label>
           </div>
         {/each}
       </div>
-      <span class="field-hint">The master gives each worker a level: {LEVELS.map((l) => `${l.label.toLowerCase()} (${l.hint})`).join("; ")}. Only labeled models are offered.</span>
+      <span class="field-hint">The master gives each worker a level: {LEVELS.map((l) => `${l.label.toLowerCase()} (${l.hint})`).join("; ")}. Only labeled models are offered. Give a model on your own hardware a limit near the number of requests it serves at once: more wait in its queue until they time out. Levels on the same model share the lowest limit.</span>
     </div>
   {/if}
   {#if worker}

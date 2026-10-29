@@ -52,6 +52,24 @@ puts the thread off until then without spending a try. Any other error spends
 one of its three tries. A thread put off six times in a row counts its next
 failures as its own, so one that keeps dying this way can't wait forever.
 
+### A model on your own hardware gets only what it can serve
+
+Level-1 threads ran on the local Qwen (llama.cpp: four requests at a time
+from one shared 262k-token context). The pool sent it every level-1 thread;
+past four, requests queued for minutes behind other workers' long prompts
+and were cut ("Connection error", "terminated", "Request timed out"), and
+several large conversations together overflowed its context ("Context size
+has been exceeded"). They failed together because they waited together. It
+looked like a network fault; the sandboxes, the gateway and OpenRouter were
+never the cause (reproduced 2026-10-29: a test agent on the local model
+answered in 2 s until five workers started, then waited past 2 minutes).
+
+The worker profile sets **at most N at once** per level, next to its model.
+Levels on the same model share the lowest limit; a thread with no level
+counts against the profile's own model. The pool counts its running threads
+by model and asks graph-rag only for the room left; graph-rag's claim skips a
+full model's threads, which stay pending with their tries.
+
 ### Every background loop reports how it went
 
 The sweep, pruning, jobs, leases, batches and regrading run through
