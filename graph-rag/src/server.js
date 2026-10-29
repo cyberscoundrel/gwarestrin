@@ -2710,12 +2710,18 @@ async function workerUpsert(args, identity, scope) {
   const byHome = new Map();
   for (const e of entities) {
     let home = asked;
-    if (home === undefined) {
-      const found = await adbQuery(`SELECT @rid AS rid, _origin FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 2`, { n: e.name }).catch(() => []);
-      // two entries by this name: which one is meant isn't for a guess (update_entry takes the id)
-      if (found.length > 1) await findEntry(e.name);
-      home = found.length === 1 && found[0]._origin ? found[0]._origin : (own?._origin ?? positionMap.root);
-    }
+    const found = await adbQuery(`SELECT @rid AS rid, _origin, _home FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 2`, { n: e.name }).catch(() => []);
+    // two entries by this name: which one is meant isn't for a guess (update_entry takes the id)
+    if (found.length > 1) await findEntry(e.name);
+    if (found.length === 1 && found[0]._origin) {
+      // an existing entry is updated where it was written (an entry is its name and origin: any
+      // other origin would be a copy beside it); where it's seen from moves only with set_home
+      const lives = effectiveHome(positionMap, found[0]._home);
+      if (asked !== undefined && asked !== lives) {
+        throw new Error(`"${e.name}" already exists at ${homeName(positionMap, lives)}: an update is written where it lives, so leave home out. To change who sees it, use set_home.`);
+      }
+      home = found[0]._origin;
+    } else if (home === undefined) home = own?._origin ?? positionMap.root;
     if (!byHome.has(home)) byHome.set(home, []);
     byHome.get(home).push(e);
   }
@@ -3910,7 +3916,8 @@ removed. Leave it out for what lasts (where things are, how things are done, dec
 fills it in when the content clearly ends, and "lasting" keeps an entry from ever expiring. To
 change an existing entry's end date, upsert it again with valid_until.${SCOPED ? `
 Entities land at your position by default; \`home\` may name one of your positions or one above it
-(restricting who sees them), never one below or beside yours.` : ""}
+(restricting who sees them), never one below or beside yours.${role === "worker" ? ` An entry that already exists is
+updated where it lives: leave \`home\` out for it (set_home moves an entry).` : ""}` : ""}
 ${facetDoc}`,
     {
       ...(SCOPED ? { home: z.string().optional() } : {}),
