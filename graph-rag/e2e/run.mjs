@@ -33,8 +33,12 @@ async function until(label, fn, timeoutMs = 240_000) {
   const end = Date.now() + timeoutMs;
   let last;
   while (Date.now() < end) {
-    last = await fn().catch((e) => ({ error: String(e) }));
-    if (last && !last.error && last !== false) return last;
+    try {
+      last = await fn();
+      if (last) return last;
+    } catch (e) {
+      last = `threw: ${e}`;
+    }
     await new Promise((r) => setTimeout(r, 3000));
   }
   throw new Error(`timed out: ${label} (last: ${JSON.stringify(last)?.slice(0, 300)})`);
@@ -50,6 +54,9 @@ async function scenario(name, fn) {
   } catch (e) {
     results.push({ name, ok: false, error: String(e?.message ?? e) });
     console.log(`FAIL ${name}: ${String(e?.message ?? e).slice(0, 500)}`);
+  } finally {
+    // a failed scenario never leaves a model failing for the next one
+    for (const model of ["grader", "ds-flash", "embed", "decisions"]) await models("/__ok", { model });
   }
 }
 const check = (cond, msg) => {
