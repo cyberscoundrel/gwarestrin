@@ -165,6 +165,27 @@ await scenario("a worker restricts an entry on its own, but asks before moving o
   check((await entry("e2e-p2 placed"))?._home === POS.floor, "still where the person put it");
 });
 
+await scenario("a writer still reads a note grading put above them; others at their position don't", async () => {
+  await save("bob", "e2e-w1 pay note", "Diep starts at 21.50 an hour. [admins]");
+  const e = await entry("e2e-w1 pay note");
+  check(e?._home === POS.org, `graded to the top, got ${e?._home}`);
+  const by = (await sql("SELECT _written_by FROM Entity WHERE name = 'e2e-w1 pay note'"))[0]?._written_by;
+  check(by === "bob", `written by bob, got ${by}`);
+  const found = async (who) => ((await tool(who, "search_graph", { query: "Diep starts at 21.50 an hour" })).results ?? []).find((r) => r.name === "e2e-w1 pay note");
+  const mine = await found("bob");
+  check(mine, "its writer finds it");
+  check(mine.via === "writer", `seen as its writer, got ${mine.via}`);
+  check(!(await found("alice")), "alice, above bob but below the top, doesn't");
+  // a worker's update never takes the writer over
+  await tool(workerToken(String(e.rid)), "update_entry", { entry: String(e.rid), facets: { identity: "Diep starts at 21.50 an hour; review at 90 days. [admins]" } });
+  const after = (await sql("SELECT _written_by FROM Entity WHERE name = 'e2e-w1 pay note'"))[0]?._written_by;
+  check(after === "bob", `still written by bob, got ${after}`);
+  // reading isn't owning: its writer can't move it back down
+  const moved = await tool("bob", "set_home", { entities: [{ name: "e2e-w1 pay note" }], to: "Production floor" });
+  check(moved.error || moved.pendingId || moved.proposed, `bob's move isn't made directly: ${JSON.stringify(moved).slice(0, 200)}`);
+  check((await entry("e2e-w1 pay note"))._home === POS.org, "still at the top");
+});
+
 await scenario("nothing in the background kept failing", async () => {
   const st = await api("/api/worker");
   const failing = Object.entries(st.loops ?? {}).filter(([, l]) => !l.ok);

@@ -4,7 +4,7 @@
 // credit or a provider outage does.
 //
 //   POST /v1/embeddings          deterministic vectors from the words
-//   POST /v1/chat/completions    the grader (writer's position, sure),
+//   POST /v1/chat/completions    the grader (writer's position, sure; "[admins]" in a note = the top),
 //                                the linker (mentions from the statement's
 //                                [things: Name/type, ...] tag)
 //   POST /decisions              triage: "[L2]" in the entry = an
@@ -31,9 +31,17 @@ function vector(text) {
 
 function grade(messages) {
   const user = messages.find((m) => m.role === "user")?.content ?? "";
-  const names = [...user.matchAll(/^#\d+ name: (.+)$/gm)].map((m) => m[1].trim());
+  const items = [...user.matchAll(/^#\d+ name: (.+)$([\s\S]*?)(?=^#\d+ name: |$(?![\s\S]))/gm)].map((m) => ({ name: m[1].trim(), text: m[2] }));
+  // the top of the organization's label (`Pn: org (...)`), for notes tagged [admins]
+  const top = /^(P\d+): org\b/m.exec(user)?.[1];
   // P1 is the writer's own position: routine for its writer's team
-  return JSON.stringify({ items: names.map((name) => ({ name, visible_from: "P1", release_to: null, until: null, confidence: 0.9, reason: "routine for its writer's team" })) });
+  return JSON.stringify({
+    items: items.map(({ name, text }) =>
+      text.includes("[admins]") && top
+        ? { name, visible_from: top, release_to: null, until: null, confidence: 0.9, reason: "for admins only" }
+        : { name, visible_from: "P1", release_to: null, until: null, confidence: 0.9, reason: "routine for its writer's team" },
+    ),
+  });
 }
 
 function mentions(messages) {
