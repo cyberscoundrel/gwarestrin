@@ -17,7 +17,7 @@ import { getInstanceMetadata } from "../instance/metadata.js";
 import { OpenShellAgentLauncher } from "../runtime/openshell-agent.js";
 import { OpenShellProviders, OpenShellRuntime, connectOpenShell } from "../runtime/openshell.js";
 import { openShellIdentity } from "../runtime/openshell-identity.js";
-import { lastReply } from "./last-reply.js";
+import { lastReply, lastTurn } from "./last-reply.js";
 import { AgentStore } from "./store.js";
 import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.js";
 
@@ -240,14 +240,26 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
 
   /** the last thing a running agent said in its latest turn (see last-reply.ts: never blank for a turn that ended on a tool call or an error) */
   async lastAssistantText(id: string): Promise<string> {
+    const messages = await this.messagesOf(id);
+    if (messages) return lastReply(messages);
+    // older pi without get_messages
+    const old = await this.running.get(id)?.send("get_last_assistant_text", {}, 10_000).catch(() => null);
+    return String((old?.data as { text?: unknown } | undefined)?.text ?? "");
+  }
+
+  /** its latest turn: what it said, and how it ended if badly (an error or a stop); null ended when unknown */
+  async lastTurn(id: string): Promise<{ text: string; ended: string | null }> {
+    const messages = await this.messagesOf(id);
+    if (messages) return lastTurn(messages);
+    return { text: await this.lastAssistantText(id), ended: null };
+  }
+
+  private async messagesOf(id: string): Promise<unknown[] | null> {
     const agent = this.running.get(id);
-    if (!agent) return "";
+    if (!agent) return null;
     const res = await agent.send("get_messages", {}, 15_000).catch(() => null);
     const messages = (res?.data as { messages?: unknown } | undefined)?.messages;
-    if (Array.isArray(messages)) return lastReply(messages);
-    // older pi without get_messages
-    const old = await agent.send("get_last_assistant_text", {}, 10_000).catch(() => null);
-    return String((old?.data as { text?: unknown } | undefined)?.text ?? "");
+    return Array.isArray(messages) ? messages : null;
   }
 
   /**
