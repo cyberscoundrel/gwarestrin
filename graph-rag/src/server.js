@@ -172,11 +172,17 @@ function homeFilter(scope, { own = false } = {}) {
   }
   const conds = [];
   if (homes.size) conds.push(`_home IN [${[...homes].map((h) => `'${esc(h)}'`).join(",")}]`);
+  // a person always reads what they wrote, wherever grading put it (they know what it says);
+  // reading isn't owning: moving or sharing it onward still goes by home
+  if (!own && scope.person) conds.push(`_written_by = '${esc(scope.person)}'`);
   // a thing: seen from the homes of the statements about it
   if (homes.size) conds.push(`(_kind = 'thing' AND _homes CONTAINSANY [${[...homes].map((h) => `'${esc(h)}'`).join(",")}])`);
   if (entities) conds.push(entities);
   return conds.length ? ` AND (${conds.join(" OR ")})` : " AND 1 = 0";
 }
+
+/** how the caller sees a row it can read but doesn't own: as its writer, or through a share */
+const viaOf = (scope, row) => (!SCOPED || !positionMap || ownsHome(scope, row._home) ? {} : { via: scope.person && row._written_by === scope.person ? "writer" : "grant" });
 
 /** does the caller see this home by its own positions (not through a grant) */
 const ownsHome = (scope, home) => scope.homes === null || scope.homes.has(effectiveHome(positionMap, home));
@@ -507,7 +513,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
           labels: row["@type"] ? [row["@type"]] : [],
           properties: publicProps(row),
           ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
-          ...(SCOPED && positionMap && !ownsHome(scope, row._home) ? { via: "grant" } : {}),
+          ...viaOf(scope, row),
           ...validityOf(row),
           ...questionOf(row),
           ...(row._mentions_at ? { _mentioned: true } : {}),
@@ -536,7 +542,7 @@ async function searchGraph({ query, facets, k = 8, temporal_filter, include_expi
         name: row.name,
         properties: publicProps(row),
         ...(homeLabel(row._home) ? { home: homeLabel(row._home) } : {}),
-        ...(SCOPED && positionMap && !ownsHome(scope, row._home) ? { via: "grant" } : {}),
+        ...viaOf(scope, row),
         ...validityOf(row),
         ...questionOf(row),
         score: null,
@@ -743,7 +749,7 @@ async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
-async function upsertEntities({ entities, home, floor, written_at, from_worker }) {
+async function upsertEntities({ entities, home, floor, written_at, from_worker, written_by }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
   // dates in the content ("next Friday") mean the day it was written, not approved
@@ -806,6 +812,9 @@ async function upsertEntities({ entities, home, floor, written_at, from_worker }
         `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""}${placeSql}${validSql}${systemSql} ${labelClause}`,
       "cypher",
     );
+    // its writer: the person who first wrote it (an update by anyone else, a worker included, never takes it over)
+    if (written_by && home !== undefined)
+      await adbCommand(`UPDATE ${ENTITY_LABEL} SET _written_by = :w WHERE name = :n AND _origin = :o AND _written_by IS NULL`, "sql", { w: written_by, n: e.name, o: home });
     merged++;
     for (const [facet, text] of Object.entries(e.facets ?? {})) {
       const f = sanitizeFacet(facet);
@@ -998,6 +1007,12 @@ const DELETE_RE = /\b(DELETE|TRUNCATE)\b/i;
 /** execute a queued write (admin approval path) */
 /** a person (not an agent or a worker thread): their placement of an entry stands until a person changes it */
 const isPerson = (identity) => !identity.agent && !identity.role && !identity.open;
+
+/** who a write is recorded as written by: a person, or the person an agent acts for (graph roles and open mode: nobody) */
+const writerOf = (identity) => {
+  const person = identity.role || identity.open ? "" : personOf(identity.user);
+  return person ? { written_by: person } : {};
+};
 
 /** execute a queued write (admin approval path); `placedBy` = the person who approved it, if a person did */
 async function executePending(rec, placedBy) {
@@ -1582,6 +1597,7 @@ const holdersMap = () => new Map([...entriesByUser].map(([name, e]) => [name, he
 function personSees(person, row) {
   const s = personScope(person);
   if (!s) return false;
+  if (row._written_by && row._written_by === person) return true;
   return ownsHome(s, row._home) || s.granted?.homes.has(effectiveHome(positionMap, row._home)) || grantShows(s.granted, { rid: String(row.rid ?? row["@rid"]), name: row.name, origin: row._origin ?? null });
 }
 
@@ -2025,6 +2041,7 @@ async function ingestDocument(p) {
       },
     ],
     home: p.home,
+    written_by: p.written_by,
     floor: p.floor,
     written_at: p.written_at,
   });
@@ -2043,6 +2060,7 @@ async function ingestDocument(p) {
         _system: { _kind: "section", _doc_id: p.doc_id, _doc_title: p.title, _section: c.index },
       })),
       home: p.home,
+      written_by: p.written_by,
       floor: docHome,
       written_at: p.written_at,
     });
@@ -2102,6 +2120,7 @@ async function extractFacts(p, chunks, sections, writtenAt) {
           ...(f.until ? { valid_until: f.until } : {}),
         })),
         home: p.home,
+        written_by: p.written_by,
         floor: home,
         written_at: p.written_at,
       });
@@ -2185,6 +2204,7 @@ async function requestIngest({ title, description, text, extract, home: requeste
     ...(v ? { valid_until: v.valid_until ?? "lasting" } : {}),
     chars: body.length,
     sections: chunks.length,
+    ...writerOf(identity),
   };
   await docStore.put(doc_id, body, { title: payload.title, by: identity.user, at: payload.written_at });
   if (identity.caps.write === "queued") {
@@ -3958,7 +3978,7 @@ ${facetDoc}`,
         return v === undefined ? e : { ...e, valid_until: v.valid_until ?? "lasting" };
       });
       // fixed at request time: what the requester read, not the approver
-      const write = { entities, home, floor: derivedFloor(identity, home), written_at: new Date(now).toISOString() };
+      const write = { entities, home, floor: derivedFloor(identity, home), written_at: new Date(now).toISOString(), ...writerOf(identity) };
       if (caps.write === "queued") {
         const pending = await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home });
         return { content: [{ type: "text", text: JSON.stringify(pending) }] };
@@ -5031,7 +5051,7 @@ async function boot() {
   // declared, or SQL WHERE can't see it (see upsertEntities)
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._home IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_home) NOTUNIQUE`).catch(() => {});
-  for (const prop of ["_origin", "_grade", "_valid_until", "_valid_by", "_ungraded", "_placed_by", "_placed_at"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["_origin", "_grade", "_valid_until", "_valid_by", "_ungraded", "_placed_by", "_placed_at", "_written_by"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (name, _origin) NOTUNIQUE`).catch(() => {});
   if (SCOPED && positionMap) {
     // entities from before origins: their origin is where they are (legacy, unhomed ones: the root)
