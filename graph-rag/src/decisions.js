@@ -113,7 +113,7 @@ export async function askDecisionModel({ url, key, model, timeoutMs = 15_000 }, 
     body: JSON.stringify({ model, state, questions }),
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!res.ok) throw new Error(`decision model ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  if (!res.ok) throw Object.assign(new Error(`decision model ${res.status}: ${(await res.text()).slice(0, 200)}`), { status: res.status });
   const body = await res.json();
   return { model: body.model, answers: body.answers ?? {}, cost: body.usage?.cost ?? null };
 }
