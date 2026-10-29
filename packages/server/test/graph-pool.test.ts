@@ -5,7 +5,7 @@ import { GraphPool, threadName, type GraphCall } from "../src/agents/graph-pool.
 import type { AgentManager } from "../src/agents/manager.js";
 
 // a manager that runs no pi: agents "settle" as soon as they're prompted
-function fakeManager(opts: { settle?: "ok" | "never" | "stop" | "stall"; levelModels?: Record<string, { provider: string; modelId: string }> } = {}) {
+function fakeManager(opts: { settle?: "ok" | "never" | "stop" | "stall"; ended?: string; levelModels?: Record<string, { provider: string; modelId: string }> } = {}) {
   const records = new Map<string, AgentRecord>();
   const running = new Map<string, EventEmitter>();
   const prompts: Array<[string, string]> = [];
@@ -53,6 +53,9 @@ function fakeManager(opts: { settle?: "ok" | "never" | "stop" | "stall"; levelMo
     },
     async lastAssistantText() {
       return "Linked it to Toro (customer).";
+    },
+    async lastTurn() {
+      return opts.ended ? { text: "Checking the jobs next.", ended: opts.ended } : { text: "Linked it to Toro (customer).", ended: null };
     },
     aborted: 0,
     async abortAgent(id: string) {
@@ -121,6 +124,14 @@ describe("graph worker pool", () => {
     await new GraphPool(manager, call, () => 8).tick();
     await flush();
     expect(calls.find(([p]) => p.endsWith("/finish"))?.[1]).toEqual({ status: "failed", summary: "the agent stopped" });
+  });
+
+  it("a turn that ended on a model error is reported failed (to be tried again), not done", async () => {
+    const { manager } = fakeManager({ ended: "the turn ended with an error: Request timed out." });
+    const { call, calls } = fakeGraph([thread("0f8fad5b-0000-0000-0000-00000000000d")]);
+    await new GraphPool(manager, call, () => 8).tick();
+    await flush();
+    expect(calls.find(([p]) => p.endsWith("/finish"))?.[1]).toEqual({ status: "failed", summary: "Checking the jobs next.\n\n(the turn ended with an error: Request timed out.)" });
   });
 
   it("no room, no profile, or not the root: nothing is claimed", async () => {

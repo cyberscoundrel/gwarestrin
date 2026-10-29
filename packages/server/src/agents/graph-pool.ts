@@ -176,9 +176,17 @@ export class GraphPool {
       settled.catch(() => undefined); // awaited below; never unhandled
       await this.manager.promptAgent(agentId, t.message);
       await settled;
-      const summary = await this.manager.lastAssistantText(agentId);
-      await this.call(`/api/worker/threads/${t.job}/finish`, { method: "POST", body: { status: "done", summary } });
-      log.info(`thread ${t.job.slice(0, 8)} (${t.name}) finished`);
+      // a turn that ended on a model error (after pi's own retries) or a stop hasn't done its work:
+      // it goes back for another try, in the same conversation, instead of counting as done
+      const turn = await this.manager.lastTurn(agentId);
+      if (turn.ended) {
+        log.warn(`thread ${t.job.slice(0, 8)} (${t.name}): ${turn.ended}`);
+        const summary = turn.text ? `${turn.text}\n\n(${turn.ended})` : turn.ended;
+        await this.call(`/api/worker/threads/${t.job}/finish`, { method: "POST", body: { status: "failed", summary } });
+      } else {
+        await this.call(`/api/worker/threads/${t.job}/finish`, { method: "POST", body: { status: "done", summary: turn.text } });
+        log.info(`thread ${t.job.slice(0, 8)} (${t.name}) finished`);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.warn(`thread ${t.job.slice(0, 8)} (${t.name}) failed: ${message}`);

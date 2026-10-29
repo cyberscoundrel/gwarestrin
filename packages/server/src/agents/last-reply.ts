@@ -21,7 +21,13 @@ interface Message {
 const textOf = (m: Message): string =>
   typeof m.content === "string" ? m.content : (m.content ?? []).filter((b) => b?.type === "text" && typeof b.text === "string").map((b) => b.text).join("");
 
-export function lastReply(messages: unknown[]): string {
+/**
+ * The latest turn: what it last said, and why it ended badly if it did (a
+ * model error after pi's own retries, or a stop), whether or not it wrote
+ * something first. A turn that ended badly hasn't finished its work, even
+ * when it left text behind.
+ */
+export function lastTurn(messages: unknown[]): { text: string; ended: string | null } {
   const list = (Array.isArray(messages) ? messages : []) as Message[];
   // the latest turn: everything after the last message from its user
   let start = list.length;
@@ -30,10 +36,20 @@ export function lastReply(messages: unknown[]): string {
   let text = "";
   for (let i = turn.length - 1; i >= 0 && !text; i--) text = textOf(turn[i]!).trim();
   const last = turn.at(-1);
-  const failed = last && (last.stopReason === "error" || last.stopReason === "aborted") && !textOf(last).trim();
-  if (failed) {
-    const why = last.stopReason === "aborted" ? "the turn was stopped" : `the turn ended with an error${last.errorMessage ? `: ${String(last.errorMessage).slice(0, 300)}` : ""}`;
-    return text ? `${text}\n\n(${why} after this)` : `(no reply: ${why})`;
-  }
+  const ended =
+    last && (last.stopReason === "error" || last.stopReason === "aborted")
+      ? last.stopReason === "aborted"
+        ? "the turn was stopped"
+        : `the turn ended with an error${last.errorMessage ? `: ${String(last.errorMessage).slice(0, 300)}` : ""}`
+      : null;
+  return { text, ended };
+}
+
+export function lastReply(messages: unknown[]): string {
+  const list = (Array.isArray(messages) ? messages : []) as Message[];
+  const { text, ended } = lastTurn(list);
+  const last = list.filter((m) => m?.role === "assistant").at(-1);
+  // an error that left its own text is reported as that text (it said what went wrong)
+  if (ended && last && !textOf(last).trim()) return text ? `${text}\n\n(${ended} after this)` : `(no reply: ${ended})`;
   return text;
 }

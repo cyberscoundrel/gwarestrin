@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { lastReply } from "../src/agents/last-reply.js";
+import { lastReply, lastTurn } from "../src/agents/last-reply.js";
 
 const user = (text: string) => ({ role: "user", content: [{ type: "text", text }] });
 const said = (text: string, extra = {}) => ({ role: "assistant", content: [{ type: "text", text }], stopReason: "stop", ...extra });
@@ -32,5 +32,13 @@ describe("lastReply", () => {
     expect(lastReply([user("x"), { role: "assistant", content: "plain" }])).toBe("plain");
     expect(lastReply([])).toBe("");
     expect(lastReply(null as unknown as unknown[])).toBe("");
+  });
+
+  it("lastTurn says a turn ended badly even when it wrote something first", () => {
+    const err = { role: "assistant", content: [], stopReason: "error", errorMessage: "Request timed out." };
+    expect(lastTurn([user("go"), said("Checking jobs next."), tool(), result(), err])).toEqual({ text: "Checking jobs next.", ended: "the turn ended with an error: Request timed out." });
+    expect(lastTurn([user("go"), said("Done: linked it.")])).toEqual({ text: "Done: linked it.", ended: null });
+    expect(lastTurn([user("go"), said("Half", { stopReason: "error", errorMessage: "boom" })])).toEqual({ text: "Half", ended: "the turn ended with an error: boom" });
+    expect(lastTurn([user("go"), { role: "assistant", content: [], stopReason: "aborted" }]).ended).toBe("the turn was stopped");
   });
 });
