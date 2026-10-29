@@ -996,10 +996,14 @@ async function executeGraph({ command, language = "cypher", reason }, identity) 
 const DELETE_RE = /\b(DELETE|TRUNCATE)\b/i;
 
 /** execute a queued write (admin approval path) */
-async function executePending(rec) {
+/** a person (not an agent or a worker thread): their placement of an entry stands until a person changes it */
+const isPerson = (identity) => !identity.agent && !identity.role && !identity.open;
+
+/** execute a queued write (admin approval path); `placedBy` = the person who approved it, if a person did */
+async function executePending(rec, placedBy) {
   // upsert payloads carry the home resolved when the write was requested
   if (rec.kind === "upsert") return upsertEntities(JSON.parse(rec.payload));
-  if (rec.kind === "rehome") return applyRehome(JSON.parse(rec.payload));
+  if (rec.kind === "rehome") return applyRehome({ ...JSON.parse(rec.payload), placedBy });
   if (rec.kind === "grant") return storeGrant(JSON.parse(rec.payload));
   if (rec.kind === "backfill") return backfillIdentity(Number(JSON.parse(rec.payload).limit) || 64);
   if (rec.kind === "merge") return mergeThings(JSON.parse(rec.payload));
@@ -1026,7 +1030,7 @@ async function setHome({ entities, to, reason, propose }, identity, scope) {
   for (const ref of entities) {
     const from = ref.home === undefined ? undefined : positionId(ref.home);
     const rows = await adbQuery(
-      `SELECT @rid AS rid, name, _home FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope, { own: true })}${ASSERTIONS}`,
+      `SELECT @rid AS rid, name, _home, _placed_by, _placed_at FROM ${ENTITY_LABEL} WHERE name = :name${homeFilter(scope, { own: true })}${ASSERTIONS}`,
       { name: ref.name },
     );
     const candidates = rows.filter((r) => from === undefined || effectiveHome(positionMap, r._home) === from);
@@ -1040,9 +1044,16 @@ async function setHome({ entities, to, reason, propose }, identity, scope) {
     }
     const move = { rid: String(node.rid), name: ref.name, from: current, to: target };
     const kind = moveKind(positionMap, current, target);
+    // a person placed it here: an agent asks before moving it, either way
+    const placed = !isPerson(identity) && node._placed_by;
+    if (placed) {
+      const why = `${node._placed_by} placed "${ref.name}" at ${homeName(positionMap, current)}${node._placed_at ? ` on ${String(node._placed_at).slice(0, 10)}` : ""}: moving it is a person's decision`;
+      results.push({ name: ref.name, placed_by_person: why, ...(await queueWrite({ kind: "rehome", payload: JSON.stringify(move), user: identity.user, home: current, ...proposalFields(identity, reason ? `${reason} (${why})` : why) })) });
+      continue;
+    }
     // widening who sees something is always a person's call; a worker may also choose to ask
     if (kind === "restrict" && identity.caps.write === "direct" && !propose) {
-      results.push({ name: ref.name, ...(await applyRehome(move)) });
+      results.push({ name: ref.name, ...(await applyRehome({ ...move, ...(isPerson(identity) ? { placedBy: identity.user } : {}) })) });
       if (identity.role?.kind === "worker") await logChange(identity, { kind: "move", detail: `"${ref.name}" up to ${homeName(positionMap, target)}`, ...(reason ? { reason: String(reason).slice(0, 300) } : {}) });
     } else {
       // only people widen who sees what; queued writers queue restrictions too
@@ -1052,12 +1063,14 @@ async function setHome({ entities, to, reason, propose }, identity, scope) {
   return { results };
 }
 
-async function applyRehome({ rid, name, from, to }) {
+async function applyRehome({ rid, name, from, to, placedBy }) {
   if (!RID_RE.test(rid)) throw new Error("invalid record id");
   const rows = await adbQuery(`SELECT _home FROM ${rid}`);
   if (!rows.length) throw new Error(`entity ${name} no longer exists`);
   if (effectiveHome(positionMap, rows[0]._home) !== from) throw new Error(`entity ${name} moved since the request`);
-  await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
+  // a person's move is recorded: a worker can't move the entry again without asking (setHome)
+  if (placedBy) await adbCommand(`UPDATE ${rid} SET _home = :to, _placed_by = :who, _placed_at = :at`, "sql", { to, who: placedBy, at: new Date().toISOString() });
+  else await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
   // seen from its new home: so are the things it's about
   const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
   for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to).catch(() => {});
@@ -3779,7 +3792,7 @@ async function approvePending(id, identity, reason = "", { quiet = false } = {})
   let result;
   try {
     // upsert/backfill payloads are JSON for their handlers, not SQL
-    result = await executePending(rec);
+    result = await executePending(rec, isPerson(identity) ? approver : undefined);
   } catch (err) {
     await adbCommand("UPDATE PendingWrite SET status = 'failed', executed_at = :now WHERE id = :id", "sql", {
       now: new Date().toISOString(),
@@ -5018,7 +5031,7 @@ async function boot() {
   // declared, or SQL WHERE can't see it (see upsertEntities)
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._home IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_home) NOTUNIQUE`).catch(() => {});
-  for (const prop of ["_origin", "_grade", "_valid_until", "_valid_by", "_ungraded"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["_origin", "_grade", "_valid_until", "_valid_by", "_ungraded", "_placed_by", "_placed_at"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (name, _origin) NOTUNIQUE`).catch(() => {});
   if (SCOPED && positionMap) {
     // entities from before origins: their origin is where they are (legacy, unhomed ones: the root)
