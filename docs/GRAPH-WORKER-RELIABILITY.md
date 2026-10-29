@@ -42,6 +42,16 @@ off until the next probe without spending a retry, and the workspace is
 handed no threads while the worker's model is out. Triage falls back to
 sending entries to the master untriaged.
 
+Worker threads follow the same rule. A thread's agent talks to its model
+directly, so the workspace reads how its turn ended: a turn that ended on a
+model error (after pi's own retries) or a stop is never counted as done. When
+that error is the connection or the provider (a dropped connection, a
+timeout, 402, 429, 5xx), the thread is reported as an outage: graph-rag
+pauses the worker's model, hands out no threads until the pause ends, and
+puts the thread off until then without spending a try. Any other error spends
+one of its three tries. A thread put off six times in a row counts its next
+failures as its own, so one that keeps dying this way can't wait forever.
+
 ### Every background loop reports how it went
 
 The sweep, pruning, jobs, leases, batches and regrading run through
