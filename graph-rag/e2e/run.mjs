@@ -186,6 +186,32 @@ await scenario("a writer still reads a note grading put above them; others at th
   check((await entry("e2e-w1 pay note"))._home === POS.org, "still at the top");
 });
 
+await scenario("a thread whose turn died on the model connection waits it out without spending a try", async () => {
+  const jid = randomUUID();
+  const now = new Date().toISOString();
+  const ins = await tool("admin", "execute_graph", { command: `INSERT INTO Job SET id = '${jid}', kind = 'review', job_key = 'e2e:${jid}', payload = '{}', status = 'running', attempts = 0, priority = 1, run_after = '${now}', created_at = '${now}', updated_at = '${now}'`, language: "sql" });
+  check(!ins.error, `job inserted: ${JSON.stringify(ins).slice(0, 200)}`);
+  const row = async () => (await sql(`SELECT status, attempts, payload, run_after FROM Job WHERE id = '${jid}'`))[0];
+  const finish = (body) => api(`/api/worker/threads/${jid}/finish`, { method: "POST", body: JSON.stringify(body) });
+  const out = await finish({ status: "failed", summary: "(the turn ended with an error: Connection error.)", outage: "the turn ended with an error: Connection error." });
+  check(out.status === "pending" && out.outage, `put off: ${JSON.stringify(out)}`);
+  const r = await row();
+  check(r.status === "pending" && Number(r.attempts) === 0, `pending, no try spent: ${JSON.stringify(r)}`);
+  check(JSON.parse(r.payload).outages === 1, "one outage counted");
+  check(Date.parse(r.run_after) > Date.now(), "goes again after the pause");
+  const st = await api("/api/worker");
+  check(st.dependencies?.["model:ds-flash"]?.ok === false, `the worker model shows out: ${JSON.stringify(st.dependencies)}`);
+  const claim = await api("/api/worker/threads/claim", { method: "POST", body: JSON.stringify({ limit: 1 }) });
+  check(claim.paused && !(claim.threads ?? []).length, `no thread starts while it's out: ${JSON.stringify(claim)}`);
+  // a turn that ends normally: the model is back
+  await finish({ status: "done", summary: "done" });
+  check((await api("/api/worker")).dependencies?.["model:ds-flash"]?.ok === true, "the worker model is back once a turn ends normally");
+  // a work failure still spends a try
+  await tool("admin", "execute_graph", { command: `UPDATE Job SET status = 'running' WHERE id = '${jid}'`, language: "sql" });
+  await finish({ status: "failed", summary: "bad arguments" });
+  check(Number((await row()).attempts) === 1, "a failure of its own spends a try");
+});
+
 await scenario("nothing in the background kept failing", async () => {
   const st = await api("/api/worker");
   const failing = Object.entries(st.loops ?? {}).filter(([, l]) => !l.ok);

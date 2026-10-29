@@ -2566,7 +2566,10 @@ async function threadAgent(jobId, agentId) {
 }
 
 /** the thread ended its turn: done, or waiting on its open questions */
-async function finishThread(jobId, { status, summary }) {
+/** a thread whose turn died on the model connection waits it out this many times before it counts as a failure */
+const MAX_OUTAGE_DEFERRALS = 6;
+
+async function finishThread(jobId, { status, summary, outage }) {
   if (!JOB_ID_RE.test(String(jobId))) throw Object.assign(new Error("invalid job"), { status: 400 });
   const job = (await adbQuery("SELECT payload, attempts FROM Job WHERE id = :id AND kind = 'review'", { id: jobId }))[0];
   if (!job) throw Object.assign(new Error("no such thread"), { status: 404 });
@@ -2575,9 +2578,31 @@ async function finishThread(jobId, { status, summary }) {
     Number((await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: jobId }).catch(() => []))[0]?.n ?? 0) +
     Number((await adbQuery("SELECT count(*) AS n FROM PendingWrite WHERE job_id = :id AND status = 'pending'", { id: jobId }).catch(() => []))[0]?.n ?? 0);
   const now = new Date().toISOString();
+  const payload = JSON.parse(job.payload || "{}");
+  const model = `model:${workerModel()}`;
+  // the model was out, not the work wrong: the model pauses (no thread starts until it's back) and this one
+  // goes again after the pause, keeping its tries; one that keeps dying this way counts as failing after a while
+  if (status === "failed" && outage && Number(payload.outages ?? 0) < MAX_OUTAGE_DEFERRALS) {
+    const out = health.fail(model, { outage: true, message: String(outage).slice(0, 120) });
+    payload.outages = Number(payload.outages ?? 0) + 1;
+    const now = new Date().toISOString();
+    await adbCommand("UPDATE Job SET status = 'pending', summary = :sum, payload = :p, run_after = :ra, updated_at = :now WHERE id = :id", "sql", {
+      sum: String(summary ?? "").slice(0, 4000),
+      p: JSON.stringify(payload),
+      ra: new Date(out?.until ?? Date.now() + 60_000).toISOString(),
+      now,
+      id: jobId,
+    });
+    log.warn(`thread ${String(jobId).slice(0, 8)} put off: ${model} out (${String(outage).slice(0, 80)})`);
+    return { status: "pending", outage: true };
+  }
   const failed = status === "failed";
   const attempts = Number(job.attempts ?? 0) + (failed ? 1 : 0);
-  const payload = JSON.parse(job.payload || "{}");
+  // a turn that ended normally: the model answered
+  if (!failed) {
+    health.ok(model);
+    delete payload.outages;
+  }
   delete payload.resume;
   // answers or decisions that came while it ran: it goes again with the first
   const queued = !failed && Array.isArray(payload.next_resume) && payload.next_resume.length ? payload.next_resume.shift() : null;
