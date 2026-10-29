@@ -3,13 +3,19 @@
 // fake-models.mjs and e2e.sh). Run by e2e.sh inside the harness network.
 const GRAPH = process.env.GRAPH_URL ?? "http://graph-rag:8000";
 const MODELS = process.env.MODELS_URL ?? "http://models:4000";
+import { createHmac, randomUUID } from "node:crypto";
 const TOKENS = { admin: "e2e-admin", alice: "e2e-alice", bob: "e2e-bob" };
+// a graph worker thread's token, as the admin's workspace signs it (graph-rag/src/delegation.js)
+const workerToken = (entry) => {
+  const body = Buffer.from(JSON.stringify({ u: "admin", a: randomUUID(), r: "worker", j: randomUUID(), e: entry, iat: Math.floor(Date.now() / 1000) })).toString("base64url");
+  return `gwa1.${body}.${createHmac("sha256", "e2e-delegation-key-0123456789abcdef").update(`gwa1.${body}`).digest("base64url")}`;
+};
 
 let id = 1;
 async function tool(who, name, args) {
   const r = await fetch(`${GRAPH}/mcp`, {
     method: "POST",
-    headers: { authorization: `Bearer ${TOKENS[who]}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+    headers: { authorization: `Bearer ${TOKENS[who] ?? who}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
     body: JSON.stringify({ jsonrpc: "2.0", id: id++, method: "tools/call", params: { name, arguments: args } }),
   });
   const t = await r.text();
@@ -136,6 +142,27 @@ await scenario("with triage ahead, a new name becomes a thing only after triage:
   check(String(intake.payload).includes("John Henry Foster"), `the new name goes to the master: ${intake.payload}`);
   check(!(await thing("John Henry Foster")), "no thing made before a worker decides");
   check(!(await job(String(t1.rid), "intake")), "the plain one needs no worker");
+});
+
+await scenario("a worker restricts an entry on its own, but asks before moving one a person placed", async () => {
+  await save("alice", "e2e-p1 unplaced", "The loading dock door sticks in the cold.");
+  await save("alice", "e2e-p2 placed", "Second shift starts at 3 pm from Monday.");
+  // a person releases e2e-p2 to the floor (a widening: queued, then approved)
+  const asked = await tool("admin", "set_home", { entities: [{ name: "e2e-p2 placed" }], to: "Production floor" });
+  const id = asked.results?.[0]?.id ?? asked.results?.[0]?.pendingId;
+  check(id, `the release is queued: ${JSON.stringify(asked).slice(0, 300)}`);
+  const ok = await api(`/api/queue/${id}/approve`, { method: "POST", body: "{}" });
+  check(ok.result?.approved, `approved: ${JSON.stringify(ok).slice(0, 300)}`);
+  check((await entry("e2e-p2 placed"))?._home === POS.floor, "released to the floor");
+  // a worker moving the unplaced one up: applied
+  const p1 = await entry("e2e-p1 unplaced");
+  const w1 = await tool(workerToken(String(p1.rid)), "set_home", { entities: [{ name: "e2e-p1 unplaced" }], to: "org", reason: "e2e" });
+  check((await entry("e2e-p1 unplaced"))?._home === POS.org, `an unplaced entry is restricted directly: ${JSON.stringify(w1).slice(0, 300)}`);
+  // a worker moving the placed one back up: proposed, and it stays where the person put it
+  const p2 = await entry("e2e-p2 placed");
+  const w2 = await tool(workerToken(String(p2.rid)), "set_home", { entities: [{ name: "e2e-p2 placed" }], to: "Operations", reason: "it's an Operations note" });
+  check(w2.results?.[0]?.placed_by_person, `proposed, not applied: ${JSON.stringify(w2).slice(0, 300)}`);
+  check((await entry("e2e-p2 placed"))?._home === POS.floor, "still where the person put it");
 });
 
 await scenario("nothing in the background kept failing", async () => {
