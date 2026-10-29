@@ -68,6 +68,11 @@ At ingestion an LLM grades each item against the position tree:
    person's approval or an admin-written rule.
 2. **Uncertainty fails upward**: a low-confidence grade homes the item closer
    to the root and queues it for review. A misgrade can hide data, never leak it.
+3. **An unreachable grader is not uncertainty.** An item written while the
+   grader is out is held one level up the same way, but marked
+   `_ungraded` rather than queued for a person; it's graded once the grader
+   answers and placed by the same rules (`graph-rag/src/placement.js`). See
+   [GRAPH-WORKER-RELIABILITY.md](GRAPH-WORKER-RELIABILITY.md).
 
 ### Derived data
 A summary, briefing or agent write built from several items is visible only to

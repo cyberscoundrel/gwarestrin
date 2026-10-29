@@ -139,9 +139,9 @@ export function signalsMessage(signals, status = {}) {
       for (const e of d.entries ?? []) {
         const t = e.triage;
         const tri = t ? ` (triage: level ${t.level}${t.reason ? `, ${t.reason}` : ""}${t.sample ? ", a sample of no-work entries: check it needs nothing" : ""})` : "";
-        lines.push(`- "${e.name}" [${e.home}]${tri}${e.links?.length ? `: linked to ${e.links.join(", ")}` : ""}${t?.settled?.length ? `; settled: ${t.settled.join("; ")}` : ""}${e.unsure?.length ? `; unsure: ${e.unsure.join("; ")}` : ""}`);
+        lines.push(`- "${e.name}" [${e.home}]${tri}${e.links?.length ? `: linked to ${e.links.join(", ")}` : ""}${t?.settled?.length ? `; settled: ${t.settled.join("; ")}` : ""}${e.unsure?.length ? `; unsure: ${e.unsure.join("; ")}` : ""}${e.fresh?.length ? `; not in the graph yet: ${e.fresh.join(", ")}` : ""}`);
       }
-      lines.push("Triage levels: 1 a quick check, 2 an investigation, 3 a broad or structural matter (entries needing nothing were kept out). Read what you need (graph-rag_search_graph, graph-rag_about_thing), group what belongs together, and start workers for the work (graph-rag_start_worker), giving each the entries it's about. A worker's brief can match its level: a quick check needs a short, narrow brief.");
+      lines.push("Triage levels: 1 a quick check, 2 an investigation, 3 a broad or structural matter (entries needing nothing were kept out). A name marked not in the graph yet was linked to nothing: a worker makes it a thing (graph-rag_link_things) only if it's a real person, place, part, order or the like, and never for a code that names another entry. Read what you need (graph-rag_search_graph, graph-rag_about_thing), group what belongs together, and start workers for the work (graph-rag_start_worker), giving each the entries it's about. A worker's brief can match its level: a quick check needs a short, narrow brief.");
     } else if (s.kind === "done") {
       lines.push("", `DONE worker ${s.job_id} ("${d.title}"): ${String(d.summary ?? "").slice(0, 1200)}`);
     } else if (s.kind === "stopped") {

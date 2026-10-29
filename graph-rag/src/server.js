@@ -41,7 +41,9 @@ import { firstJob, handlerBrief, signalsMessage, POOL_DEFAULTS, poolSettings, re
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
-import { decide, gradingPrompt, parseVerdicts } from "./grading.js";
+import { gradingPrompt, parseVerdicts } from "./grading.js";
+import { createHealth, createLoops } from "./health.js";
+import { applyFloor, floorLifts, place as placeOne } from "./placement.js";
 import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -268,6 +270,9 @@ const FACETS = {
 
 const knownIndexes = new Set();
 const log = { warn: (...a) => console.warn("[graph-rag]", ...a), info: (...a) => console.log("[graph-rag]", ...a) };
+// the model routes and the decision API (an outage pauses what needs them), and the background loops (a failing one shows in the status)
+const health = createHealth();
+const loops = createLoops(log);
 const BASIC = "Basic " + Buffer.from(`${ARCADEDB_USER}:${ARCADEDB_PASSWORD}`).toString("base64");
 
 /** ArcadeDB HTTP JSON API */
@@ -342,16 +347,39 @@ async function ensureFullText() {
   }
 }
 
-async function embedBatch(texts) {
-  const res = await fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}/embeddings`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${LITELLM_API_KEY}` },
-    body: JSON.stringify({ model: EMBED_MODEL, input: texts }),
-    // a stalled backend fails the call (search falls back to lexical) instead of hanging it
-    signal: AbortSignal.timeout(Number(EMBED_TIMEOUT_MS)),
-  });
-  if (!res.ok) throw new Error(`embeddings HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`);
+/**
+ * One call to a model route (through litellm), under the dependency rule
+ * (health.js): an outage (out of credit, rate-limited, down, timed out)
+ * pauses the route and throws an Outage, which puts work off without
+ * spending its retries; while it's paused, calls fail at once.
+ */
+async function modelPost(model, path, body, timeoutMs) {
+  const dep = `model:${model}`;
+  const paused = health.outage(dep);
+  if (paused) throw paused;
+  let res;
+  try {
+    res = await fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${LITELLM_API_KEY}` },
+      body: JSON.stringify({ model, ...body }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (e) {
+    throw health.fail(dep, e) ?? e;
+  }
+  if (!res.ok) {
+    const text = (await res.text().catch(() => "")).slice(0, 120);
+    throw health.fail(dep, null, res.status) ?? Object.assign(new Error(`${model} HTTP ${res.status}: ${text}`), { status: res.status });
+  }
   const j = await res.json();
+  health.ok(dep);
+  return j;
+}
+
+async function embedBatch(texts) {
+  // a stalled backend fails the call (search falls back to lexical) instead of hanging it
+  const j = await modelPost(EMBED_MODEL, "/embeddings", { input: texts }, Number(EMBED_TIMEOUT_MS));
   const vecs = (j.data ?? []).map((d) => d.embedding);
   if (vecs.length !== texts.length || vecs.some((v) => !Array.isArray(v))) {
     throw new Error("embeddings response shape mismatch");
@@ -635,7 +663,7 @@ function workerLift(identity, home) {
   if (!SCOPED || !positionMap || home === undefined) return null;
   const at = effectiveHome(positionMap, home);
   const floor = derivedFloor(identity, at);
-  if (!floor || floor === at || at === EVERYONE || !ancestors(positionMap, at).includes(floor)) return null;
+  if (!floorLifts(positionMap, at, floor)) return null;
   const cutoff = Date.now() - windowMs();
   const above = [...(readMarks.get(markKey(identity)) ?? new Map())]
     .filter(([h, t]) => t > cutoff && commonAncestor(positionMap, [at, h]) !== at)
@@ -647,74 +675,71 @@ const liftRefusal = (name, lift) =>
   `Not written: "${name}" lives at ${homeName(positionMap, lift.home)}, but in the last ${policy.derivedWindowHours} hours you read entries at ${lift.read.join(", ") || homeName(positionMap, lift.floor)} that people there can't see, so this write would be held at ${homeName(positionMap, lift.floor)} instead. Either leave the entry as it is, or write it again with propose: true and a reason that says what it rests on: an admin then decides whether it's written at ${homeName(positionMap, lift.home)}.`;
 
 /**
- * Apply a derived-data floor to a placement. The floor is at or above the
- * origin, so it and the placement lie on one line through the origin. The
- * entry goes at least as high as the floor, and nothing is proposed below it
- * (a release or a review back to the origin would widen derived data).
+ * One grading call (chunks of up to 16 entities). Per entity: a verdict,
+ * null when the grader answered but not usably (a person reviews), or
+ * undefined when it couldn't be reached (the entity is graded again later).
  */
-function applyFloor(place, origin, floor) {
-  if (!floor || floor === origin) return place;
-  const { release: _release, review: _review, ...rest } = place;
-  const raises = floor !== place.home && ancestors(positionMap, place.home).includes(floor);
-  if (!raises) return rest;
-  return {
-    home: floor,
-    note: `held at ${homeName(positionMap, floor)}: built from what its writer read there or below (${place.note})`,
-  };
-}
-
-/** one grading call (chunks of up to 16 entities); null per entity when it fails */
 async function gradeBatch(origin, entities, writtenAt = Date.now()) {
   const out = [];
   for (let i = 0; i < entities.length; i += 16) {
     const chunk = entities.slice(i, i + 16);
     const { messages, byLabel } = gradingPrompt(positionMap, origin, chunk, writtenAt);
-    let text = null;
+    let text;
     try {
-      const res = await fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${LITELLM_API_KEY}` },
-        body: JSON.stringify({ model: GRADER_MODEL, messages, temperature: 0 }),
-        signal: AbortSignal.timeout(Number(GRADER_TIMEOUT_MS)),
-      });
-      if (!res.ok) throw new Error(`grader HTTP ${res.status}`);
-      text = (await res.json()).choices?.[0]?.message?.content ?? null;
+      text = (await modelPost(GRADER_MODEL, "/chat/completions", { messages, temperature: 0 }, Number(GRADER_TIMEOUT_MS))).choices?.[0]?.message?.content ?? "";
     } catch (e) {
-      log.warn(`grading failed (entities held one level up): ${String(e).slice(0, 160)}`);
+      // unreached: held where it can't widen anything, and graded again when the grader is back (regradeTick)
+      if (!e.outage) log.warn(`grading failed (entities held until graded): ${String(e).slice(0, 160)}`);
     }
-    out.push(...(text === null ? chunk.map(() => null) : parseVerdicts(text, byLabel, positionMap, origin, chunk.map((e) => e.name), writtenAt)));
+    out.push(...(text === undefined ? chunk.map(() => undefined) : parseVerdicts(text, byLabel, positionMap, origin, chunk.map((e) => e.name), writtenAt)));
   }
   return out;
 }
 
+/** the end date the grader judged: an unsure verdict means lasting, none leaves it be */
+const graderUntil = (v) => (v ? (v.confidence >= policy.gradingConfidence ? v.until : null) : undefined);
+
 /**
- * Where each entity of a scoped write lands. `origin` is the writer's
- * resolved position (provenance); an existing entity is (name, origin).
- * Without a grader: new entities at the origin, existing ones where they are.
+ * Where each entity of a scoped write lands (placement.js decides). `origin`
+ * is the writer's resolved position (provenance); an existing entity is
+ * (name, origin). Without a grader: new entities at the origin, existing
+ * ones where they are.
  */
 async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
   const existing = await Promise.all(
     entities.map((e) =>
-      adbQuery(`SELECT _home FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin }).then(
-        (rows) => (rows[0] ? effectiveHome(positionMap, rows[0]._home) : undefined),
+      adbQuery(`SELECT _home, _ungraded FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin }).then((rows) =>
+        rows[0] ? { home: effectiveHome(positionMap, rows[0]._home), awaiting: Boolean(rows[0]._ungraded) } : undefined,
       ),
     ),
   );
+  const at = (i) => existing[i]?.home;
   const grading = Boolean(GRADER_MODEL) && policy.gradingEnabled;
-  if (!grading) return entities.map((_, i) => applyFloor({ home: existing[i] ?? origin, note: "not graded (grading off)" }, origin, floor));
+  if (!grading) return entities.map((_, i) => applyFloor(positionMap, { home: at(i) ?? origin, note: "not graded (grading off)" }, origin, floor));
   // written for everyone: graded from the top for its end date only (everyone isn't a position to describe)
   const verdicts = await gradeBatch(origin === EVERYONE ? positionMap.root : origin, entities, writtenAt);
-  // the end date the grader judged; an unsure verdict means lasting, a failed one leaves it be
-  const until = (v) => (v ? (v.confidence >= policy.gradingConfidence ? v.until : null) : undefined);
   if (origin === EVERYONE) {
     // written for everyone on purpose (the admin, or a survey for everyone): graded for its end date only
-    return entities.map((_, i) => ({ ...applyFloor({ home: existing[i] ?? origin, note: "for everyone" }, origin, floor), until: until(verdicts[i]) }));
+    return entities.map((_, i) => ({ ...applyFloor(positionMap, { home: at(i) ?? origin, note: "for everyone" }, origin, floor), until: graderUntil(verdicts[i]) }));
   }
   if (origin === positionMap.root) {
     // nothing above the root to restrict to: graded for its end date only
-    return entities.map((_, i) => ({ ...applyFloor({ home: existing[i] ?? origin, note: "at the root" }, origin, floor), until: until(verdicts[i]) }));
+    return entities.map((_, i) => ({ ...applyFloor(positionMap, { home: at(i) ?? origin, note: "at the root" }, origin, floor), until: graderUntil(verdicts[i]) }));
   }
-  return entities.map((_, i) => ({ ...applyFloor(decide(positionMap, origin, verdicts[i], existing[i], policy.gradingConfidence), origin, floor), until: until(verdicts[i]) }));
+  return entities.map((_, i) => ({
+    ...placeOne(positionMap, {
+      origin,
+      verdict: verdicts[i],
+      graded: verdicts[i] !== undefined,
+      existing: at(i),
+      // still awaiting grading: this write's grading settles it like a new one
+      awaiting: existing[i]?.awaiting && verdicts[i] !== undefined,
+      floor,
+      threshold: policy.gradingConfidence,
+    }),
+    graded: verdicts[i] !== undefined,
+    until: graderUntil(verdicts[i]),
+  }));
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
@@ -751,7 +776,13 @@ async function upsertEntities({ entities, home, floor, written_at, from_worker }
     // written from another position; where it is seen from is _home
     const key = home === undefined ? `{name: '${esc(e.name)}'}` : `{name: '${esc(e.name)}', \`_origin\`: '${esc(home)}'}`;
     const place = placements?.[idx];
-    const placeSql = place ? `, n.\`_home\` = '${esc(place.home)}', n.\`_grade\` = '${esc(place.note)}'` : "";
+    // awaiting grading: what it needs to be graded again (regradeTick); graded now: no longer awaiting
+    const ungradedSql = place?.ungraded
+      ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString() }))}'`
+      : place?.graded
+        ? ", n.`_ungraded` = null"
+        : "";
+    const placeSql = place ? `, n.\`_home\` = '${esc(place.home)}', n.\`_grade\` = '${esc(place.note)}'${ungradedSql}` : "";
     // server-set fields (documents, sections); never from a caller (tool schemas drop them)
     const systemSql = Object.entries(e._system && typeof e._system === "object" ? e._system : {})
       .filter(([k, v]) => /^_[a-z][a-z0-9_]*$/.test(k) && ["string", "number"].includes(typeof v))
@@ -828,19 +859,78 @@ async function upsertEntities({ entities, home, floor, written_at, from_worker }
     for (const [i, e] of entities.entries()) {
       const p = placements[i];
       placed.push({ name: e.name, home: homeName(positionMap, p.home), note: p.note, ...(validities[i] !== undefined ? { valid_until: validities[i] } : {}) });
-      const ask = p.release ?? p.review;
-      if (!ask) continue;
+      if (!p.release && !p.review) continue;
       const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin: home });
-      if (!rows[0]) continue;
-      await queueWrite({
-        kind: "rehome",
-        payload: JSON.stringify({ rid: String(rows[0].rid), name: e.name, from: p.home, to: ask.to, reason: ask.reason }),
-        user: "graph-rag grader",
-        home: p.home,
-      }).catch((err) => log.warn(`grading proposal for ${e.name} not queued: ${String(err).slice(0, 120)}`));
+      if (rows[0]) await askAboutPlacement(String(rows[0].rid), e.name, p);
     }
   }
   return { merged, embedded, facets_indexed: [...knownIndexes], ...(placements ? { placed } : {}) };
+}
+
+/** grading's proposals go to a person: release lower, or review an unsure call */
+async function askAboutPlacement(rid, name, p) {
+  const ask = p.release ?? p.review;
+  if (!ask) return;
+  await queueWrite({
+    kind: "rehome",
+    payload: JSON.stringify({ rid, name, from: p.home, to: ask.to, reason: ask.reason }),
+    user: "graph-rag grader",
+    home: p.home,
+  }).catch((err) => log.warn(`grading proposal for ${name} not queued: ${String(err).slice(0, 120)}`));
+}
+
+/**
+ * Entries written while the grader couldn't be reached wait one level up,
+ * marked _ungraded. When the grader answers again they're graded as when
+ * they were written and placed by the same rules (placement.js): no person
+ * has to move them back. One that someone moved meanwhile stays where they
+ * put it.
+ */
+async function regradeTick() {
+  if (!SCOPED || !positionMap || !GRADER_MODEL || !policy.gradingEnabled || health.down(`model:${GRADER_MODEL}`)) return;
+  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _ungraded, _valid_by FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL LIMIT 16`);
+  const waiting = [];
+  for (const r of rows) {
+    let w = null;
+    try {
+      w = JSON.parse(r._ungraded);
+    } catch {
+      /* unreadable: nothing to grade from */
+    }
+    // its origin is gone from the tree: it stays where it waits (no lower home to return to)
+    if (w && positionMap.positions[w.origin]) waiting.push({ ...r, w });
+    else await adbCommand(`UPDATE ${r.rid} SET _ungraded = null`);
+  }
+  const byOrigin = Map.groupBy(waiting, (r) => `${r.w.origin}|${r.w.written_at}`);
+  for (const group of byOrigin.values()) {
+    const { origin, written_at } = group[0].w;
+    const entities = [];
+    for (const r of group) {
+      const full = (await adbQuery(`SELECT FROM ${r.rid}`))[0] ?? {};
+      entities.push({ name: r.name, facets: Object.fromEntries(Object.keys(full).filter((k) => k.startsWith("text_") && full[k]).map((k) => [k.slice(5), full[k]])) });
+    }
+    const verdicts = await gradeBatch(origin, entities, Date.parse(written_at) || Date.now());
+    if (verdicts.some((v) => v === undefined)) return; // still unreachable: next time
+    for (const [i, r] of group.entries()) {
+      const rid = String(r.rid);
+      if (effectiveHome(positionMap, r._home) !== r.w.held) {
+        // someone moved it while it waited: their call stands
+        await adbCommand(`UPDATE ${rid} SET _ungraded = null`);
+        continue;
+      }
+      const p = placeOne(positionMap, { origin, verdict: verdicts[i], floor: r.w.floor, threshold: policy.gradingConfidence });
+      const until = graderUntil(verdicts[i]);
+      // the grader's end date, unless its writer gave one
+      const validSql = until !== undefined && r._valid_by !== "writer" ? ", _valid_until = :until, _valid_by = 'grader'" : "";
+      await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null${validSql}`, "sql", { home: p.home, note: p.note, until });
+      if (p.home !== r.w.held) {
+        const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
+        for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), p.home).catch(() => {});
+      }
+      await askAboutPlacement(rid, r.name, p);
+      log.info(`graded ${r.name} after waiting: ${homeName(positionMap, p.home)} (${p.note})`);
+    }
+  }
 }
 
 async function backfillIdentity(limit = 64) {
@@ -1895,15 +1985,7 @@ async function edgeOnce(type, from, to) {
 
 /** one model call (the extraction model: EXTRACT_MODEL, else the grader's) */
 async function chat(model, messages, timeoutMs = Number(GRADER_TIMEOUT_MS) * 2) {
-  const res = await fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: `Bearer ${LITELLM_API_KEY}` },
-    body: JSON.stringify({ model, messages, temperature: 0 }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  // out of credit or rate-limited is the provider's outage, not the job's fault: wait without spending a retry
-  if (!res.ok) throw Object.assign(new Error(`${model} HTTP ${res.status}`), res.status === 402 || res.status === 429 ? { later: true } : {});
-  return (await res.json()).choices?.[0]?.message?.content ?? "";
+  return (await modelPost(model, "/chat/completions", { messages, temperature: 0 }, timeoutMs)).choices?.[0]?.message?.content ?? "";
 }
 
 /**
@@ -2220,6 +2302,8 @@ async function aboutOnce(statementRid, thingRid, role) {
   await adbCommand(`CREATE EDGE ABOUT FROM ${statementRid} TO ${thingRid} SET role = :role`, "sql", { role });
 }
 
+const NOT_A_THING = "not an existing thing";
+
 /**
  * Resolve mentions to things and link a statement to them (see things.js):
  * exact or very close -> that thing; close but unsure -> a new thing plus a
@@ -2265,8 +2349,11 @@ async function linkMentions(rid, mentions, home, { unsure = "ask", create = true
       if (found.length) r = { ambiguous: found.map((c) => String(c.rid)) };
     }
     if (r.create && !m.key) {
-      // another entry's name ("ux-t06 bse certs") is a cross-reference, not a thing: no placeholder for it
-      const entry = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 1`, { n: m.name }).catch(() => []);
+      // another entry's name ("ux-t06 bse certs"), or the code it starts with ("ux-t06"), is a cross-reference, not a thing: no placeholder for it
+      const entry = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE (name = :n OR name LIKE :code) AND ${ENTRY_KINDS} LIMIT 1`, {
+        n: m.name,
+        code: `${String(m.name).trim().replace(/[%_\\]/g, "")} %`,
+      }).catch(() => []);
       if (entry.length) {
         out.push({ name: m.name, type: m.type, role: m.role, skipped: "that's an entry, not a thing: mention it in the text instead" });
         continue;
@@ -2274,7 +2361,7 @@ async function linkMentions(rid, mentions, home, { unsure = "ask", create = true
     }
     if (r.create && !create) {
       // what a worker wrote links only to things that exist (it makes new ones on purpose, with link_things)
-      out.push({ name: m.name, type: m.type, role: m.role, skipped: "not an existing thing" });
+      out.push({ name: m.name, type: m.type, role: m.role, ...(m.key ? { key: m.key } : {}), skipped: NOT_A_THING });
       continue;
     }
     if (r.ambiguous) {
@@ -2336,7 +2423,9 @@ async function jobMentions({ rid, from_worker, no_thread, intake }) {
   const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort }));
   const mentions = parseMentions(reply);
   const home = effectiveHome(positionMap, row._home);
-  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: !from_worker });
+  // going to triage: only existing things now; a new name becomes a thing once triage has looked (intakeWithTriage)
+  const deferNew = Boolean(intake && DECISION_API_KEY);
+  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: !from_worker && !deferNew });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
   // with a master: into the next batch, with what linking couldn't settle
   if (intake) await intakeWithTriage(String(rid), row, linked, home);
@@ -2398,6 +2487,9 @@ async function entryForBrief(rid) {
  * proposal) and the thread's agent if it has one.
  */
 async function claimThreads(limit) {
+  // a thread on a model that's out would only fail: none start until it's back
+  const paused = health.outage(`model:${workerModel()}`);
+  if (paused) return { threads: [], paused: paused.message };
   const room = Math.max(0, Math.min(Number(limit) || 0, worker.pool.poolSize, worker.pool.dailyThreads - (await threadsToday())));
   if (!room) return { threads: [] };
   const now = new Date();
@@ -2618,12 +2710,18 @@ async function workerUpsert(args, identity, scope) {
   const byHome = new Map();
   for (const e of entities) {
     let home = asked;
-    if (home === undefined) {
-      const found = await adbQuery(`SELECT @rid AS rid, _origin FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 2`, { n: e.name }).catch(() => []);
-      // two entries by this name: which one is meant isn't for a guess (update_entry takes the id)
-      if (found.length > 1) await findEntry(e.name);
-      home = found.length === 1 && found[0]._origin ? found[0]._origin : (own?._origin ?? positionMap.root);
-    }
+    const found = await adbQuery(`SELECT @rid AS rid, _origin, _home FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 2`, { n: e.name }).catch(() => []);
+    // two entries by this name: which one is meant isn't for a guess (update_entry takes the id)
+    if (found.length > 1) await findEntry(e.name);
+    if (found.length === 1 && found[0]._origin) {
+      // an existing entry is updated where it was written (an entry is its name and origin: any
+      // other origin would be a copy beside it); where it's seen from moves only with set_home
+      const lives = effectiveHome(positionMap, found[0]._home);
+      if (asked !== undefined && asked !== lives) {
+        throw new Error(`"${e.name}" already exists at ${homeName(positionMap, lives)}: an update is written where it lives, so leave home out. To change who sees it, use set_home.`);
+      }
+      home = found[0]._origin;
+    } else if (home === undefined) home = own?._origin ?? positionMap.root;
     if (!byHome.has(home)) byHome.set(home, []);
     byHome.get(home).push(e);
   }
@@ -3120,6 +3218,9 @@ async function ensureTriageSchema() {
  */
 async function intakeWithTriage(rid, row, linked, home) {
   const plain = linked.filter((l) => l.unsure).map((l) => `"${l.name}" (${l.type}) may be ${l.unsure}`);
+  // names linking found no thing for (it made none: see jobMentions)
+  const fresh = linked.filter((l) => l.skipped === NOT_A_THING).map(({ name, type, role, key }) => ({ name, type, role, ...(key ? { key } : {}) }));
+  const freshNames = fresh.map((f) => `${f.name} (${f.type})`);
   if (!DECISION_API_KEY) return void (await enqueue("intake", { rid, unsure: plain }, { key: `intake:${rid}` }));
   // the names linking couldn't settle, with what each candidate is
   const unsure = [];
@@ -3143,16 +3244,21 @@ async function intakeWithTriage(rid, row, linked, home) {
   const text = Object.keys(row).filter((k) => k.startsWith("text_") && row[k]).map((k) => row[k]).join(" ");
   let verdict = null;
   let model = null;
-  try {
-    const res = await askDecisionModel(decisionConfig(), triageRequest({ name: row.name, text }, unsure, related));
-    if (res) {
-      verdict = triageVerdict(res.answers, unsure);
-      model = res.model;
+  // the decision API out: the entry goes to the master untriaged (it isn't held for it)
+  if (!health.down("decisions")) {
+    try {
+      const res = await askDecisionModel(decisionConfig(), triageRequest({ name: row.name, text }, unsure, related));
+      if (res) {
+        verdict = triageVerdict(res.answers, unsure);
+        model = res.model;
+        health.ok("decisions");
+      }
+    } catch (e) {
+      if (!health.fail("decisions", e, e.status)) log.warn(`triage ${row.name}: ${String(e?.message ?? e).slice(0, 160)}`);
     }
-  } catch (e) {
-    log.warn(`triage ${row.name}: ${String(e?.message ?? e).slice(0, 160)}`);
   }
-  if (!verdict) return void (await enqueue("intake", { rid, unsure: plain }, { key: `intake:${rid}` }));
+  // untriaged: a worker decides which new names are things
+  if (!verdict) return void (await enqueue("intake", { rid, unsure: plain, ...(freshNames.length ? { fresh: freshNames } : {}) }, { key: `intake:${rid}` }));
   // names it's confident about: linked now, the name kept as an alias
   for (const st of verdict.settled) {
     const u = unsure.find((x) => x.name === st.name);
@@ -3172,11 +3278,16 @@ async function intakeWithTriage(rid, row, linked, home) {
     m: model ?? "",
     now: new Date().toISOString(),
   }).catch((e) => log.warn(`triage record: ${String(e).slice(0, 120)}`));
-  if (!verdict.toMaster) return;
+  // nothing for a worker: its new names become things now, as linking would have made them
+  if (!verdict.toMaster) {
+    if (fresh.length) await linkMentions(rid, fresh, home, { unsure: "skip" });
+    return;
+  }
   await enqueue(
     "intake",
     {
       rid,
+      ...(freshNames.length ? { fresh: freshNames } : {}),
       unsure: verdict.open.map((o) => `"${o.name}" unsettled${o.pick ? ` (perhaps ${o.pick}, p ${o.p.toFixed(2)})` : ""}`),
       triage: { level: verdict.level, reason: verdict.reason, ...(verdict.sample ? { sample: true } : {}), ...(verdict.settled.length ? { settled: verdict.settled.map((x) => `"${x.name}" = ${x.label}`) } : {}) },
     },
@@ -3279,7 +3390,7 @@ async function batchTick() {
     const edges = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${p.rid})`).catch(() => []);
     const dsts = edges.map((e) => String(e.dst)).filter((x) => RID_RE.test(x));
     const things = dsts.length ? await adbQuery(`SELECT label, _thing_type FROM [${dsts.join(",")}]`).catch(() => []) : [];
-    entries.push({ name: row.name, home: homeName(positionMap, row._home), links: things.map((t) => `${t.label} (${t._thing_type})`), unsure: p.unsure ?? [], ...(p.triage ? { triage: p.triage } : {}) });
+    entries.push({ name: row.name, home: homeName(positionMap, row._home), links: things.map((t) => `${t.label} (${t._thing_type})`), unsure: p.unsure ?? [], fresh: p.fresh ?? [], ...(p.triage ? { triage: p.triage } : {}) });
   }
   // the batch and its signal first: entries leave the intake only once the master will hear of them
   if (entries.length) {
@@ -3443,6 +3554,8 @@ async function wakeIdleWaiting() {
 /** a few jobs per tick, highest priority first; failures back off and give up after a few tries */
 async function workerTick() {
   if (workerTicking || !worker.enabled || !workerModel() || !SCOPED || !positionMap) return;
+  // its model is out: nothing is claimed (or failed) until the pause ends
+  if (health.down(`model:${workerModel()}`) || health.down(`model:${EMBED_MODEL}`)) return;
   workerTicking = true;
   try {
     const now = new Date().toISOString();
@@ -3458,7 +3571,8 @@ async function workerTick() {
       } catch (e) {
         const attempts = Number(job.attempts ?? 0) + (e.later ? 0 : 1);
         const giveUp = attempts >= 5;
-        const wait = e.later ? 3_600_000 : 30_000 * 4 ** attempts;
+        // put off: until a paused dependency's next probe, or an hour for a used-up budget
+        const wait = e.later ? (e.until ? Math.max(30_000, e.until - Date.now()) : 3_600_000) : 30_000 * 4 ** attempts;
         await adbCommand("UPDATE Job SET status = :s, attempts = :a, run_after = :ra, error = :err, updated_at = :now WHERE id = :id", "sql", {
           s: giveUp ? "failed" : "pending",
           a: attempts,
@@ -3467,7 +3581,7 @@ async function workerTick() {
           now: new Date().toISOString(),
           id: job.id,
         });
-        if (e.later) break; // out of budget: stop for this tick
+        if (e.later) break; // out of budget or a dependency out: stop for this tick
       }
     }
   } finally {
@@ -3802,7 +3916,8 @@ removed. Leave it out for what lasts (where things are, how things are done, dec
 fills it in when the content clearly ends, and "lasting" keeps an entry from ever expiring. To
 change an existing entry's end date, upsert it again with valid_until.${SCOPED ? `
 Entities land at your position by default; \`home\` may name one of your positions or one above it
-(restricting who sees them), never one below or beside yours.` : ""}
+(restricting who sees them), never one below or beside yours.${role === "worker" ? ` An entry that already exists is
+updated where it lives: leave \`home\` out for it (set_home moves an entry).` : ""}` : ""}
 ${facetDoc}`,
     {
       ...(SCOPED ? { home: z.string().optional() } : {}),
@@ -4555,6 +4670,10 @@ async function workerStatus() {
     things: Number(things[0]?.n ?? 0),
     today: { calls: workerUsage.day === new Date().toISOString().slice(0, 10) ? workerUsage.calls : 0, budget: Number(WORKER_DAILY_CALLS) },
     recent_failures: failed,
+    // what's out (its work waits) and which background loops keep failing
+    dependencies: health.status(),
+    loops: loops.status(),
+    awaiting_grading: Number((await adbQuery(`SELECT count(*) AS n FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL`).catch(() => []))[0]?.n ?? 0),
   };
 }
 app.get("/api/worker", (req, res) => {
@@ -4899,7 +5018,7 @@ async function boot() {
   // declared, or SQL WHERE can't see it (see upsertEntities)
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._home IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_home) NOTUNIQUE`).catch(() => {});
-  for (const prop of ["_origin", "_grade", "_valid_until", "_valid_by"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["_origin", "_grade", "_valid_until", "_valid_by", "_ungraded"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (name, _origin) NOTUNIQUE`).catch(() => {});
   if (SCOPED && positionMap) {
     // entities from before origins: their origin is where they are (legacy, unhomed ones: the root)
@@ -4912,10 +5031,7 @@ async function boot() {
   await ensurePruneSchema();
   if (!pruneSink) log.warn(`PRUNE_SINK=${PRUNE_SINK} isn't a known sink: pruning is off (nothing is deleted)`);
   // every 10 minutes, a batch at a time; the first a minute after boot
-  const prune = () =>
-    void pruneExpired()
-      .then(() => sweepOrphanDocuments())
-      .catch((e) => log.warn(`pruning failed: ${String(e).slice(0, 160)}`));
+  const prune = () => void loops.run("pruning", () => pruneExpired().then(() => sweepOrphanDocuments()));
   setTimeout(prune, 60_000);
   setInterval(prune, 600_000);
   if (SCOPED) log.info(`semantic grading: ${GRADER_MODEL && policy.gradingEnabled ? `on (${GRADER_MODEL}, confidence ${policy.gradingConfidence})` : "off"}`);
@@ -4926,11 +5042,13 @@ async function boot() {
     await ensureNeedSchema();
     await ensureDocumentSchema();
     await ensureWorkerSchema();
-    setInterval(() => void workerTick().catch((e) => log.warn(`worker: ${String(e).slice(0, 160)}`)), 5_000);
-    setInterval(() => void expireLeases().then(wakeIdleWaiting).catch((e) => log.warn(`worker leases: ${String(e).slice(0, 160)}`)), 60_000);
+    setInterval(() => void loops.run("worker jobs", workerTick), 5_000);
+    setInterval(() => void loops.run("worker leases", () => expireLeases().then(wakeIdleWaiting)), 60_000);
+    // entries written while the grader was out: graded once it's back
+    setInterval(() => void loops.run("regrading", regradeTick), 60_000);
     await ensureMasterSchema();
     await ensureTriageSchema();
-    setInterval(() => void batchTick().catch((e) => log.warn(`batches: ${String(e).slice(0, 160)}`)), 30_000);
+    setInterval(() => void loops.run("batches", batchTick), 30_000);
     log.info(`graph worker: ${worker.enabled && workerModel() ? `on (${workerModel()}${worker.profile ? `, from profile ${worker.profile}` : ""})` : "off"}`);
     if (!docStore) log.warn(`DOC_STORE=${DOC_STORE} isn't a known store: documents can't be ingested`);
     await expireRequests();
@@ -4938,14 +5056,11 @@ async function boot() {
   }
   await ensurePendingSchema();
   console.log(`[graph-rag] indexes ready: ${[...knownIndexes].join(", ")}`);
-  const sweep = async () => {
-    try {
+  const sweep = () =>
+    loops.run("sweep", async () => {
       const r = await backfillIdentity(64);
       if (r.backfilled > 0) console.log(`[graph-rag] sweep backfilled ${r.backfilled} identity embeddings`);
-    } catch (e) {
-      console.warn(`[graph-rag] sweep failed: ${String(e).slice(0, 160)}`);
-    }
-  };
+    });
   setInterval(sweep, Number(SWEEP_INTERVAL_MS));
   app.listen(Number(PORT), () => console.log(`[graph-rag] listening on :${PORT}`));
 }

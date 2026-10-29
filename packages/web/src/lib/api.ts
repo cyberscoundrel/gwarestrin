@@ -65,7 +65,15 @@ export interface GraphWorkerView {
   master?: MasterStatus | null;
   /** triage of saved entries by a decision model (today) */
   triage?: TriageStats | null;
+  /** model routes and the decision API: one that's out pauses the work that needs it */
+  dependencies?: Record<string, DependencyHealth>;
+  /** graph-rag's background loops: one that keeps failing shows here */
+  loops?: Record<string, LoopHealth>;
+  /** entries written while the grader was out, held one level up until it grades them */
+  awaiting_grading?: number;
 }
+export type DependencyHealth = { ok: true; at?: string | null } | { ok: false; since: string; reason: string; retry_at: string };
+export type LoopHealth = { ok: true; at?: string | null } | { ok: false; since: string; failures: number; error: string };
 export interface TriageStats {
   on: boolean;
   model: string | null;
