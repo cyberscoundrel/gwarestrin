@@ -2302,6 +2302,8 @@ async function aboutOnce(statementRid, thingRid, role) {
   await adbCommand(`CREATE EDGE ABOUT FROM ${statementRid} TO ${thingRid} SET role = :role`, "sql", { role });
 }
 
+const NOT_A_THING = "not an existing thing";
+
 /**
  * Resolve mentions to things and link a statement to them (see things.js):
  * exact or very close -> that thing; close but unsure -> a new thing plus a
@@ -2359,7 +2361,7 @@ async function linkMentions(rid, mentions, home, { unsure = "ask", create = true
     }
     if (r.create && !create) {
       // what a worker wrote links only to things that exist (it makes new ones on purpose, with link_things)
-      out.push({ name: m.name, type: m.type, role: m.role, skipped: "not an existing thing" });
+      out.push({ name: m.name, type: m.type, role: m.role, ...(m.key ? { key: m.key } : {}), skipped: NOT_A_THING });
       continue;
     }
     if (r.ambiguous) {
@@ -2421,7 +2423,9 @@ async function jobMentions({ rid, from_worker, no_thread, intake }) {
   const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort }));
   const mentions = parseMentions(reply);
   const home = effectiveHome(positionMap, row._home);
-  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: !from_worker });
+  // going to triage: only existing things now; a new name becomes a thing once triage has looked (intakeWithTriage)
+  const deferNew = Boolean(intake && DECISION_API_KEY);
+  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: !from_worker && !deferNew });
   await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
   // with a master: into the next batch, with what linking couldn't settle
   if (intake) await intakeWithTriage(String(rid), row, linked, home);
@@ -3208,6 +3212,9 @@ async function ensureTriageSchema() {
  */
 async function intakeWithTriage(rid, row, linked, home) {
   const plain = linked.filter((l) => l.unsure).map((l) => `"${l.name}" (${l.type}) may be ${l.unsure}`);
+  // names linking found no thing for (it made none: see jobMentions)
+  const fresh = linked.filter((l) => l.skipped === NOT_A_THING).map(({ name, type, role, key }) => ({ name, type, role, ...(key ? { key } : {}) }));
+  const freshNames = fresh.map((f) => `${f.name} (${f.type})`);
   if (!DECISION_API_KEY) return void (await enqueue("intake", { rid, unsure: plain }, { key: `intake:${rid}` }));
   // the names linking couldn't settle, with what each candidate is
   const unsure = [];
@@ -3244,7 +3251,8 @@ async function intakeWithTriage(rid, row, linked, home) {
       if (!health.fail("decisions", e, e.status)) log.warn(`triage ${row.name}: ${String(e?.message ?? e).slice(0, 160)}`);
     }
   }
-  if (!verdict) return void (await enqueue("intake", { rid, unsure: plain }, { key: `intake:${rid}` }));
+  // untriaged: a worker decides which new names are things
+  if (!verdict) return void (await enqueue("intake", { rid, unsure: plain, ...(freshNames.length ? { fresh: freshNames } : {}) }, { key: `intake:${rid}` }));
   // names it's confident about: linked now, the name kept as an alias
   for (const st of verdict.settled) {
     const u = unsure.find((x) => x.name === st.name);
@@ -3264,11 +3272,16 @@ async function intakeWithTriage(rid, row, linked, home) {
     m: model ?? "",
     now: new Date().toISOString(),
   }).catch((e) => log.warn(`triage record: ${String(e).slice(0, 120)}`));
-  if (!verdict.toMaster) return;
+  // nothing for a worker: its new names become things now, as linking would have made them
+  if (!verdict.toMaster) {
+    if (fresh.length) await linkMentions(rid, fresh, home, { unsure: "skip" });
+    return;
+  }
   await enqueue(
     "intake",
     {
       rid,
+      ...(freshNames.length ? { fresh: freshNames } : {}),
       unsure: verdict.open.map((o) => `"${o.name}" unsettled${o.pick ? ` (perhaps ${o.pick}, p ${o.p.toFixed(2)})` : ""}`),
       triage: { level: verdict.level, reason: verdict.reason, ...(verdict.sample ? { sample: true } : {}), ...(verdict.settled.length ? { settled: verdict.settled.map((x) => `"${x.name}" = ${x.label}`) } : {}) },
     },
@@ -3371,7 +3384,7 @@ async function batchTick() {
     const edges = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${p.rid})`).catch(() => []);
     const dsts = edges.map((e) => String(e.dst)).filter((x) => RID_RE.test(x));
     const things = dsts.length ? await adbQuery(`SELECT label, _thing_type FROM [${dsts.join(",")}]`).catch(() => []) : [];
-    entries.push({ name: row.name, home: homeName(positionMap, row._home), links: things.map((t) => `${t.label} (${t._thing_type})`), unsure: p.unsure ?? [], ...(p.triage ? { triage: p.triage } : {}) });
+    entries.push({ name: row.name, home: homeName(positionMap, row._home), links: things.map((t) => `${t.label} (${t._thing_type})`), unsure: p.unsure ?? [], fresh: p.fresh ?? [], ...(p.triage ? { triage: p.triage } : {}) });
   }
   // the batch and its signal first: entries leave the intake only once the master will hear of them
   if (entries.length) {

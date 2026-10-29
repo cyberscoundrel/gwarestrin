@@ -52,7 +52,7 @@ test("master mode: saved entries are linked then batched; the inbox and the hand
   assert.throws(() => poolSettings({ maxHandlers: 0 }), /1 to 50/);
   const m = signalsMessage(
     [
-      { kind: "batch", batch_id: "b1", data: { entries: [{ name: "ux-note 03", home: "Operations", links: ["BSE (customer)"], unsure: ['"John" (person) may be John Francis or JOHN'] }] } },
+      { kind: "batch", batch_id: "b1", data: { entries: [{ name: "ux-note 03", home: "Operations", links: ["BSE (customer)"], unsure: ['"John" (person) may be John Francis or JOHN'], fresh: ["Diep (person)"] }] } },
       { kind: "stopped", job_id: "j1", data: { title: "Fix Toro jobs", reason: "it's waiting on a decision", questions: [{ id: "q1", question: "Which Toro?", options: ["customer", "supplier"] }], proposals: [] } },
       { kind: "resolved", job_id: "j2", data: { decision: "The operator: keep both" } },
     ],
@@ -61,6 +61,8 @@ test("master mode: saved entries are linked then batched; the inbox and the hand
   assert.match(m, /HALTED/);
   assert.match(m, /BATCH b1/);
   assert.match(m, /unsure: "John"/);
+  assert.match(m, /not in the graph yet: Diep \(person\)/);
+  assert.match(m, /never for a code that names another entry/);
   assert.match(m, /question q1: Which Toro\? \(options: customer \| supplier\)/);
   assert.match(m, /graph-rag_start_handler/);
   assert.match(m, /RESOLVED worker j2/);
