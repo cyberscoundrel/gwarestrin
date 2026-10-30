@@ -2731,6 +2731,32 @@ async function answerQuestions(ids, { answer, dismiss = false, quiet = false }, 
   return { answered: done.length, ids: done };
 }
 
+/**
+ * Where a proposal lands, in plain words. An upsert payload's `home` is the
+ * origin an entry is keyed by (where it was first written), not who sees it:
+ * read raw, an update to an entry grading moved up looked like a widening.
+ */
+async function proposalLands(kind, payload) {
+  if (kind === "command") return ["a raw command: it can change anything"];
+  try {
+    const p = JSON.parse(payload);
+    if (kind === "rehome") return [`moves "${p.name}" from ${homeName(positionMap, p.from)} to ${homeName(positionMap, p.to)} (${moveKind(positionMap, p.from, p.to) === "widen" ? "more people see it" : "fewer people see it"})`];
+    if (kind !== "upsert" || !positionMap || p.home === undefined) return [];
+    const out = [];
+    for (const e of p.entities ?? []) {
+      const row = (await adbQuery(`SELECT _home FROM ${ENTITY_LABEL} WHERE name = :n AND _origin = :o LIMIT 1`, { n: e.name, o: p.home }).catch(() => []))[0];
+      out.push(
+        row
+          ? `"${e.name}": updated where it's seen from now, ${homeName(positionMap, effectiveHome(positionMap, row._home))}; who sees it doesn't change`
+          : `"${e.name}": a new entry from ${homeName(positionMap, p.home)}, placed by grading${p.floor && p.floor !== p.home ? `, held at least at ${homeName(positionMap, p.floor)}` : ""}`,
+      );
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 /** workers' proposals: queued writes from a thread, with its reason */
 async function listProposals() {
   const rows = await adbQuery("SELECT id, kind, payload, requested_by, created_at, note, job_id, home FROM PendingWrite WHERE status = 'pending' AND job_id IS NOT NULL ORDER BY created_at ASC LIMIT 100").catch(() => []);
@@ -2739,7 +2765,7 @@ async function listProposals() {
     const job = (await adbQuery("SELECT agent_id, payload FROM Job WHERE id = :id", { id: r.job_id }).catch(() => []))[0];
     const rid = JSON.parse(job?.payload || "{}").rid;
     const entry = RID_RE.test(String(rid)) ? (await adbQuery(`SELECT name FROM ${rid}`).catch(() => []))[0]?.name : null;
-    out.push({ id: r.id, kind: r.kind, change: String(r.payload).slice(0, 2000), reason: r.note ?? "", proposed_by: r.requested_by, created_at: r.created_at, entry, agent_id: job?.agent_id ?? null });
+    out.push({ id: r.id, kind: r.kind, lands: await proposalLands(r.kind, r.payload), change: String(r.payload).slice(0, 2000), reason: r.note ?? "", proposed_by: r.requested_by, created_at: r.created_at, entry, agent_id: job?.agent_id ?? null });
   }
   return out;
 }
@@ -2791,30 +2817,35 @@ async function workerUpsert(args, identity, scope) {
   // where each lands: the home asked for; else an existing entry's own home (it's updated where it
   // lives, never copied next to it); else the worker's own entry's
   const asked = args.home === undefined ? undefined : resolveWriteHome(scope, args.home, { everyoneOk: (await threadAudience(identity)) === EVERYONE });
+  // grouped by origin (what an entry is keyed by) and where it lives (who sees it): the floor
+  // is judged against where it lives, which grading may have put above its origin
   const byHome = new Map();
   for (const e of entities) {
     let home = asked;
+    let lives;
     const found = await adbQuery(`SELECT @rid AS rid, _origin, _home FROM ${ENTITY_LABEL} WHERE name = :n AND ${ENTRY_KINDS} LIMIT 2`, { n: e.name }).catch(() => []);
     // two entries by this name: which one is meant isn't for a guess (update_entry takes the id)
     if (found.length > 1) await findEntry(e.name);
     if (found.length === 1 && found[0]._origin) {
       // an existing entry is updated where it was written (an entry is its name and origin: any
       // other origin would be a copy beside it); where it's seen from moves only with set_home
-      const lives = effectiveHome(positionMap, found[0]._home);
+      lives = effectiveHome(positionMap, found[0]._home);
       if (asked !== undefined && asked !== lives) {
         throw new Error(`"${e.name}" already exists at ${homeName(positionMap, lives)}: an update is written where it lives, so leave home out. To change who sees it, use set_home.`);
       }
       home = found[0]._origin;
     } else if (home === undefined) home = own?._origin ?? positionMap.root;
-    if (!byHome.has(home)) byHome.set(home, []);
-    byHome.get(home).push(e);
+    lives ??= home;
+    const key = `${home} ${lives}`;
+    if (!byHome.has(key)) byHome.set(key, { home, lives, list: [] });
+    byHome.get(key).list.push(e);
   }
   const results = [];
-  for (const [home, list] of byHome) {
-    const lift = workerLift(identity, home);
+  for (const { home, lives, list } of byHome.values()) {
+    const lift = workerLift(identity, lives);
     if (lift && !args.propose) throw new Error(liftRefusal(list.map((e) => e.name).join(", "), lift));
     // proposed past the floor: an admin who approves it writes it where it lives
-    const write = { entities: list, home, floor: lift ? lift.home : derivedFloor(identity, home), written_at: new Date(now).toISOString(), from_worker: true };
+    const write = { entities: list, home, floor: lift ? lift.home : derivedFloor(identity, lives), written_at: new Date(now).toISOString(), from_worker: true };
     if (args.propose) {
       results.push({ ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE });
       continue;
@@ -3439,10 +3470,10 @@ async function emitSignal(kind, { job_id = null, batch_id = null, data = {} } = 
 /** a stopped worker's open questions and undecided proposals */
 async function openItems(jobId) {
   const questions = await adbQuery("SELECT id, question, options FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: jobId }).catch(() => []);
-  const proposals = await adbQuery("SELECT id, kind, note FROM PendingWrite WHERE job_id = :id AND status = 'pending'", { id: jobId }).catch(() => []);
+  const proposals = await adbQuery("SELECT id, kind, note, payload FROM PendingWrite WHERE job_id = :id AND status = 'pending'", { id: jobId }).catch(() => []);
   return {
     questions: questions.map((q) => ({ id: q.id, question: q.question, options: JSON.parse(q.options || "[]") })),
-    proposals: proposals.map((p) => ({ id: p.id, kind: p.kind, reason: p.note ?? "" })),
+    proposals: await Promise.all(proposals.map(async (p) => ({ id: p.id, kind: p.kind, lands: await proposalLands(p.kind, p.payload), reason: p.note ?? "" }))),
   };
 }
 

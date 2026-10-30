@@ -180,6 +180,23 @@ await scenario("a worker restricts an entry on its own, but asks before moving o
   check((await entry("e2e-p2 placed"))?._home === POS.floor, "still where the person put it");
 });
 
+await scenario("a worker updates an entry where grading put it, and its proposals say where they land", async () => {
+  await save("bob", "e2e-l1 bonus note", "The weekend shift bonus is 40 a week. [admins]");
+  const e = await entry("e2e-l1 bonus note");
+  check(e?._home === POS.org, `graded to the top, got ${e?._home}`);
+  const w = workerToken(String(e.rid));
+  // reading it marks the top as read: that is where it lives, so the update isn't held anywhere else
+  await tool(w, "search_graph", { query: "weekend shift bonus 40 a week" });
+  const done = await tool(w, "upsert_entities", { entities: [{ name: "e2e-l1 bonus note", facets: { state: "Paid weekly from November." } }] });
+  check(!done.error, `applied where it lives: ${JSON.stringify(done).slice(0, 300)}`);
+  check((await entry("e2e-l1 bonus note"))?._home === POS.org, "still at the top");
+  const asked = await tool(w, "upsert_entities", { entities: [{ name: "e2e-l1 bonus note", facets: { temporal: "From 2026-11-01." } }], propose: true, reason: "e2e" });
+  check(asked.pendingId, `proposed: ${JSON.stringify(asked).slice(0, 300)}`);
+  const listed = (await api("/api/worker/proposals")).proposals.find((p) => p.id === asked.pendingId);
+  check(/seen from now, org; who sees it doesn't change/.test(listed?.lands?.[0] ?? ""), `lands: ${JSON.stringify(listed?.lands)}`);
+  await api(`/api/worker/proposals/${asked.pendingId}`, { method: "POST", body: JSON.stringify({ approve: false, reason: "e2e" }) });
+});
+
 await scenario("a writer still reads a note grading put above them; others at their position don't", async () => {
   await save("bob", "e2e-w1 pay note", "Diep starts at 21.50 an hour. [admins]");
   const e = await entry("e2e-w1 pay note");
