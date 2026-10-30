@@ -68,7 +68,11 @@ The worker profile sets **at most N at once** per level, next to its model.
 Levels on the same model share the lowest limit; a thread with no level
 counts against the profile's own model. The pool counts its running threads
 by model and asks graph-rag only for the room left; graph-rag's claim skips a
-full model's threads, which stay pending with their tries.
+full model's threads, which stay pending with their tries. A thread's model is
+the one it really runs on: a resumed thread keeps its agent's model whatever
+its level, and a thread with no level runs on the profile's model or the
+workspace default. The pool checks that before it starts a thread and hands a
+thread on a full model back (pending again in a minute, tries kept).
 
 ### Every background loop reports how it went
 
