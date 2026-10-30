@@ -3602,15 +3602,23 @@ async function handlerDecide(args, identity) {
   if (h.status === "done") throw new Error("already decided");
   const { for_job } = JSON.parse(h.payload || "{}");
   const items = await openItems(for_job);
-  const mine = new Set(items.proposals.map((p) => p.id));
+  // checked before anything is applied: an empty call or an id that isn't open was taken as
+  // "carry on", closing the handler with the operator's decision unrecorded
+  const open = items.proposals.map((p) => p.id);
+  const resolve = (id) => {
+    const hits = open.filter((p) => p === id || (String(id).length >= 8 && p.startsWith(String(id))));
+    if (hits.length !== 1) throw new Error(`${id} is not one of this worker's open proposals (${open.join(", ") || "none"}): nothing was recorded`);
+    return hits[0];
+  };
+  const approve = (args.approve ?? []).map(resolve);
+  const reject = (args.reject ?? []).map((r) => ({ ...r, id: resolve(r.id) }));
+  if (!args.answer?.trim() && !approve.length && !reject.length) throw new Error("Nothing to record: give the operator's answer, or the proposals to apply or reject. Nothing was recorded.");
   const by = `${identity.user} (on the operator's word)`;
   const done = [];
-  for (const id of args.approve ?? []) {
-    if (!mine.has(id)) continue;
+  for (const id of approve) {
     await approvePending(id, { ...identity, user: by }, "", { quiet: true }).then(() => done.push(`applied ${id.slice(0, 8)}`), (e) => done.push(`couldn't apply ${id.slice(0, 8)}: ${String(e.message ?? e).slice(0, 120)}`));
   }
-  for (const r of args.reject ?? []) {
-    if (!mine.has(r.id)) continue;
+  for (const r of reject) {
     await rejectPending(r.id, { ...identity, user: by }, r.reason ?? "", { quiet: true }).then(() => done.push(`rejected ${r.id.slice(0, 8)}`));
   }
   if (items.questions.length && args.answer) await answerQuestions(items.questions.map((q) => q.id), { answer: args.answer, quiet: true }, by);
