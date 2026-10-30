@@ -94,6 +94,15 @@ acknowledgement and then fail the thread ("rpc 'prompt' timed out"). It now
 gives the prompt the turn's own time limit: the thread's minutes, the
 handler's turn limit, or the master's stall limit.
 
+Starting an agent must not touch the others. Each start wrote the shared
+provider profiles and the model's provider on the OpenShell gateway again, with
+nothing changed, and the gateway hands each update to every sandbox using
+them. On 2026-10-30 the threads on the local model dropped in pairs ("Connection
+error"), each time a few seconds after another agent started. llama.cpp was
+still working on both requests when they dropped, and litellm returned no
+error, so the connections were cut between the sandboxes and litellm. The
+server now writes a profile or provider only when it changes.
+
 ### Every background loop reports how it went
 
 The sweep, pruning, jobs, leases, batches and regrading run through

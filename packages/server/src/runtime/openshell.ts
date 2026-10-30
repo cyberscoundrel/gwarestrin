@@ -65,10 +65,21 @@ function codeOf(err: unknown): string | null {
 
 type RawClient = SandboxClient["raw"];
 
+/** a stable digest of what a write sends (credentials included, never kept in the clear) */
+function fingerprint(value: unknown): string {
+  const json = JSON.stringify(value, (_k, v: unknown) => (typeof v === "bigint" ? v.toString() : v));
+  return createHash("sha256").update(json).digest("hex");
+}
+
 /**
  * Provider profiles + instances on the gateway. Profiles describe where a
  * credential may be used; instances hold the real values (gateway-side,
  * encrypted). Both calls are idempotent: create, or update in place.
+ *
+ * An update is written only when it changes something. Profiles and model
+ * providers are shared by every agent, and the gateway hands each update to
+ * every sandbox that uses it: an update on each agent start, with nothing
+ * changed, cut other agents' model calls mid-stream.
  */
 export class OpenShellProviders {
   private readonly scope: { workspaceScope: { selection: { case: "workspace"; value: string } } };
@@ -84,6 +95,8 @@ export class OpenShellProviders {
   // connection): updates to one profile run one at a time, or the gateway
   // refuses all but the first ("modified concurrently")
   private readonly profileLocks = new Map<string, Promise<void>>();
+  // what this server last wrote, by profile id / provider name
+  private readonly written = new Map<string, string>();
 
   async ensureProfile(profile: ProfileInit): Promise<void> {
     const id = profile.id ?? "";
@@ -103,6 +116,14 @@ export class OpenShellProviders {
 
   private async ensureProfileOnce(profile: ProfileInit): Promise<void> {
     const id = profile.id ?? "";
+    const key = `profile:${id}`;
+    const fp = fingerprint(profile);
+    if (this.written.get(key) === fp && (await this.exists(() => this.raw.getProviderProfile({ ...this.scope, id })))) return;
+    await this.writeProfile(id, profile);
+    this.written.set(key, fp);
+  }
+
+  private async writeProfile(id: string, profile: ProfileInit): Promise<void> {
     const res = await this.raw.importProviderProfiles({ ...this.scope, profiles: [{ profile, source: "gwarestrin" }] });
     if (res.imported) return;
     const diag = res.diagnostics.map((d) => JSON.stringify(d)).join("; ");
@@ -126,23 +147,36 @@ export class OpenShellProviders {
     // profiles are imported workspace-scoped; without profileWorkspace the
     // gateway resolves the type at platform scope and rejects it
     const provider = { metadata: { name }, type: profileId, credentials, profileWorkspace: this.workspace };
-    try {
-      await this.raw.getProvider({ ...this.scope, name });
-    } catch (err) {
-      if (codeOf(err) !== "not_found") throw err;
+    const key = `provider:${name}`;
+    const fp = fingerprint(provider);
+    if (!(await this.exists(() => this.raw.getProvider({ ...this.scope, name })))) {
       await this.raw.createProvider({ ...this.scope, provider });
       log.info(`created provider ${name} (${profileId})`);
-      return;
+    } else if (this.written.get(key) !== fp) {
+      await this.raw.updateProvider({ ...this.scope, provider });
     }
-    await this.raw.updateProvider({ ...this.scope, provider });
+    this.written.set(key, fp);
   }
 
   async deleteProvider(name: string): Promise<void> {
+    this.written.delete(`provider:${name}`);
     await this.raw.deleteProvider({ ...this.scope, name, allowMissing: true });
   }
 
   async deleteProfile(id: string): Promise<void> {
+    this.written.delete(`profile:${id}`);
     await this.raw.deleteProviderProfile({ ...this.scope, id, allowMissing: true });
+  }
+
+  /** a read that tells whether the gateway still has it (a reset gateway forgets) */
+  private async exists(read: () => Promise<unknown>): Promise<boolean> {
+    try {
+      await read();
+      return true;
+    } catch (err) {
+      if (codeOf(err) === "not_found") return false;
+      throw err;
+    }
   }
 }
 
