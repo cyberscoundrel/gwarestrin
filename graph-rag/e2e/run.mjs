@@ -6,10 +6,13 @@ const MODELS = process.env.MODELS_URL ?? "http://models:4000";
 import { createHmac, randomUUID } from "node:crypto";
 const TOKENS = { admin: "e2e-admin", alice: "e2e-alice", bob: "e2e-bob" };
 // a graph worker thread's token, as the admin's workspace signs it (graph-rag/src/delegation.js)
-const workerToken = (entry) => {
-  const body = Buffer.from(JSON.stringify({ u: "admin", a: randomUUID(), r: "worker", j: randomUUID(), e: entry, iat: Math.floor(Date.now() / 1000) })).toString("base64url");
+const delegated = (claims) => {
+  const body = Buffer.from(JSON.stringify({ u: "admin", a: randomUUID(), iat: Math.floor(Date.now() / 1000), ...claims })).toString("base64url");
   return `gwa1.${body}.${createHmac("sha256", "e2e-delegation-key-0123456789abcdef").update(`gwa1.${body}`).digest("base64url")}`;
 };
+const workerToken = (entry, job = randomUUID()) => delegated({ r: "worker", j: job, e: entry });
+// the handler the master starts for a stopped worker (its Job row says which)
+const handlerToken = (job) => delegated({ r: "handler", j: job });
 
 let id = 1;
 async function tool(who, name, args) {
@@ -178,6 +181,41 @@ await scenario("a worker restricts an entry on its own, but asks before moving o
   const w2 = await tool(workerToken(String(p2.rid)), "set_home", { entities: [{ name: "e2e-p2 placed" }], to: "Operations", reason: "it's an Operations note" });
   check(w2.results?.[0]?.placed_by_person, `proposed, not applied: ${JSON.stringify(w2).slice(0, 300)}`);
   check((await entry("e2e-p2 placed"))?._home === POS.floor, "still where the person put it");
+});
+
+await scenario("a worker updates an entry where grading put it, and its proposals say where they land", async () => {
+  await save("bob", "e2e-l1 bonus note", "The weekend shift bonus is 40 a week. [admins]");
+  const e = await entry("e2e-l1 bonus note");
+  check(e?._home === POS.org, `graded to the top, got ${e?._home}`);
+  const w = workerToken(String(e.rid));
+  // reading it marks the top as read: that is where it lives, so the update isn't held anywhere else
+  await tool(w, "search_graph", { query: "weekend shift bonus 40 a week" });
+  const done = await tool(w, "upsert_entities", { entities: [{ name: "e2e-l1 bonus note", facets: { state: "Paid weekly from November." } }] });
+  check(!done.error, `applied where it lives: ${JSON.stringify(done).slice(0, 300)}`);
+  check((await entry("e2e-l1 bonus note"))?._home === POS.org, "still at the top");
+  const asked = await tool(w, "upsert_entities", { entities: [{ name: "e2e-l1 bonus note", facets: { temporal: "From 2026-11-01." } }], propose: true, reason: "e2e" });
+  check(asked.pendingId, `proposed: ${JSON.stringify(asked).slice(0, 300)}`);
+  const listed = (await api("/api/worker/proposals")).proposals.find((p) => p.id === asked.pendingId);
+  check(/seen from now, Top of the organization \(admins only\); who sees it doesn't change/.test(listed?.lands?.[0] ?? ""), `lands: ${JSON.stringify(listed?.lands)}`);
+  await api(`/api/worker/proposals/${asked.pendingId}`, { method: "POST", body: JSON.stringify({ approve: false, reason: "e2e" }) });
+});
+
+await scenario("a handler records the operator's decision only when it names one, and takes a proposal's short id", async () => {
+  await save("alice", "e2e-h1 dock lights", "Two dock lights are out by door 3.");
+  const e = await entry("e2e-h1 dock lights");
+  const job = randomUUID();
+  const asked = await tool(workerToken(String(e.rid), job), "upsert_entities", { entities: [{ name: "e2e-h1 dock lights", facets: { state: "Reported 2026-10-30; not yet fixed." } }], propose: true, reason: "e2e" });
+  check(asked.pendingId, `proposed: ${JSON.stringify(asked).slice(0, 300)}`);
+  const h = randomUUID();
+  await tool("admin", "execute_graph", { language: "sql", command: `INSERT INTO Job SET id = '${h}', kind = 'handler', status = 'waiting', payload = '{"for_job":"${job}"}'` });
+  const empty = await tool(handlerToken(h), "decide_for_worker", {});
+  check(/Nothing to record/.test(empty.error ?? ""), `an empty call is refused: ${JSON.stringify(empty).slice(0, 300)}`);
+  const wrong = await tool(handlerToken(h), "decide_for_worker", { approve: ["00000000"] });
+  check(/not one of this worker's open proposals/.test(wrong.error ?? ""), `an unknown id is refused: ${JSON.stringify(wrong).slice(0, 300)}`);
+  const ok = await tool(handlerToken(h), "decide_for_worker", { approve: [asked.pendingId.slice(0, 8)] });
+  check(ok.decided, `decided: ${JSON.stringify(ok).slice(0, 300)}`);
+  const st = (await sql(`SELECT status FROM PendingWrite WHERE id = '${asked.pendingId}'`))[0]?.status;
+  check(st === "approved", `the short id applied it: ${st}`);
 });
 
 await scenario("a writer still reads a note grading put above them; others at their position don't", async () => {
