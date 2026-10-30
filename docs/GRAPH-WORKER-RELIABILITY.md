@@ -74,6 +74,26 @@ its level, and a thread with no level runs on the profile's model or the
 workspace default. The pool checks that before it starts a thread and hands a
 thread on a full model back (pending again in a minute, tries kept).
 
+Counting threads is not enough: the context is shared too. The model's
+`contextWindow` in providers.json is what each agent compacts against, and it
+was the server's whole 262k. Two workers could each grow past 130k, and the
+next large prompt then overflowed the cache. llama.cpp spent minutes
+prefilling it, starving the other slots, then failed it ("Context size has
+been exceeded", which litellm reports as a connection error). The agents saw
+"Connection error" or "terminated" right after a new thread started.
+Reproduced 2026-10-30: one uncached 75k-token prompt, sent from the host
+straight to litellm with no sandbox in the path, failed that way after 161 s.
+Set the local model's `contextWindow` to the shared context divided by the
+level's limit, less room for anything else using the server (100k for two
+workers on 262k).
+
+A smaller window means a resumed conversation may compact before it takes the
+next prompt, and pi acknowledges a prompt only after that. On the local model
+compacting takes minutes. The pool used to wait two minutes for the
+acknowledgement and then fail the thread ("rpc 'prompt' timed out"). It now
+gives the prompt the turn's own time limit: the thread's minutes, the
+handler's turn limit, or the master's stall limit.
+
 ### Every background loop reports how it went
 
 The sweep, pruning, jobs, leases, batches and regrading run through

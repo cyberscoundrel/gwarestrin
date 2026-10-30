@@ -9,6 +9,7 @@ function fakeManager(opts: { settle?: "ok" | "never" | "stop" | "stall"; ended?:
   const records = new Map<string, AgentRecord>();
   const running = new Map<string, EventEmitter>();
   const prompts: Array<[string, string]> = [];
+  const promptWaits: number[] = [];
   let n = 0;
   const m = {
     profiles: { graphWorker: () => ({ id: "worker-profile", graphWorker: { model: "ds-flash", ...(opts.levelModels ? { levelModels: opts.levelModels } : {}), ...(opts.levelLimits ? { levelLimits: opts.levelLimits } : {}) } }) },
@@ -37,8 +38,9 @@ function fakeManager(opts: { settle?: "ok" | "never" | "stop" | "stall"; ended?:
     },
     getRunning: (id: string) => running.get(id),
     runningCount: () => running.size,
-    async promptAgent(id: string, message: string) {
+    async promptAgent(id: string, message: string, timeoutMs?: number) {
       prompts.push([id, message]);
+      promptWaits.push(timeoutMs ?? 0);
       const ev = running.get(id)!;
       if (opts.settle === "ok" || opts.settle === undefined) setTimeout(() => ev.emit("event", { type: "agent_settled" }), 5);
       if (opts.settle === "stop") setTimeout(() => ev.emit("closed"), 5);
@@ -67,7 +69,7 @@ function fakeManager(opts: { settle?: "ok" | "never" | "stop" | "stall"; ended?:
       (m as { compacted: number }).compacted++;
     },
   };
-  return { manager: m as unknown as AgentManager, records, prompts, running, compacted: () => (m as { compacted: number }).compacted, aborted: () => (m as { aborted: number }).aborted };
+  return { manager: m as unknown as AgentManager, records, prompts, promptWaits, running, compacted: () => (m as { compacted: number }).compacted, aborted: () => (m as { aborted: number }).aborted };
 }
 
 function fakeGraph(threads: Array<Record<string, unknown>>, status: Record<string, unknown> = { pool: { poolSize: 2, keepDays: 14 } }) {
@@ -87,7 +89,7 @@ const flush = () => new Promise((r) => setTimeout(r, 40));
 
 describe("graph worker pool", () => {
   it("claims within the pool and the agent limit, makes a worker per entry, prompts it, reports, stops it", async () => {
-    const { manager, records, prompts, running } = fakeManager();
+    const { manager, records, prompts, promptWaits, running } = fakeManager();
     const { call, calls } = fakeGraph([thread("0f8fad5b-0000-0000-0000-000000000001"), thread("0f8fad5b-0000-0000-0000-000000000002"), thread("0f8fad5b-0000-0000-0000-000000000003")]);
     const pool = new GraphPool(manager, call, () => 8);
     expect((await pool.tick()).started).toBe(2);
@@ -97,6 +99,8 @@ describe("graph worker pool", () => {
     expect(agents[0]!.graphRole).toEqual({ kind: "worker", job: "0f8fad5b-0000-0000-0000-000000000001", entry: "#12:3", title: "Toro PO 4471 plating" });
     expect(agents[0]!.name).toBe(threadName("Toro PO 4471 plating", "0f8fad5b-0000-0000-0000-000000000001"));
     expect(prompts.map(([, m]) => m)).toEqual(["A new queue entry for you.", "A new queue entry for you."]);
+    // the prompt may wait out a compaction: it gets the turn's whole time, not the default two minutes
+    expect(promptWaits).toEqual([60_000, 60_000]);
     const finishes = calls.filter(([p]) => p.endsWith("/finish"));
     expect(finishes.map(([, b]) => b)).toEqual([
       { status: "done", summary: "Linked it to Toro (customer)." },

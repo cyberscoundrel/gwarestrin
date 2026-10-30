@@ -241,7 +241,8 @@ export class GraphPool {
       if (!this.manager.getRunning(agentId)) await this.manager.start(agentId);
       const settled = this.manager.waitSettled(agentId, t.minutes * 60_000);
       settled.catch(() => undefined); // awaited below; never unhandled
-      await this.manager.promptAgent(agentId, t.message);
+      // a resumed conversation may compact before the prompt is taken: that's part of the turn
+      await this.manager.promptAgent(agentId, t.message, t.minutes * 60_000);
       await settled;
       // a turn that ended on a model error (after pi's own retries) or a stop hasn't done its work:
       // it goes back for another try, in the same conversation, instead of counting as done
@@ -296,7 +297,7 @@ export class GraphPool {
       for (let nudge = 0; ; nudge++) {
         const settled = this.manager.waitSettled(master.id, MASTER_TURN_MS);
         settled.catch(() => undefined);
-        await this.manager.promptAgent(master.id, nudge === 0 ? (body?.message ?? "") : CARRY_ON);
+        await this.manager.promptAgent(master.id, nudge === 0 ? (body?.message ?? "") : CARRY_ON, MASTER_STALL_MS);
         if (nudge === 0) await this.call("/api/worker/signals/ack", { method: "POST", body: { ids: signals.map((x) => x.id) } });
         if ((await this.settleOrStall(master.id, settled)) === "settled") break;
         // a stalled request: stop it (that ends the turn) and carry on, a couple of times; then start it afresh next tick
@@ -361,7 +362,7 @@ export class GraphPool {
           await this.manager.start(id);
           const settled = this.manager.waitSettled(id, HANDLER_TURN_MS);
           settled.catch(() => undefined);
-          await this.manager.promptAgent(id, h.message);
+          await this.manager.promptAgent(id, h.message, HANDLER_TURN_MS);
           await settled;
         } catch (e) {
           log.warn(`handler ${h.job.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)}`);
