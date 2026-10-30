@@ -171,41 +171,63 @@ export class GraphPool {
     }
   }
 
-  /** the model a level's threads run on: its level model, else the profile's own ("") */
-  private levelModelKey(level: number | undefined): string {
-    const m = this.manager.profiles.graphWorker()?.graphWorker?.levelModels?.[String(level) as WorkerLevel];
-    return m ? `${m.provider}/${m.modelId}` : "";
+  /** the model a new thread of this level runs on: its level's model, else the profile's own, else the workspace's default */
+  private newThreadModelKey(level: number | undefined): string {
+    const profile = this.manager.profiles.graphWorker();
+    const ok = (m: { provider: string; modelId: string } | null | undefined) => (m && !modelRefusal(m.provider, m.modelId) ? `${m.provider}/${m.modelId}` : null);
+    return ok(profile?.graphWorker?.levelModels?.[String(level) as WorkerLevel]) ?? ok(profile?.defaults?.model) ?? ok(this.manager.defaultModel?.()) ?? "";
+  }
+
+  /** the model a claimed thread runs on: a resumed one keeps its agent's own */
+  private threadModelKey(t: ClaimedThread): string {
+    const own = t.agent_id ? this.manager.store.get(t.agent_id)?.model : null;
+    return own ? `${own.provider}/${own.modelId}` : this.newThreadModelKey(t.level);
+  }
+
+  /** each limited model and its limit: the lowest limit among the levels that run on it */
+  private modelCaps(): Map<string, number> {
+    const limits = this.manager.profiles.graphWorker()?.graphWorker?.levelLimits ?? {};
+    const caps = new Map<string, number>();
+    for (const l of ["1", "2", "3"] as WorkerLevel[]) {
+      const lim = limits[l];
+      if (typeof lim !== "number" || lim < 1) continue;
+      const key = this.newThreadModelKey(Number(l));
+      caps.set(key, Math.min(caps.get(key) ?? Infinity, lim));
+    }
+    return caps;
+  }
+
+  private busyOn(key: string): number {
+    return [...this.active.values()].filter((k) => k === key).length;
   }
 
   /**
    * The levels whose model has a limit, grouped by model, with how many more
-   * threads that model takes now (levels on one model share the lowest limit).
+   * threads that model takes now (0 = a thread with no level). A hint for
+   * graph-rag's claim; run() checks each thread's real model again.
    */
   levelGroups(): Array<{ levels: number[]; room: number }> {
-    const gw = this.manager.profiles.graphWorker()?.graphWorker;
-    const limits = gw?.levelLimits ?? {};
-    const byModel = new Map<string, { levels: number[]; cap: number }>();
-    for (const l of ["1", "2", "3"] as WorkerLevel[]) {
-      const key = this.levelModelKey(Number(l));
-      const g = byModel.get(key) ?? { levels: [], cap: Infinity };
-      g.levels.push(Number(l));
-      const lim = limits[l];
-      if (typeof lim === "number" && lim > 0) g.cap = Math.min(g.cap, lim);
-      byModel.set(key, g);
+    const caps = this.modelCaps();
+    const byModel = new Map<string, number[]>();
+    for (const l of [0, 1, 2, 3]) {
+      const key = this.newThreadModelKey(l || undefined);
+      if (caps.has(key)) byModel.set(key, [...(byModel.get(key) ?? []), l]);
     }
-    const out: Array<{ levels: number[]; room: number }> = [];
-    for (const [key, g] of byModel) {
-      if (!Number.isFinite(g.cap)) continue;
-      const busy = [...this.active.values()].filter((k) => k === key).length;
-      // a thread with no level runs on the profile's own model
-      out.push({ levels: key === "" ? [0, ...g.levels] : g.levels, room: Math.max(0, g.cap - busy) });
-    }
-    return out;
+    return [...byModel].map(([key, levels]) => ({ levels, room: Math.max(0, caps.get(key)! - this.busyOn(key)) }));
   }
 
   /** one thread's turn, start to report */
   async run(t: ClaimedThread, profileId: string): Promise<void> {
-    this.active.set(t.job, this.levelModelKey(t.level));
+    // its model is full (a resumed thread keeps its agent's model, whatever its level): back to the queue, keeping its tries.
+    // Checked before anything is awaited, so threads started in the same tick can't pass the limit together.
+    const model = this.threadModelKey(t);
+    const cap = this.modelCaps().get(model);
+    if (cap !== undefined && this.busyOn(model) >= cap) {
+      log.info(`thread ${t.job.slice(0, 8)} (${t.name}) waits: ${model.split("/").at(-1)} is at its limit (${cap})`);
+      await this.call(`/api/worker/threads/${t.job}/release`, { method: "POST", body: {} }).catch(() => null);
+      return;
+    }
+    this.active.set(t.job, model);
     let agentId: string | null = t.agent_id && this.manager.store.get(t.agent_id) ? t.agent_id : null;
     try {
       if (!agentId) {
@@ -216,9 +238,6 @@ export class GraphPool {
         agentId = record.id;
         await this.call(`/api/worker/threads/${t.job}/agent`, { method: "POST", body: { agent_id: agentId } });
       }
-      // a resumed thread runs on its agent's own model
-      const own = this.manager.store.get(agentId)?.model;
-      if (own) this.active.set(t.job, `${own.provider}/${own.modelId}`);
       if (!this.manager.getRunning(agentId)) await this.manager.start(agentId);
       const settled = this.manager.waitSettled(agentId, t.minutes * 60_000);
       settled.catch(() => undefined); // awaited below; never unhandled

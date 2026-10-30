@@ -212,7 +212,7 @@ await scenario("a thread whose turn died on the model connection waits it out wi
   check(Number((await row()).attempts) === 1, "a failure of its own spends a try");
 });
 
-await scenario("a model with a limit gets no more threads than it serves; the rest wait without spending a try", async () => {
+await scenario("a model with a limit gets no more threads than it serves; the rest wait (or go back) without spending a try", async () => {
   const before = (await api("/api/worker")).pool;
   await api("/api/worker", { method: "PUT", body: JSON.stringify({ pool: { poolSize: 5 } }) });
   try {
@@ -237,6 +237,12 @@ await scenario("a model with a limit gets no more threads than it serves; the re
     // a full model: none of its threads start
     const none = await api("/api/worker/threads/claim", { method: "POST", body: JSON.stringify({ limit: 5, groups: [{ levels: [1], room: 0 }] }) });
     check(!(none.threads ?? []).some((t) => ids.includes(t.job)), "none while it's full");
+    // a claimed thread the workspace can't start yet goes back: pending in a minute, no try spent
+    const one = mine.find((t) => t.level === 1).job;
+    const rel = await api(`/api/worker/threads/${one}/release`, { method: "POST", body: "{}" });
+    check(rel.released === true, `released: ${JSON.stringify(rel)}`);
+    const back = (await sql(`SELECT status, attempts, run_after FROM Job WHERE id = '${one}'`))[0];
+    check(back.status === "pending" && Number(back.attempts) === 0 && Date.parse(back.run_after) > Date.now(), `back in the queue: ${JSON.stringify(back)}`);
     await tool("admin", "execute_graph", { command: `UPDATE Job SET status = 'done' WHERE id IN [${ids.map((i) => `'${i}'`).join(",")}]`, language: "sql" });
   } finally {
     await api("/api/worker", { method: "PUT", body: JSON.stringify({ pool: before }) });
