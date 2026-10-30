@@ -157,10 +157,30 @@ describe("graph worker pool", () => {
     // nothing running yet: the local model takes 2 (the lower of its levels' limits); level 3 and unlevelled threads have none
     expect(calls.find(([p]) => p.endsWith("/claim"))?.[1]).toEqual({ limit: 5, groups: [{ levels: [1, 2], room: 2 }] });
     await flush();
+    // the fake graph handed out all three (it ignores the groups): two start, the third goes back keeping its tries
+    expect(calls.filter(([p]) => p.endsWith("/release")).map(([p]) => p)).toEqual(["/api/worker/threads/0f8fad5b-0000-0000-0000-000000000103/release"]);
+    expect(calls.filter(([p]) => p.endsWith("/agent"))).toHaveLength(2);
     calls.length = 0;
     await pool.tick();
-    // three level-1 threads run now (the fake graph ignores the groups): the local model is full
     expect(calls.find(([p]) => p.endsWith("/claim"))?.[1]).toMatchObject({ groups: [{ levels: [1, 2], room: 0 }] });
+  });
+
+  it("a resumed thread keeps its agent's model: it waits when that model is full, whatever its level", async () => {
+    const local = { provider: "local-inference", modelId: "qwen" };
+    const { manager, records } = fakeManager({ settle: "never", levelModels: { "1": local }, levelLimits: { "1": 1 } });
+    const { call, calls } = fakeGraph([thread("0f8fad5b-0000-0000-0000-000000000201", { level: 1 })], { pool: { poolSize: 5, keepDays: 14 } });
+    const pool = new GraphPool(manager, call, () => 10);
+    await pool.tick();
+    await flush();
+    // an older agent made on the local model, its thread now at level 2 (no level model: the profile's own)
+    records.set("old", { id: "old", name: "old", profileId: "worker-profile", createdAt: "", status: "stopped", model: local, mcpServers: [], gondolin: { allowedHosts: [], secrets: {} } } as never);
+    const again = fakeGraph([thread("0f8fad5b-0000-0000-0000-000000000202", { level: 2, agent_id: "old" })], { pool: { poolSize: 5, keepDays: 14 } });
+    const pool2 = pool as unknown as { call: GraphCall };
+    pool2.call = again.call;
+    await pool.tick();
+    await flush();
+    expect(again.calls.filter(([p]) => p.endsWith("/release"))).toHaveLength(1);
+    expect(calls.filter(([p]) => p.endsWith("/release"))).toHaveLength(0);
   });
 
   it("without limits a claim carries none", async () => {

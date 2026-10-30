@@ -4812,6 +4812,17 @@ app.post("/api/worker/threads/:id/agent", (req, res) => {
   if (!rootOnly(req, res)) return;
   void threadAgent(req.params.id, req.body?.agent_id).then((r) => res.json(r), (e) => httpError(res, e));
 });
+/** a claimed thread the workspace couldn't start yet (its model is at its limit): pending again in a minute, its tries kept */
+app.post("/api/worker/threads/:id/release", (req, res) => {
+  if (!rootOnly(req, res)) return;
+  if (!JOB_ID_RE.test(String(req.params.id))) return res.status(400).json({ error: "invalid job" });
+  const now = new Date();
+  void adbCommand("UPDATE Job SET status = 'pending', lease_until = null, run_after = :ra, updated_at = :now WHERE id = :id AND kind = 'review' AND status = 'running'", "sql", {
+    ra: new Date(now.getTime() + 60_000).toISOString(),
+    now: now.toISOString(),
+    id: req.params.id,
+  }).then((r) => res.json({ released: Number(r?.[0]?.count ?? 0) === 1 }), (e) => httpError(res, e));
+});
 app.post("/api/worker/threads/:id/finish", (req, res) => {
   if (!rootOnly(req, res)) return;
   void finishThread(req.params.id, req.body ?? {}).then((r) => res.json(r), (e) => httpError(res, e));
