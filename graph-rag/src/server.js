@@ -967,8 +967,10 @@ async function backfillIdentity(limit = 64) {
   const vecs = await embedBatch(texts);
   for (let i = 0; i < names.length; i++) {
     if (!RID_RE.test(String(rids[i]))) continue;
-    // as parameters: an inlined vector or text can fail to parse (and one bad row stalled every sweep)
-    await adbCommand(`UPDATE ${rids[i]} SET embed_identity = :v, text_identity = :t`, "sql", { v: vecs[i], t: texts[i] });
+    // as parameters: an inlined vector or text can fail to parse (and one bad row stalled every sweep).
+    // Only while it still has none: a write creates the row before it embeds its texts, so the sweep
+    // can read it bare, and its own text must never land over the one the write stored meanwhile
+    await adbCommand(`UPDATE ${rids[i]} SET embed_identity = :v, text_identity = :t WHERE embed_identity IS NULL`, "sql", { v: vecs[i], t: texts[i] });
   }
   await ensureFullText();
   return { backfilled: names.length, ...(nodes.length === lim ? { note: "more may remain; run again" } : {}) };
