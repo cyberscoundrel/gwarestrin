@@ -11,11 +11,14 @@
 //                                investigation, else nothing to do
 //   POST /__fail {model, status} a model (or "decisions") answers with status
 //   POST /__ok {model}           ... and recovers
+//   POST /__slow {model, match, ms}  a request to it whose input contains match waits ms first
+//                                ({} clears them): to order two writers' calls
 //   GET  /__calls                calls per model
 import { createServer } from "node:http";
 
 const DIM = 384;
 const failing = new Map(); // model -> status
+let slow = []; // {model, match, ms}
 const calls = {};
 
 function vector(text) {
@@ -87,8 +90,11 @@ createServer(async (req, res) => {
   if (path === "/__fail") return failing.set(body.model, Number(body.status) || 402), send(200, { failing: Object.fromEntries(failing) });
   if (path === "/__ok") return failing.delete(body.model), send(200, { failing: Object.fromEntries(failing) });
   if (path === "/__calls") return send(200, calls);
+  if (path === "/__slow") return (slow = body.model ? [...slow, body] : []), send(200, { slow });
   const model = path === "/decisions" ? "decisions" : body.model;
   calls[model] = (calls[model] ?? 0) + 1;
+  const wait = slow.find((x) => x.model === model && JSON.stringify(body).includes(x.match));
+  if (wait) await new Promise((r) => setTimeout(r, Number(wait.ms) || 0));
   if (failing.has(model)) return send(failing.get(model), { error: { message: `fake: ${model} answers ${failing.get(model)}`, code: failing.get(model) } });
   if (path === "/embeddings") return send(200, { data: (body.input ?? []).map((t, index) => ({ index, embedding: vector(t) })) });
   if (path === "/decisions") return send(200, decide(body));

@@ -152,6 +152,9 @@ then replays the failures above (`e2e/run.mjs`):
 - the linking model out of credit: the job waits with no retry spent, then runs;
 - a note's own code never becomes a thing;
 - the sweep embeds rows the old inline SQL couldn't parse;
+- the sweep never writes over the text a save stored while it ran (a save
+  creates its row before it embeds the text; on 2026-10-30 the sweep's field
+  dump replaced 8 notes' bodies that way);
 - with triage, a new name becomes a thing only after triage;
 - no loop is still failing at the end.
 

@@ -131,6 +131,21 @@ await scenario("the sweep embeds rows whose text the old inline SQL couldn't par
   }, 90_000);
 });
 
+await scenario("the sweep never writes over the text a save stored while it ran", async () => {
+  // the save embeds its text slower than the sweep comes round, so the sweep reads the row
+  // bare; the sweep's own embedding is slower still, so its write lands after the save's
+  await models("/__slow", { model: "embed", match: "a slow save stores", ms: 8000 });
+  await models("/__slow", { model: "embed", match: "e2e-race lost update", ms: 12000 });
+  try {
+    await save("alice", "e2e-race lost update", "The body a slow save stores.");
+    await new Promise((r) => setTimeout(r, 15000));
+    const row = (await sql("SELECT text_identity FROM Entity WHERE name = 'e2e-race lost update'"))[0];
+    check(row?.text_identity === "The body a slow save stores.", `text ${JSON.stringify(row?.text_identity)?.slice(0, 120)}`);
+  } finally {
+    await models("/__slow", {});
+  }
+});
+
 await scenario("with triage ahead, a new name becomes a thing only after triage: now for no work, else for a worker", async () => {
   await api("/api/worker", { method: "PUT", body: JSON.stringify({ pool: { poolSize: 2, master: true, batchSize: 50, batchMinutes: 60 } }) });
   await save("alice", "e2e-t1 diep starts", "Diep starts on CNC 2 Monday. [things: Diep/person]");
