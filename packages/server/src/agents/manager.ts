@@ -208,11 +208,16 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     return this.store.list().map((r) => this.running.get(r.id)?.summary() ?? { id: r.id, status: r.status });
   }
 
-  /** send a running agent a message as its user (the worker pool's threads) */
-  async promptAgent(id: string, message: string): Promise<void> {
+  /**
+   * Send a running agent a message as its user (the worker pool's threads).
+   * pi answers only once the prompt's preflight is through, and that includes
+   * compacting a long conversation first: on a slow model that takes minutes,
+   * so the pool passes its turn's own time limit.
+   */
+  async promptAgent(id: string, message: string, timeoutMs = 120_000): Promise<void> {
     const agent = this.running.get(id);
     if (!agent) throw new Error("agent not running");
-    const res = await agent.send("prompt", { message }, 120_000);
+    const res = await agent.send("prompt", { message }, timeoutMs);
     if (!res.success) throw new Error(res.error ?? "prompt failed");
   }
 
