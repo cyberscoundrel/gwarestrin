@@ -249,6 +249,19 @@ await scenario("a model with a limit gets no more threads than it serves; the re
   }
 });
 
+await scenario("an update with labels keeps an entry's record id; a new entry still gets its labels", async () => {
+  await save("alice", "e2e-r1 coolant", "Coolant on CNC 1 read 4 percent.");
+  const before = (await sql("SELECT @rid AS rid, @type AS t FROM Entity WHERE name = 'e2e-r1 coolant'"))[0];
+  const up = await tool("alice", "upsert_entities", { entities: [{ name: "e2e-r1 coolant", labels: ["Note"], facets: { state: "Topped up to 7 percent." } }] });
+  check(!up.error, `updated: ${JSON.stringify(up).slice(0, 200)}`);
+  const after = await sql("SELECT @rid AS rid, @type AS t, text_state FROM Entity WHERE name = 'e2e-r1 coolant'");
+  check(after.length === 1 && String(after[0].rid) === String(before.rid), `same record: ${JSON.stringify(before)} -> ${JSON.stringify(after)}`);
+  check(after[0].t === before.t && after[0].text_state === "Topped up to 7 percent.", `updated in place: ${JSON.stringify(after[0])}`);
+  await tool("alice", "upsert_entities", { entities: [{ name: "e2e-r2 labelled", labels: ["Note"], facets: { identity: "A new labelled note." } }] });
+  const fresh = (await sql("SELECT @type AS t FROM Entity WHERE name = 'e2e-r2 labelled'"))[0];
+  check(String(fresh?.t).endsWith("Note"), `a new entry takes its label: ${JSON.stringify(fresh)}`);
+});
+
 await scenario("nothing in the background kept failing", async () => {
   const st = await api("/api/worker");
   const failing = Object.entries(st.loops ?? {}).filter(([, l]) => !l.ok);
