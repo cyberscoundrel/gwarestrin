@@ -807,9 +807,12 @@ async function upsertEntities({ entities, home, floor, written_at, from_worker, 
       ? `, n.\`_valid_until\` = ${validity.valid_until ? `'${esc(validity.valid_until)}'` : "null"}, n.\`_valid_by\` = '${validity.valid_by}'`
       : "";
     if (validity) validities[idx] = validity.valid_until;
+    // labels only on a new entry: giving an existing one a label changes its type, and ArcadeDB
+    // moves it to a new record id (and hands the old id to the next record), so every proposal,
+    // thread and reference that holds its id would then point at nothing, or at something else
     await adbCommand(
       `MERGE (n:${ENTITY_LABEL} ${key}) ` +
-        `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""}${placeSql}${validSql}${systemSql} ${labelClause}`,
+        `SET n.updated_at = datetime() ${propSql ? ", " + propSql : ""}${placeSql}${validSql}${systemSql} ${stored ? "" : labelClause}`,
       "cypher",
     );
     // its writer: the person who first wrote it (an update by anyone else, a worker included, never takes it over)
@@ -1080,8 +1083,9 @@ async function setHome({ entities, to, reason, propose }, identity, scope) {
 
 async function applyRehome({ rid, name, from, to, placedBy }) {
   if (!RID_RE.test(rid)) throw new Error("invalid record id");
-  const rows = await adbQuery(`SELECT _home FROM ${rid}`);
-  if (!rows.length) throw new Error(`entity ${name} no longer exists`);
+  const rows = await adbQuery(`SELECT _home, name FROM ${rid}`);
+  // a record id can be handed to another record once its own is gone: check it's still this entry
+  if (!rows.length || (name && rows[0].name !== name)) throw new Error(`entity ${name} no longer exists`);
   if (effectiveHome(positionMap, rows[0]._home) !== from) throw new Error(`entity ${name} moved since the request`);
   // a person's move is recorded: a worker can't move the entry again without asking (setHome)
   if (placedBy) await adbCommand(`UPDATE ${rid} SET _home = :to, _placed_by = :who, _placed_at = :at`, "sql", { to, who: placedBy, at: new Date().toISOString() });
