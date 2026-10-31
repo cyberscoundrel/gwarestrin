@@ -200,6 +200,25 @@ await scenario("a worker updates an entry where grading put it, and its proposal
   await api(`/api/worker/proposals/${asked.pendingId}`, { method: "POST", body: JSON.stringify({ approve: false, reason: "e2e" }) });
 });
 
+await scenario("a worker's update grading finds more sensitive doesn't hide the entry from its people: refused, or proposed", async () => {
+  await save("alice", "e2e-g1 bar bought", "Bought three bundles of bar stock, stored in rack A.");
+  const e = await entry("e2e-g1 bar bought");
+  check(e?._home === POS.ops, `at Operations, got ${e?._home}`);
+  const w = workerToken(String(e.rid));
+  const refused = await tool(w, "upsert_entities", { entities: [{ name: "e2e-g1 bar bought", facets: { state: "Bought against the hold. [admins]" } }] });
+  check(/Not written: grading judged this update/.test(refused.error ?? ""), `refused: ${JSON.stringify(refused).slice(0, 300)}`);
+  check((await entry("e2e-g1 bar bought"))?._home === POS.ops, "still seen from Operations");
+  const viaUpdate = await tool(w, "update_entry", { entry: String(e.rid), facets: { state: "Bought against the hold. [admins]" } });
+  check(/Not written: grading judged this update/.test(viaUpdate.error ?? ""), `update_entry refused too: ${JSON.stringify(viaUpdate).slice(0, 300)}`);
+  const plain = await tool(w, "upsert_entities", { entities: [{ name: "e2e-g1 bar bought", facets: { state: "Three bundles in rack A." } }] });
+  check(!plain.error, `a plain update applies: ${JSON.stringify(plain).slice(0, 300)}`);
+  const asked = await tool(w, "upsert_entities", { entities: [{ name: "e2e-g1 bar bought", facets: { state: "Bought against the hold. [admins]" } }], propose: true, reason: "e2e" });
+  check(asked.pendingId, `proposed: ${JSON.stringify(asked).slice(0, 300)}`);
+  const ok = await api(`/api/worker/proposals/${asked.pendingId}`, { method: "POST", body: JSON.stringify({ approve: true, reason: "e2e" }) });
+  check(!ok.error, `approved: ${JSON.stringify(ok).slice(0, 300)}`);
+  check((await entry("e2e-g1 bar bought"))?._home === POS.org, "approved: grading's restriction applies");
+});
+
 await scenario("a handler records the operator's decision only when it names one, and takes a proposal's short id", async () => {
   await save("alice", "e2e-h1 dock lights", "Two dock lights are out by door 3.");
   const e = await entry("e2e-h1 dock lights");

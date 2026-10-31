@@ -43,6 +43,7 @@ export function gradingPrompt(map, origin, entities, writtenAt = Date.now()) {
     "You decide who in an organization may see a piece of information in its knowledge base.",
     "The information was written by someone at the FIRST position below; people at that position and every position above it would see it.",
     "visible_from P# means: people at P# and at the positions ABOVE it see it, nobody else. The higher the position, the FEWER people see it; the last one listed is the top of the organization, which only its leadership sees.",
+    "Positions BELOW the writer never see it at the writer's own position: keeping it from them is never a reason to pick a higher one.",
     "If it is more sensitive than that (e.g. management matters, personnel, pricing, negotiations, anything the writer's own team shouldn't see), pick a higher position from the same list.",
     "If it is clearly routine for a position BELOW the writer, you may suggest releasing it there; a person will decide.",
     "Also judge how long it stays true or useful. until = the last day it matters (YYYY-MM-DD) when it clearly ends: a visit, an event, a schedule for a given day or week, a temporary state. until = null when it lasts: where things are, how things are done, policies, history worth keeping. When unsure, null.",
@@ -113,7 +114,7 @@ export function decide(map, origin, verdict, current, threshold = CONFIDENCE_MIN
     const restricts =
       sure && verdict.home !== origin && verdict.home !== current && ancestors(map, current).includes(verdict.home);
     return restricts
-      ? { home: verdict.home, note: `restricted by grading (${verdict.reason})` }
+      ? { home: verdict.home, note: `restricted by grading (${verdict.reason})`, restricted: { from: current, reason: verdict.reason } }
       : { home: current, note: sure ? "kept" : "kept (grader unsure)" };
   }
   if (!sure) {

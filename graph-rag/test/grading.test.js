@@ -82,4 +82,6 @@ test("updates never widen: grading may only restrict an existing entity further"
   assert.equal(decide(map, "floor", { home: "floor", confidence: 0.9, reason: "routine" }, "ops").home, "ops", "a person's restriction stays");
   assert.equal(decide(map, "ops", { home: "ops", confidence: 0.9 }, "floor").home, "floor", "a person's release stays");
   assert.equal(decide(map, "floor", null, "floor").home, "floor", "no verdict on an update keeps the home");
+  assert.deepEqual(decide(map, "floor", { home: "ops", confidence: 0.9, reason: "now has pricing" }, "floor").restricted, { from: "floor", reason: "now has pricing" }, "a restriction on an update says from where");
+  assert.equal(decide(map, "floor", { home: "floor", confidence: 0.9, reason: "routine" }, "floor").restricted, undefined, "kept: nothing restricted");
 });
