@@ -677,6 +677,9 @@ function workerLift(identity, home) {
   return { floor, home: at, read: [...new Set(above)] };
 }
 
+const restrictRefusal = (r) =>
+  `Not written: grading judged this update to "${r.name}" too sensitive for ${homeName(positionMap, r.restricted.from)}, where it's seen from now (${r.restricted.reason}), so it would be hidden from the people there. Text that only points at entries they can already see doesn't need hiding: write it plainly, without dramatizing it, or leave the entry as it is. If it does rest on something they mustn't see, write it again with propose: true and a reason: an admin then decides who sees it.`;
+
 const liftRefusal = (name, lift) =>
   `Not written: "${name}" lives at ${homeName(positionMap, lift.home)}, but in the last ${policy.derivedWindowHours} hours you read entries at ${lift.read.join(", ") || homeName(positionMap, lift.floor)} that people there can't see, so this write would be held at ${homeName(positionMap, lift.floor)} instead. Either leave the entry as it is, or write it again with propose: true and a reason that says what it rests on: an admin then decides whether it's written at ${homeName(positionMap, lift.home)}.`;
 
@@ -749,13 +752,17 @@ async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
-async function upsertEntities({ entities, home, floor, written_at, from_worker, written_by }) {
+async function upsertEntities({ entities, home, floor, written_at, from_worker, written_by, keep_seen_from }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
   // dates in the content ("next Friday") mean the day it was written, not approved
   const writtenAt = Number.isFinite(Date.parse(written_at)) ? Date.parse(written_at) : Date.now();
   // scoped: `home` is the origin; grading decides where each entity is seen from
   const placements = home === undefined || !positionMap ? null : await placeEntities(entities, home, floor ?? home, writtenAt);
+  // a worker's own update: grading judging it more sensitive than where the entry lives doesn't hide
+  // the entry from the people there (its text is mostly the worker's own reading): a person decides
+  const hidden = keep_seen_from ? (placements ?? []).flatMap((p, i) => (p?.restricted ? [{ name: entities[i].name, ...p }] : [])) : [];
+  if (hidden.length) throw new Error(hidden.map(restrictRefusal).join("\n"));
 
   let merged = 0;
   const validities = []; // per entity: the end date this write set (ISO / null), if any
@@ -2850,7 +2857,7 @@ async function workerUpsert(args, identity, scope) {
       results.push({ ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE });
       continue;
     }
-    results.push(await upsertEntities(write));
+    results.push(await upsertEntities({ ...write, keep_seen_from: true }));
   }
   if (!args.propose) await logChange(identity, { kind: "upsert", entries: entities.map((e) => e.name), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return results.length === 1 ? results[0] : { results };
@@ -3308,7 +3315,7 @@ async function workerUpdateEntry(args, identity) {
   if (lift && !args.propose) throw new Error(liftRefusal(row.name, lift));
   const write = { entities: [entity], home: origin, floor: lift ? origin : derivedFloor(identity, origin), written_at: new Date(now).toISOString(), from_worker: true };
   if (args.propose) return { ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home: origin, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE };
-  const result = await upsertEntities(write);
+  const result = await upsertEntities({ ...write, keep_seen_from: true });
   const changed = [...Object.keys(args.properties ?? {}), ...Object.keys(args.facets ?? {}).map((f) => `${f} facet`), ...(args.valid_until !== undefined ? ["valid_until"] : [])];
   await logChange(identity, { kind: "update", detail: `${row.rid} "${row.name}": ${changed.join(", ")}`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return result;
