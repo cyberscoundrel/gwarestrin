@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { duplicateEntries, entryId, splitThingName, thingClash, mentionsPrompt, normalize, parseMentions, resolve, thingName } from "../src/things.js";
+import { designatorsDiffer, duplicateEntries, entryId, splitThingName, thingClash, mentionsPrompt, normalize, parseMentions, resolve, thingName } from "../src/things.js";
 
 test("names normalize for matching", () => {
   assert.equal(normalize("Toro Co."), "toro co");
@@ -128,4 +128,17 @@ test("thingClash points at the right tools", () => {
   const msg = thingClash("CNC 2 (machine)", { label: "cnc", _thing_type: "machine", rid: "#1:57347" });
   assert.match(msg, /is a thing \(cnc, machine, #1:57347\)/);
   assert.match(msg, /rename_thing/);
+});
+
+test("names alike but for a short designator are different things: rack A is not rack C", () => {
+  const rackC = [{ rid: "#1:9", name: "rack C", aliases: [], type: "place", score: 0.95 }];
+  assert.deepEqual(resolve({ name: "rack A", type: "place" }, rackC), { create: true }, "not merged, and not an unsure match either");
+  assert.deepEqual(resolve({ name: "Bay N", type: "place" }, [{ rid: "#1:8", name: "bay S", aliases: [], type: "place", score: 0.9 }]), { create: true });
+  assert.deepEqual(resolve({ name: "rack C", type: "place" }, rackC), { use: "#1:9" }, "the same rack is still found");
+  assert.deepEqual(resolve({ name: "Rack C.", type: "place" }, [{ ...rackC[0], score: undefined }]), { use: "#1:9" }, "written differently, same name");
+  assert.ok(designatorsDiffer("rack A", "rack C"));
+  assert.ok(!designatorsDiffer("north dock", "south dock"), "whole words differ: the embedding decides");
+  assert.ok(!designatorsDiffer("A", "C"), "a bare letter isn't a designated name");
+  assert.ok(!designatorsDiffer("rack A", "rack A"));
+  assert.deepEqual(resolve({ name: "Toro Inc", type: "customer" }, [{ rid: "#1:1", name: "Toro Co", aliases: [], type: "customer", score: 0.95 }]), { use: "#1:1", alias: "Toro Inc" }, "a short word that isn't a designator still matches by embedding");
 });
