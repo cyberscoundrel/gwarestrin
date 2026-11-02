@@ -677,6 +677,15 @@ function workerLift(identity, home) {
   return { floor, home: at, read: [...new Set(above)] };
 }
 
+/** what the people who see an entry see (a scope), or null when that can't be told */
+async function entryAudience(rid) {
+  if (!SCOPED || !positionMap || !RID_RE.test(String(rid ?? ""))) return null;
+  const home = (await adbQuery(`SELECT _home FROM ${rid}`).catch(() => []))[0]?._home;
+  if (!home) return null;
+  const at = effectiveHome(positionMap, home);
+  return { homes: visibleHomes(positionMap, [at]), root: false };
+}
+
 /** a worker's update grading found more sensitive: it stays where it's seen from, and says how to hide it if it must be */
 const heldNote = (from, reason) =>
   `kept where it's seen from: grading judged this update more sensitive (${reason}), but a worker's update never hides an entry from its people. If people at ${homeName(positionMap, from)} mustn't see it, move it with set_home and a reason`;
@@ -4005,9 +4014,16 @@ Custom facets created via upsert_entities are also searchable. Use for conceptua
 paraphrased questions; temporal_filter (property + after/before ISO datetimes) narrows by
 a datetime property. Entries past their end date (valid_until) are left out; include_expired
 shows them too, marked expired (for history: "who was on shift last Friday?"). Falls back to
-lexical matching if embeddings are unavailable.${homeNote}`,
+lexical matching if embeddings are unavailable.${homeNote}${
+      role === "worker"
+        ? `
+It searches what the people who see your entry see. beyond: true searches everything, but then what you
+write may be held for an admin (you read what they can't see): use it only when the entry needs it.`
+        : ""
+    }`,
     {
       query: z.string().min(1),
+      ...(role === "worker" ? { beyond: z.boolean().optional() } : {}),
       include_expired: z.boolean().optional(),
       facets: z.array(z.string()).optional(),
       k: z.number().int().min(1).max(32).optional(),
@@ -4022,7 +4038,9 @@ lexical matching if embeddings are unavailable.${homeNote}`,
     async (args) => {
       need("read");
       const read = [];
-      const result = await searchGraph(args, scope, read, { demand: !role, ownEntry: identity.role?.entry ?? null });
+      // a worker searches its entry's audience: a hit above it held the worker's next write for an admin
+      const seen = role === "worker" && !args.beyond ? await entryAudience(identity.role?.entry) : null;
+      const result = await searchGraph(args, seen ?? scope, read, { demand: !role, ownEntry: identity.role?.entry ?? null });
       recordReads(identity, read);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
