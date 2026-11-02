@@ -218,6 +218,23 @@ await scenario("a worker's update grading finds more sensitive doesn't hide the 
   check((await entry("e2e-g1 bar bought"))?._home === POS.ops, "approved: still seen from Operations");
 });
 
+await scenario("a worker searches its entry's audience, so a search alone doesn't hold its write; beyond: true does", async () => {
+  await save("alice", "e2e-s1 zephyrine budget", "The zephyrine fixture budget is 9,000. [admins]");
+  check((await entry("e2e-s1 zephyrine budget"))?._home === POS.org, "the budget note is at the top");
+  await save("bob", "e2e-s2 zephyrine fixture", "The zephyrine fixture is on the bench.");
+  const e = await entry("e2e-s2 zephyrine fixture");
+  const w = workerToken(String(e.rid));
+  const names = (r) => (r.results ?? []).map((x) => x.name);
+  const mine = await tool(w, "search_graph", { query: "zephyrine fixture budget" });
+  check(!names(mine).includes("e2e-s1 zephyrine budget"), `not found by default: ${names(mine).join(", ")}`);
+  const plain = await tool(w, "upsert_entities", { entities: [{ name: "e2e-s2 zephyrine fixture", facets: { state: "On the bench since Monday." } }] });
+  check(!plain.error && !plain.pendingId, `the write isn't held: ${JSON.stringify(plain).slice(0, 300)}`);
+  const all = await tool(w, "search_graph", { query: "zephyrine fixture budget", beyond: true });
+  check(names(all).includes("e2e-s1 zephyrine budget"), `found with beyond: ${names(all).join(", ")}`);
+  const held = await tool(w, "upsert_entities", { entities: [{ name: "e2e-s2 zephyrine fixture", facets: { state: "On the bench; budgeted." } }] });
+  check(/Not written/.test(held.error ?? "") || held.pendingId, `now held: ${JSON.stringify(held).slice(0, 300)}`);
+});
+
 await scenario("a handler records the operator's decision only when it names one, and takes a proposal's short id", async () => {
   await save("alice", "e2e-h1 dock lights", "Two dock lights are out by door 3.");
   const e = await entry("e2e-h1 dock lights");
