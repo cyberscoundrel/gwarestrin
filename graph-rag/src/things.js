@@ -128,11 +128,25 @@ export function resolve(mention, candidates) {
   // identifiers ("3260372", "PO 4471", "EPP-D98-1-A") are equal or not: embeddings
   // can't tell numbers apart, so a name with a digit matches only exactly
   if (/\d/.test(n)) return { create: true };
-  const ranked = same.filter((c) => Number.isFinite(c.score)).sort((a, b) => b.score - a.score);
+  // so are designators: "rack A" and "rack C" embed alike but are two racks
+  const ranked = same.filter((c) => Number.isFinite(c.score) && !designatorsDiffer(n, normalize(c.name))).sort((a, b) => b.score - a.score);
   const best = ranked[0];
   if (best && best.score >= SAME_MIN) return { use: best.rid, alias: mention.name };
   if (best && best.score >= MAYBE_MIN) return { create: true, maybe: best.rid };
   return { create: true };
+}
+
+/**
+ * Two names alike but for a short designator ("rack A" / "rack C", "bay N" /
+ * "bay S"): the same words, where every word that differs is one or two
+ * characters on both sides. Such names name different things.
+ */
+export function designatorsDiffer(a, b) {
+  const x = normalize(a).split(" ");
+  const y = normalize(b).split(" ");
+  if (x.length !== y.length || x.length < 2) return false;
+  const diff = x.map((w, i) => [w, y[i]]).filter(([w, v]) => w !== v);
+  return diff.length > 0 && diff.every(([w, v]) => w.length <= 2 && v.length <= 2);
 }
 
 /** a thing's entity name: readable in traversal, unique per type */
