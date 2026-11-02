@@ -218,7 +218,7 @@ await scenario("a worker's update grading finds more sensitive doesn't hide the 
   check((await entry("e2e-g1 bar bought"))?._home === POS.ops, "approved: still seen from Operations");
 });
 
-await scenario("a worker searches its entry's audience, so a search alone doesn't hold its write; beyond: true does", async () => {
+await scenario("a worker (or a master's task) searches its entries' audience, so a search alone doesn't hold its write; beyond: true does", async () => {
   await save("alice", "e2e-s1 zephyrine budget", "The zephyrine fixture budget is 9,000. [admins]");
   check((await entry("e2e-s1 zephyrine budget"))?._home === POS.org, "the budget note is at the top");
   await save("bob", "e2e-s2 zephyrine fixture", "The zephyrine fixture is on the bench.");
@@ -244,6 +244,16 @@ await scenario("a worker searches its entry's audience, so a search alone doesn'
   check(names(all).includes("e2e-s1 zephyrine budget"), `found with beyond: ${names(all).join(", ")}`);
   const held = await tool(w, "upsert_entities", { entities: [{ name: "e2e-s2 zephyrine fixture", facets: { state: "On the bench; budgeted." } }] });
   check(/Not written/.test(held.error ?? "") || held.pendingId, `now held: ${JSON.stringify(held).slice(0, 300)}`);
+  // a master's task (a record at the top) about the floor's entry: its worker sees what the floor sees
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = 'e2e-s3 zephyrine task', _kind = 'task', _home = '${POS.org}', _origin = '${POS.org}'` });
+  const task = (await sql("SELECT @rid AS rid FROM Entity WHERE name = 'e2e-s3 zephyrine task' AND _kind = 'task'"))[0];
+  const tj = randomUUID();
+  await tool("admin", "execute_graph", { language: "sql", command: `INSERT INTO Job SET id = '${tj}', kind = 'thread', status = 'waiting', payload = '${JSON.stringify({ rid: String(task.rid), entries: ["e2e-s2 zephyrine fixture"] })}'` });
+  const tw = workerToken(String(task.rid), tj);
+  const taskAbout = await tool(tw, "about_thing", { name: "zephyrine fixture" });
+  check(said(taskAbout).includes("e2e-s2 zephyrine fixture") && !said(taskAbout).includes("e2e-s1 zephyrine budget"), `a task's worker sees its entries' view: ${JSON.stringify(taskAbout).slice(0, 300)}`);
+  const taskWrite = await tool(tw, "update_entry", { entry: "e2e-s2 zephyrine fixture", facets: { state: "On the bench, task checked." } });
+  check(!taskWrite.error && !taskWrite.pendingId, `a task's write isn't held: ${JSON.stringify(taskWrite).slice(0, 300)}`);
 });
 
 await scenario("a handler records the operator's decision only when it names one, and takes a proposal's short id", async () => {

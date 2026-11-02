@@ -677,13 +677,29 @@ function workerLift(identity, home) {
   return { floor, home: at, read: [...new Set(above)] };
 }
 
-/** what the people who see an entry see (a scope), or null when that can't be told */
-async function entryAudience(rid) {
+/**
+ * What the people who see a worker's entry see (a scope), or null when that can't be told. A
+ * master's task sits at the root (only the admin sees it): its audience is what the people who
+ * see all of the entries it's about see.
+ */
+async function entryAudience(role) {
+  const rid = role?.entry;
   if (!SCOPED || !positionMap || !RID_RE.test(String(rid ?? ""))) return null;
-  const home = (await adbQuery(`SELECT _home FROM ${rid}`).catch(() => []))[0]?._home;
-  if (!home) return null;
-  const at = effectiveHome(positionMap, home);
-  return { homes: visibleHomes(positionMap, [at]), root: false };
+  const rec = (await adbQuery(`SELECT _home, _kind FROM ${rid}`).catch(() => []))[0];
+  if (!rec?._home) return null;
+  let homes = [rec._home];
+  if (rec._kind === "task") {
+    const payload = JSON.parse((await adbQuery("SELECT payload FROM Job WHERE id = :id", { id: role.job }).catch(() => []))[0]?.payload || "{}");
+    const names = (payload.entries ?? []).slice(0, 25);
+    if (!names.length) return null;
+    homes = [];
+    for (const n of names) homes.push(...(await adbQuery(`SELECT _home FROM ${ENTITY_LABEL} WHERE name = :n AND _kind IS NULL`, { n }).catch(() => [])).map((r) => r._home));
+    if (!homes.length) return null;
+  }
+  const seen = homes.map((h) => visibleHomes(positionMap, [effectiveHome(positionMap, h)]));
+  if (seen.every((v) => v === null)) return { homes: null, root: false };
+  const sets = seen.filter((v) => v !== null);
+  return { homes: new Set([...sets[0]].filter((h) => sets.every((v) => v.has(h)))), root: false };
 }
 
 /** a worker's update grading found more sensitive: it stays where it's seen from, and says how to hide it if it must be */
@@ -4039,7 +4055,7 @@ write may be held for an admin (you read what they can't see): use it only when 
       need("read");
       const read = [];
       // a worker searches its entry's audience: a hit above it held the worker's next write for an admin
-      const seen = role === "worker" && !args.beyond ? await entryAudience(identity.role?.entry) : null;
+      const seen = role === "worker" && !args.beyond ? await entryAudience(identity.role) : null;
       const result = await searchGraph(args, seen ?? scope, read, { demand: !role, ownEntry: identity.role?.entry ?? null });
       recordReads(identity, read);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
@@ -4191,7 +4207,7 @@ a search.${role === "worker" ? " Like search_graph, it shows what your entry's p
     async (args) => {
       need("read");
       // a worker's view is its entry's audience, as in search_graph: a statement above it held its next write
-      const seen = role === "worker" && !args.beyond ? await entryAudience(identity.role?.entry) : null;
+      const seen = role === "worker" && !args.beyond ? await entryAudience(identity.role) : null;
       return { content: [{ type: "text", text: JSON.stringify(await aboutThing(args, identity, seen ?? scope)) }] };
     },
   );
