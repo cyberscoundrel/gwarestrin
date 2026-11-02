@@ -40,5 +40,6 @@ describe("lastReply", () => {
     expect(lastTurn([user("go"), said("Done: linked it.")])).toEqual({ text: "Done: linked it.", ended: null });
     expect(lastTurn([user("go"), said("Half", { stopReason: "error", errorMessage: "boom" })])).toEqual({ text: "Half", ended: "the turn ended with an error: boom" });
     expect(lastTurn([user("go"), { role: "assistant", content: [], stopReason: "aborted" }]).ended).toBe("the turn was stopped");
+    expect(lastTurn([user("go"), said("Starting workers", { stopReason: "length" })]).ended).toBe("the reply was cut off at the model's output limit");
   });
 });

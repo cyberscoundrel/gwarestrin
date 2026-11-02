@@ -66,6 +66,8 @@ const MASTER_STALL_MS = 5 * 60_000;
 const MASTER_NUDGES = 2;
 const CARRY_ON =
   "Your last request stalled and was stopped. Carry on with the signals above from where you were: check what you already started (worker_status) before starting anything again.";
+const CUT_OFF =
+  "Your last reply was cut off (it was too long, or the model failed) before you finished. Carry on with the signals above from where you were: check what you already started (worker_status) before starting anything again, and start workers a few at a time, keeping each call short.";
 const HANDLER_TURN_MS = 20 * 60_000;
 
 export class GraphPool {
@@ -294,12 +296,26 @@ export class GraphPool {
         if (this.manager.runningCount() >= this.maxAgents()) return; // no room right now: next tick
         await this.manager.start(master.id);
       }
+      let next = body?.message ?? "";
       for (let nudge = 0; ; nudge++) {
         const settled = this.manager.waitSettled(master.id, MASTER_TURN_MS);
         settled.catch(() => undefined);
-        await this.manager.promptAgent(master.id, nudge === 0 ? (body?.message ?? "") : CARRY_ON, MASTER_STALL_MS);
+        await this.manager.promptAgent(master.id, next, MASTER_STALL_MS);
         if (nudge === 0) await this.call("/api/worker/signals/ack", { method: "POST", body: { ids: signals.map((x) => x.id) } });
-        if ((await this.settleOrStall(master.id, settled)) === "settled") break;
+        if ((await this.settleOrStall(master.id, settled)) === "settled") {
+          // a turn cut off at the output limit or ended by a model error hasn't handled its signals: carry on
+          const turn = await this.manager.lastTurn(master.id);
+          if (!turn.ended || turn.ended === "the turn was stopped") break;
+          if (nudge >= MASTER_NUDGES) {
+            log.warn(`the master's turn ended badly again (${turn.ended}): given back, it starts afresh with its conversation next tick`);
+            await this.manager.releaseAgent(master.id).catch(() => undefined);
+            return;
+          }
+          log.warn(`the master's turn ended badly (${turn.ended}): told to carry on`);
+          next = CUT_OFF;
+          continue;
+        }
+        next = CARRY_ON;
         // a stalled request: stop it (that ends the turn) and carry on, a couple of times; then start it afresh next tick
         await this.manager.abortAgent(master.id);
         await settled.catch(() => undefined);
