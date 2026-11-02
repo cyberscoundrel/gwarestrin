@@ -250,6 +250,17 @@ describe("graph master", () => {
     expect(running.has(master.id)).toBe(false);
   });
 
+  it("a master turn cut off at the output limit is told to carry on, not counted as handled", async () => {
+    const { manager, prompts, compacted } = fakeManager();
+    const ends = ["the reply was cut off at the model's output limit", null];
+    (manager as unknown as { lastTurn: () => Promise<{ text: string; ended: string | null }> }).lastTurn = async () => ({ text: "", ended: ends.shift() ?? null });
+    const call: GraphCall = async (path) =>
+      path === "/api/worker/signals" ? { status: 200, body: { signals: [{ id: "s1", kind: "batch" }], message: "A batch for you." } } : { status: 200, body: {} };
+    await new GraphPool(manager, call, () => 8).masterTurn("worker-profile");
+    expect(prompts.map(([, p]) => p)).toEqual(["A batch for you.", expect.stringMatching(/cut off/)]);
+    expect(compacted()).toBe(1);
+  });
+
   it("starts each handler, gives it its brief, then leaves it waiting in the rail with its sandbox given back", async () => {
     const { manager, records, prompts, running } = fakeManager();
     const calls: Array<[string, unknown]> = [];

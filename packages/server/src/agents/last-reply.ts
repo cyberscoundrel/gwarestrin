@@ -23,7 +23,8 @@ const textOf = (m: Message): string =>
 
 /**
  * The latest turn: what it last said, and why it ended badly if it did (a
- * model error after pi's own retries, or a stop), whether or not it wrote
+ * model error after pi's own retries, a stop, or a reply cut off at the
+ * output limit), whether or not it wrote
  * something first. A turn that ended badly hasn't finished its work, even
  * when it left text behind.
  */
@@ -36,11 +37,14 @@ export function lastTurn(messages: unknown[]): { text: string; ended: string | n
   let text = "";
   for (let i = turn.length - 1; i >= 0 && !text; i--) text = textOf(turn[i]!).trim();
   const last = turn.at(-1);
+  // a reply cut off at the model's output limit ended mid-work too (often mid tool call)
   const ended =
-    last && (last.stopReason === "error" || last.stopReason === "aborted")
+    last && (last.stopReason === "error" || last.stopReason === "aborted" || last.stopReason === "length")
       ? last.stopReason === "aborted"
         ? "the turn was stopped"
-        : `the turn ended with an error${last.errorMessage ? `: ${String(last.errorMessage).slice(0, 300)}` : ""}`
+        : last.stopReason === "length"
+          ? "the reply was cut off at the model's output limit"
+          : `the turn ended with an error${last.errorMessage ? `: ${String(last.errorMessage).slice(0, 300)}` : ""}`
       : null;
   return { text, ended };
 }
