@@ -3612,9 +3612,14 @@ async function handlerDecide(args, identity) {
   // checked before anything is applied: an empty call or an id that isn't open was taken as
   // "carry on", closing the handler with the operator's decision unrecorded
   const open = items.proposals.map((p) => p.id);
+  // the worker's own first; else any pending proposal the operator named (the grader's moves, say):
+  // otherwise their decision on one the worker didn't raise came back as yet another handler
+  const pending = (await adbQuery("SELECT id FROM PendingWrite WHERE status = 'pending'").catch(() => [])).map((p) => String(p.id));
+  const match = (list, id) => list.filter((p) => p === id || (String(id).length >= 8 && p.startsWith(String(id))));
   const resolve = (id) => {
-    const hits = open.filter((p) => p === id || (String(id).length >= 8 && p.startsWith(String(id))));
-    if (hits.length !== 1) throw new Error(`${id} is not one of this worker's open proposals (${open.join(", ") || "none"}): nothing was recorded`);
+    const own = match(open, id);
+    const hits = own.length ? own : match(pending, id);
+    if (hits.length !== 1) throw new Error(`${id} is not one pending proposal (this worker's open ones: ${open.join(", ") || "none"}): nothing was recorded`);
     return hits[0];
   };
   const approve = (args.approve ?? []).map(resolve);
@@ -4388,7 +4393,8 @@ resumes in its own conversation.`,
     server.tool(
       "decide_proposal",
       `Apply or reject a worker's proposal yourself (its worker resumes with your decision). Raw commands and
-widening who sees something are the operator's: hand those to a handler.`,
+widening who sees something are the operator's: hand those to a handler, once they're queued (the
+handler applies them on the operator's word; asking first means a second handler to apply them).`,
       { id: z.string(), approve: z.boolean(), reason: z.string().max(1000).optional() },
       async (args) => {
         const why = await needsOperator(args.id);
@@ -4434,7 +4440,9 @@ records their decision. Describe what's going on and what needs deciding, plainl
     server.tool(
       "decide_for_worker",
       `Record the operator's decision, only on their word: their answer to the worker's questions, which
-proposals to apply, which to reject (with their reason). The worker resumes and the master is told.`,
+proposals to apply, which to reject (with their reason). Proposals are this worker's, or any other pending
+one the operator's decision covers (by id: the grader's moves, another worker's duplicate), so one decision
+settles it. The worker resumes and the master is told.`,
       {
         answer: z.string().max(3000).optional(),
         approve: z.array(z.string()).max(20).optional(),

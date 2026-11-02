@@ -229,11 +229,20 @@ await scenario("a handler records the operator's decision only when it names one
   const empty = await tool(handlerToken(h), "decide_for_worker", {});
   check(/Nothing to record/.test(empty.error ?? ""), `an empty call is refused: ${JSON.stringify(empty).slice(0, 300)}`);
   const wrong = await tool(handlerToken(h), "decide_for_worker", { approve: ["00000000"] });
-  check(/not one of this worker's open proposals/.test(wrong.error ?? ""), `an unknown id is refused: ${JSON.stringify(wrong).slice(0, 300)}`);
+  check(/not one pending proposal/.test(wrong.error ?? ""), `an unknown id is refused: ${JSON.stringify(wrong).slice(0, 300)}`);
   const ok = await tool(handlerToken(h), "decide_for_worker", { approve: [asked.pendingId.slice(0, 8)] });
   check(ok.decided, `decided: ${JSON.stringify(ok).slice(0, 300)}`);
   const st = (await sql(`SELECT status FROM PendingWrite WHERE id = '${asked.pendingId}'`))[0]?.status;
   check(st === "approved", `the short id applied it: ${st}`);
+  // a pending proposal the worker didn't raise (here an admin's widening): the operator's word applies it too
+  const moved = await tool("admin", "set_home", { entities: [{ name: "e2e-h1 dock lights" }], to: "Production floor", reason: "e2e" });
+  const pid = moved.results?.[0]?.pendingId ?? moved.results?.[0]?.id;
+  check(pid, `a widening is queued: ${JSON.stringify(moved).slice(0, 300)}`);
+  const h2 = randomUUID();
+  await tool("admin", "execute_graph", { language: "sql", command: `INSERT INTO Job SET id = '${h2}', kind = 'handler', status = 'waiting', payload = '{"for_job":"${job}"}'` });
+  const other = await tool(handlerToken(h2), "decide_for_worker", { approve: [pid.slice(0, 8)] });
+  check(other.decided, `decided: ${JSON.stringify(other).slice(0, 300)}`);
+  check((await entry("e2e-h1 dock lights"))?._home === POS.floor, "the widening applied");
 });
 
 await scenario("a writer still reads a note grading put above them; others at their position don't", async () => {
