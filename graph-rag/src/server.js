@@ -4186,11 +4186,13 @@ in upsert_entities. Re-ingesting the same title replaces the document.`,
 place, project or team, by name (aliases work: "Toro Co." finds Toro). The graph worker links
 statements to the things they mention in the background, so newly saved entries appear here after
 a minute or so. Use it for "what do we know about X" questions, and to find related entries after
-a search.`,
-    { name: z.string().min(2) },
+a search.${role === "worker" ? " Like search_graph, it shows what your entry's people see; beyond: true shows everything, and then what you write may be held for an admin." : ""}`,
+    { name: z.string().min(2), ...(role === "worker" ? { beyond: z.boolean().optional() } : {}) },
     async (args) => {
       need("read");
-      return { content: [{ type: "text", text: JSON.stringify(await aboutThing(args, identity, scope)) }] };
+      // a worker's view is its entry's audience, as in search_graph: a statement above it held its next write
+      const seen = role === "worker" && !args.beyond ? await entryAudience(identity.role?.entry) : null;
+      return { content: [{ type: "text", text: JSON.stringify(await aboutThing(args, identity, seen ?? scope)) }] };
     },
   );
 

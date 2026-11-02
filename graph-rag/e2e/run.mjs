@@ -229,6 +229,17 @@ await scenario("a worker searches its entry's audience, so a search alone doesn'
   check(!names(mine).includes("e2e-s1 zephyrine budget"), `not found by default: ${names(mine).join(", ")}`);
   const plain = await tool(w, "upsert_entities", { entities: [{ name: "e2e-s2 zephyrine fixture", facets: { state: "On the bench since Monday." } }] });
   check(!plain.error && !plain.pendingId, `the write isn't held: ${JSON.stringify(plain).slice(0, 300)}`);
+  // about_thing too: the fixture's statements as the floor sees them
+  const top = await entry("e2e-s1 zephyrine budget");
+  await tool(workerToken(String(top.rid)), "link_things", { things: [{ name: "zephyrine fixture", type: "part" }] });
+  await tool(w, "link_things", { things: [{ name: "zephyrine fixture", type: "part" }] });
+  const said = (r) => (r.things ?? []).flatMap((t) => (t.statements ?? []).map((x) => x.name));
+  const about = await tool(w, "about_thing", { name: "zephyrine fixture" });
+  check(said(about).includes("e2e-s2 zephyrine fixture") && !said(about).includes("e2e-s1 zephyrine budget"), `about_thing shows the floor's view: ${JSON.stringify(about).slice(0, 300)}`);
+  const plain2 = await tool(w, "upsert_entities", { entities: [{ name: "e2e-s2 zephyrine fixture", facets: { state: "On the bench since Monday, checked." } }] });
+  check(!plain2.error && !plain2.pendingId, `still not held: ${JSON.stringify(plain2).slice(0, 300)}`);
+  const aboutAll = await tool(w, "about_thing", { name: "zephyrine fixture", beyond: true });
+  check(said(aboutAll).includes("e2e-s1 zephyrine budget"), `beyond shows the top's: ${JSON.stringify(aboutAll).slice(0, 300)}`);
   const all = await tool(w, "search_graph", { query: "zephyrine fixture budget", beyond: true });
   check(names(all).includes("e2e-s1 zephyrine budget"), `found with beyond: ${names(all).join(", ")}`);
   const held = await tool(w, "upsert_entities", { entities: [{ name: "e2e-s2 zephyrine fixture", facets: { state: "On the bench; budgeted." } }] });
