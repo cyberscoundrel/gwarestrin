@@ -678,6 +678,17 @@ function workerLift(identity, home) {
 }
 
 /**
+ * Where a worker's write to an entry that lives at `lives` lands, judged the one way for every
+ * worker write tool: lifted (refused or proposed) when what it read is hidden from people there,
+ * else floored by what it read.
+ */
+function workerWriteFloor(identity, lives) {
+  const home = lives === undefined || !positionMap ? lives : effectiveHome(positionMap, lives);
+  const lift = workerLift(identity, home);
+  return { lift, home, floor: lift ? lift.home : derivedFloor(identity, home) };
+}
+
+/**
  * What the people who see a worker's entry see (a scope), or null when that can't be told. A
  * master's task sits at the root (only the admin sees it): its audience is what the people who
  * see all of the entries it's about see.
@@ -718,7 +729,7 @@ async function gradeBatch(origin, entities, writtenAt = Date.now()) {
   const out = [];
   for (let i = 0; i < entities.length; i += 16) {
     const chunk = entities.slice(i, i + 16);
-    const { messages, byLabel } = gradingPrompt(positionMap, origin, chunk, writtenAt);
+    const { messages, byLabel } = gradingPrompt(positionMap, origin, chunk, writtenAt, policy.restrictedTopics);
     let text;
     try {
       text = (await modelPost(GRADER_MODEL, "/chat/completions", { messages, temperature: 0 }, Number(GRADER_TIMEOUT_MS))).choices?.[0]?.message?.content ?? "";
@@ -726,7 +737,7 @@ async function gradeBatch(origin, entities, writtenAt = Date.now()) {
       // unreached: held where it can't widen anything, and graded again when the grader is back (regradeTick)
       if (!e.outage) log.warn(`grading failed (entities held until graded): ${String(e).slice(0, 160)}`);
     }
-    out.push(...(text === undefined ? chunk.map(() => undefined) : parseVerdicts(text, byLabel, positionMap, origin, chunk.map((e) => e.name), writtenAt)));
+    out.push(...(text === undefined ? chunk.map(() => undefined) : parseVerdicts(text, byLabel, positionMap, origin, chunk.map((e) => e.name), writtenAt, policy.restrictedTopics)));
   }
   return out;
 }
@@ -2874,10 +2885,10 @@ async function workerUpsert(args, identity, scope) {
   }
   const results = [];
   for (const { home, lives, list } of byHome.values()) {
-    const lift = workerLift(identity, lives);
+    const { lift, floor } = workerWriteFloor(identity, lives);
     if (lift && !args.propose) throw new Error(liftRefusal(list.map((e) => e.name).join(", "), lift));
     // proposed past the floor: an admin who approves it writes it where it lives
-    const write = { entities: list, home, floor: lift ? lift.home : derivedFloor(identity, lives), written_at: new Date(now).toISOString(), from_worker: true };
+    const write = { entities: list, home, floor, written_at: new Date(now).toISOString(), from_worker: true };
     if (args.propose) {
       results.push({ ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE });
       continue;
@@ -3246,10 +3257,9 @@ async function deleteEntry({ rid }) {
 async function typedUpdate(row, type, args, identity) {
   if (args.valid_until !== undefined) throw new Error(`"${row.name}" is a ${type} record: it has no end date; set properties or facets`);
   const change = typedChange(args);
-  const home = effectiveHome(positionMap, row._home);
-  const floor = derivedFloor(identity, home);
+  const { lift } = workerWriteFloor(identity, row._home);
   const payload = { rid: String(row.rid), name: row.name, type, ...change };
-  if (args.propose || (floor !== undefined && floor !== home)) {
+  if (args.propose || lift) {
     return {
       ...(await queueWrite({ kind: "typed_update", payload: JSON.stringify(payload), user: identity.user, home: positionMap.root, ...proposalFields(identity, args.reason) })),
       note: args.propose ? PROPOSED_NOTE : `What you read reaches fewer people than this record does, so the correction is a proposal. ${PROPOSED_NOTE}`,
@@ -3336,9 +3346,9 @@ async function workerUpdateEntry(args, identity) {
   const now = Date.now();
   const v = parseValidUntil(entity.valid_until, now);
   if (v !== undefined) entity.valid_until = v.valid_until ?? "lasting";
-  const lift = workerLift(identity, row._home ?? origin) ?? workerLift(identity, origin);
+  const { lift, floor } = workerWriteFloor(identity, row._home ?? origin);
   if (lift && !args.propose) throw new Error(liftRefusal(row.name, lift));
-  const write = { entities: [entity], home: origin, floor: lift ? origin : derivedFloor(identity, origin), written_at: new Date(now).toISOString(), from_worker: true };
+  const write = { entities: [entity], home: origin, floor, written_at: new Date(now).toISOString(), from_worker: true };
   if (args.propose) return { ...(await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home: origin, ...proposalFields(identity, args.reason) })), note: PROPOSED_NOTE };
   const result = await upsertEntities(write);
   const changed = [...Object.keys(args.properties ?? {}), ...Object.keys(args.facets ?? {}).map((f) => `${f} facet`), ...(args.valid_until !== undefined ? ["valid_until"] : [])];
@@ -3995,6 +4005,14 @@ function createServer(identity) {
   const scope = scopeOf(identity);
   // the graph worker's agents (see delegation.js): their own tools, not the sharing and review ones
   const role = identity.role?.kind;
+  // a worker reads what its entry's people see, resolved once per request; beyond: true reads
+  // everything, and only then can what it read hold its write for an admin
+  let audience;
+  const readScope = async (args) => {
+    if (role !== "worker" || args?.beyond) return scope;
+    audience ??= entryAudience(identity.role);
+    return (await audience) ?? scope;
+  };
   const need = (cap) => {
     requireCap(caps, cap);
     // raw queries bypass the home filter: only for the root of the tree
@@ -4054,9 +4072,7 @@ write may be held for an admin (you read what they can't see): use it only when 
     async (args) => {
       need("read");
       const read = [];
-      // a worker searches its entry's audience: a hit above it held the worker's next write for an admin
-      const seen = role === "worker" && !args.beyond ? await entryAudience(identity.role) : null;
-      const result = await searchGraph(args, seen ?? scope, read, { demand: !role, ownEntry: identity.role?.entry ?? null });
+      const result = await searchGraph(args, await readScope(args), read, { demand: !role, ownEntry: identity.role?.entry ?? null });
       recordReads(identity, read);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
@@ -4206,9 +4222,7 @@ a search.${role === "worker" ? " Like search_graph, it shows what your entry's p
     { name: z.string().min(2), ...(role === "worker" ? { beyond: z.boolean().optional() } : {}) },
     async (args) => {
       need("read");
-      // a worker's view is its entry's audience, as in search_graph: a statement above it held its next write
-      const seen = role === "worker" && !args.beyond ? await entryAudience(identity.role) : null;
-      return { content: [{ type: "text", text: JSON.stringify(await aboutThing(args, identity, seen ?? scope)) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await aboutThing(args, identity, await readScope(args))) }] };
     },
   );
 
@@ -4527,11 +4541,16 @@ an approval with a reason) resumes the thread with the reason.`,
     `Read a document from the knowledge graph. Search results with kind "section" are parts of a
 document (document, document_id, section): pass document_id (or the document's title) and the
 section to read it in full, with up to count sections from there (default 3, at most 6). Without
-a section you get its contents (the sections you can see) and the first sections.`,
-    { document: z.string().min(1), section: z.number().int().min(1).optional(), count: z.number().int().min(1).max(6).optional() },
+a section you get its contents (the sections you can see) and the first sections.${role === "worker" ? " Like search_graph, it shows what your entry's people see; beyond: true shows everything, and then what you write may be held for an admin." : ""}`,
+    {
+      document: z.string().min(1),
+      section: z.number().int().min(1).optional(),
+      count: z.number().int().min(1).max(6).optional(),
+      ...(role === "worker" ? { beyond: z.boolean().optional() } : {}),
+    },
     async (args) => {
       need("read");
-      return { content: [{ type: "text", text: JSON.stringify(await readDocument(args, identity, scope)) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await readDocument(args, identity, await readScope(args))) }] };
     },
   );
 

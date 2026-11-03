@@ -21,6 +21,7 @@
   let pruned = $state<PrunedEntry[]>([]);
   let pruneBusy = $state(false);
   let pruneNote = $state("");
+  let topicsText = $state("");
 
   const LABELS: Record<keyof OrgPolicy, string> = {
     maxGrantDays: "Longest share",
@@ -29,6 +30,7 @@
     peopleShareDirectly: "People share their own data",
     gradingEnabled: "Grading",
     gradingConfidence: "Grading confidence",
+    restrictedTopics: "Restricted topics",
     derivedWindowHours: "Derived-data window",
     requestDays: "How long a request stays open",
     pruneAfterDays: "Removing expired entries",
@@ -39,6 +41,7 @@
     try {
       view = await api.policy();
       draft = { ...view.policy };
+      topicsText = draft.restrictedTopics.join("\n");
       if (view.canEdit) pruned = (await api.pruned().catch(() => ({ pruned: [] }))).pruned;
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
@@ -84,7 +87,7 @@
     saved = "";
     if (maxError || defError || windowError || requestError || pruneError) return;
     const changes = Object.fromEntries(
-      (Object.keys(draft) as Array<keyof OrgPolicy>).filter((k) => draft![k] !== view!.policy[k]).map((k) => [k, draft![k]]),
+      (Object.keys(draft) as Array<keyof OrgPolicy>).filter((k) => !same(draft![k], view!.policy[k])).map((k) => [k, draft![k]]),
     ) as Partial<OrgPolicy>;
     if (!Object.keys(changes).length) return;
     saving = true;
@@ -100,8 +103,19 @@
     }
   }
 
+  // a topic list compares by its contents
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  // one topic per line, kept as typed; blank lines dropped from the list
+  function setTopics(text: string) {
+    topicsText = text;
+    if (draft) draft.restrictedTopics = text.split("\n").map((t) => t.trim()).filter(Boolean);
+  }
+
   function resetToDefaults() {
-    if (view) draft = { ...view.defaults };
+    if (view) {
+      draft = { ...view.defaults };
+      topicsText = draft.restrictedTopics.join("\n");
+    }
   }
 
   /** "Longest share: 90 days → 30 days" lines for one history entry */
@@ -110,7 +124,7 @@
       const a = JSON.parse(prev) as OrgPolicy;
       const b = JSON.parse(next) as OrgPolicy;
       return (Object.keys(b) as Array<keyof OrgPolicy>)
-        .filter((k) => a[k] !== b[k])
+        .filter((k) => !same(a[k], b[k]))
         .map((k) => `${LABELS[k] ?? k}: ${fmt(k, a[k])} → ${fmt(k, b[k])}`);
     } catch {
       return [];
@@ -123,6 +137,7 @@
     if (k === "maxGrantDays" || k === "defaultShareDays" || k === "requestDays") return `${v} days`;
     if (k === "derivedWindowHours") return `${v} h`;
     if (k === "gradingConfidence") return `${Math.round(Number(v) * 100)}%`;
+    if (Array.isArray(v)) return v.length ? v.join(", ") : "none";
     return String(v);
   }
   const when = (iso: string | null) =>
@@ -219,6 +234,17 @@
         <span class="w-10 text-right font-mono text-xs text-dim">{Math.round(draft.gradingConfidence * 100)}%</span>
       </div>
       <span class="field-hint">Below this, a new entry is held one level up and someone is asked to review it.</span>
+    </div>
+    <div class="field">
+      <label class="field-label" for="os-topics">Restricted topics</label>
+      <textarea
+        id="os-topics"
+        class="input min-h-32"
+        value={topicsText}
+        oninput={(e) => setTopics(e.currentTarget.value)}
+        disabled={!draft.gradingEnabled || !view.infra.graderModel}
+      ></textarea>
+      <span class="field-hint">One per line. The grader files an entry higher only when it's about one of these; everything else stays with the writer's team.</span>
     </div>
   {/if}
 {/snippet}

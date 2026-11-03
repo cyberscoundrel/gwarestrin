@@ -256,6 +256,37 @@ await scenario("a worker (or a master's task) searches its entries' audience, so
   check(!taskWrite.error && !taskWrite.pendingId, `a task's write isn't held: ${JSON.stringify(taskWrite).slice(0, 300)}`);
 });
 
+await scenario("a worker reads documents as its entry's people do: a section above them doesn't hold its write, beyond: true does", async () => {
+  const doc = await tool("alice", "ingest_document", { title: "e2e-d1 quillon contract", description: "The quillon supply contract.", text: "The quillon supply contract pays 12,000 a year. [admins]", extract: false });
+  check(doc.doc_id, `ingested: ${JSON.stringify(doc).slice(0, 300)}`);
+  await until("the section is placed", async () => (await sql(`SELECT _home FROM Entity WHERE _kind = 'section' AND _doc_id = '${doc.doc_id}'`))[0]?._home === POS.org);
+  await save("bob", "e2e-d2 quillon bench", "The quillon jig is on bench 2.");
+  const e = await entry("e2e-d2 quillon bench");
+  const w = workerToken(String(e.rid));
+  const hidden = await tool(w, "read_document", { document: doc.doc_id, section: 1 });
+  check(!(hidden.sections ?? []).length, `the floor's view has no section: ${JSON.stringify(hidden).slice(0, 300)}`);
+  const plain = await tool(w, "update_entry", { entry: "e2e-d2 quillon bench", facets: { state: "On bench 2 since Monday." } });
+  check(!plain.error && !plain.pendingId, `update_entry isn't held: ${JSON.stringify(plain).slice(0, 300)}`);
+  const all = await tool(w, "read_document", { document: doc.doc_id, section: 1, beyond: true });
+  check((all.sections ?? []).length === 1, `beyond reads the section: ${JSON.stringify(all).slice(0, 300)}`);
+  // the same entry, the same reads: update_entry and upsert_entities judge it alike
+  const viaUpdate = await tool(w, "update_entry", { entry: "e2e-d2 quillon bench", facets: { state: "On bench 2; under contract." } });
+  const viaUpsert = await tool(w, "upsert_entities", { entities: [{ name: "e2e-d2 quillon bench", facets: { state: "On bench 2; under contract." } }] });
+  check(/Not written/.test(viaUpdate.error ?? ""), `update_entry is refused: ${JSON.stringify(viaUpdate).slice(0, 300)}`);
+  check(/Not written/.test(viaUpsert.error ?? ""), `upsert_entities is refused alike: ${JSON.stringify(viaUpsert).slice(0, 300)}`);
+  const asked = await tool(w, "update_entry", { entry: "e2e-d2 quillon bench", facets: { state: "On bench 2; under contract." }, propose: true, reason: "e2e" });
+  check(asked.pendingId, `proposed: ${JSON.stringify(asked).slice(0, 300)}`);
+  if (asked.pendingId) await api(`/api/worker/proposals/${asked.pendingId}`, { method: "POST", body: JSON.stringify({ approve: false, reason: "e2e" }) });
+});
+
+await scenario("grading restricts only for a listed topic: one it can't name stays with the writer's team", async () => {
+  await save("bob", "e2e-c1 floater order", "Exatron sent a new order for 500 floaters, job 3260410. [no-topic]");
+  const routine = await entry("e2e-c1 floater order");
+  check(routine?._home === POS.floor, `stays on the floor: ${routine?._home} (${routine?._grade})`);
+  await save("bob", "e2e-c2 floater pay", "The floater crew's pay goes up next month. [admins]");
+  check((await entry("e2e-c2 floater pay"))?._home === POS.org, "a listed topic restricts");
+});
+
 await scenario("a handler records the operator's decision only when it names one, and takes a proposal's short id", async () => {
   await save("alice", "e2e-h1 dock lights", "Two dock lights are out by door 3.");
   const e = await entry("e2e-h1 dock lights");

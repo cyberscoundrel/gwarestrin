@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { candidates, decide, gradingPrompt, parseVerdicts } from "../src/grading.js";
+import { candidates, DEFAULT_TOPICS, decide, gradingPrompt, matchTopic, parseVerdicts } from "../src/grading.js";
 import { parsePositionMap } from "../src/positions.js";
 
 //        org
@@ -32,15 +32,32 @@ test("the prompt labels positions and treats content as data", () => {
 
 test("verdicts outside the allowed lists are unusable or dropped", () => {
   const { byLabel } = gradingPrompt(map, "ops", [{ name: "a" }, { name: "b" }, { name: "c" }]);
-  const text = 'sure: {"items":[{"name":"a","visible_from":"P2","release_to":null,"confidence":0.9,"reason":"salary"},' +
+  const text = 'sure: {"items":[{"name":"a","visible_from":"P2","topic":"Pay and  compensation","release_to":null,"confidence":0.9,"reason":"salary"},' +
     '{"name":"b","visible_from":"P3","confidence":0.9},' + // P3 = floor: below the origin, can't be visible_from
     '{"name":"c","visible_from":"P1","release_to":"P2","confidence":0.8,"reason":"routine"}]}'; // P2 = org: not below
   const [a, b, c] = parseVerdicts(text, byLabel, map, "ops", ["a", "b", "c"]);
-  assert.deepEqual(a, { home: "org", confidence: 0.9, until: null, reason: "salary" });
+  assert.deepEqual(a, { home: "org", topic: "pay and compensation", confidence: 0.9, until: null, reason: "salary" });
   assert.equal(b, null);
   assert.equal(c.home, "ops");
   assert.equal(c.release, undefined, "a release must be below the origin");
   assert.deepEqual(parseVerdicts("not json", byLabel, map, "ops", ["a"]), [null]);
+});
+
+test("restricting needs a listed topic: none, or one not on the list, keeps it at the writer's position", () => {
+  const topics = ["pay and compensation"];
+  const { messages, byLabel } = gradingPrompt(map, "ops", [{ name: "a" }, { name: "b" }, { name: "c" }], Date.now(), topics);
+  assert.match(messages[0].content, /ONLY when the information itself is about one of these restricted topics: pay and compensation\./);
+  const text = '{"items":[{"name":"a","visible_from":"P2","topic":null,"confidence":0.9,"reason":"500 pieces"},' +
+    '{"name":"b","visible_from":"P2","topic":"pricing and margins","confidence":0.9,"reason":"a price"},' +
+    '{"name":"c","visible_from":"P2","topic":"pay and compensation","confidence":0.9,"reason":"a raise"}]}';
+  const [a, b, c] = parseVerdicts(text, byLabel, map, "ops", ["a", "b", "c"], Date.now(), topics);
+  assert.equal(a.home, "ops");
+  assert.match(a.reason, /no restricted topic named/);
+  assert.equal(b.home, "ops", "a topic the organization didn't list doesn't restrict");
+  assert.equal(c.home, "org");
+  assert.equal(c.topic, "pay and compensation");
+  assert.equal(matchTopic("Pricing and margins", DEFAULT_TOPICS), "pricing and margins");
+  assert.equal(matchTopic("", DEFAULT_TOPICS), null);
 });
 
 test("the grader dates what ends, from when it was written; anything unclear lasts", () => {

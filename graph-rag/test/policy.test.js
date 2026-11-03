@@ -1,17 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { DEFAULT_TOPICS } from "../src/grading.js";
 import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "../src/policy.js";
 
 const d = defaultPolicy({});
 
 test("defaults are the built-in values, overridable by env", () => {
-  assert.deepEqual(d, { maxGrantDays: 90, defaultShareDays: 14, standingGrants: "root", peopleShareDirectly: true, gradingEnabled: true, gradingConfidence: 0.6, derivedWindowHours: 12, requestDays: 14, pruneAfterDays: 30 });
+  assert.deepEqual(d, { maxGrantDays: 90, defaultShareDays: 14, standingGrants: "root", peopleShareDirectly: true, gradingEnabled: true, gradingConfidence: 0.6, restrictedTopics: DEFAULT_TOPICS, derivedWindowHours: 12, requestDays: 14, pruneAfterDays: 30 });
   const e = defaultPolicy({ MAX_GRANT_DAYS: "30", DERIVED_WINDOW_HOURS: "24", STANDING_GRANTS: "nobody", PEOPLE_SHARE_DIRECTLY: "false", GRADING_ENABLED: "false" });
   assert.equal(e.maxGrantDays, 30);
   assert.equal(e.derivedWindowHours, 24);
   assert.equal(e.standingGrants, "nobody");
   assert.equal(e.peopleShareDirectly, false);
   assert.equal(e.gradingEnabled, false);
+  assert.deepEqual(defaultPolicy({ RESTRICTED_TOPICS: " pay, legal ,," }).restrictedTopics, ["pay", "legal"]);
 });
 
 test("updates are validated and partial", () => {
@@ -25,6 +27,9 @@ test("updates are validated and partial", () => {
   assert.throws(() => applyPolicyUpdate(d, { colour: "blue" }), /unknown setting/);
   assert.throws(() => applyPolicyUpdate(d, { maxGrantDays: 10 }), /default share length/);
   assert.equal(applyPolicyUpdate(d, { derivedWindowHours: 0 }).derivedWindowHours, 0, "0 turns derived-data limits off");
+  assert.deepEqual(applyPolicyUpdate(d, { restrictedTopics: [" pay ", "pay", "legal  matters"] }).restrictedTopics, ["pay", "legal matters"]);
+  assert.deepEqual(applyPolicyUpdate(d, { restrictedTopics: [] }).restrictedTopics, [], "an empty list: grading never restricts");
+  assert.throws(() => applyPolicyUpdate(d, { restrictedTopics: "pay" }), /list of topics/);
 });
 
 test("a stored policy is filled from the defaults; junk falls back to them", () => {
