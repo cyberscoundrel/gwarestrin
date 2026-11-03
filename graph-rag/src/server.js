@@ -45,6 +45,7 @@ import { gradingPrompt, parseVerdicts } from "./grading.js";
 import { createHealth, createLoops } from "./health.js";
 import { applyFloor, floorLifts, place as placeOne } from "./placement.js";
 import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
+import { changedCount, changedNothing, countingCommand } from "./rawcount.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -1079,7 +1080,10 @@ async function executePending(rec, placedBy) {
     void startIngest(p);
     return { ingesting: true, doc_id: p.doc_id, sections: p.sections };
   }
-  const result = await adbCommand(rec.payload, rec.language ?? "sql");
+  // an approved command says what it changed: one that matched nothing isn't applied
+  const language = rec.language ?? "sql";
+  const result = await adbCommand(countingCommand(rec.payload, language), language);
+  if (changedCount(rec.payload, language, result) === 0) throw new Error(changedNothing(language));
   if (DELETE_RE.test(rec.payload)) await refreshGrants();
   return result;
 }

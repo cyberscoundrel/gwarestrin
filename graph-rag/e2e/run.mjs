@@ -314,6 +314,23 @@ await scenario("a handler records the operator's decision only when it names one
   check((await entry("e2e-h1 dock lights"))?._home === POS.floor, "the widening applied");
 });
 
+await scenario("an approved raw command that changes nothing isn't recorded as applied", async () => {
+  await save("alice", "e2e-r1 raw rename", "The spare saw blades are in cabinet 4.");
+  const e = await entry("e2e-r1 raw rename");
+  await tool("admin", "execute_graph", { language: "sql", command: `UPDATE ${e.rid} SET _keys = ['e2e:r1']` });
+  const w = workerToken(String(e.rid));
+  // CONTAINS on a list matches nothing in Cypher: the approval fails and says why
+  const miss = await tool(w, "execute_graph", { language: "cypher", command: "MATCH (t) WHERE t._keys CONTAINS 'e2e:r1' SET t.e2e_mark = 'x'", reason: "e2e" });
+  check(miss.pendingId, `proposed: ${JSON.stringify(miss).slice(0, 300)}`);
+  const failed = await api(`/api/worker/proposals/${miss.pendingId}`, { method: "POST", body: JSON.stringify({ approve: true, reason: "e2e" }) });
+  check(/matched nothing/.test(JSON.stringify(failed)), `refused: ${JSON.stringify(failed).slice(0, 300)}`);
+  check((await sql(`SELECT status FROM PendingWrite WHERE id = '${miss.pendingId}'`))[0]?.status === "failed", "recorded as failed");
+  const hit = await tool(w, "execute_graph", { language: "cypher", command: "MATCH (t) WHERE 'e2e:r1' IN t._keys SET t.e2e_mark = 'x'", reason: "e2e" });
+  const ok = await api(`/api/worker/proposals/${hit.pendingId}`, { method: "POST", body: JSON.stringify({ approve: true, reason: "e2e" }) });
+  check(ok.approved, `applied: ${JSON.stringify(ok).slice(0, 300)}`);
+  check((await sql(`SELECT e2e_mark FROM ${e.rid}`))[0]?.e2e_mark === "x", "the change is in the graph");
+});
+
 await scenario("a writer still reads a note grading put above them; others at their position don't", async () => {
   await save("bob", "e2e-w1 pay note", "Diep starts at 21.50 an hour. [admins]");
   const e = await entry("e2e-w1 pay note");
