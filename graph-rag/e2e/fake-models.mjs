@@ -41,8 +41,11 @@ function grade(messages) {
   return JSON.stringify({
     items: items.map(({ name, text }) =>
       text.includes("[admins]") && top
-        ? { name, visible_from: top, release_to: null, until: null, confidence: 0.9, reason: "for admins only" }
-        : { name, visible_from: "P1", release_to: null, until: null, confidence: 0.9, reason: "routine for its writer's team" },
+        ? { name, visible_from: top, topic: "personnel and health", release_to: null, until: null, confidence: 0.9, reason: "for admins only" }
+        : // [no-topic]: a grader that would restrict but names no listed topic (it stays where it's written)
+          text.includes("[no-topic]") && top
+          ? { name, visible_from: top, topic: null, release_to: null, until: null, confidence: 0.9, reason: "500 pieces, job 3260410" }
+          : { name, visible_from: "P1", release_to: null, until: null, confidence: 0.9, reason: "routine for its writer's team" },
     ),
   });
 }

@@ -163,7 +163,13 @@ export function buildStandingInstructions({
 }): string {
   if (graphRole) {
     const src = ["Your sources", ""];
-    if (graph) src.push("- The knowledge graph (graph-rag): the whole organization's, in full.");
+    if (graph) {
+      src.push(
+        graphRole === "worker"
+          ? "- The knowledge graph (graph-rag): as the people who see your entry see it. beyond: true on search_graph, about_thing or read_document shows everything, after which what you write may be held for an admin."
+          : "- The knowledge graph (graph-rag): the whole organization's, in full.",
+      );
+    }
     for (const c of connections) {
       src.push(`- ${c.name} (read-only): ${c.description ?? "(your organization hasn't described this connection; its tools say what they do)"}`);
       if (c.digest) src.push(`  What it holds:\n${c.digest.split("\n").map((l) => `  ${l}`).join("\n")}`);

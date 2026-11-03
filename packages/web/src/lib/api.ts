@@ -43,6 +43,8 @@ export interface OrgPolicy {
   peopleShareDirectly: boolean;
   gradingEnabled: boolean;
   gradingConfidence: number;
+  /** what grading may hide an entry from its writer's team for; anything else stays where it's written */
+  restrictedTopics: string[];
   derivedWindowHours: number;
   requestDays: number;
   pruneAfterDays: number;
