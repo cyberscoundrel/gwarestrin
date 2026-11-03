@@ -4098,7 +4098,8 @@ write may be held for an admin (you read what they can't see): use it only when 
 facet texts — a concise natural-language sentence per facet capturing that aspect (facet
 list below). Provide only facets you have information for. Unknown facet names are allowed
 and indexed lazily. Include datetime facts BOTH as properties (for temporal_filter) and
-inside facet texts.
+inside facet texts. Facets say what the entry is about, never where it lives or who can see
+it (a position, "admins only", "an Operations note"): that is its home, kept apart, and it can change.
 Things that stop mattering on a date (a visit, an event, this week's schedule, a temporary state)
 get valid_until: an ISO date or e.g. "7d"; after it they drop out of searches and are later
 removed. Leave it out for what lasts (where things are, how things are done, decisions); grading
