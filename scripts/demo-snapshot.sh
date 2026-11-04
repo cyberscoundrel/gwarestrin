@@ -13,8 +13,8 @@ mkdir -p "$W/volumes" "$W/config"
 for v in "${VOLS[@]}"; do
   docker run --rm -v "${P}_${v}:/v:ro" -v "$W/volumes:/out" alpine tar czf "/out/$v.tgz" -C /v .
 done
-# config the stack reads (secrets stay out: root-pw, .env values, provider keys)
-tar czf "$W/config/config.tgz" --exclude=arcadedb-config/root-pw graph-rag-config dab-config litellm-config arcadedb-config instances authentik/blueprints traefik/dynamic
+# config the stack reads (secrets stay out: root-pw, the root-only instances/.* files, .env values, provider keys)
+tar czf "$W/config/config.tgz" --exclude=arcadedb-config/root-pw --exclude="instances/.*" graph-rag-config dab-config litellm-config arcadedb-config instances authentik/blueprints traefik/dynamic
 sed -E 's/^([A-Z0-9_]+)=.*/\1=<set me>/' .env > "$W/config/env.redacted"
 [ -f providers.json ] && sed -E 's/("(apiKey|key|token)"\s*:\s*)"[^"]*"/\1"<set me>"/g' providers.json > "$W/config/providers.redacted.json"
 git rev-parse HEAD > "$W/COMMIT"
