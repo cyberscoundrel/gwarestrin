@@ -2889,6 +2889,7 @@ async function workerUpsert(args, identity, scope) {
   }
   const results = [];
   for (const { home, lives, list } of byHome.values()) {
+    await refuseHiddenNames(list, lives);
     const { lift, floor } = workerWriteFloor(identity, lives);
     if (lift && !args.propose) throw new Error(liftRefusal(list.map((e) => e.name).join(", "), lift));
     // proposed past the floor: an admin who approves it writes it where it lives
@@ -2901,6 +2902,27 @@ async function workerUpsert(args, identity, scope) {
   }
   if (!args.propose) await logChange(identity, { kind: "upsert", entries: entities.map((e) => e.name), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return results.length === 1 ? results[0] : { results };
+}
+
+/**
+ * A worker's text names no entry the people who see it can't see: a name can say what's in it
+ * ("kayla accepted"), and the master's brief, written from the root, may cite ones they can't.
+ */
+async function refuseHiddenNames(entities, lives) {
+  if (!SCOPED || !positionMap || lives === undefined) return;
+  const vis = visibleHomes(positionMap, [effectiveHome(positionMap, lives)]);
+  if (vis === null) return;
+  const text = entities.flatMap((e) => Object.values(e.facets ?? {})).map(String).join("\n").toLowerCase();
+  if (!text) return;
+  const own = new Set(entities.map((e) => String(e.name).toLowerCase()));
+  const rows = await adbQuery(`SELECT name, _home FROM ${ENTITY_LABEL} WHERE (_kind IS NULL OR _kind IN ['document', 'section']) AND name IS NOT NULL`).catch(() => []);
+  const seen = new Set(rows.filter((r) => vis.has(effectiveHome(positionMap, r._home))).map((r) => String(r.name).toLowerCase()));
+  const hidden = [...new Set(rows.map((r) => String(r.name)).filter((n) => n.length >= 8 && !seen.has(n.toLowerCase()) && !own.has(n.toLowerCase()) && text.includes(n.toLowerCase())))];
+  if (hidden.length) {
+    throw new Error(
+      `not written: it names ${hidden.map((n) => `"${n}"`).join(", ")}, which people at ${homeName(positionMap, lives)} can't see (a name can say what's in it). Write it again without ${hidden.length > 1 ? "them" : "it"}, and without saying hidden entries exist.`,
+    );
+  }
 }
 
 /** who a task thread writes for: "everyone" when the admin started its survey for everyone */
@@ -3362,6 +3384,7 @@ async function workerUpdateEntry(args, identity) {
   const now = Date.now();
   const v = parseValidUntil(entity.valid_until, now);
   if (v !== undefined) entity.valid_until = v.valid_until ?? "lasting";
+  await refuseHiddenNames([entity], row._home ?? origin);
   const { lift, floor } = workerWriteFloor(identity, row._home ?? origin);
   if (lift && !args.propose) throw new Error(liftRefusal(row.name, lift));
   const write = { entities: [entity], home: origin, floor, written_at: new Date(now).toISOString(), from_worker: true };
@@ -4433,7 +4456,7 @@ result is) and the entries it's about (by name: the worker reads them). Group en
 together into one worker. audience "everyone" lets it write for Everyone (only for organization-wide
 knowledge). level picks the model it runs on: 1 a quick check, 2 an investigation, 3 a broad or
 structural matter (default: the highest triage level among its entries). You get a signal when it's
-done or stopped.`,
+done or stopped. The brief names no entry its entries' people can't see: the worker writes for them.`,
       {
         title: z.string().min(4).max(120),
         brief: z.string().min(20).max(6000),
