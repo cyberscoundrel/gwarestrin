@@ -1,0 +1,23 @@
+# The frozen demo instance: the same stack as its own compose project (-p gwdemo), so its
+# volumes, network and containers are its own. Only what would collide with the
+# development instance on one host changes: published ports and the backend subnet.
+# Bring up only to rehearse or present (it shares the host's local model). See docs/DEMO.md.
+services:
+  gwarestrin:
+    ports: !override
+      - "3100:3000"
+  litellm:
+    ports: !override
+      - "4101:4000"
+  arcadedb:
+    ports: !override
+      - "127.0.0.1:2481:2480"
+  traefik:
+    ports: !override
+      - "8081:80"
+
+networks:
+  backend:
+    ipam:
+      config: !override
+        - subnet: 172.31.98.0/24
