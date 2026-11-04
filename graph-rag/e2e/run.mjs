@@ -331,6 +331,23 @@ await scenario("an approved raw command that changes nothing isn't recorded as a
   check((await sql(`SELECT e2e_mark FROM ${e.rid}`))[0]?.e2e_mark === "x", "the change is in the graph");
 });
 
+await scenario("an unlink that leaves a keyless thing with nothing linking it deletes the thing; a keyed or still-linked one stays", async () => {
+  await save("bob", "e2e-u1 quillwort bench", "The quillwort gauge sits by the quillwort clamp and the quillwort tray.");
+  await save("bob", "e2e-u2 quillwort tray", "The quillwort tray is full.");
+  const w1 = workerToken(String((await entry("e2e-u1 quillwort bench")).rid));
+  const w2 = workerToken(String((await entry("e2e-u2 quillwort tray")).rid));
+  const things = [{ name: "quillwort gauge", type: "part" }, { name: "quillwort clamp", type: "part" }, { name: "quillwort tray", type: "part" }];
+  await tool(w1, "link_things", { things });
+  await tool(w2, "link_things", { things: [things[2]] });
+  const thing = async (n) => (await sql(`SELECT @rid AS rid FROM Entity WHERE _kind = 'thing' AND _norm = '${n}'`))[0];
+  await tool("admin", "execute_graph", { language: "sql", command: `UPDATE ${(await thing("quillwort clamp")).rid} SET _keys = ['e2e:clamp']` });
+  const r = await tool(w1, "unlink_things", { things, reason: "e2e" });
+  check((r.results ?? []).every((x) => x.unlinked), `all unlinked: ${JSON.stringify(r).slice(0, 300)}`);
+  check(!(await thing("quillwort gauge")), "the keyless thing nothing links any more is gone");
+  check(await thing("quillwort clamp"), "a thing from a source record stays");
+  check(await thing("quillwort tray"), "a thing another entry still links stays");
+});
+
 await scenario("a writer still reads a note grading put above them; others at their position don't", async () => {
   await save("bob", "e2e-w1 pay note", "Diep starts at 21.50 an hour. [admins]");
   const e = await entry("e2e-w1 pay note");
