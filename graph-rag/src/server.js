@@ -2951,11 +2951,23 @@ async function workerUnlink(args, identity) {
     }
     const e = edges.filter((x) => String(x.dst) === String(t.rid));
     for (const x of e) if (RID_RE.test(String(x.edge))) await adbCommand(`DELETE FROM ${x.edge}`);
-    out.push({ name: t.label, [e.length ? "unlinked" : "wasnt_linked"]: true });
+    out.push({ name: t.label, [e.length ? "unlinked" : "wasnt_linked"]: true, ...(e.length && (await dropIfStray(t)) ? { deleted: "no source record and nothing links it any more" } : {}) });
   }
   const done = out.filter((o) => o.unlinked);
   if (done.length) await logChange(identity, { kind: "unlink", detail: `${args.entry ? `"${args.entry}": ` : ""}${done.map((o) => o.name).join(", ")}`, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  const gone = out.filter((o) => o.deleted);
+  if (gone.length) await logChange(identity, { kind: "delete", detail: gone.map((o) => o.name).join(", "), reason: "left with nothing linking it after an unlink" });
   return { results: out };
+}
+
+/** a thing an unlink left with no edges at all and no source record (a linker's stray mint) goes with it */
+async function dropIfStray(t) {
+  const row = (await adbQuery(`SELECT _keys FROM ${t.rid}`).catch(() => []))[0];
+  if (!row || (Array.isArray(row._keys) && row._keys.length)) return false;
+  const edges = Number((await adbQuery(`SELECT count(*) AS n FROM (SELECT expand(bothE()) FROM ${t.rid})`))[0]?.n ?? 0);
+  if (edges) return false;
+  await adbCommand(`DELETE FROM ${t.rid}`);
+  return true;
 }
 
 /** a worker deletes a stray thing nothing refers to any more (anything still linked is merged or unlinked first) */
