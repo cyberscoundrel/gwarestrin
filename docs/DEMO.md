@@ -9,6 +9,9 @@ rehearsing or presenting, because it shares the host's local model with the deve
 
 ```bash
 git worktree add ~/gwarestrin-demo demo-2026-11 && cd ~/gwarestrin-demo
+# the override and scripts came after the tag: take them from main
+git show main:docker-compose.demo.yml > docker-compose.demo.yml
+for s in demo-restore demo-snapshot; do git show main:scripts/$s.sh > scripts/$s.sh; chmod +x scripts/$s.sh; done
 cp ~/gwarestrin/.env .env                     # or fill in config/env.redacted from the snapshot
 cp ~/gwarestrin/providers.json providers.json
 cp ~/gwarestrin/arcadedb-config/root-pw arcadedb-config/root-pw
