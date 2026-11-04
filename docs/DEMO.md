@@ -14,7 +14,7 @@ git show main:docker-compose.demo.yml > docker-compose.demo.yml
 for s in demo-restore demo-snapshot; do git show main:scripts/$s.sh > scripts/$s.sh; chmod +x scripts/$s.sh; done
 cp ~/gwarestrin/.env .env                     # or fill in config/env.redacted from the snapshot
 cp ~/gwarestrin/providers.json providers.json
-cp ~/gwarestrin/arcadedb-config/root-pw arcadedb-config/root-pw
+mkdir -p arcadedb-config && cp ~/gwarestrin/arcadedb-config/root-pw arcadedb-config/root-pw
 sudo cp -p ~/gwarestrin/instances/.ops-token ~/gwarestrin/instances/.openshell-platform.json instances/  # root-only secrets, not in the snapshot
 scripts/demo-restore.sh <snapshot.tgz>        # once: fills the gwdemo_* volumes and config
 docker compose -p gwdemo -f docker-compose.yml -f docker-compose.demo.yml up -d --build
