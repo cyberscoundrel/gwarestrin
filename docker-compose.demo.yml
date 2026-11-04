@@ -1,11 +1,17 @@
 # The frozen demo instance: the same stack as its own compose project (-p gwdemo), so its
 # volumes, network and containers are its own. Only what would collide with the
-# development instance on one host changes: published ports and the backend subnet.
+# development instance on one host changes: published ports, the backend subnet, and
+# the app image's name (a build here must not replace the development instance's image).
 # Bring up only to rehearse or present (it shares the host's local model). See docs/DEMO.md.
 services:
   gwarestrin:
+    image: gwarestrin-demo:local
     ports: !override
       - "3100:3000"
+  gw-alice:
+    image: gwarestrin-demo:local
+  gw-bob:
+    image: gwarestrin-demo:local
   litellm:
     ports: !override
       - "4101:4000"
