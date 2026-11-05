@@ -348,6 +348,22 @@ await scenario("an unlink that leaves a keyless thing with nothing linking it de
   check(await thing("quillwort tray"), "a thing another entry still links stays");
 });
 
+await scenario("a worker can't name, in what it writes, an entry hidden from the people who see it", async () => {
+  await save("bob", "e2e-h2 quillwort raise", "Quillwort Sam's pay goes to 26 an hour. [admins]");
+  check((await entry("e2e-h2 quillwort raise"))?._home === POS.org, "the raise is at the top");
+  await save("bob", "e2e-h1 quillwort shift", "Quillwort Sam ran the late shift.");
+  const e = await entry("e2e-h1 quillwort shift");
+  const w = workerToken(String(e.rid));
+  const named = await tool(w, "update_entry", { entry: String(e.rid), facets: { relations: "Same person as in 'e2e-h2 quillwort raise'." } });
+  check(String(named.error ?? "").includes("can't see"), `refused: ${JSON.stringify(named).slice(0, 300)}`);
+  const up = await tool(w, "upsert_entities", { entities: [{ name: "e2e-h1 quillwort shift", facets: { relations: "See e2e-h2 quillwort raise." } }] });
+  check(String(up.error ?? "").includes("can't see"), `refused through upsert too: ${JSON.stringify(up).slice(0, 300)}`);
+  const ok = await tool(w, "update_entry", { entry: String(e.rid), facets: { relations: "Quillwort Sam works the late shift." } });
+  check(!ok.error, `written without it: ${JSON.stringify(ok).slice(0, 300)}`);
+  const text = (await sql("SELECT text_relations FROM Entity WHERE name = 'e2e-h1 quillwort shift'"))[0]?.text_relations;
+  check(!String(text).includes("quillwort raise"), "the hidden name isn't in the note");
+});
+
 await scenario("a writer still reads a note grading put above them; others at their position don't", async () => {
   await save("bob", "e2e-w1 pay note", "Diep starts at 21.50 an hour. [admins]");
   const e = await entry("e2e-w1 pay note");
