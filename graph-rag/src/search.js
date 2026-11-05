@@ -10,7 +10,8 @@ import { adbQuery, adbQueryLang, ensureIndex, ENTITY_LABEL, esc, FACET_RE, FACET
 import { embedBatch } from "./models.js";
 import { homeFilter, homeLabel, positionMap, SCOPED, viaOf } from "./scope.js";
 import { recordReads } from "./floor.js";
-import { ASSERTIONS, enqueue, openNeedsClause } from "./server.js";
+import { ASSERTIONS, openNeedsClause } from "./requests.js";
+import { enqueue } from "./server.js";
 
 /** a question in results: who asked, until when; it's a request, not a fact */
 const questionOf = (row) =>

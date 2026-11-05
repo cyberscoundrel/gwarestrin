@@ -11,7 +11,8 @@ import { entriesByUser, homeFilter, ownsHome, peopleView, personOf, personScope,
 import { searchGraph } from "./search.js";
 import { recordReads } from "./floor.js";
 import { queueWrite } from "./write.js";
-import { ASSERTIONS, expiryRules, policy, QUESTION_GRANTOR } from "./server.js";
+import { ASSERTIONS, QUESTION_GRANTOR } from "./requests.js";
+import { expiryRules, policy } from "./server.js";
 
 /** ---- grants (see grants.js) ---- */
 
