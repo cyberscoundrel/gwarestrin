@@ -10,7 +10,7 @@ import { embedBatch } from "./models.js";
 import { positionMap } from "./scope.js";
 import { queueWrite } from "./write.js";
 import { enqueue, worker, workerCall } from "./worker-pool.js";
-import { intakeWithTriage } from "./server.js";
+import { intakeWithTriage } from "./triage.js";
 
 const THING_KINDS_READ = ["document", "section"]; // besides plain entries, what the worker reads for things
 
