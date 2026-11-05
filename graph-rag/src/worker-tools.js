@@ -13,7 +13,7 @@ import { liftRefusal, workerWriteFloor } from "./floor.js";
 import { deleteEntry, foldEntries, mergeThings, proposalFields, queueWrite, typedUpdate, upsertEntities } from "./write.js";
 import { bareThing, ENTRY_KINDS, findEntry, findThing, linkMentions, thingNamed } from "./linker.js";
 import { assertNotWaiting, createTask, logChange, PROPOSED_NOTE, raiseQuestion } from "./worker-pool.js";
-import { MASTER } from "./server.js";
+import { MASTER } from "./master-tools.js";
 
 /**
  * A worker thread's upsert. It applies directly (with the derived-data floor

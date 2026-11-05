@@ -11,7 +11,7 @@ import { chat } from "./models.js";
 import { positionMap, SCOPED } from "./scope.js";
 import { jobMentions } from "./linker.js";
 import { recordTriageOutcome, triageStats } from "./triage.js";
-import { emitSignal, MASTER, masterStatus, openItems } from "./server.js";
+import { emitSignal, MASTER, masterStatus, openItems } from "./master-tools.js";
 
 /** ---- the graph worker: a job queue and loop (things and their links; see things.js) ---- */
 
