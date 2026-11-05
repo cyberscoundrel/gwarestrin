@@ -2905,8 +2905,9 @@ async function workerUpsert(args, identity, scope) {
 }
 
 /**
- * A worker's text names no entry the people who see it can't see: a name can say what's in it
+ * A worker's text names no entry the people who see it can't see: a title can say what's in it
  * ("kayla accepted"), and the master's brief, written from the root, may cite ones they can't.
+ * Only titles: a one-word name, or one a thing also goes by (a part number, a job), is the text's subject.
  */
 async function refuseHiddenNames(entities, lives) {
   if (!SCOPED || !positionMap || lives === undefined) return;
@@ -2917,7 +2918,11 @@ async function refuseHiddenNames(entities, lives) {
   const own = new Set(entities.map((e) => String(e.name).toLowerCase()));
   const rows = await adbQuery(`SELECT name, _home FROM ${ENTITY_LABEL} WHERE (_kind IS NULL OR _kind IN ['document', 'section']) AND name IS NOT NULL`).catch(() => []);
   const seen = new Set(rows.filter((r) => vis.has(effectiveHome(positionMap, r._home))).map((r) => String(r.name).toLowerCase()));
-  const hidden = [...new Set(rows.map((r) => String(r.name)).filter((n) => n.length >= 8 && !seen.has(n.toLowerCase()) && !own.has(n.toLowerCase()) && text.includes(n.toLowerCase())))];
+  // a name that's also a thing's (a part number, a job, a database) is what the text is about, not a title
+  const things = new Set();
+  for (const t of await adbQuery(`SELECT _norm, _alias_norms FROM ${ENTITY_LABEL} WHERE _kind = 'thing'`).catch(() => [])) for (const n of [t._norm, ...(Array.isArray(t._alias_norms) ? t._alias_norms : [])]) if (n) things.add(String(n));
+  const titled = (n) => n.length >= 8 && /\S\s+\S/.test(n) && !things.has(normalize(n));
+  const hidden = [...new Set(rows.map((r) => String(r.name)).filter((n) => titled(n) && !seen.has(n.toLowerCase()) && !own.has(n.toLowerCase()) && text.includes(n.toLowerCase())))];
   if (hidden.length) {
     throw new Error(
       `not written: it names ${hidden.map((n) => `"${n}"`).join(", ")}, which people at ${homeName(positionMap, lives)} can't see (a name can say what's in it). Write it again without ${hidden.length > 1 ? "them" : "it"}, and without saying hidden entries exist.`,

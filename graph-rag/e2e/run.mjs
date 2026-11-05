@@ -362,6 +362,11 @@ await scenario("a worker can't name, in what it writes, an entry hidden from the
   check(!ok.error, `written without it: ${JSON.stringify(ok).slice(0, 300)}`);
   const text = (await sql("SELECT text_relations FROM Entity WHERE name = 'e2e-h1 quillwort shift'"))[0]?.text_relations;
   check(!String(text).includes("quillwort raise"), "the hidden name isn't in the note");
+  // a one-word name (a part number) is what a text is about, not a title: naming it is fine
+  await save("bob", "QWX-4471-B", "Quillwort part QWX-4471-B costs 41 dollars. [admins]");
+  check((await entry("QWX-4471-B"))?._home === POS.org, "the part's note is at the top");
+  const part = await tool(w, "update_entry", { entry: String(e.rid), facets: { relations: "Quillwort Sam cut QWX-4471-B blanks." } });
+  check(!part.error, `a part number isn't a title: ${JSON.stringify(part).slice(0, 300)}`);
 });
 
 await scenario("a writer still reads a note grading put above them; others at their position don't", async () => {
