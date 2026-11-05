@@ -16,77 +16,27 @@
 import express from "express";
 import { readFileSync, watchFile } from "node:fs";
 import { randomUUID } from "node:crypto";
-import {
-  ancestors,
-  canSee,
-  commonAncestor,
-  defaultHome,
-  effectiveHome,
-  EVERYONE,
-  heldPositions,
-  homeName,
-  moveKind,
-  ROOT_NAME,
-  parsePositionMap,
-  visibleHomes,
-  writableHomes,
-} from "./positions.js";
+import { ancestors, canSee, commonAncestor, defaultHome, effectiveHome, EVERYONE, heldPositions, homeName, moveKind, ROOT_NAME, parsePositionMap, visibleHomes, writableHomes } from "./positions.js";
 import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js";
 import { chooseValidity, isExpired, liveClause, parseValidUntil } from "./extent.js";
 import { createSink, ledgerLine, preview as prunePreviewDays, pruneCutoff, pruneRecord } from "./prune.js";
 import { createDocStore } from "./docstore.js";
-import { duplicateEntries, entryId, mentionsPrompt, normalize, splitThingName, thingClash, normalizeKey, normalizeRel, parseMentions, parseSort, partialPerson, personCandidates, resolve, THING_TYPES, thingName } from "./things.js";
+import { duplicateEntries, entryId, mentionsPrompt, normalize, splitThingName, thingClash, normalizeKey, normalizeRel, parseMentions, parseSort, partialPerson, personCandidates, resolve, thingName } from "./things.js";
 import { askDecisionModel, triageRequest, triageVerdict } from "./decisions.js";
 import { firstJob, handlerBrief, signalsMessage, POOL_DEFAULTS, poolSettings, resumeBrief, surveyBrief, taskBrief, taskThreadBrief } from "./pool.js";
 import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, preview, sectionName } from "./documents.js";
 import { danglingGrants, entityPredicate, grantedView, grantShows, isActive, resolveExpiry } from "./grants.js";
 import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
 import { gradingPrompt, parseVerdicts } from "./grading.js";
-import { createHealth, createLoops } from "./health.js";
 import { applyFloor, floorLifts, place as placeOne } from "./placement.js";
 import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
 import { changedCount, changedNothing, countingCommand } from "./rawcount.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-
-const {
-  ARCADEDB_URL = "http://arcadedb:2480",
-  ARCADEDB_DB = "gwarestrin",
-  ARCADEDB_USER = "root",
-  ARCADEDB_PASSWORD = "",
-  LITELLM_BASE_URL = "http://litellm:4000/v1",
-  LITELLM_API_KEY = "",
-  EMBED_MODEL = "embed-minilm",
-  EMBED_DIM = "384",
-  SWEEP_INTERVAL_MS = "600000",
-  PORT = "8000",
-  TOKEN_MAP_PATH = "",
-  GRAPH_RAG_OPEN_MODE = "",
-  POSITION_MAP_PATH = "",
-  // semantic grading of new writes against the position tree (empty = off)
-  GRADER_MODEL = "",
-  GRADER_TIMEOUT_MS = "30000",
-  EMBED_TIMEOUT_MS = "30000",
-  // where pruned entries go before deletion; "discard" keeps nothing (see prune.js)
-  PRUNE_SINK = "discard",
-  // where whole documents live (outside ArcadeDB; see docstore.js)
-  DOC_STORE = "fs:/app/documents",
-  // the model that extracts facts from documents (when an ingest asks for it); default: the grader's
-  EXTRACT_MODEL = "",
-  // the graph worker (finds the things statements are about); its model and instructions
-  // normally come from the admin's Graph worker profile; these are fallbacks and limits
-  WORKER_MODEL = "",
-  // a Jev-style decision model for triage (TypeSafe's Jev through OpenRouter, or a compatible one); no key = no triage
-  DECISION_URL = "https://openrouter.ai/api/alpha/decisions",
-  DECISION_API_KEY = "",
-  DECISION_MODEL = "~typesafe/jev-latest",
-  WORKER_TIMEOUT_MS = "120000",
-  WORKER_DAILY_CALLS = "300",
-  // policy defaults (MAX_GRANT_DAYS, DEFAULT_SHARE_DAYS, STANDING_GRANTS,
-  // PEOPLE_SHARE_DIRECTLY, GRADING_ENABLED, GRADING_CONFIDENCE,
-  // DERIVED_WINDOW_HOURS) are read by policy.js
-} = process.env;
+import { DECISION_API_KEY, DECISION_MODEL, DECISION_URL, DOC_STORE, EMBED_MODEL, EXTRACT_MODEL, GRADER_MODEL, GRADER_TIMEOUT_MS, GRAPH_RAG_OPEN_MODE, health, LITELLM_API_KEY, LITELLM_BASE_URL, log, loops, PORT, POSITION_MAP_PATH, PRUNE_SINK, SWEEP_INTERVAL_MS, TOKEN_MAP_PATH, WORKER_DAILY_CALLS, WORKER_MODEL, WORKER_TIMEOUT_MS } from "./context.js";
+import { adbCommand, adbQuery, adbQueryLang, ensureFullText, ensureIndex, ENTITY_LABEL, esc, FACET_RE, FACETS, knownIndexes, likeTerm, PENDING_ID_RE, PROP_RE, RID_RE, sanitizeFacet } from "./db.js";
+import { chat, embedBatch, modelPost } from "./models.js";
 
 /**
  * Identity model: callers present a bearer token (issued by the surrounding
@@ -259,139 +209,6 @@ function requireCap(caps, cap) {
   }
   if (cap === "approve" && caps.approve !== true) throw new Error("requires approve capability");
   if (cap === "raw" && caps.raw !== true) throw new Error("raw graph queries require the raw capability");
-}
-
-const EMBED_DIM_N = Number(EMBED_DIM);
-const ENTITY_LABEL = "Entity";
-const FACET_RE = /^[a-z][a-z0-9_-]*$/i;
-const PROP_RE = /^[a-z][a-z0-9_]*$/i;
-
-/** advertised facets — upsert may add custom ones (lazily indexed) */
-const FACETS = {
-  identity: "what the entity is — type, purpose, defining attributes",
-  location: "where it is / where it lives / where it runs",
-  state: "current status, condition, availability",
-  temporal: "when things happened — ordered, arrived, installed, updated",
-  relations: "how it connects to other entities",
-};
-
-const knownIndexes = new Set();
-const log = { warn: (...a) => console.warn("[graph-rag]", ...a), info: (...a) => console.log("[graph-rag]", ...a) };
-// the model routes and the decision API (an outage pauses what needs them), and the background loops (a failing one shows in the status)
-const health = createHealth();
-const loops = createLoops(log);
-const BASIC = "Basic " + Buffer.from(`${ARCADEDB_USER}:${ARCADEDB_PASSWORD}`).toString("base64");
-
-/** ArcadeDB HTTP JSON API */
-async function adb(endpoint, body) {
-  const res = await fetch(`${ARCADEDB_URL.replace(/\/+$/, "")}/api/v1/${endpoint}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: BASIC },
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`arcadedb ${res.status}: ${text.slice(0, 200)}`);
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new Error(`arcadedb non-JSON: ${text.slice(0, 120)}`);
-  }
-}
-
-/** read query (sql or cypher); params use :name markers */
-async function adbQueryLang(query, language = "sql", params) {
-  const body = { language, command: query };
-  if (params) body.params = params;
-  const j = await adb(`query/${ARCADEDB_DB}`, body);
-  return j.result ?? j.records ?? [];
-}
-
-/** read query (sql) */
-async function adbQuery(sql, params) {
-  return adbQueryLang(sql, "sql", params);
-}
-
-/** write command (sql or cypher) */
-async function adbCommand(command, language = "sql", params) {
-  const body = { language, command };
-  if (params) body.params = params;
-  const j = await adb(`command/${ARCADEDB_DB}`, body);
-  return j.result ?? [];
-}
-
-/** escape a string literal for embedding in sql/cypher */
-const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-/** a user-typed term inside an ILIKE pattern: escaped, with its own wildcards removed */
-const likeTerm = (s) => esc(String(s).replace(/[%_]/g, ""));
-
-async function ensureIndex(facet) {
-  if (knownIndexes.has(facet)) return;
-  const prop = `embed_${facet}`;
-  try {
-    await adbCommand("CREATE VERTEX TYPE Entity IF NOT EXISTS");
-  } catch {
-    /* exists */
-  }
-  try {
-    await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} LIST OF FLOAT`);
-  } catch {
-    /* property may already exist */
-  }
-  await adbCommand(
-    `CREATE INDEX ON ${ENTITY_LABEL} (${prop}) LSM_VECTOR METADATA ` +
-      `{dimensions: ${EMBED_DIM_N}, similarity: 'COSINE', quantization: 'INT8', buildGraphNow: false}`,
-  ).catch((e) => {
-    if (!/already exists/i.test(String(e))) throw e;
-  });
-  knownIndexes.add(facet);
-}
-
-async function ensureFullText() {
-  try {
-    await adbCommand(`CREATE INDEX ON ${ENTITY_LABEL} (text_identity) FULL_TEXT`);
-  } catch {
-    /* exists */
-  }
-}
-
-/**
- * One call to a model route (through litellm), under the dependency rule
- * (health.js): an outage (out of credit, rate-limited, down, timed out)
- * pauses the route and throws an Outage, which puts work off without
- * spending its retries; while it's paused, calls fail at once.
- */
-async function modelPost(model, path, body, timeoutMs) {
-  const dep = `model:${model}`;
-  const paused = health.outage(dep);
-  if (paused) throw paused;
-  let res;
-  try {
-    res = await fetch(`${LITELLM_BASE_URL.replace(/\/+$/, "")}${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${LITELLM_API_KEY}` },
-      body: JSON.stringify({ model, ...body }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (e) {
-    throw health.fail(dep, e) ?? e;
-  }
-  if (!res.ok) {
-    const text = (await res.text().catch(() => "")).slice(0, 120);
-    throw health.fail(dep, null, res.status) ?? Object.assign(new Error(`${model} HTTP ${res.status}: ${text}`), { status: res.status });
-  }
-  const j = await res.json();
-  health.ok(dep);
-  return j;
-}
-
-async function embedBatch(texts) {
-  // a stalled backend fails the call (search falls back to lexical) instead of hanging it
-  const j = await modelPost(EMBED_MODEL, "/embeddings", { input: texts }, Number(EMBED_TIMEOUT_MS));
-  const vecs = (j.data ?? []).map((d) => d.embedding);
-  if (vecs.length !== texts.length || vecs.some((v) => !Array.isArray(v))) {
-    throw new Error("embeddings response shape mismatch");
-  }
-  return vecs;
 }
 
 /** a question in results: who asked, until when; it's a request, not a fact */
@@ -2063,11 +1880,6 @@ async function edgeOnce(type, from, to) {
   const out = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('${type}')) FROM ${from})`).catch(() => []);
   if (out.some((e) => String(e.dst) === to)) return;
   await adbCommand(`CREATE EDGE ${type} FROM ${from} TO ${to}`);
-}
-
-/** one model call (the extraction model: EXTRACT_MODEL, else the grader's) */
-async function chat(model, messages, timeoutMs = Number(GRADER_TIMEOUT_MS) * 2) {
-  return (await modelPost(model, "/chat/completions", { messages, temperature: 0 }, timeoutMs)).choices?.[0]?.message?.content ?? "";
 }
 
 /**
@@ -3923,9 +3735,6 @@ async function ensurePendingSchema() {
   }
 }
 
-const RID_RE = /^#\d+:\d+$/;
-const PENDING_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /** a worker thread's queued write is a proposal: its reason, and the thread to resume when it's decided */
 const proposalFields = (identity, reason) =>
   identity.role?.kind === "worker" ? { note: String(reason ?? "").trim().slice(0, 600) || "(no reason given)", job: identity.role.job } : {};
@@ -4031,12 +3840,6 @@ async function rejectPending(id, identity, reason = "", { quiet = false } = {}) 
   // a worker thread's proposal: the thread decides again (wherever it was rejected)
   if (rows[0].job_id && !quiet) await resumeThread(rows[0].job_id, { proposal: rows[0].note || rows[0].kind, decision: "rejected", reason, answered_by: rejector }).catch(() => {});
   return { rejected: true };
-}
-
-function sanitizeFacet(name) {
-  if (typeof name !== "string" || !FACET_RE.test(name)) throw new Error(`invalid facet name: ${String(name)}`);
-  // a facet named as it's stored ("text_state") is that facet, not a second one ("text_text_state")
-  return name.toLowerCase().replace(/^(?:text_|embed_)+/, "") || name.toLowerCase();
 }
 
 /** ---- MCP server (fresh instance per request: stateless) ---- */
