@@ -1,9 +1,11 @@
 # server.js: the map and the cut
 
-`server.js` is being split into modules by area with no behavior change (see
-`docs/ORGANIZATION-MODEL.md`, "Serial step two"). This file is the map: every
+`server.js` was split into modules by area with no behavior change (see
+`docs/ORGANIZATION-MODEL.md`, "Serial step two"); the replay harness passes 22 of 22
+on the split as on the original. This file is the map: the modules as they are now,
+with what each owns and the stream that takes it, and below it the cut: every
 top-level declaration of the file as it was before the move (5,320 lines, commit
-`2293266`), with its line range and the module it goes to. The move is mechanical:
+`2293266`), with its line range and the module it went to. The move was mechanical:
 each module is the concatenation of its declarations in their original order, with
 an import block computed from what the code uses, and `export` added to what another
 module imports. No string a model sees, no SQL, no prompt and no order of awaits
@@ -11,27 +13,27 @@ changes.
 
 ## The modules
 
-| Module | Owns | Stream (from the design doc) |
-|---|---|---|
-| `context.js` | the environment configuration, `log`, `health`, `loops` | shared; the integrator |
-| `db.js` | ArcadeDB access (`adb*`, `esc`, `likeTerm`), the Entity constants (`ENTITY_LABEL`, `FACETS`, the facet, property and record-id patterns), the vector indexes (`ensureIndex`, `knownIndexes`), `sanitizeFacet` | shared; the integrator |
-| `models.js` | `modelPost`, `embedBatch`, `chat` | shared; the integrator |
-| `scope.js` | identity and scope: the token and position maps and their loaders, `scopeOf`, `homeFilter`, `resolveWriteHome`, `resolveIdentity`, `requireCap`, `personOf`, `isPerson`, `writerOf`, the people and position name helpers | Authority |
-| `search.js` | `searchGraph`, `queryGraph`, `schemaGraph`, `aboutThing`, the result shaping helpers | Queries |
-| `floor.js` | derived data and placement: read marks, `recordReads`, `derivedFloor`, `workerLift`, `workerWriteFloor`, `entryAudience`, `gradeBatch`, `placeEntities`, `regradeTick` | Authority |
-| `write.js` | `upsertEntities`, the pending-write queue (`queueWrite`, `approvePending`, `rejectPending`, `executePending`), `setHome`, `executeGraph`, `backfillIdentity`, the executors an approval runs (`mergeThings`, `foldEntries`, `deleteEntry`, `typedUpdate`) | Authority |
-| `sharing.js` | grants: `grantCache`, `grantAccess`, `revokeGrant`, `listGrants`, share proposals and the shares waiting on a pending write, `findShareable` | Authority |
-| `requests.js` | needs: questions as entries, how they meet assertions, the asker's and the owners' sides | Queries |
-| `ingest.js` | documents: `requestIngest`, `ingestDocument`, `extractFacts`, `readDocument`, the document store handle | Condenser |
-| `linker.js` | `linkMentions`, `jobMentions`, `findThing`, `findEntry`, `thingNamed`, the ABOUT edge helpers | Admission and resolution |
-| `worker-pool.js` | the job queue (`enqueue`, `workerTick`), the thread pool (`claimThreads`, `finishThread`, `resumeThread`), questions, the proposals list, `logChange`, `createTask`, the worker's settings and `workerStatus` | Reconciliation and data entry |
-| `worker-tools.js` | a worker thread's tools (`workerUpsert`, `workerLink`, `workerMerge`, …) and their MCP registration | Reconciliation and data entry |
-| `triage.js` | `intakeWithTriage`, `recordTriageOutcome`, `triageStats` | Reconciliation and data entry (it feeds the master's batches; the decision model itself is `decisions.js`) |
-| `master-tools.js` | the master (`batchTick`, signals, `masterStartWorker`, …), handlers, and the MCP registration of the master, handler and liaison tools | Reconciliation and data entry |
-| `pruning.js` | `pruneExpired`, `prunePreview` | housekeeping; the integrator |
-| `org-policy.js` | the organization policy: `policy`, `loadPolicy`, `savePolicy`, `expiryRules`, `canEditPolicy` | Authority |
-| `routes.js` | the express app: `/mcp` and every `/api/*` route | shared: each stream adds its own route group; the integrator merges |
-| `server.js` | the composition root: `createServer` (the MCP tool table) and `boot` | the integrator |
+| Module | Lines | Owns | Stream (from the design doc) |
+|---|---|---|---|
+| `context.js` | 48 | the environment configuration, `log`, `health`, `loops` | shared; the integrator |
+| `db.js` | 104 | ArcadeDB access (`adb*`, `esc`, `likeTerm`), the Entity constants (`ENTITY_LABEL`, `FACETS`, the facet, property and record-id patterns), the vector indexes (`ensureIndex`, `knownIndexes`), `sanitizeFacet` | shared; the integrator |
+| `models.js` | 49 | `modelPost`, `embedBatch`, `chat` | shared; the integrator |
+| `scope.js` | 218 | identity and scope: the token and position maps and their loaders, `scopeOf`, `homeFilter`, `resolveWriteHome`, `resolveIdentity`, `requireCap`, `personOf`, `isPerson`, `writerOf`, the people and position name helpers | Authority |
+| `search.js` | 289 | `searchGraph`, `queryGraph`, `schemaGraph`, `aboutThing`, the result shaping helpers | Queries |
+| `floor.js` | 261 | derived data and placement: read marks, `recordReads`, `derivedFloor`, `workerLift`, `workerWriteFloor`, `entryAudience`, `gradeBatch`, `placeEntities`, `regradeTick` | Authority |
+| `write.js` | 510 | `upsertEntities`, the pending-write queue (`queueWrite`, `approvePending`, `rejectPending`, `executePending`), `setHome`, `executeGraph`, `backfillIdentity`, the executors an approval runs (`mergeThings`, `foldEntries`, `deleteEntry`, `typedUpdate`) | Authority |
+| `sharing.js` | 425 | grants: `grantCache`, `grantAccess`, `revokeGrant`, `listGrants`, share proposals and the shares waiting on a pending write, `findShareable` | Authority |
+| `requests.js` | 466 | needs: questions as entries, how they meet assertions, the asker's and the owners' sides | Queries |
+| `ingest.js` | 274 | documents: `requestIngest`, `ingestDocument`, `extractFacts`, `readDocument`, the document store handle | Condenser |
+| `linker.js` | 228 | `linkMentions`, `jobMentions`, `findThing`, `findEntry`, `thingNamed`, the ABOUT edge helpers | Admission and resolution |
+| `worker-pool.js` | 518 | the job queue (`enqueue`, `workerTick`), the thread pool (`claimThreads`, `finishThread`, `resumeThread`), questions, the proposals list, `logChange`, `createTask`, the worker's settings and `workerStatus` | Reconciliation and data entry |
+| `worker-tools.js` | 579 | a worker thread's tools (`workerUpsert`, `workerLink`, `workerMerge`, …) and their MCP registration | Reconciliation and data entry |
+| `triage.js` | 136 | `intakeWithTriage`, `recordTriageOutcome`, `triageStats` | Reconciliation and data entry (it feeds the master's batches; the decision model itself is `decisions.js`) |
+| `master-tools.js` | 343 | the master (`batchTick`, signals, `masterStartWorker`, …), handlers, and the MCP registration of the master, handler and liaison tools | Reconciliation and data entry |
+| `pruning.js` | 79 | `pruneExpired`, `prunePreview` | housekeeping; the integrator |
+| `org-policy.js` | 70 | the organization policy: `policy`, `loadPolicy`, `savePolicy`, `expiryRules`, `canEditPolicy` | Authority |
+| `routes.js` | 459 | the express app: `/mcp` and every `/api/*` route | shared: each stream adds its own route group; the integrator merges |
+| `server.js` | 491 | the composition root: `createServer` (the MCP tool table) and `boot` | the integrator |
 
 Two things are not a plain move, both mechanical:
 
@@ -57,6 +59,46 @@ Modules import each other in cycles (the areas call into one another at run time
 allow: no module reads another's `const` or `let` at load time, only inside functions, and every
 function declaration is hoisted. `routes.js` imports `createServer` from `server.js` for the `/mcp`
 route, so the HTTP table stays in one file.
+
+## What the integrator should know
+
+**The write-or-propose decision** (the Authority stream's `decideWrite`) is still made at
+its sites, now in six modules. Every call of `queueWrite` outside its own module:
+`server.js` (the `upsert_entities` and `embed_backfill` tools, for queued writers),
+`write.js` (`executeGraph`, `setHome` twice, `typedUpdate`), `worker-tools.js`
+(`workerUpsert`, `workerMerge`, `workerFoldEntries`, `workerDeleteEntry`, `workerUpdateEntry`),
+`sharing.js` (`grantAccess`, twice), `ingest.js` (`requestIngest`), `floor.js`
+(`askAboutPlacement`), `linker.js` (the unsure-match merge proposal). Replacing them with one
+rule touches all six.
+
+**Functions two areas both need**, kept where the map puts them and imported by the other:
+
+- `assertNotWaiting`, `PROPOSED_NOTE`, `logChange`, `createTask` (`worker-pool.js`) are used by
+  `worker-tools.js`, `write.js` (`executeGraph`, `setHome`), `master-tools.js` and `routes.js`.
+- `thingSeenFrom` and `aboutOnce` (`linker.js`) are used by `floor.js` (`regradeTick`), `write.js`
+  (`applyRehome`, `foldEntries`, `mergeThings`) and `triage.js`.
+- `ASSERTIONS` and `openNeedsClause` (`requests.js`) are read predicates used by `search.js`,
+  `write.js`, `sharing.js` and `routes.js`; they could move to `db.js` if the Queries stream
+  would rather not own them.
+- `MASTER` (`master-tools.js`) is read by `worker-pool.js` and `worker-tools.js`.
+- `recordReads` (`floor.js`) is called by every read: `search.js`, `sharing.js`, `ingest.js`,
+  `server.js`.
+
+**Shared state read across areas**: `positionMap` (nearly everywhere), `policy` (`floor`,
+`sharing`, `requests`, `pruning`, `routes`, `server`), `worker` (`write`, `linker`,
+`master-tools`, `routes`, `server`), `grantCache` (`scope`, `requests`), `entriesByUser`
+(`sharing`, `requests`), `knownIndexes` (`search`, `write`, `routes`, `server`), `docStore`
+(`write`, `pruning`, `server`).
+
+**Import cycles**: `scope` ↔ `sharing` (scopeOf reads the grant cache), `floor` ↔ `write`,
+`write` ↔ `worker-pool` ↔ `linker` ↔ `triage`, `worker-pool` ↔ `master-tools`,
+`search` ↔ `requests`, and `routes` → `server` → `routes`. All are safe as they are (nothing
+reads another module's binding at load time); a stream that adds top-level code using an
+imported `const` or `let` would break one.
+
+**The map's judgment calls**: `triage.js` under Reconciliation rather than Admission;
+`sharing.js` and `org-policy.js` under Authority; `pruning.js`, `routes.js` and the three
+infrastructure modules with the integrator. Change the table if a stream owner disagrees.
 
 ## The cut
 
