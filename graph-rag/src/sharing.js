@@ -12,7 +12,7 @@ import { searchGraph } from "./search.js";
 import { recordReads } from "./floor.js";
 import { queueWrite } from "./write.js";
 import { ASSERTIONS, QUESTION_GRANTOR } from "./requests.js";
-import { expiryRules, policy } from "./server.js";
+import { expiryRules, policy } from "./org-policy.js";
 
 /** ---- grants (see grants.js) ---- */
 

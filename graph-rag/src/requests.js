@@ -13,7 +13,7 @@ import { embedBatch } from "./models.js";
 import { entriesByUser, ownsHome, personOf, personScope, positionMap, positionName, SCOPED } from "./scope.js";
 import { gradeBatch } from "./floor.js";
 import { grantAccess, grantCache, refreshGrants, storeGrant } from "./sharing.js";
-import { policy } from "./server.js";
+import { policy } from "./org-policy.js";
 
 /** ---- needs: questions as entries (see needs.js) ---- */
 

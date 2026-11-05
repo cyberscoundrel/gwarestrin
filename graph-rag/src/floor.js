@@ -11,7 +11,7 @@ import { modelPost } from "./models.js";
 import { positionMap, SCOPED } from "./scope.js";
 import { queueWrite } from "./write.js";
 import { thingSeenFrom } from "./linker.js";
-import { policy } from "./server.js";
+import { policy } from "./org-policy.js";
 
 /** ---- derived data: what an identity read bounds where its writes land ---- */
 

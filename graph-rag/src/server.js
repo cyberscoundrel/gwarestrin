@@ -18,7 +18,6 @@ import { watchFile } from "node:fs";
 import { EVERYONE, heldPositions, homeName, visibleHomes } from "./positions.js";
 import { liveClause, parseValidUntil } from "./extent.js";
 import { firstJob, handlerBrief, signalsMessage, poolSettings, surveyBrief } from "./pool.js";
-import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -36,6 +35,7 @@ import { registerWorkerTools, workerUpsert } from "./worker-tools.js";
 import { ensureTriageSchema } from "./triage.js";
 import { batchTick, decideProposal, ensureMasterSchema, masterStatus, registerHandlerTools, registerLiaisonTools, registerMasterTools } from "./master-tools.js";
 import { ensurePruneSchema, pruneExpired, prunePreview, pruneSink } from "./pruning.js";
+import { canEditPolicy, ensurePolicySchema, loadPolicy, policy, policyDefaults, policyMeta, savePolicy } from "./org-policy.js";
 
 /** ---- MCP server (fresh instance per request: stateless) ---- */
 const facetDoc = Object.entries(FACETS)
@@ -499,68 +499,6 @@ app.get("/api/positions", (req, res) => {
   const tree = Object.entries(positionMap.positions).map(([id, p]) => ({ id, name: homeName(positionMap, id), parent: p.parent }));
   res.json({ scoped: true, root: positionMap.root, everyone: { id: EVERYONE, name: "Everyone" }, held, positions, tree, people: peopleView(personOf(identity.user)), canGrantStanding: reach === null && !identity.agent && policy.standingGrants === "root" });
 });
-
-/** ---- organization policy (Organization settings; see policy.js) ---- */
-
-const policyDefaults = defaultPolicy();
-export let policy = policyDefaults;
-let policyMeta = { updated_by: null, updated_at: null };
-
-export const expiryRules = (identity, scope) => ({
-  root: scope.root,
-  agent: Boolean(identity.agent),
-  maxDays: policy.maxGrantDays,
-  defaultDays: policy.defaultShareDays,
-  standing: policy.standingGrants,
-});
-
-async function ensurePolicySchema() {
-  await adbCommand("CREATE DOCUMENT TYPE OrgPolicy IF NOT EXISTS").catch(() => {});
-  await adbCommand("CREATE DOCUMENT TYPE PolicyChange IF NOT EXISTS").catch(() => {});
-  for (const prop of ["scope", "json", "updated_by", "updated_at"]) await adbCommand(`CREATE PROPERTY OrgPolicy.${prop} IF NOT EXISTS STRING`).catch(() => {});
-  // (no "by"/"before"/"after": reserved words in ArcadeDB SQL)
-  for (const prop of ["changed_at", "changed_by", "prev_json", "next_json"]) await adbCommand(`CREATE PROPERTY PolicyChange.${prop} IF NOT EXISTS STRING`).catch(() => {});
-}
-
-async function loadPolicy() {
-  try {
-    const row = (await adbQuery("SELECT FROM OrgPolicy WHERE scope = 'org' LIMIT 1"))[0];
-    policy = row ? normalizeStored(JSON.parse(row.json), policyDefaults) : policyDefaults;
-    policyMeta = { updated_by: row?.updated_by ?? null, updated_at: row?.updated_at ?? null };
-  } catch (e) {
-    log.warn(`policy load failed (keeping the current one): ${String(e).slice(0, 120)}`);
-  }
-}
-
-/** a root person changes the policy; every change is recorded */
-async function savePolicy(input, identity) {
-  const next = applyPolicyUpdate(policy, input);
-  const now = new Date().toISOString();
-  const updated = await adbCommand("UPDATE OrgPolicy SET json = :json, updated_by = :by_user, updated_at = :now WHERE scope = 'org'", "sql", {
-    json: JSON.stringify(next),
-    by_user: identity.user,
-    now,
-  });
-  if (Number(updated?.[0]?.count ?? 0) === 0) {
-    await adbCommand("INSERT INTO OrgPolicy SET scope = 'org', json = :json, updated_by = :by_user, updated_at = :now", "sql", {
-      json: JSON.stringify(next),
-      by_user: identity.user,
-      now,
-    });
-  }
-  await adbCommand("INSERT INTO PolicyChange SET changed_at = :now, changed_by = :by_user, prev_json = :prev, next_json = :next", "sql", {
-    now,
-    by_user: identity.user,
-    prev: JSON.stringify(policy),
-    next: JSON.stringify(next),
-  }).catch((e) => log.warn(`policy change not logged: ${String(e).slice(0, 120)}`));
-  log.info(`organization policy changed by ${identity.user}: ${JSON.stringify(input)}`);
-  policy = next;
-  policyMeta = { updated_by: identity.user, updated_at: now };
-  return policy;
-}
-
-const canEditPolicy = (identity, scope) => !identity.agent && !identity.open && scope.root && SCOPED;
 
 app.get("/api/policy", (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);

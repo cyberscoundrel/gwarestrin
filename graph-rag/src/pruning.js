@@ -6,7 +6,7 @@ import { log, PRUNE_SINK } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { refreshGrants } from "./sharing.js";
 import { docStore } from "./ingest.js";
-import { policy } from "./server.js";
+import { policy } from "./org-policy.js";
 
 /** ---- pruning (see prune.js): expired entries leave for good after a window ---- */
 
