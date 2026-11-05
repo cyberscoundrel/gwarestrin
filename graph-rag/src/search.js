@@ -9,7 +9,8 @@ import { log } from "./context.js";
 import { adbQuery, adbQueryLang, ensureIndex, ENTITY_LABEL, esc, FACET_RE, FACETS, knownIndexes, likeTerm, PROP_RE, RID_RE } from "./db.js";
 import { embedBatch } from "./models.js";
 import { homeFilter, homeLabel, positionMap, SCOPED, viaOf } from "./scope.js";
-import { ASSERTIONS, enqueue, openNeedsClause, recordReads } from "./server.js";
+import { recordReads } from "./floor.js";
+import { ASSERTIONS, enqueue, openNeedsClause } from "./server.js";
 
 /** a question in results: who asked, until when; it's a request, not a fact */
 const questionOf = (row) =>
