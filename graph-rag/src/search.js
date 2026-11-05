@@ -11,7 +11,7 @@ import { embedBatch } from "./models.js";
 import { homeFilter, homeLabel, positionMap, SCOPED, viaOf } from "./scope.js";
 import { recordReads } from "./floor.js";
 import { ASSERTIONS, openNeedsClause } from "./requests.js";
-import { enqueue } from "./server.js";
+import { enqueue } from "./worker-pool.js";
 
 /** a question in results: who asked, until when; it's a request, not a fact */
 const questionOf = (row) =>

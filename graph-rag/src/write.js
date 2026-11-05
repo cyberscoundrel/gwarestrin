@@ -18,7 +18,7 @@ import { dropWaitingShares, refreshGrants, resolveWaitingShares, storeGrant } fr
 import { ASSERTIONS, meetAssertion } from "./requests.js";
 import { docStore, startIngest } from "./ingest.js";
 import { aboutOnce, ENTRY_KINDS, thingSeenFrom } from "./linker.js";
-import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, worker, workerModel } from "./server.js";
+import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, worker, workerModel } from "./worker-pool.js";
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
 export async function upsertEntities({ entities, home, floor, written_at, from_worker, written_by }) {

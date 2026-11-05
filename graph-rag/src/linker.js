@@ -9,7 +9,8 @@ import { adbCommand, adbQuery, ENTITY_LABEL, FACETS, RID_RE } from "./db.js";
 import { embedBatch } from "./models.js";
 import { positionMap } from "./scope.js";
 import { queueWrite } from "./write.js";
-import { enqueue, intakeWithTriage, worker, workerCall } from "./server.js";
+import { enqueue, worker, workerCall } from "./worker-pool.js";
+import { intakeWithTriage } from "./server.js";
 
 const THING_KINDS_READ = ["document", "section"]; // besides plain entries, what the worker reads for things
 
