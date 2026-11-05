@@ -14,7 +14,8 @@ import { embedBatch } from "./models.js";
 import { homeFilter, isPerson, positionId, positionMap, SCOPED } from "./scope.js";
 import { identityText, publicProps } from "./search.js";
 import { askAboutPlacement, heldNote, placeEntities, workerWriteFloor } from "./floor.js";
-import { aboutOnce, ASSERTIONS, assertNotWaiting, docStore, dropWaitingShares, enqueue, ENTRY_KINDS, logChange, meetAssertion, PROPOSED_NOTE, refreshGrants, resolveWaitingShares, resumeThread, startIngest, storeGrant, thingSeenFrom, worker, workerModel } from "./server.js";
+import { dropWaitingShares, refreshGrants, resolveWaitingShares, storeGrant } from "./sharing.js";
+import { aboutOnce, ASSERTIONS, assertNotWaiting, docStore, enqueue, ENTRY_KINDS, logChange, meetAssertion, PROPOSED_NOTE, resumeThread, startIngest, thingSeenFrom, worker, workerModel } from "./server.js";
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
 export async function upsertEntities({ entities, home, floor, written_at, from_worker, written_by }) {

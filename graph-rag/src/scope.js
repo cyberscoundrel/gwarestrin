@@ -8,7 +8,7 @@ import { PREFIX as AGENT_TOKEN_PREFIX, resolveAgentToken } from "./delegation.js
 import { entityPredicate, grantedView } from "./grants.js";
 import { GRAPH_RAG_OPEN_MODE, POSITION_MAP_PATH, TOKEN_MAP_PATH } from "./context.js";
 import { esc, RID_RE } from "./db.js";
-import { grantCache } from "./server.js";
+import { grantCache } from "./sharing.js";
 
 /**
  * Identity model: callers present a bearer token (issued by the surrounding
