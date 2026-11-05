@@ -7,15 +7,22 @@
 //   section:  { heading?, text, claims: [claim] }
 //   claim:    { kind, subject, class, attribute, value,
 //               valid_from?, valid_until?, at?, recorded_at? }
-//   subject:  { key? , name?, class? | actor? }
-//             an instance: `class` (a confirmed class) and a `key`
-//             (system:table:row) or a `name`; an actor: `actor` (person,
-//             position, customer, supplier, agent) and a name or key.
+//   subject:  { key?, name?, class?, actor?, scope? } or a string
+//             an instance: `class` (a confirmed class; defaults to the
+//             claim's) and a `key` (system:table:row) or a `name`; an actor:
+//             `actor` (person, position, customer, supplier, agent) and a
+//             name or key; a class itself (an aggregate observation, a need
+//             on a process): `scope: "class"` with `class` and an optional
+//             qualifying `name`. A string is a key when it parses as one,
+//             else a name, with the claim's class.
 //
 // Every error names the field it is about (`sections[1].claims[0].value`).
-// The interval rule is decision 3: a claim with no dates is valid from
-// recorded_at, open-ended, and closed by the next claim on the same attribute
-// of the same subject (`closeIntervals`). An event is a point in time.
+// Dates are ISO, or relative to the claim's recording: `recorded_at`,
+// `recorded_at+14d` (d, w, m, y). The interval rule is decision 3: a claim
+// with no dates is valid from recorded_at, open-ended, and closed by the next
+// claim on the same attribute of the same subject (`closeIntervals`). An
+// event is a point in time (`at`) unless the text gives it an end (a two-day
+// closure); events neither close nor are closed.
 // Nothing here stores anything; pure functions over plain objects.
 import { ACTOR_TYPES, CLAIM_KINDS, parseKey, STAGE_ATTRIBUTE } from "./schema.js";
 
@@ -58,6 +65,29 @@ export function isoDate(v) {
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 }
 
+const REL_RE = /^recorded_at(?:\s*\+\s*(\d{1,4})\s*([dwmy]))?$/i;
+
+/**
+ * A date as the condenser writes it, resolved against the claim's
+ * recording: ISO, or `recorded_at`, or `recorded_at+14d` (d days, w weeks,
+ * m calendar months, y years). Null when unusable.
+ */
+export function resolveDate(v, recordedAt) {
+  const m = typeof v === "string" ? REL_RE.exec(v.trim()) : null;
+  if (!m) return isoDate(v);
+  const base = isoDate(recordedAt);
+  if (!base) return null;
+  if (!m[1]) return base;
+  const d = new Date(base);
+  const n = Number(m[1]);
+  const unit = m[2].toLowerCase();
+  if (unit === "d") d.setUTCDate(d.getUTCDate() + n);
+  else if (unit === "w") d.setUTCDate(d.getUTCDate() + 7 * n);
+  else if (unit === "m") d.setUTCMonth(d.getUTCMonth() + n);
+  else d.setUTCFullYear(d.getUTCFullYear() + n);
+  return d.toISOString();
+}
+
 /** the classes a document is validated against: a list (the fixture) or a map, by name */
 export function classIndex(classes) {
   const list = Array.isArray(classes) ? classes : classes?.classes ? classes.classes : Object.values(classes ?? {});
@@ -71,28 +101,41 @@ const text = (v, max) => String(v).replace(/\s+/g, " ").trim().slice(0, max);
 
 /** what identifies a subject across claims: its key, else its class/actor and normalized name */
 export function subjectId(subject) {
+  if (subject.scope === "class") return `class|${subject.class}|${normalizeName(subject.name)}`;
   if (subject.key) return `key|${subject.key}`;
   return `${subject.class ?? subject.actor}|${normalizeName(subject.name)}`;
 }
 
-/** one subject, normalized; throws ClaimError */
-export function normalizeSubject(raw, field, classes) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ClaimError(field, "must be an object with a key or a name");
+/**
+ * One subject, normalized; throws ClaimError. `claimClass` is the claim's
+ * own class, which an instance subject takes when it names none. A string
+ * is a key when it parses as one, else a name.
+ */
+export function normalizeSubject(raw, field, classes, claimClass = null) {
+  if (typeof raw === "string") raw = parseKey(raw.trim()) ? { key: raw.trim() } : { name: raw };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ClaimError(field, "must be a key, a name, or an object with one");
   const key = raw.key === undefined || raw.key === null || raw.key === "" ? null : String(raw.key).trim();
   if (key !== null && !parseKey(key)) throw new ClaimError(`${field}.key`, `not a record key (system:table:row): ${key}`);
   const name = nonEmpty(raw.name) ? text(raw.name, 120) : null;
-  if (!key && !name) throw new ClaimError(field, "needs a key or a name");
-  const hasClass = nonEmpty(raw.class);
   const hasActor = nonEmpty(raw.actor);
-  if (hasClass === hasActor) throw new ClaimError(field, "needs exactly one of class (an instance) or actor");
+  const scope = raw.scope === undefined || raw.scope === null ? null : String(raw.scope).trim().toLowerCase();
+  if (scope !== null && scope !== "class") throw new ClaimError(`${field}.scope`, 'must be "class" when given: the subject is the class itself');
   if (hasActor) {
+    if (scope) throw new ClaimError(`${field}.scope`, "an actor is not a class");
+    if (!key && !name) throw new ClaimError(field, "needs a key or a name");
     const actor = String(raw.actor).trim().toLowerCase();
     if (!ACTOR_TYPES.includes(actor)) throw new ClaimError(`${field}.actor`, `must be one of ${ACTOR_TYPES.join(", ")}`);
-    return { key, name, class: null, actor };
+    return { key, name, class: null, actor, scope: null };
   }
-  const cls = String(raw.class).trim();
+  const cls = nonEmpty(raw.class) ? String(raw.class).trim() : claimClass;
+  if (!cls) throw new ClaimError(`${field}.class`, "an instance needs its class (or the claim one), an actor its actor");
   if (classes && !classes.has(cls)) throw new ClaimError(`${field}.class`, `not a confirmed class: ${cls}`);
-  return { key, name, class: cls, actor: null };
+  if (scope === "class") {
+    if (key) throw new ClaimError(`${field}.key`, "a class subject has no row; give a key for an instance");
+    return { key: null, name, class: cls, actor: null, scope: "class" };
+  }
+  if (!key && !name) throw new ClaimError(field, "needs a key or a name (or scope \"class\" for the class itself)");
+  return { key, name, class: cls, actor: null, scope: null };
 }
 
 /**
@@ -105,8 +148,9 @@ export function normalizeClaim(raw, field, { classes, recordedAt, recordedBy, se
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ClaimError(field, "must be an object");
   const kind = String(raw.kind ?? "").trim().toLowerCase();
   if (!CLAIM_KINDS.includes(kind)) throw new ClaimError(`${field}.kind`, `must be one of ${CLAIM_KINDS.join(", ")}`);
-  const subject = normalizeSubject(raw.subject, `${field}.subject`, classes);
-  const clsName = nonEmpty(raw.class) ? String(raw.class).trim() : subject.class;
+  const own = nonEmpty(raw.class) ? String(raw.class).trim() : null;
+  const subject = normalizeSubject(raw.subject, `${field}.subject`, classes, own);
+  const clsName = own ?? subject.class;
   if (!clsName) throw new ClaimError(`${field}.class`, "a claim about an actor must name the commitment class it bears on");
   if (classes && !classes.has(clsName)) throw new ClaimError(`${field}.class`, `not a confirmed class: ${clsName}`);
   if (subject.class && subject.class !== clsName) throw new ClaimError(`${field}.class`, `differs from the subject's class (${subject.class})`);
@@ -135,22 +179,21 @@ export function normalizeClaim(raw, field, { classes, recordedAt, recordedBy, se
   if (!nonEmpty(by)) throw new ClaimError(`${field}.recorded_by`, "needs the person");
   const date = (k) => {
     if (raw[k] === undefined || raw[k] === null || raw[k] === "") return null;
-    const d = isoDate(raw[k]);
-    if (!d) throw new ClaimError(`${field}.${k}`, `not a date: ${raw[k]}`);
+    const d = resolveDate(raw[k], recorded);
+    if (!d) throw new ClaimError(`${field}.${k}`, `not a date (ISO, recorded_at, recorded_at+14d): ${raw[k]}`);
     return d;
   };
   let validFrom;
   let validUntil;
   if (kind === "event") {
-    const at = date("at") ?? date("valid_from") ?? recorded;
-    validFrom = at;
-    validUntil = at;
-    if (raw.valid_until !== undefined && raw.valid_until !== null && date("valid_until") !== at) throw new ClaimError(`${field}.valid_until`, "an event is a point in time: give `at`, not an interval");
+    // a point in time unless the text gives it an end (a two-day closure)
+    validFrom = date("at") ?? date("valid_from") ?? recorded;
+    validUntil = date("valid_until") ?? validFrom;
   } else {
     validFrom = date("valid_from") ?? recorded;
     validUntil = date("valid_until");
-    if (validUntil && validUntil < validFrom) throw new ClaimError(`${field}.valid_until`, `ends (${validUntil}) before it starts (${validFrom})`);
   }
+  if (validUntil && validUntil < validFrom) throw new ClaimError(`${field}.valid_until`, `ends (${validUntil}) before it starts (${validFrom})`);
   return {
     ...(nonEmpty(raw.id) ? { id: String(raw.id).trim() } : {}),
     kind,
@@ -286,6 +329,7 @@ export function closeIntervals(claims) {
 /** the claims in force at `asOf` (ISO): started by then, not ended (an open end counts as in force) */
 export function inForce(claims, asOf) {
   const t = isoDate(asOf);
+  // an event is in force through its end (a point is in force at its instant); a state ends when the next one starts
   return claims.filter((c) => c.valid_from <= t && (c.valid_until === null || (c.kind === "event" ? c.valid_until >= t : c.valid_until > t)));
 }
 

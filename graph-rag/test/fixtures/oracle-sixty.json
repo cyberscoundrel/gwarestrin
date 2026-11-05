@@ -1,0 +1,1790 @@
+[
+  {
+    "id": "ux-m01",
+    "batch": "ux-m",
+    "text": "Lucas says INSPECT-2 is down until the gauge is recalibrated, so Exatron's EPP-D98 parts wait.",
+    "title": "ux-m01 inspect-2 down",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "event",
+    "instance": "mssql:dbo_Work_Center:INSPECT-2",
+    "class": "work center outage",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "mssql:dbo_Work_Center:INSPECT-2",
+        "class": "work center",
+        "attribute": "status",
+        "value": "down until gauge recalibrated",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      },
+      {
+        "kind": "state",
+        "subject": "Exatron EPP-D98 parts (job not named)",
+        "class": "customer order",
+        "attribute": "status",
+        "value": "waiting on INSPECT-2",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      },
+      {
+        "kind": "observation",
+        "subject": "mssql:dbo_Work_Center:INSPECT-2",
+        "class": "work center",
+        "attribute": "reported_by",
+        "value": "Lucas",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "floor"
+      }
+    ],
+    "notes": "Outage event on a keyed work center; the dependent order is only named by part number, so its job key must be resolved from the ERP (EPP-D98 → job). The batch bar saw merge sign-offs on EPP-D98 part things: under the model the part is an attribute of the job claim, not a node."
+  },
+  {
+    "id": "ux-m03",
+    "batch": "ux-m",
+    "text": "We should stop quoting Aetrium below cost; Karl thinks we lose money on every bearing job.",
+    "title": "ux-m03 aetrium pricing",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Customer:AETRIUM",
+    "class": "pricing policy",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "mssql:dbo_Customer:AETRIUM",
+        "class": "customer",
+        "attribute": "margin_on_bearing_jobs",
+        "value": "negative (Karl's judgement)",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "admins-only"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Customer:AETRIUM",
+        "class": "pricing policy",
+        "attribute": "quote_floor",
+        "value": "proposed: not below cost",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "A recommendation, not a decision: the commitment claim is proposed, owed by whoever sets Aetrium pricing. Fits as a conditional/proposed commitment plus a margin observation. Both admins-only (pricing and margins)."
+  },
+  {
+    "id": "ux-t01",
+    "batch": "ux-t",
+    "text": "The break room fridge gets cleaned out every Friday at 3pm.",
+    "title": "ux-t01 fridge",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "break room fridge",
+    "class": "recurring chore",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "break room fridge",
+        "class": "recurring chore",
+        "attribute": "schedule",
+        "value": "cleaned out every Friday 15:00",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A standing rule is a recurring commitment of the floor to itself; the fridge is a resource named inside the claim, not a node (admission rule)."
+  },
+  {
+    "id": "ux-t02",
+    "batch": "ux-t",
+    "text": "The holiday party is on December 19 at noon in the shop.",
+    "title": "ux-t02 holiday party",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "event",
+    "instance": "holiday party 2026",
+    "class": "company event",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "holiday party 2026",
+        "class": "company event",
+        "attribute": "scheduled_at",
+        "value": "2026-12-19T12:00 in the shop",
+        "valid_from": "2026-12-19",
+        "valid_until": "2026-12-19",
+        "authority": "floor"
+      }
+    ],
+    "notes": "A planned social event: an event with a future time. Later notes (ag14, ai14, ak14) change the date and time; each is a new claim on the same attribute closing the previous one."
+  },
+  {
+    "id": "ux-t03",
+    "batch": "ux-t",
+    "text": "Ask John F. about the assembly fixtures before the next run.",
+    "title": "ux-t03 john fixtures",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Employee:FRAJ",
+    "class": "task",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Employee:FRAJ",
+        "class": "task",
+        "attribute": "ask_about",
+        "value": "assembly fixtures, before the next run",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "An instruction to the reader is a task: a commitment the recipient (the writer's agent or team) owes, with John F. as the counterparty. John F. resolves by key (FRAJ) — the decisions test uses this exact note."
+  },
+  {
+    "id": "ux-t06",
+    "batch": "ux-t",
+    "text": "Job 3260372 for BSE needs certs with the shipment.",
+    "title": "ux-t06 bse certs",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Job:3260372",
+    "class": "customer order",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:3260372",
+        "class": "customer order",
+        "attribute": "shipment_requires",
+        "value": "certs with the shipment",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A term on an existing order, referenced by job key; BSE is the customer (BSE). t21 repeats it as a check before Friday."
+  },
+  {
+    "id": "ux-t07",
+    "batch": "ux-t",
+    "text": "Should we raise prices for Cohu next quarter? Margins on their sockets look thin.",
+    "title": "ux-t07 cohu pricing",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Customer:COHU-CA",
+    "class": "pricing decision",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "mssql:dbo_Customer:COHU-CA",
+        "class": "customer",
+        "attribute": "socket_margin",
+        "value": "thin",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "admins-only"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Customer:COHU-CA",
+        "class": "need",
+        "attribute": "question",
+        "value": "raise prices for Cohu next quarter?",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "A question is a need: a commitment with the sign flipped (an answer nobody has promised). Subject resolves to the Cohu customer row. Margin observation is admins-only; the question inherits it."
+  },
+  {
+    "id": "ux-t22",
+    "batch": "ux-t",
+    "text": "Several customers complained about late cryo-optic parts this quarter; something in how we schedule the inspection step may be off across the board.",
+    "title": "ux-t22 late cryo parts",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "residue",
+    "instance": null,
+    "class": "inspection scheduling (a class, not an instance)",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "cryo-optic customer orders (class)",
+        "class": "customer order",
+        "attribute": "late_this_quarter",
+        "value": "several complaints",
+        "valid_from": "2026-10-01",
+        "valid_until": "2026-12-31",
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "inspection step scheduling (class)",
+        "class": "need",
+        "attribute": "question",
+        "value": "is the inspection step scheduled wrong across the board?",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "RESIDUE. The observation is about a class of orders and a step of a class, not an instance; the claim shape takes an instance or actor as subject. Fits no primitive as an instance. Pattern: class-level observations and diagnostic questions (see w14). Also the 'field-dumped text' note from the sweep incident."
+  },
+  {
+    "id": "ux-v02",
+    "batch": "ux-v",
+    "text": "Per ux-z03, John Henry Foster quoted $1,840 a year for quarterly compressor service.",
+    "title": "ux-v02 compressor quote",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Vendor:JOHNH",
+    "class": "service quote",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Vendor:JOHNH",
+        "class": "service quote",
+        "attribute": "quoted_amount",
+        "value": "1,840 per year, quarterly compressor service",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "A quote is a conditional commitment by the vendor (JOHNH resolves by key). 'Per ux-z03' is a cross-reference to another note, never a thing (the code guard)."
+  },
+  {
+    "id": "ux-w05",
+    "batch": "ux-w",
+    "text": "Lucas is on overtime Saturday to clear the Exatron backlog.",
+    "title": "ux-w05 lucas overtime",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "Lucas",
+    "class": "overtime shift",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "Lucas",
+        "class": "overtime shift",
+        "attribute": "scheduled",
+        "value": "Saturday, to clear the Exatron backlog",
+        "valid_from": null,
+        "valid_until": null,
+        "authority": "Ops"
+      },
+      {
+        "kind": "state",
+        "subject": "mssql:dbo_Customer:EXATRON",
+        "class": "customer",
+        "attribute": "backlog",
+        "value": "yes",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "Lucas has no resolved employee key in the batches. The note's title was later leaked into floor notes by the master's brief (ux-av finding); under the model the shift claim is Ops and the floor never sees the title."
+  },
+  {
+    "id": "ux-w11",
+    "batch": "ux-w",
+    "text": "The Toro guy wants their PO 4471 rushed, can we move it ahead of BSE?",
+    "title": "ux-w11 toro rush",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Job:4471",
+    "class": "customer order",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:4471",
+        "class": "need",
+        "attribute": "request",
+        "value": "Toro asks to rush PO 4471 ahead of BSE",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:4471",
+        "class": "customer order",
+        "attribute": "priority",
+        "value": "proposed: ahead of BSE",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "The doc's own example key. A customer's rush request is a need (sign-flipped commitment) and, if granted, a change of the order's priority term. Fulfilment dependency on the BSE job is the structural kind the model allows."
+  },
+  {
+    "id": "ux-w14",
+    "batch": "ux-w",
+    "text": "Feels like quotes stall everywhere lately, not just Montana. Is it one person, the process, or the tooling?",
+    "title": "ux-w14 why quotes stall",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "residue",
+    "instance": null,
+    "class": "quoting (a class, not an instance)",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "quotes (class)",
+        "class": "quote",
+        "attribute": "cycle_time",
+        "value": "stalling lately, not just Montana",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "quotes (class)",
+        "class": "need",
+        "attribute": "question",
+        "value": "cause: one person, the process, or the tooling?",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "RESIDUE. Same pattern as t22: subject is the quote class, not an instance. A need with a class as subject is answerable only by a query over instances. Fits the shapes if 'subject' may be a class; fits no primitive otherwise."
+  },
+  {
+    "id": "ux-y02",
+    "batch": "ux-y",
+    "text": "HILL invoiced the gage pins at the old price, accounting is asking about it.",
+    "title": "ux-y02 hill pins invoice",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "event",
+    "instance": "HILL gage pins invoice",
+    "class": "supplier invoice",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "HILL gage pins invoice",
+        "class": "supplier invoice",
+        "attribute": "priced_at",
+        "value": "old price (before the 8% increase)",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "HILL gage pins invoice",
+        "class": "need",
+        "attribute": "question",
+        "value": "accounting asks whether the old price stands",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "An invoice event that bears on the purchase commitment (v05 recorded the 8% increase). HILL is a vendor without a resolved key in the batches."
+  },
+  {
+    "id": "ux-z01",
+    "batch": "ux-z",
+    "text": "Correction: only Exatron job 3260356 shipped Thursday. 3260357 is still waiting on FINAL INSP.",
+    "title": "ux-z01 exatron correction",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "event",
+    "instance": "mssql:dbo_Job:3260357",
+    "class": "shipment",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "mssql:dbo_Job:3260356",
+        "class": "shipment",
+        "attribute": "shipped_at",
+        "value": "Thursday (2026-10-22)",
+        "valid_from": "2026-10-22",
+        "valid_until": "2026-10-22",
+        "authority": "floor"
+      },
+      {
+        "kind": "state",
+        "subject": "mssql:dbo_Job:3260357",
+        "class": "customer order",
+        "attribute": "status",
+        "value": "waiting on FINAL INSP (correction of y05)",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A correction: two claims, one confirming 3260356 shipped and one closing y05's claim that 3260357 shipped. Contradiction is two claims on one attribute with overlapping intervals, resolved by the later recorded_at."
+  },
+  {
+    "id": "ux-z04",
+    "batch": "ux-z",
+    "text": "The old pin gauge set on INSPECT-2 is retired; the new HILL set is in use from today.",
+    "title": "ux-z04 inspect-2 new pins",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "resource",
+    "instance": "HILL pin gauge set",
+    "class": "gauge set",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "old pin gauge set (INSPECT-2)",
+        "class": "gauge set",
+        "attribute": "status",
+        "value": "retired",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      },
+      {
+        "kind": "state",
+        "subject": "new HILL pin gauge set",
+        "class": "gauge set",
+        "attribute": "in_use_at",
+        "value": "mssql:dbo_Work_Center:INSPECT-2",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "Known failure: the linker once minted 'ux-z04' itself as a thing. Two resources change state; INSPECT-2 resolves by key."
+  },
+  {
+    "id": "ux-z05",
+    "batch": "ux-z",
+    "text": "The plant is closed Thursday and Friday for Thanksgiving; shipping pickups move to Wednesday.",
+    "title": "ux-z05 thanksgiving closure",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "event",
+    "instance": "the shop",
+    "class": "closure",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "the shop",
+        "class": "closure",
+        "attribute": "closed",
+        "value": "Thanksgiving Thursday and Friday",
+        "valid_from": "2026-11-26",
+        "valid_until": "2026-11-27",
+        "authority": "floor"
+      },
+      {
+        "kind": "commitment",
+        "subject": "shipping pickups",
+        "class": "pickup schedule",
+        "attribute": "moved_to",
+        "value": "Wednesday 2026-11-25 for that week",
+        "valid_from": "2026-11-25",
+        "valid_until": "2026-11-25",
+        "authority": "floor"
+      }
+    ],
+    "notes": "A closure is a dated event on the organization; the pickup change is a one-week change to a standing commitment with the carrier."
+  },
+  {
+    "id": "ux-aa03",
+    "batch": "ux-aa",
+    "text": "Coolant concentration on CNC 1 read 4 percent, below the 6 to 8 percent target. Topped up and rechecked at 7.",
+    "title": "ux-aa03 coolant concentration",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "resource",
+    "instance": "CNC 1 coolant",
+    "class": "coolant concentration",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "CNC 1",
+        "class": "work center",
+        "attribute": "coolant_concentration",
+        "value": "4 percent (target 6 to 8)",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "Ops"
+      },
+      {
+        "kind": "event",
+        "subject": "CNC 1",
+        "class": "work center",
+        "attribute": "coolant_topped_up",
+        "value": "rechecked at 7 percent",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "Ops"
+      }
+    ],
+    "notes": "A measurement on a machine's consumable, then the corrective event. CNC 1 has no row key (the ERP has one work center 'CNC'); the machine is a thing by name."
+  },
+  {
+    "id": "ux-aa05",
+    "batch": "ux-aa",
+    "text": "Near miss at the dock: the Toyota forklift backed up without the beeper working. Nobody hurt. Beeper tagged out until maintenance replaces it.",
+    "title": "ux-aa05 forklift near miss",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "event",
+    "instance": "dock Toyota forklift",
+    "class": "safety incident",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "dock Toyota forklift",
+        "class": "safety incident",
+        "attribute": "near_miss",
+        "value": "backed up without the reverse beeper; nobody hurt",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "Ops"
+      },
+      {
+        "kind": "state",
+        "subject": "dock Toyota forklift",
+        "class": "equipment",
+        "attribute": "status",
+        "value": "beeper tagged out until maintenance replaces it",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "An incident is an event on a resource; the tag-out is the state it leaves. aa06 is the floor's report of the same incident: two sections, one event."
+  },
+  {
+    "id": "ux-aa07",
+    "batch": "ux-aa",
+    "text": "Diep's starting rate is set at 21.50 an hour with a review at 90 days. Keep this between supervisors and HR.",
+    "title": "ux-aa07 diep pay rate",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "actor",
+    "instance": "mssql:dbo_Employee:NGUD",
+    "class": "employment",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "mssql:dbo_Employee:NGUD",
+        "class": "employment",
+        "attribute": "pay_rate",
+        "value": "21.50 per hour",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "admins-only"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Employee:NGUD",
+        "class": "review",
+        "attribute": "due",
+        "value": "90-day review",
+        "valid_from": "recorded_at+90d",
+        "valid_until": "recorded_at+90d",
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "Pay is admins-only by the authority map whatever the text says; 'keep this between supervisors and HR' adds nothing. Diep resolves to the active employee NGUD, not the inactive same-named NGDT (the week-long mislink)."
+  },
+  {
+    "id": "ux-aa11",
+    "batch": "ux-aa",
+    "text": "The thing from Tuesday is sorted, no further action needed.",
+    "title": "ux-aa11 the thing from tuesday",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "residue",
+    "instance": null,
+    "class": null,
+    "claims": [],
+    "notes": "RESIDUE. 'The thing from Tuesday is sorted' is an event with a subject that exists only in the writer's head. Not a missing primitive: an unresolvable subject. Decision 2 applies: store the section with no claim, let the condenser ask."
+  },
+  {
+    "id": "ux-aa13",
+    "batch": "ux-aa",
+    "text": "October scrap rate came in at 2.1 percent, down from 3.4 in September, mostly thanks to fewer setup errors on CNC 2.",
+    "title": "ux-aa13 scrap rate october",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "actor",
+    "instance": "the shop",
+    "class": "scrap rate",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "the shop",
+        "class": "production metric",
+        "attribute": "scrap_rate",
+        "value": "2.1 percent",
+        "valid_from": "2026-10-01",
+        "valid_until": "2026-10-31",
+        "authority": "Ops"
+      },
+      {
+        "kind": "observation",
+        "subject": "CNC 2",
+        "class": "work center",
+        "attribute": "setup_errors",
+        "value": "fewer in October",
+        "valid_from": "2026-10-01",
+        "valid_until": "2026-10-31",
+        "authority": "Ops"
+      }
+    ],
+    "notes": "A monthly metric is a state of the organization over an interval. ac08 later corrects October to 2.3: a second claim on the same attribute and interval, closing this one. Subject is the organization as an actor, which the model allows."
+  },
+  {
+    "id": "ux-aa14",
+    "batch": "ux-aa",
+    "text": "Marisol Vega is out the week of November 16; Brian covers shipping sign-off that week.",
+    "title": "ux-aa14 marisol vacation",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "commitment",
+    "instance": "Marisol Vega",
+    "class": "leave",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "Marisol Vega",
+        "class": "leave",
+        "attribute": "out",
+        "value": "week of 2026-11-16",
+        "valid_from": "2026-11-16",
+        "valid_until": "2026-11-20",
+        "authority": "floor"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Employee:LOWB",
+        "class": "shift cover",
+        "attribute": "covers",
+        "value": "shipping sign-off for Marisol",
+        "valid_from": "2026-11-16",
+        "valid_until": "2026-11-20",
+        "authority": "floor"
+      }
+    ],
+    "notes": "Leave and cover are two commitments with the same interval. ab08, ac09 and ad07 each move or cancel them: pure interval edits on the same attributes."
+  },
+  {
+    "id": "ux-ab02",
+    "batch": "ux-ab",
+    "text": "The CNC 2 warm-up problem is a worn spindle bearing, not the warm-up routine. Diep heard it grinding at low RPM. Replacement bearing ordered from the machine builder, about 10 days out; run CNC 2 at reduced speed until then.",
+    "title": "ux-ab02 cnc 2 spindle bearing",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "event",
+    "instance": "CNC 2",
+    "class": "machine repair",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "CNC 2",
+        "class": "work center",
+        "attribute": "fault",
+        "value": "worn spindle bearing (not the warm-up routine)",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      },
+      {
+        "kind": "commitment",
+        "subject": "CNC 2 spindle bearing order",
+        "class": "purchase",
+        "attribute": "ordered_from",
+        "value": "the machine builder, about 10 days",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at+10d",
+        "authority": "floor"
+      },
+      {
+        "kind": "state",
+        "subject": "CNC 2",
+        "class": "work center",
+        "attribute": "operating_limit",
+        "value": "reduced speed until the bearing is fitted",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A diagnosis (observation), a purchase (commitment) and an operating limit (state) in one note: three claims at one sensitivity. The diagnosis closes aa01's warm-up explanation. Diep resolves to NGUD."
+  },
+  {
+    "id": "ux-ab05",
+    "batch": "ux-ab",
+    "text": "Exatron placed the repeat order for job 3260357, 1,200 pieces, due mid December. Buy the 4140 bar before the December 1 price increase.",
+    "title": "ux-ab05 exatron repeat order",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Job:3260357",
+    "class": "customer order",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:3260357",
+        "class": "customer order",
+        "attribute": "repeat_order",
+        "value": "1,200 pieces due mid December",
+        "valid_from": "recorded_at",
+        "valid_until": "2026-12-15",
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "4140 bar purchase",
+        "class": "purchase",
+        "attribute": "buy_before",
+        "value": "2026-12-01 price increase",
+        "valid_from": "recorded_at",
+        "valid_until": "2026-12-01",
+        "authority": "Ops"
+      }
+    ],
+    "notes": "Known failure: the grader restricted an order quantity because it read like money. Under the authority map quantity is an order attribute at Ops; price would be admins-only. The repeat order is a new instance of the order class keyed on the same job."
+  },
+  {
+    "id": "ux-ab06",
+    "batch": "ux-ab",
+    "text": "Posted two second-shift CNC operator openings to cover the gap that left CNC 3 idle. Diep will train whoever starts first.",
+    "title": "ux-ab06 second shift hiring",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "commitment",
+    "instance": "second-shift CNC operator openings",
+    "class": "hire",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "second-shift CNC operator openings",
+        "class": "hire",
+        "attribute": "posted",
+        "value": "two openings",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Employee:NGUD",
+        "class": "training",
+        "attribute": "trains",
+        "value": "whoever starts first",
+        "valid_from": null,
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A job posting is an open hiring commitment; hiring is admins-only on the topic list, but the posting itself is public to the floor. Authority on the opening: Ops (the fact of hiring), the candidates and offers later: admins-only."
+  },
+  {
+    "id": "ux-ab11",
+    "batch": "ux-ab",
+    "text": "Talked about the usual stuff at the Thursday meeting. Nothing new.",
+    "title": "ux-ab11 meeting notes",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "event",
+    "instance": "Thursday meeting",
+    "class": "meeting",
+    "claims": [],
+    "notes": "An event with no claims: the meeting happened and changed nothing. Fits 'event' trivially and earns no node (admission rules). Counted as fitting, with zero claims; the condenser should emit nothing."
+  },
+  {
+    "id": "ux-ac13",
+    "batch": "ux-ac",
+    "text": "Rack C is now two racks, C1 for titanium and C2 for aluminum. The Brightline titanium bar is in C1.",
+    "title": "ux-ac13 rack c split",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "resource",
+    "instance": "rack C",
+    "class": "material rack",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "rack C1",
+        "class": "material rack",
+        "attribute": "holds",
+        "value": "titanium",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      },
+      {
+        "kind": "state",
+        "subject": "rack C2",
+        "class": "material rack",
+        "attribute": "holds",
+        "value": "aluminum",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      },
+      {
+        "kind": "state",
+        "subject": "Brightline titanium bar",
+        "class": "material stock",
+        "attribute": "located_at",
+        "value": "rack C1",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "Racks are resources with contents as state. ad15 contradicts this a batch later."
+  },
+  {
+    "id": "ux-ad03",
+    "batch": "ux-ad",
+    "text": "Tomas Reyes finished his first week on CNC 3. Diep says he can run setups on his own from next Monday.",
+    "title": "ux-ad03 tomas first week",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "actor",
+    "instance": "Tomas Reyes",
+    "class": "training",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "Tomas Reyes",
+        "class": "training",
+        "attribute": "completed",
+        "value": "first week on CNC 3",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "floor"
+      },
+      {
+        "kind": "state",
+        "subject": "Tomas Reyes",
+        "class": "qualification",
+        "attribute": "can_run_setups_alone",
+        "value": "CNC 3 from next Monday (Diep's judgement)",
+        "valid_from": null,
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A qualification is an actor attribute set by a judgement no system records (admission rule 3). Tomas has no employee key in the batches."
+  },
+  {
+    "id": "ux-ad15",
+    "batch": "ux-ad",
+    "text": "Rack C1 holds the aluminum and C2 holds the titanium.",
+    "title": "ux-ad15 rack c contents",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "resource",
+    "instance": "rack C",
+    "class": "material rack",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "rack C1",
+        "class": "material rack",
+        "attribute": "holds",
+        "value": "aluminum",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      },
+      {
+        "kind": "state",
+        "subject": "rack C2",
+        "class": "material rack",
+        "attribute": "holds",
+        "value": "titanium",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "Contradicts ac13 on both attributes with overlapping intervals. The model's contradiction is exactly this query; which claim wins is a person's call, not the linker's."
+  },
+  {
+    "id": "ux-ae15",
+    "batch": "ux-ae",
+    "text": "With the new coolant the dosing changes to 6 percent instead of 5.",
+    "title": "ux-ae15 coolant dosing",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "resource",
+    "instance": "coolant dosing",
+    "class": "coolant dosing",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "all machines",
+        "class": "coolant dosing",
+        "attribute": "concentration_setpoint",
+        "value": "6 percent (was 5) with the new coolant",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A setpoint is a state on a resource shared by machines. aa03 said the target was 6 to 8; af11 confirms 6 on all machines."
+  },
+  {
+    "id": "ux-af04",
+    "batch": "ux-af",
+    "text": "Some people are asking whether there will be layoffs after the Exatron burr problem. There are no plans for layoffs.",
+    "title": "ux-af04 layoff rumor",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "actor",
+    "instance": "the shop",
+    "class": "layoff",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "the floor",
+        "class": "rumor",
+        "attribute": "asking_about",
+        "value": "layoffs after the Exatron burr problem",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "Ops"
+      },
+      {
+        "kind": "state",
+        "subject": "the shop",
+        "class": "layoff",
+        "attribute": "plan",
+        "value": "none",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "A rumor is an observation about the floor; the denial is a state of the organization. aq10 later records a contingent plan admins-only: that does not contradict 'no plans' at Ops, which is the case the authority rule has to carry."
+  },
+  {
+    "id": "ux-ag03",
+    "batch": "ux-ag",
+    "text": "Exatron sent a new order for 500 floaters, job 3260410.",
+    "title": "ux-ag03 exatron reorder",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Job:3260410",
+    "class": "customer order",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:3260410",
+        "class": "customer order",
+        "attribute": "placed",
+        "value": "500 floaters for Exatron",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A new order instance keyed on its job number. The job row may not exist in the connected ERP (the batch invented it); the key is still the reference."
+  },
+  {
+    "id": "ux-ai04",
+    "batch": "ux-ai",
+    "text": "Brightline agreed to hold the current unit price through Q2 if we deliver the blanks by March.",
+    "title": "ux-ai04 brightline price hold",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "Brightline Medical",
+    "class": "price hold",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "Brightline Medical",
+        "class": "price hold",
+        "attribute": "unit_price_held",
+        "value": "current price through Q2, conditional on delivery by March",
+        "valid_from": "2027-04-01",
+        "valid_until": "2027-06-30",
+        "authority": "admins-only"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:3260455",
+        "class": "customer order",
+        "attribute": "delivery_condition",
+        "value": "by 2027-03-31",
+        "valid_from": "recorded_at",
+        "valid_until": "2027-03-31",
+        "authority": "Ops"
+      }
+    ],
+    "notes": "A conditional commitment by the customer, with our delivery as the condition: the quote-shaped case the doc names. Pricing is admins-only; the delivery date is an order term at Ops. Brightline has no customer key (invented by the batches)."
+  },
+  {
+    "id": "ux-ai06",
+    "batch": "ux-ai",
+    "text": "Saturday overtime is paid at time and a half; payroll needs the hours by Monday noon.",
+    "title": "ux-ai06 overtime pay rate",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "Saturday overtime",
+    "class": "overtime pay policy",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "Saturday overtime",
+        "class": "overtime pay policy",
+        "attribute": "rate",
+        "value": "time and a half",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "second shift",
+        "class": "payroll submission",
+        "attribute": "hours_due",
+        "value": "Monday noon",
+        "valid_from": null,
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "A pay policy is a standing commitment of the organization to its people. The rate multiplier is policy (Ops), not an individual's pay (admins-only); the ak06 fix drew the same line."
+  },
+  {
+    "id": "ux-aj02",
+    "batch": "ux-aj",
+    "text": "Exatron moved the floater due date to December 12 and will take partial shipments.",
+    "title": "ux-aj02 floater due date moved",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Job:3260410",
+    "class": "customer order",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:3260410",
+        "class": "customer order",
+        "attribute": "due",
+        "value": "2026-12-12 (moved)",
+        "valid_from": "recorded_at",
+        "valid_until": "2026-12-12",
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:3260410",
+        "class": "customer order",
+        "attribute": "partial_shipments",
+        "value": "accepted",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "A change of terms on an existing commitment: two attributes edited, no new instance. Which job is implied (3260410, the 500 floaters) rather than stated; the condenser resolves it from the prior claim."
+  },
+  {
+    "id": "ux-aj09",
+    "batch": "ux-aj",
+    "text": "The forklift has a slow leak in the front left tire.",
+    "title": "ux-aj09 forklift tire leak",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "resource",
+    "instance": "forklift",
+    "class": "equipment fault",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "forklift",
+        "class": "equipment",
+        "attribute": "fault",
+        "value": "slow leak in the front left tire",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "Known failure: the linker minted 'front left tire (part)'. The tire is a value inside the claim; the forklift is the node. ak05 closes it (patched)."
+  },
+  {
+    "id": "ux-aj10",
+    "batch": "ux-aj",
+    "text": "Tomas passed his 90-day review early.",
+    "title": "ux-aj10 tomas review passed",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "event",
+    "instance": "Tomas Reyes",
+    "class": "review",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "Tomas Reyes",
+        "class": "review",
+        "attribute": "result",
+        "value": "passed 90-day review, early",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "Fulfils the review commitment from af14. An individual's review result is personnel: admins-only (grader 3/3, judged OK in the batches). The event closes the review commitment."
+  },
+  {
+    "id": "ux-ak03",
+    "batch": "ux-ak",
+    "text": "Shipped the first 250 Exatron floaters this afternoon.",
+    "title": "ux-ak03 first floaters shipped",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "event",
+    "instance": "mssql:dbo_Job:3260410",
+    "class": "shipment",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "mssql:dbo_Job:3260410",
+        "class": "shipment",
+        "attribute": "shipped",
+        "value": "first 250 of 500 floaters",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "floor"
+      },
+      {
+        "kind": "state",
+        "subject": "mssql:dbo_Job:3260410",
+        "class": "customer order",
+        "attribute": "remaining",
+        "value": "250",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A partial fulfilment event on the order; the partial-shipment term from aj02 is what makes it a fulfilment and not a breach."
+  },
+  {
+    "id": "ux-ak06",
+    "batch": "ux-ak",
+    "text": "Payroll switches to biweekly from January.",
+    "title": "ux-ak06 payroll biweekly",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "payroll",
+    "class": "payroll schedule",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "payroll",
+        "class": "payroll schedule",
+        "attribute": "frequency",
+        "value": "biweekly",
+        "valid_from": "2027-01-01",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "Known failure: graded admins-only 3/3 on the word 'payroll' (fixed fe7bff3). The schedule is policy at Ops; rates and raises are what is admins-only. The authority map by attribute is the fix made structural."
+  },
+  {
+    "id": "ux-al04",
+    "batch": "ux-al",
+    "text": "Brightline's PO came in for 2,000 blanks at the 41 price, job 3260455.",
+    "title": "ux-al04 brightline po received",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Job:3260455",
+    "class": "customer order",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:3260455",
+        "class": "customer order",
+        "attribute": "placed",
+        "value": "2,000 blanks for Brightline Medical",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:3260455",
+        "class": "customer order",
+        "attribute": "unit_price",
+        "value": "41",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "One note, two sensitivities: the order (Ops) and its price (admins-only). The reason a summary is several claims, not one blob."
+  },
+  {
+    "id": "ux-am02",
+    "batch": "ux-am",
+    "text": "Brightline blanks run at about a 22 percent margin at 41 a piece.",
+    "title": "ux-am02 brightline margin",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Job:3260455",
+    "class": "customer order",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "mssql:dbo_Job:3260455",
+        "class": "customer order",
+        "attribute": "margin",
+        "value": "about 22 percent at 41 a piece",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "Margin on an order: admins-only (pricing and margins). Expected admins-only in the batch and placed so."
+  },
+  {
+    "id": "ux-am06",
+    "batch": "ux-am",
+    "text": "Andre from Staffmark didn't work out; we're ending his assignment Friday.",
+    "title": "ux-am06 andre let go",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "actor",
+    "instance": "Andre (Staffmark temp)",
+    "class": "temp assignment",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "Andre (Staffmark temp)",
+        "class": "temp assignment",
+        "attribute": "ended",
+        "value": "Friday; did not work out",
+        "valid_from": null,
+        "valid_until": null,
+        "authority": "admins-only"
+      },
+      {
+        "kind": "state",
+        "subject": "Andre (Staffmark temp)",
+        "class": "temp assignment",
+        "attribute": "status",
+        "value": "ended",
+        "valid_from": null,
+        "valid_until": null,
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "A dismissal-shaped event on a temp's assignment (hiring and dismissal): admins-only. The assignment is the commitment with Staffmark; the event breaks it early."
+  },
+  {
+    "id": "ux-am10",
+    "batch": "ux-am",
+    "text": "Two coolant quotes came in: Master Fluid and Blaser, both cheaper than Hangsterfer's.",
+    "title": "ux-am10 coolant quotes in",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "coolant supply",
+    "class": "supplier quote",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "Master Fluid",
+        "class": "supplier quote",
+        "attribute": "received",
+        "value": "coolant quote, cheaper than Hangsterfer's",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      },
+      {
+        "kind": "commitment",
+        "subject": "Blaser",
+        "class": "supplier quote",
+        "attribute": "received",
+        "value": "coolant quote, cheaper than Hangsterfer's",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "Known failure: grader wobble (1/3) sent it admins-only. Two vendor quotes with no figures: supplier quotes are Ops; the amounts, if stated, would be the admins-only attribute. Two instances of the quote class."
+  },
+  {
+    "id": "ux-am12",
+    "batch": "ux-am",
+    "text": "Tomas strained his back lifting a bundle; he's on light duty for two weeks.",
+    "title": "ux-am12 tomas injury",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "actor",
+    "instance": "Tomas Reyes",
+    "class": "health",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "Tomas Reyes",
+        "class": "injury",
+        "attribute": "strained_back",
+        "value": "lifting a bundle",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "admins-only"
+      },
+      {
+        "kind": "state",
+        "subject": "Tomas Reyes",
+        "class": "work restriction",
+        "attribute": "light_duty",
+        "value": "two weeks",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at+14d",
+        "authority": "Ops"
+      }
+    ],
+    "notes": "The injury is health (admins-only). The resulting restriction is a scheduling fact the floor needs: am15 is the floor acting on it. The split is the point: one event, two claims, two authorities."
+  },
+  {
+    "id": "ux-am15",
+    "batch": "ux-am",
+    "text": "Tomas is on the deburr bench this week instead of the saw.",
+    "title": "ux-am15 light duty tomas",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "actor",
+    "instance": "Tomas Reyes",
+    "class": "work assignment",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "Tomas Reyes",
+        "class": "work assignment",
+        "attribute": "station",
+        "value": "deburr bench instead of the saw",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at+7d",
+        "authority": "floor"
+      }
+    ],
+    "notes": "Known failure: landed at Ops though the grader kept it floor 3/3, cause untraced. A floor assignment is floor authority; it refers to the restriction in am12 without revealing the injury. The deburr bench is a place inside the claim, not a node (a worker minted and later deleted one)."
+  },
+  {
+    "id": "ux-an02",
+    "batch": "ux-an",
+    "text": "We're raising Exatron's floater price to 15.10 from January; they haven't been told yet.",
+    "title": "ux-an02 exatron price increase",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Customer:EXATRON",
+    "class": "price change",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Customer:EXATRON",
+        "class": "price change",
+        "attribute": "floater_unit_price",
+        "value": "15.10 from January; not yet told",
+        "valid_from": "2027-01-01",
+        "valid_until": null,
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "A price change not yet communicated: pricing (admins-only) and a negotiation not yet announced. aq02 records acceptance, which is the event that makes it a term of the next order."
+  },
+  {
+    "id": "ux-an15",
+    "batch": "ux-an",
+    "text": "Kayla wants to get her forklift certification.",
+    "title": "ux-an15 kayla forklift",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "commitment",
+    "instance": "Kayla",
+    "class": "need",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "Kayla",
+        "class": "need",
+        "attribute": "wants",
+        "value": "forklift certification",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A wish is a need: a request for a training event nobody has promised. ao10 fulfils it (signed up for the class on 11-20). Fits as the sign-flipped commitment."
+  },
+  {
+    "id": "ux-ao04",
+    "batch": "ux-ao",
+    "text": "Kayla's temp assignment is extended through January.",
+    "title": "ux-ao04 kayla extended",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "Kayla",
+    "class": "temp assignment",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "Kayla",
+        "class": "temp assignment",
+        "attribute": "ends",
+        "value": "extended through January",
+        "valid_from": "recorded_at",
+        "valid_until": "2027-01-31",
+        "authority": "Ops"
+      }
+    ],
+    "notes": "Grader 5/5 'personnel' → admins-only, accepted in the batch as a consistent call. By the authority map an assignment's duration is scheduling at Ops; the offer and pay (at04) are what is admins-only. The oracle states the map's answer."
+  },
+  {
+    "id": "ux-ao12",
+    "batch": "ux-ao",
+    "text": "Exatron is disputing the last invoice; our lawyer is looking at it.",
+    "title": "ux-ao12 exatron dispute",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "event",
+    "instance": "mssql:dbo_Customer:EXATRON",
+    "class": "invoice dispute",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "mssql:dbo_Customer:EXATRON",
+        "class": "invoice dispute",
+        "attribute": "opened",
+        "value": "last invoice disputed; lawyer reviewing",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "Legal and disputes: admins-only. ap02 closes it (dropped, paying in full). The invoice is the commitment the dispute threatens."
+  },
+  {
+    "id": "ux-aq01",
+    "batch": "ux-aq",
+    "text": "Diep is running CNC 5 this afternoon.",
+    "title": "ux-aq01 diep on cnc 5",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "actor",
+    "instance": "mssql:dbo_Employee:NGUD",
+    "class": "work assignment",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "mssql:dbo_Employee:NGUD",
+        "class": "work assignment",
+        "attribute": "station",
+        "value": "CNC 5 this afternoon",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at+1d",
+        "authority": "floor"
+      }
+    ],
+    "notes": "Known failure: the auto-linker kept linking the inactive same-named Diep (NGDT) until the node was renamed. Resolution by key and class first (an active employee on the floor) makes the choice mechanical."
+  },
+  {
+    "id": "ux-aq07",
+    "batch": "ux-aq",
+    "text": "Ordered three saw blades for the Hyd-Mech.",
+    "title": "ux-aq07 saw blades ordered",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "commitment",
+    "instance": "Hyd-Mech saw blades order",
+    "class": "purchase",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "Hyd-Mech saw blades order",
+        "class": "purchase",
+        "attribute": "ordered",
+        "value": "three saw blades for the Hyd-Mech",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "Minor flake: not linked to the Hyd-Mech supplier thing. The purchase is the commitment; the saw (a resource) is what the blades are for, so the link is a relation on the claim, not a judgement call."
+  },
+  {
+    "id": "ux-aq10",
+    "batch": "ux-aq",
+    "text": "If the Exatron volume drops we'd lay off two people in March; this stays with the owners.",
+    "title": "ux-aq10 layoff plan",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "the shop",
+    "class": "layoff",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "the shop",
+        "class": "layoff",
+        "attribute": "contingent_plan",
+        "value": "lay off two people in March if Exatron volume drops",
+        "valid_from": "2027-03-01",
+        "valid_until": null,
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "A contingent internal plan: a conditional commitment by the owners, like a quote. Admins-only (hiring and dismissal, and 'stays with the owners'). af04's 'no plans' at Ops stays true for the floor."
+  },
+  {
+    "id": "ux-aq12",
+    "batch": "ux-aq",
+    "text": "We're meeting Corvane Medical about a possible order next week.",
+    "title": "ux-aq12 new customer meeting",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "event",
+    "instance": "Corvane Medical",
+    "class": "prospect meeting",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "Corvane Medical",
+        "class": "prospect meeting",
+        "attribute": "scheduled",
+        "value": "next week, about a possible order",
+        "valid_from": null,
+        "valid_until": null,
+        "authority": "Ops"
+      },
+      {
+        "kind": "state",
+        "subject": "Corvane Medical",
+        "class": "customer",
+        "attribute": "status",
+        "value": "prospect",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "Grader 5/5 'deals not yet announced' → admins-only, accepted in the batch. A first meeting with a prospect is pipeline at Ops under the map; the deal's terms (price, size) are what would be admins-only. Corvane is the thing later notes must reuse (ar02)."
+  },
+  {
+    "id": "ux-ar02",
+    "batch": "ux-ar",
+    "text": "Corvane Medical wants 20 sample parts before they place an order.",
+    "title": "ux-ar02 corvane wants samples",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "commitment",
+    "instance": "Corvane Medical",
+    "class": "sample order",
+    "claims": [
+      {
+        "kind": "commitment",
+        "subject": "Corvane Medical",
+        "class": "sample order",
+        "attribute": "requested",
+        "value": "20 sample parts before placing an order",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "Known expectation: must reuse the existing Corvane thing, not mint a second. A sample request is a commitment class of its own that precedes the order (as02 quotes it, at02 accepts, au01 runs it)."
+  },
+  {
+    "id": "ux-as08",
+    "batch": "ux-as",
+    "text": "The holiday schedule is posted next to the time clock.",
+    "title": "ux-as08 holiday schedule posted",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "event",
+    "instance": "holiday schedule",
+    "class": "notice",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "holiday schedule",
+        "class": "notice",
+        "attribute": "posted_at",
+        "value": "next to the time clock",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "Known failure: the linker minted 'holiday schedule (other)' and 'time clock (machine)'. The schedule is a document (af12/an04 hold its content), the time clock a place inside the claim. One posting event, nothing minted."
+  },
+  {
+    "id": "ux-at03",
+    "batch": "ux-at",
+    "text": "The break room coffee maker quit again.",
+    "title": "ux-at03 coffee maker broken",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "resource",
+    "instance": "break room coffee maker",
+    "class": "equipment fault",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "break room coffee maker",
+        "class": "equipment",
+        "attribute": "status",
+        "value": "broken again",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "A worker minted 'coffee maker (machine)' here (judged noise). Under admission rule 1 it qualifies only weakly (au03 references it again). Fits as a resource state either way."
+  },
+  {
+    "id": "ux-au04",
+    "batch": "ux-au",
+    "text": "Kayla accepted the permanent job; she starts as permanent December 1.",
+    "title": "ux-au04 kayla accepted",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "actor",
+    "instance": "Kayla",
+    "class": "employment",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "Kayla",
+        "class": "hire",
+        "attribute": "accepted",
+        "value": "permanent job offer",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "admins-only"
+      },
+      {
+        "kind": "state",
+        "subject": "Kayla",
+        "class": "employment",
+        "attribute": "status",
+        "value": "permanent from 2026-12-01",
+        "valid_from": "2026-12-01",
+        "valid_until": null,
+        "authority": "Ops"
+      }
+    ],
+    "notes": "Known failure: this note's title was copied into floor notes from the master's brief (the ux-av leak). The acceptance event is hiring (admins-only, with the 20/hour from at04); the status from December 1 is what the floor may see."
+  },
+  {
+    "id": "ux-au13",
+    "batch": "ux-au",
+    "text": "The new mats at CNC 3 are a big help.",
+    "title": "ux-au13 mats helping",
+    "writer": "bob",
+    "origin_position": "floor",
+    "primitive": "resource",
+    "instance": "anti-fatigue mats at CNC 3",
+    "class": "consumable",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "anti-fatigue mats at CNC 3",
+        "class": "consumable",
+        "attribute": "effect",
+        "value": "a big help (floor's judgement)",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "An opinion about a resource is an observation with a judgement as value. Thin, but it fits; it earns no node of its own."
+  },
+  {
+    "id": "ux-av06",
+    "batch": "ux-av",
+    "text": "The owner plans to retire in two years and sell the shop; nobody hears this yet.",
+    "title": "ux-av06 owner retiring",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "actor",
+    "instance": "the owner",
+    "class": "ownership",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "the owner",
+        "class": "ownership",
+        "attribute": "intention",
+        "value": "retire in two years and sell the shop",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at+2y",
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "An intention is a state of an actor (what they plan), not a commitment (nothing is owed yet). Admins-only: a deal not announced and asked to keep quiet."
+  },
+  {
+    "id": "ux-aw10",
+    "batch": "ux-aw",
+    "text": "Diep's doctor note says no lifting over 20 pounds for two weeks.",
+    "title": "ux-aw10 diep lifting limit",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "primitive": "actor",
+    "instance": "mssql:dbo_Employee:NGUD",
+    "class": "work restriction",
+    "claims": [
+      {
+        "kind": "state",
+        "subject": "mssql:dbo_Employee:NGUD",
+        "class": "work restriction",
+        "attribute": "no_lifting_over",
+        "value": "20 pounds, two weeks (doctor's note)",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at+14d",
+        "authority": "Ops"
+      },
+      {
+        "kind": "event",
+        "subject": "mssql:dbo_Employee:NGUD",
+        "class": "health",
+        "attribute": "doctor_note",
+        "value": "received",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "admins-only"
+      }
+    ],
+    "notes": "Expected admins-only in ux-aw. The restriction is what scheduling needs (Ops); the medical reason is health (admins-only). Same split as am12."
+  }
+]

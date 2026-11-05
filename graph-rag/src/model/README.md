@@ -5,8 +5,8 @@ The shapes every stream of the organization model codes against
 modules, pure functions over plain objects, no database, no model calls, no
 dependency beyond Node and `positions.js`. Tests in `test/model-*.test.js`;
 fixtures every stream shares in `test/fixtures/` (`classes.json`,
-`policy.json`, `positions.json`; the sixty-note oracle lands there as
-`oracle-sixty.json`).
+`policy.json`, `positions.json`, and the sixty-note oracle
+`oracle-sixty.json`, whose 95 claims all validate: `test/oracle.test.js`).
 
 ## Shapes
 
@@ -33,13 +33,18 @@ in = the subject thing): one primitive bound to a subject with an interval.
   valid_from, valid_until | null, recorded_at, recorded_by, section }
 ```
 
-A subject is an instance (`class`, with a `key` or a `name`) or an actor
-(`actor`: person | position | customer | supplier | agent, with a name or
-key). A claim about an actor still names the class it bears on (a pay claim
-about Tomas is `hires` / `pay`). `attribute` is snake_case; `stage` is the
-attribute every class has and its value must be one of the class's stages.
-`value` is stored as a string (numbers and booleans JSON-encoded), with
-`value_num` when it is a number. Dates are ISO; a date without a zone is
+A subject is an instance (`class`, defaulting to the claim's, with a `key`
+or a `name`), an actor (`actor`: person | position | customer | supplier |
+agent, with a name or key), or the class itself (`scope: "class"`, an
+optional qualifying `name`: an aggregate observation or a need on a
+process, which is what the oracle's residue needed). The condenser may give
+a subject as a string: a key when it parses as one, else a name. A claim
+about an actor still names the class it bears on (a pay claim about Tomas
+is `hires` / `pay`). `attribute` is snake_case; `stage` is the attribute
+every class has and its value must be one of the class's stages. `value` is
+stored as a string (numbers and booleans JSON-encoded), with `value_num`
+when it is a number. Dates are ISO, or relative to the recording
+(`recorded_at`, `recorded_at+14d`; d, w, m, y); a date without a zone is
 UTC; a date alone is its start.
 
 **Document** (what the condenser emits; `claims.normalizeDocument`):
@@ -79,8 +84,9 @@ admin edits. `classes[name].authority`, `classes[name].attributes[attr]`,
   claim's `valid_from` (`claims.closeIntervals`). Two claims starting at the
   same instant both stay open; with different values they are a
   contradiction (`claims.overlaps`), never a succession. An event is a point
-  (`valid_from = valid_until = at`) and neither closes nor is closed. An
-  explicit `valid_until` is kept.
+  (`valid_from = valid_until = at`) unless the text gives it an end (a
+  two-day closure); it neither closes nor is closed. An explicit
+  `valid_until` is kept.
 - **State is a query.** `claims.stateOf(claims, subject, asOf)` is the
   current state; the latest `valid_from` in force wins. Contradiction is
   two overlapping claims with different values, after closing.

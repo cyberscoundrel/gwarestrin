@@ -7,6 +7,7 @@ import {
   closeIntervals,
   inForce,
   isoDate,
+  resolveDate,
   normalizeAttribute,
   normalizeClaim,
   normalizeDocument,
@@ -55,7 +56,7 @@ test("a condensed document normalizes: on record, sections indexed, claims carry
   assert.deepEqual(doc.sections.map((s) => s.index), [0, 1]);
   const claims = claimsOf(doc);
   assert.equal(claims.length, 5);
-  assert.deepEqual(claims[0].subject, { key: "mssql:dbo_Job:4471", name: null, class: "jobs", actor: null });
+  assert.deepEqual(claims[0].subject, { key: "mssql:dbo_Job:4471", name: null, class: "jobs", actor: null, scope: null });
   assert.equal(claims[0].class, "jobs");
   assert.equal(claims[0].recorded_by, "bob");
   assert.equal(claims[0].recorded_at, NOW);
@@ -63,7 +64,7 @@ test("a condensed document normalizes: on record, sections indexed, claims carry
   assert.equal(claims[3].value, "120");
   assert.equal(claims[3].value_num, 120);
   assert.equal(claims[4].section, 1);
-  assert.deepEqual(claims[4].subject, { key: null, name: "Hallen", class: null, actor: "supplier" });
+  assert.deepEqual(claims[4].subject, { key: null, name: "Hallen", class: null, actor: "supplier", scope: null });
 });
 
 test("decision 3: no dates means valid from recorded_at, open-ended; an event is a point", () => {
@@ -132,8 +133,10 @@ test("errors name the field", () => {
   bad((d) => (d.sections[0].claims[0].kind = "decision"), "sections[0].claims[0].kind", /commitment, event, state, observation/);
   bad((d) => (d.sections[0].claims[0].subject = { key: "Job 4471", class: "jobs" }), "sections[0].claims[0].subject.key", /system:table:row/);
   bad((d) => (d.sections[0].claims[0].subject = { class: "jobs" }), "sections[0].claims[0].subject", /key or a name/);
-  bad((d) => (d.sections[0].claims[0].subject = { name: "Job 4471" }), "sections[0].claims[0].subject", /class .* or actor/);
-  bad((d) => (d.sections[0].claims[0].subject = { name: "Job 4471", class: "jobs", actor: "person" }), "sections[0].claims[0].subject", /exactly one/);
+  bad((d) => (d.sections[0].claims[0].subject = { name: "Job 4471" }), "sections[0].claims[0].subject.class", /needs its class/);
+  bad((d) => (d.sections[0].claims[0].subject = { name: "Tomas", actor: "person", scope: "class" }), "sections[0].claims[0].subject.scope", /actor is not a class/);
+  bad((d) => (d.sections[0].claims[0].subject = { key: "mssql:dbo_Job:4471", class: "jobs", scope: "class" }), "sections[0].claims[0].subject.key", /class subject has no row/);
+  bad((d) => (d.sections[0].claims[0].subject = { class: "jobs", scope: "instance" }), "sections[0].claims[0].subject.scope", /must be "class"/);
   bad((d) => (d.sections[0].claims[0].subject.class = "schedules"), "sections[0].claims[0].subject.class", /not a confirmed class/);
   bad((d) => (d.sections[0].claims[0].class = "orders"), "sections[0].claims[0].class", /differs from the subject/);
   bad((d) => delete d.sections[1].claims[0].class, "sections[1].claims[0].class", /actor must name the commitment class/);
@@ -143,7 +146,7 @@ test("errors name the field", () => {
   bad((d) => (d.sections[0].claims[3].value = {}), "sections[0].claims[3].value", /string, number or boolean/);
   bad((d) => (d.sections[0].claims[2].valid_until = "2026-11-03"), "sections[0].claims[2].valid_until", /ends .* before it starts/);
   bad((d) => (d.sections[0].claims[2].valid_from = "next week"), "sections[0].claims[2].valid_from", /not a date/);
-  bad((d) => (d.sections[1].claims[0].valid_until = "2026-11-06"), "sections[1].claims[0].valid_until", /point in time/);
+  bad((d) => (d.sections[1].claims[0].valid_until = "2026-11-03"), "sections[1].claims[0].valid_until", /ends .* before it starts/);
 });
 
 test("validateDocument reports every claim's problem at once; a sound document has none", () => {
@@ -163,6 +166,34 @@ test("without a class set any class name passes (a stream that has not loaded th
   raw.sections[0].claims[0].subject.class = "schedules";
   raw.sections[0].claims[0].value = "whatever";
   assert.equal(claimsOf(normalizeDocument(raw)).length, 5);
+});
+
+test("the condenser's shorthand: a string subject, the claim's class, relative dates, events with an end", () => {
+  const idx = new Map(classes.classes.map((x) => [x.name, x]));
+  const ctx = { classes: idx, recordedAt: NOW, recordedBy: "bob" };
+  const keyed = normalizeClaim({ kind: "state", subject: "mssql:dbo_Job:4471", class: "jobs", attribute: "machine", value: "CNC 2" }, "c", ctx);
+  assert.deepEqual(keyed.subject, { key: "mssql:dbo_Job:4471", name: null, class: "jobs", actor: null, scope: null });
+  const named = normalizeClaim({ kind: "state", subject: "rack C1", class: "maintenance", attribute: "holds", value: "4140 bar" }, "c", ctx);
+  assert.deepEqual(named.subject, { key: null, name: "rack C1", class: "maintenance", actor: null, scope: null });
+  assert.throws(() => normalizeClaim({ kind: "state", subject: "rack C1", attribute: "holds", value: "x" }, "c", ctx), (e) => e.field === "c.subject.class");
+  // the class itself as subject: an aggregate observation or a need on a process (the oracle's residue)
+  const agg = normalizeClaim({ kind: "observation", subject: { scope: "class", name: "cryo-optic orders" }, class: "orders", attribute: "late_this_quarter", value: "several" }, "c", ctx);
+  assert.deepEqual(agg.subject, { key: null, name: "cryo-optic orders", class: "orders", actor: null, scope: "class" });
+  assert.equal(subjectId(agg.subject), "class|orders|cryo optic orders");
+  // dates relative to the recording
+  const rel = normalizeClaim({ kind: "commitment", subject: "mssql:dbo_Job:4471", class: "jobs", attribute: "due_date", value: "two weeks", valid_from: "recorded_at", valid_until: "recorded_at+14d" }, "c", ctx);
+  assert.equal(rel.valid_from, NOW);
+  assert.equal(rel.valid_until, "2026-11-18T14:00:00.000Z");
+  assert.equal(resolveDate("recorded_at + 2y", NOW), "2028-11-04T14:00:00.000Z");
+  assert.equal(resolveDate("recorded_at+1m", "2026-01-31"), "2026-03-03T00:00:00.000Z", "calendar months, as Date rolls them");
+  assert.equal(resolveDate("recorded_at+3d", "soon"), null);
+  assert.equal(resolveDate("2026-12-01", NOW), "2026-12-01T00:00:00.000Z");
+  // an event with an end: a two-day closure
+  const closure = normalizeClaim({ kind: "event", subject: { name: "the shop", actor: "position" }, class: "jobs", attribute: "closed", value: "Thanksgiving", valid_from: "2026-11-26", valid_until: "2026-11-27" }, "c", ctx);
+  assert.equal(closure.valid_until, "2026-11-27T00:00:00.000Z");
+  assert.equal(inForce([closure], "2026-11-27").length, 1);
+  assert.equal(inForce([closure], "2026-11-28").length, 0);
+  assert.equal(closeIntervals([closure, { ...closure, valid_from: "2026-12-01T00:00:00.000Z", valid_until: null, kind: "state" }])[0].valid_until, "2026-11-27T00:00:00.000Z", "an event is never closed by a later claim");
 });
 
 test("small helpers: dates, attribute names, subject identity", () => {
