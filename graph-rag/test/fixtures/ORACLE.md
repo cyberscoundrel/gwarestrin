@@ -1,24 +1,41 @@
 # The sixty-note oracle
 
-Sixty real notes from the ux batches, each hand-classified against the four
+Sixty real notes from the ux batches (plus the two PO 78912 notes added at
+the cross-check, 62 in all), each hand-classified against the four
 primitives in [ORGANIZATION-MODEL.md](../../../docs/ORGANIZATION-MODEL.md)
 ("The contract (serial step one)", item 1). The fixture is
 [oracle-sixty.json](oracle-sixty.json); every stream must handle all sixty.
 
 ## Where the notes come from
 
-The development instance was unreachable when this was made (the ssh pane on
-the Mac was logged out), so the texts are the seed scripts' own note texts,
-recovered from the sessions that wrote `~/ux-live/b*.mjs` on the host: 395 of
-the 418 notes, every note of ux-aa through ux-aw and part of ux-m, t, v, w,
-x, y, z. Each note's text here is the text that was saved, not what a worker
-later edited into it. `origin_position` is the writer's position in the test
-tree (org > Operations (alice) > Production floor (bob)); nothing was seeded
-from the root. When the host is back, `scripts/db-state.mjs` against the
-development ArcadeDB can confirm the texts; the demo instance stays untouched.
+The texts are the seed scripts' own note texts, first recovered from the
+sessions that wrote `~/ux-live/b*.mjs` on the host (the host was unreachable
+when the oracle was first made), then cross-checked read-only against the
+development instance on 2026-11-05: 48 of the 60 are byte-identical to the
+seed scripts still in `~/ux-live` (355 notes, ux-aa to ux-aw plus ux-v and
+ux-z); the 12 from older batches whose seed scripts are no longer on the host
+are confirmed against the graph entry itself, 10 verbatim inside the worker's
+rewritten identity facet and 2 (t01, t02) paraphrased with the same content.
+No text differed, so no classification changed. Each note's text here is the
+text that was saved, not what a worker later edited into it: workers rewrote
+most identity facets around the quoted original, and two (aa07, ai06)
+deliberately dropped the pay figures from the graph. The development graph
+holds 433 ux notes (418 at the snapshot plus ux-aw). The demo instance was
+not touched.
+
+`origin_position` is the writer's position in the test tree (org >
+Operations (alice) > Production floor (bob)); nothing was seeded from the
+root. `placed` is what the graph did with the note: its `_origin`, the
+`_home` it ended at, its grade text, and how the text was confirmed. One
+note, m03, was written at the root in the graph (pre-batch era) although its
+seed line says alice; its `origin_position` keeps the writer. Where a note
+has a second row with the same name (m01), the row at the writer's position
+is the one reported. Placement over the 60: 23 Ops → admins-only, 15 floor →
+floor, 8 Ops → Ops, 5 floor → admins-only, 4 Ops → floor (released to the
+derived floor), 4 floor → Ops, 1 root → root.
 
 Spread: 27 batches from ux-m to ux-aw (none from ux-ah, ux-ap or ux-x; ux-u was not recovered), 24
-floor notes and 36 Ops notes. Ops is over-represented because almost every
+floor notes and 36 Ops notes, plus ux-note 13 (Ops) and ux-note 14 (floor). Ops is over-represented because almost every
 note the batches flagged as a failure or an expected admins-only placement
 was alice's. Every note the reliability notes and the batch memory name as a
 known failure or a watched expectation is in: ak06 payroll, aj10 review,
@@ -27,9 +44,13 @@ Corvane meeting, aq07 Hyd-Mech, as08 holiday schedule, at03 coffee maker,
 z04 the note's own code, au04 and w05 (leaked titles), ar02 (reuse Corvane),
 aq01 (same-named Diep), ab05 (quantity graded as money), m01 (EPP-D98 part
 sign-offs), t22 (field-dumped text), the am/an/ao/aq/aw admins-only
-expectations and w11, the doc's own `mssql:dbo_Job:4471`. Not in: the
-near-duplicate order things around PO 78912, whose notes were not among the
-recovered texts.
+expectations and w11, the doc's own `mssql:dbo_Job:4471`. The PO 78912
+near-duplicate order things are covered by ux-note 13 and ux-note 14, the two
+pre-batch notes about the EPP-D98 jobs on that PO: neither note says
+"PO 78912"; a worker wrote it into their facets from the ERP row and the
+linker minted six keyless order things from that prose (an operator
+tolerated them on 2026-10-30). The PO is an attribute of the job rows,
+referenced by key, never a node.
 
 ## Shape
 
@@ -67,19 +88,20 @@ recovered texts.
 
 | primitive | notes |
 |---|---|
-| commitment | 25 |
+| commitment | 27 |
 | event | 13 |
 | actor | 11 |
 | resource | 8 |
 | residue | 3 |
 
-95 claims: 37 commitment, 31 state, 16 event, 11 observation; by authority
-40 Ops, 36 floor, 19 admins-only. Two notes fit a primitive and yield no
+100 claims: 39 commitment, 32 state, 17 event, 12 observation; by authority
+42 Ops, 39 floor, 19 admins-only. (The sixty alone: 95 claims; the two PO
+78912 notes add five.) Two notes fit a primitive and yield no
 claim (aa11 is residue, ab11 is an event with nothing to record).
 
 ## The residue
 
-Three notes, none of them a fifth primitive:
+Three of 62, none of them a fifth primitive:
 
 - **ux-aa11** "The thing from Tuesday is sorted, no further action needed."
   An event whose subject exists only in the writer's head. Unresolvable
@@ -96,7 +118,7 @@ Three notes, none of them a fifth primitive:
 
 ## What the residue suggests
 
-Not a fifth primitive. The four held on 57 of 60 and the three that did not
+Not a fifth primitive. The four held on 59 of 62 and the three that did not
 fail on the subject, not the kind. Two of three are claims whose subject is
 a class (a process) rather than an instance: an aggregate observation and a
 diagnostic need. The fix is an attribute of the existing shape: `subject`
