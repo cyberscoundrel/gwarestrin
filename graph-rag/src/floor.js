@@ -9,7 +9,8 @@ import { GRADER_MODEL, GRADER_TIMEOUT_MS, health, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { modelPost } from "./models.js";
 import { positionMap, SCOPED } from "./scope.js";
-import { policy, queueWrite, thingSeenFrom } from "./server.js";
+import { queueWrite } from "./write.js";
+import { policy, thingSeenFrom } from "./server.js";
 
 /** ---- derived data: what an identity read bounds where its writes land ---- */
 
