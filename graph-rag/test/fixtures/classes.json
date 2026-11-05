@@ -1,0 +1,40 @@
+{
+  "classes": [
+    {
+      "name": "orders",
+      "description": "a customer order: a commitment to deliver",
+      "stages": ["quoted", "ordered", "in_production", "shipped", "invoiced", "paid"],
+      "record_table": "mssql:dbo_Order",
+      "attributes": ["stage", "customer", "quantity", "due_date", "price", "margin"],
+      "confirmed_by": "admin",
+      "confirmed_at": "2026-11-01T09:00:00.000Z"
+    },
+    {
+      "name": "jobs",
+      "description": "a production job: a commitment of machine and people time to an order",
+      "stages": ["planned", "running", "paused", "done"],
+      "record_table": "mssql:dbo_Job",
+      "attributes": ["stage", "machine", "operator", "shift_cover", "quantity", "due_date"],
+      "confirmed_by": "admin",
+      "confirmed_at": "2026-11-01T09:00:00.000Z"
+    },
+    {
+      "name": "hires",
+      "description": "a hire: a commitment of a position to a person; no source system records it",
+      "stages": ["opened", "interviewing", "offered", "hired", "declined"],
+      "record_table": null,
+      "attributes": ["stage", "candidate", "start_date", "pay", "dismissal"],
+      "confirmed_by": "admin",
+      "confirmed_at": "2026-11-01T09:00:00.000Z"
+    },
+    {
+      "name": "maintenance",
+      "description": "a maintenance booking: a commitment of a machine's time to a service",
+      "stages": ["booked", "in_progress", "done"],
+      "record_table": "mssql:dbo_Maintenance",
+      "attributes": ["stage", "machine", "technician", "booked_for", "parts"],
+      "confirmed_by": "admin",
+      "confirmed_at": "2026-11-01T09:00:00.000Z"
+    }
+  ]
+}

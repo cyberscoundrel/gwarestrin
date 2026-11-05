@@ -1,0 +1,14 @@
+{
+  "root": "org",
+  "positions": {
+    "org": { "name": "Top of the organization", "description": "owners and admins: pay, dismissal, prices and margins" },
+    "ops": { "name": "Operations", "parent": "org", "description": "orders, customers, suppliers, staffing" },
+    "floor": { "name": "Production floor", "parent": "ops", "description": "jobs, machines, shifts, maintenance" }
+  },
+  "identities": {
+    "admin": { "user": "admin", "positions": ["org"], "caps": { "write": "direct" } },
+    "alice": { "user": "alice", "positions": ["ops"], "caps": { "write": "direct" } },
+    "bob": { "user": "bob", "positions": ["floor"], "caps": { "write": "direct" } },
+    "bob/agent:floor": { "user": "bob/agent:floor", "positions": ["floor"], "caps": { "write": "queued" } }
+  }
+}

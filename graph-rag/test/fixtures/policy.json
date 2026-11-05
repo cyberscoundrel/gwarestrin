@@ -1,0 +1,17 @@
+{
+  "classes": {
+    "orders": { "authority": "ops", "attributes": { "price": "org", "margin": "org" } },
+    "jobs": { "authority": "floor" },
+    "hires": { "authority": "org" },
+    "maintenance": { "authority": "floor" }
+  },
+  "attributes": {
+    "pay": "org",
+    "dismissal": "org",
+    "price": "org",
+    "margin": "org",
+    "credit_limit": "ops",
+    "balance_due": "ops",
+    "payment_terms": "ops"
+  }
+}
