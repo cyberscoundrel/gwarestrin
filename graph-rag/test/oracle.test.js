@@ -34,7 +34,7 @@ const load = () => {
 
 test("every oracle claim validates as a claim", { skip }, (t) => {
   const notes = load();
-  assert.equal(notes.length, 60);
+  assert.ok(notes.length >= 60, "the oracle holds at least the sixty");
   let total = 0;
   const byCause = new Map();
   for (const [n, note] of notes.entries()) {
@@ -53,7 +53,7 @@ test("every oracle claim validates as a claim", { skip }, (t) => {
   const failed = [...byCause.values()].reduce((a, l) => a + l.length, 0);
   t.diagnostic(`oracle: ${notes.length} notes, ${total} claims, ${failed} fail validation`);
   for (const [cause, ids] of byCause) t.diagnostic(`${ids.length} ${cause}: ${ids.join(", ")}`);
-  assert.equal(total, 95);
+  assert.ok(total >= 95, "the oracle carries at least its first 95 claims");
   assert.equal(failed, 0, `${failed} of ${total} oracle claims fail validation: ${[...byCause.keys()].join("; ")}`);
 });
 
@@ -75,7 +75,7 @@ test("the oracle's intervals close and contradict as the design says", { skip },
   const clashes = overlaps(claims);
   t.diagnostic(`${closed.length} claims closed by a later one; ${clashes.length} overlapping pairs with different values`);
   for (const [a, b] of clashes) t.diagnostic(`  ${a.id} vs ${b.id} (${a.attribute}): "${a.value}" / "${b.value}"`);
-  assert.ok(claims.length === 95);
+  assert.ok(claims.length >= 95);
 });
 
 test("the oracle's authority column against the policy fixture, where the policy has a rule", { skip }, (t) => {

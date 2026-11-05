@@ -6,6 +6,12 @@
     "title": "ux-m01 inspect-2 down",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "Ops",
+      "grade": "kept",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "event",
     "instance": "mssql:dbo_Work_Center:INSPECT-2",
     "class": "work center outage",
@@ -50,6 +56,12 @@
     "title": "ux-m03 aetrium pricing",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "admins-only",
+      "home": "admins-only",
+      "grade": "at the root",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Customer:AETRIUM",
     "class": "pricing policy",
@@ -84,6 +96,12 @@
     "title": "ux-t01 fridge",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "Ops",
+      "grade": "held at org: built from what its writer read there or below (kept)",
+      "text_confirmed": "paraphrased in the graph entry (content matches)"
+    },
     "primitive": "commitment",
     "instance": "break room fridge",
     "class": "recurring chore",
@@ -108,6 +126,12 @@
     "title": "ux-t02 holiday party",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "Ops",
+      "grade": "held at Top of the organization (admins only): built from what its writer read there or below (kept)",
+      "text_confirmed": "paraphrased in the graph entry (content matches)"
+    },
     "primitive": "event",
     "instance": "holiday party 2026",
     "class": "company event",
@@ -132,6 +156,12 @@
     "title": "ux-t03 john fixtures",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "Ops",
+      "grade": "restored to where it was written (2026-10-23): it had been held at the root by a worker read floor",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Employee:FRAJ",
     "class": "task",
@@ -156,6 +186,12 @@
     "title": "ux-t06 bse certs",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "restored to where it was written (2026-10-23): it had been held at the root by a worker read floor",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Job:3260372",
     "class": "customer order",
@@ -180,6 +216,12 @@
     "title": "ux-t07 cohu pricing",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Customer:COHU-CA",
     "class": "pricing decision",
@@ -214,6 +256,12 @@
     "title": "ux-t22 late cryo parts",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "admins-only",
+      "grade": "kept (grader unsure)",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "residue",
     "instance": null,
     "class": "inspection scheduling (a class, not an instance)",
@@ -248,6 +296,12 @@
     "title": "ux-v02 compressor quote",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "admins-only",
+      "grade": "restricted by grading (Vendor pricing/quote for contract decision; sensitive pricing, top leadership only; decision due 2026-11-30.)",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Vendor:JOHNH",
     "class": "service quote",
@@ -272,6 +326,12 @@
     "title": "ux-w05 lucas overtime",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "commitment",
     "instance": "Lucas",
     "class": "overtime shift",
@@ -306,6 +366,12 @@
     "title": "ux-w11 toro rush",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Job:4471",
     "class": "customer order",
@@ -340,6 +406,12 @@
     "title": "ux-w14 why quotes stall",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "residue",
     "instance": null,
     "class": "quoting (a class, not an instance)",
@@ -374,6 +446,12 @@
     "title": "ux-y02 hill pins invoice",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "admins-only",
+      "grade": "restricted by grading (Supplier invoice/pricing query is sensitive (pricing, accounting matter); top leadership only. No clear end date.)",
+      "text_confirmed": "verbatim in the graph entry"
+    },
     "primitive": "event",
     "instance": "HILL gage pins invoice",
     "class": "supplier invoice",
@@ -408,6 +486,12 @@
     "title": "ux-z01 exatron correction",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "mssql:dbo_Job:3260357",
     "class": "shipment",
@@ -442,6 +526,12 @@
     "title": "ux-z04 inspect-2 new pins",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "Ops",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "resource",
     "instance": "HILL pin gauge set",
     "class": "gauge set",
@@ -476,6 +566,12 @@
     "title": "ux-z05 thanksgiving closure",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "the shop",
     "class": "closure",
@@ -510,6 +606,12 @@
     "title": "ux-aa03 coolant concentration",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "resource",
     "instance": "CNC 1 coolant",
     "class": "coolant concentration",
@@ -544,6 +646,12 @@
     "title": "ux-aa05 forklift near miss",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "dock Toyota forklift",
     "class": "safety incident",
@@ -578,6 +686,12 @@
     "title": "ux-aa07 diep pay rate",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "mssql:dbo_Employee:NGUD",
     "class": "employment",
@@ -612,6 +726,12 @@
     "title": "ux-aa11 the thing from tuesday",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "residue",
     "instance": null,
     "class": null,
@@ -625,6 +745,12 @@
     "title": "ux-aa13 scrap rate october",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "floor",
+      "grade": "kept (grader unsure)",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "the shop",
     "class": "scrap rate",
@@ -659,6 +785,12 @@
     "title": "ux-aa14 marisol vacation",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "Marisol Vega",
     "class": "leave",
@@ -693,6 +825,12 @@
     "title": "ux-ab02 cnc 2 spindle bearing",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "CNC 2",
     "class": "machine repair",
@@ -737,6 +875,12 @@
     "title": "ux-ab05 exatron repeat order",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Job:3260357",
     "class": "customer order",
@@ -771,6 +915,12 @@
     "title": "ux-ab06 second shift hiring",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "Ops",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "second-shift CNC operator openings",
     "class": "hire",
@@ -805,6 +955,12 @@
     "title": "ux-ab11 meeting notes",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "Thursday meeting",
     "class": "meeting",
@@ -818,6 +974,12 @@
     "title": "ux-ac13 rack c split",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "resource",
     "instance": "rack C",
     "class": "material rack",
@@ -862,6 +1024,12 @@
     "title": "ux-ad03 tomas first week",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "Ops",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "Tomas Reyes",
     "class": "training",
@@ -896,6 +1064,12 @@
     "title": "ux-ad15 rack c contents",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "resource",
     "instance": "rack C",
     "class": "material rack",
@@ -930,6 +1104,12 @@
     "title": "ux-ae15 coolant dosing",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "resource",
     "instance": "coolant dosing",
     "class": "coolant dosing",
@@ -954,6 +1134,12 @@
     "title": "ux-af04 layoff rumor",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "the shop",
     "class": "layoff",
@@ -988,6 +1174,12 @@
     "title": "ux-ag03 exatron reorder",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Job:3260410",
     "class": "customer order",
@@ -1012,6 +1204,12 @@
     "title": "ux-ai04 brightline price hold",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "Brightline Medical",
     "class": "price hold",
@@ -1046,6 +1244,12 @@
     "title": "ux-ai06 overtime pay rate",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "Saturday overtime",
     "class": "overtime pay policy",
@@ -1080,6 +1284,12 @@
     "title": "ux-aj02 floater due date moved",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "Ops",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Job:3260410",
     "class": "customer order",
@@ -1114,6 +1324,12 @@
     "title": "ux-aj09 forklift tire leak",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "resource",
     "instance": "forklift",
     "class": "equipment fault",
@@ -1138,6 +1354,12 @@
     "title": "ux-aj10 tomas review passed",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "Tomas Reyes",
     "class": "review",
@@ -1162,6 +1384,12 @@
     "title": "ux-ak03 first floaters shipped",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "mssql:dbo_Job:3260410",
     "class": "shipment",
@@ -1196,6 +1424,12 @@
     "title": "ux-ak06 payroll biweekly",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "Ops",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "payroll",
     "class": "payroll schedule",
@@ -1220,6 +1454,12 @@
     "title": "ux-al04 brightline po received",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Job:3260455",
     "class": "customer order",
@@ -1254,6 +1494,12 @@
     "title": "ux-am02 brightline margin",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Job:3260455",
     "class": "customer order",
@@ -1278,6 +1524,12 @@
     "title": "ux-am06 andre let go",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "Andre (Staffmark temp)",
     "class": "temp assignment",
@@ -1312,6 +1564,12 @@
     "title": "ux-am10 coolant quotes in",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "coolant supply",
     "class": "supplier quote",
@@ -1346,6 +1604,12 @@
     "title": "ux-am12 tomas injury",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "Tomas Reyes",
     "class": "health",
@@ -1380,6 +1644,12 @@
     "title": "ux-am15 light duty tomas",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "Ops",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "Tomas Reyes",
     "class": "work assignment",
@@ -1404,6 +1674,12 @@
     "title": "ux-an02 exatron price increase",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "mssql:dbo_Customer:EXATRON",
     "class": "price change",
@@ -1428,6 +1704,12 @@
     "title": "ux-an15 kayla forklift",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "Kayla",
     "class": "need",
@@ -1452,6 +1734,12 @@
     "title": "ux-ao04 kayla extended",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "Kayla",
     "class": "temp assignment",
@@ -1476,6 +1764,12 @@
     "title": "ux-ao12 exatron dispute",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "mssql:dbo_Customer:EXATRON",
     "class": "invoice dispute",
@@ -1500,6 +1794,12 @@
     "title": "ux-aq01 diep on cnc 5",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "mssql:dbo_Employee:NGUD",
     "class": "work assignment",
@@ -1524,6 +1824,12 @@
     "title": "ux-aq07 saw blades ordered",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "Hyd-Mech saw blades order",
     "class": "purchase",
@@ -1548,6 +1854,12 @@
     "title": "ux-aq10 layoff plan",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "the shop",
     "class": "layoff",
@@ -1572,6 +1884,12 @@
     "title": "ux-aq12 new customer meeting",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept (grader unsure)",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "Corvane Medical",
     "class": "prospect meeting",
@@ -1606,6 +1924,12 @@
     "title": "ux-ar02 corvane wants samples",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "Ops",
+      "grade": "graded: Prospective customer sample request; not restricted.",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "commitment",
     "instance": "Corvane Medical",
     "class": "sample order",
@@ -1630,6 +1954,12 @@
     "title": "ux-as08 holiday schedule posted",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "Ops",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "event",
     "instance": "holiday schedule",
     "class": "notice",
@@ -1654,6 +1984,12 @@
     "title": "ux-at03 coffee maker broken",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "resource",
     "instance": "break room coffee maker",
     "class": "equipment fault",
@@ -1678,6 +2014,12 @@
     "title": "ux-au04 kayla accepted",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "Kayla",
     "class": "employment",
@@ -1712,6 +2054,12 @@
     "title": "ux-au13 mats helping",
     "writer": "bob",
     "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "resource",
     "instance": "anti-fatigue mats at CNC 3",
     "class": "consumable",
@@ -1736,6 +2084,12 @@
     "title": "ux-av06 owner retiring",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "the owner",
     "class": "ownership",
@@ -1760,6 +2114,12 @@
     "title": "ux-aw10 diep lifting limit",
     "writer": "alice",
     "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "seed script on the host"
+    },
     "primitive": "actor",
     "instance": "mssql:dbo_Employee:NGUD",
     "class": "work restriction",
@@ -1786,5 +2146,95 @@
       }
     ],
     "notes": "Expected admins-only in ux-aw. The restriction is what scheduling needs (Ops); the medical reason is health (admins-only). Same split as am12."
+  },
+  {
+    "id": "ux-note 13",
+    "batch": "ux-note",
+    "text": "Alexander said the inspect- is backed up again, so job 3260356 for Exatron (EPP-D98-1-A) probably slips to next week.",
+    "title": "ux-note 13",
+    "writer": "alice",
+    "origin_position": "Ops",
+    "placed": {
+      "origin": "Ops",
+      "home": "admins-only",
+      "grade": "kept",
+      "text_confirmed": "verbatim in the graph entry (leading sentence; the worker appended its ERP lookup)"
+    },
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Job:3260356",
+    "class": "customer order",
+    "claims": [
+      {
+        "kind": "observation",
+        "subject": "mssql:dbo_Work_Center:INSPECT-2",
+        "class": "work center",
+        "attribute": "backlog",
+        "value": "backed up again (Alexander)",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "Ops"
+      },
+      {
+        "kind": "state",
+        "subject": "mssql:dbo_Job:3260356",
+        "class": "customer order",
+        "attribute": "expected_completion",
+        "value": "probably slips to next week",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at+7d",
+        "authority": "Ops"
+      }
+    ],
+    "notes": "One of the two notes behind the PO 78912 cluster. The note never says 'PO 78912': a worker added 'customer PO 78912' to its facets from the ERP row, and the linker then minted six keyless order things from that prose (tolerated 2026-10-30). Under the model the PO is an attribute of the job row, referenced by key, never a node. 'inspect-' resolves to INSPECT-2 by key."
+  },
+  {
+    "id": "ux-note 14",
+    "batch": "ux-note",
+    "text": "Called Exatron about EPP-D98-2-B ('COPPERHEAD SOCKET FLOATER') - they want the next batch earlier. Darrin S. is checking material.",
+    "title": "ux-note 14",
+    "writer": "bob",
+    "origin_position": "floor",
+    "placed": {
+      "origin": "floor",
+      "home": "floor",
+      "grade": "restored to where it was written (2026-10-23): it had been held at the root by a worker read floor",
+      "text_confirmed": "verbatim in the graph entry (leading sentences; the worker appended its part lookup)"
+    },
+    "primitive": "commitment",
+    "instance": "mssql:dbo_Job:3260357",
+    "class": "customer order",
+    "claims": [
+      {
+        "kind": "event",
+        "subject": "mssql:dbo_Customer:EXATRON",
+        "class": "customer contact",
+        "attribute": "called",
+        "value": "about EPP-D98-2-B",
+        "valid_from": "recorded_at",
+        "valid_until": "recorded_at",
+        "authority": "floor"
+      },
+      {
+        "kind": "commitment",
+        "subject": "mssql:dbo_Job:3260357",
+        "class": "need",
+        "attribute": "request",
+        "value": "Exatron wants the next batch earlier",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      },
+      {
+        "kind": "commitment",
+        "subject": "Darrin S.",
+        "class": "task",
+        "attribute": "checking",
+        "value": "material for the next batch",
+        "valid_from": "recorded_at",
+        "valid_until": null,
+        "authority": "floor"
+      }
+    ],
+    "notes": "The other PO 78912 note. A customer's request to pull a batch in is a need on the order (sign-flipped commitment); the material check is a task. Same worker-prose origin of the PO things as ux-note 13. Darrin S. has no resolved employee key."
   }
 ]
