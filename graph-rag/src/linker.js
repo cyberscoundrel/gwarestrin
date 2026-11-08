@@ -21,7 +21,8 @@ import { intakeWithTriage } from "./triage.js";
 
 const THING_KINDS_READ = ["document", "section"]; // besides plain entries, what the worker reads for things
 const THING_COLS = "@rid AS rid, label, _norm, _alias_norms, _thing_type, _keys, _class, _homes";
-const CLASS_CACHE_MS = 60_000;
+const CLASS_CACHE_MS = 60_000; // confirmed classes are read this often...
+const NO_CLASS_CACHE_MS = 5_000; // ...unless there were none yet: discovery may confirm the first one any moment
 
 /** a thing's visibility follows the statements about it: add a home */
 export async function thingSeenFrom(rid, home) {
@@ -57,7 +58,7 @@ async function ensureLinkerSchema() {
 let classCache = { at: 0, list: [] };
 /** the confirmed classes (CommitmentClass rows a person confirmed), cached a minute; none when the type isn't there yet */
 export async function confirmedClassList({ fresh = false } = {}) {
-  if (!fresh && Date.now() - classCache.at < CLASS_CACHE_MS) return classCache.list;
+  if (!fresh && Date.now() - classCache.at < (classCache.list.length ? CLASS_CACHE_MS : NO_CLASS_CACHE_MS)) return classCache.list;
   const rows = await adbQuery("SELECT name, description, stages, record_table, status FROM CommitmentClass WHERE status = 'confirmed'").catch(() => []);
   classCache = { at: Date.now(), list: rows.map((r) => ({ name: r.name, description: r.description ?? "", stages: r.stages ?? [], record_table: r.record_table ?? null, status: "confirmed" })) };
   return classCache.list;

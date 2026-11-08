@@ -282,7 +282,7 @@ function fakeDb() {
       commands.push(sql);
       if (/^CREATE (VERTEX TYPE|EDGE TYPE|PROPERTY|INDEX)/.test(sql)) return [];
       if (/^CREATE VERTEX SourceRef/.test(sql)) return void refs.push({ rid: `#30:${n++}`, ...params });
-      if (/^UPDATE SourceRef/.test(sql)) return void Object.assign(refs.find((r) => r.key === params.k), { last_seen: params.at, seen_by: params.by });
+      if (/^UPDATE SourceRef/.test(sql)) return void Object.assign(refs.find((r) => r.key === params.k), { last_seen: params.last_seen, seen_by: params.seen_by });
       if (/^CREATE EDGE REFERS_TO FROM (#\d+:\d+) TO (#\d+:\d+)/.test(sql)) {
         const m = /FROM (#\d+:\d+) TO (#\d+:\d+)/.exec(sql);
         return void edges.push({ from: m[1], to: m[2] });

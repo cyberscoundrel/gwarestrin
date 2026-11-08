@@ -54,7 +54,8 @@ export async function touchSourceRef(key, { seen_by, at, db = arcade } = {}) {
   await ensureSourceRefSchema(db);
   const existing = await findSourceRef(ref.key, db);
   if (existing) {
-    await db.command("UPDATE SourceRef SET last_seen = :at, seen_by = :by WHERE key = :k", { at: ref.last_seen, by: ref.seen_by ?? existing.seen_by ?? null, k: ref.key });
+    // (`by` is a reserved word in ArcadeDB SQL: never a parameter name)
+    await db.command("UPDATE SourceRef SET last_seen = :last_seen, seen_by = :seen_by WHERE key = :k", { last_seen: ref.last_seen, seen_by: ref.seen_by ?? existing.seen_by ?? null, k: ref.key });
     return { rid: existing.rid, ref: { ...existing, last_seen: ref.last_seen, seen_by: ref.seen_by ?? existing.seen_by ?? null }, created: false };
   }
   await db.command("CREATE VERTEX SourceRef SET key = :key, system = :system, `table` = :table, row_key = :row_key, last_seen = :last_seen, seen_by = :seen_by", ref);

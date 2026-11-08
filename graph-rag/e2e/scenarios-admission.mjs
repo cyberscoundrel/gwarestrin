@@ -42,7 +42,7 @@ function harness(ctx = {}) {
   };
   h.sql ??= async (query) => (await h.tool("admin", "query_graph", { query, language: "sql" })).rows ?? [];
   h.api ??= async (path, opts = {}) => (await fetch(`${GRAPH}${path}`, { ...opts, headers: { authorization: `Bearer ${TOKENS.admin}`, "content-type": "application/json" } })).json();
-  h.entry ??= async (name) => (await h.sql(`SELECT @rid AS rid, name, _home, _grade, _ungraded, _mentions_at, _unresolved FROM Entity WHERE name = '${name}'`))[0];
+  h.entry ??= async (name) => (await h.sql(`SELECT @rid AS rid, name, _home, _grade, _ungraded, _mentions_at FROM Entity WHERE name = '${name}'`))[0];
   h.thing ??= async (label) => (await h.sql(`SELECT @rid AS rid, name, label, _keys, _class, _thing_type FROM Entity WHERE _kind = 'thing' AND label = '${label}'`))[0];
   h.job ??= async (rid, kind = "mentions") => (await h.sql(`SELECT status, attempts, error, payload FROM Job WHERE kind = '${kind}' AND payload LIKE '%${rid}%' ORDER BY created_at DESC LIMIT 1`))[0];
   h.until ??= async (label, fn, timeoutMs = 240_000) => {
@@ -74,6 +74,8 @@ const about = async (h, rid) => (await h.sql(`SELECT @in AS dst, role FROM (SELE
 const sourceRefs = (h, key) => h.sql(`SELECT @rid AS rid, key, system, \`table\`, row_key, last_seen, seen_by FROM SourceRef WHERE key = '${key}'`);
 /** the SourceRefs an instance refers to */
 const refersTo = async (h, rid) => (await h.sql(`SELECT key FROM (SELECT expand(out('REFERS_TO')) FROM ${rid})`)).map((r) => r.key);
+/** what the linker left unresolved on an entry (the loader's `entry` helper doesn't carry it) */
+const unresolvedOn = async (h, name) => JSON.parse((await h.sql(`SELECT _unresolved FROM Entity WHERE name = '${name}'`))[0]?._unresolved ?? "[]");
 /** the entry's mentions job has run */
 const linkedUp = (h, e) => h.until(`linked: ${e.name}`, async () => ((await h.job(String(e.rid)))?.status === "done" ? true : false));
 /** the linker runs on its own here: no master pool, no sorting step (a scenario in run.mjs turns the master on; this stream's cases are about the one-call linker) */
@@ -81,7 +83,7 @@ const plainLinker = (h) => h.api("/api/worker", { method: "PUT", body: JSON.stri
 /** a worker's explicit judgement with the key it looked up: the one way a name becomes an instance here */
 const workerLinks = (h, e, list) => h.tool(h.workerToken(String(e.rid)), "link_things", { things: list });
 
-export default [
+const SCENARIOS = [
   {
     name: "the same-named Diep: the linker links neither on a bare name, and the key decides",
     async run(ctx) {
@@ -95,11 +97,11 @@ export default [
         { name: "Diep", type: "person", key: "mssql:dbo_Employee:NGDT" },
       ]);
       h.check((made.linked ?? []).filter((l) => l.created && l.how === "key").length === 2, `two instances minted by key: ${JSON.stringify(made).slice(0, 400)}`);
+      // (a built-in scenario may have left a keyless "Diep" from the old triage path: the keyed two are what this one is about)
       const dieps = await things(h, "Diep");
-      h.check(dieps.length === 2, `two things called Diep, one per key: ${JSON.stringify(dieps)}`);
       const active = dieps.find((d) => (d._keys ?? []).includes("mssql:dbo_Employee:NGUD"));
       const inactive = dieps.find((d) => (d._keys ?? []).includes("mssql:dbo_Employee:NGDT"));
-      h.check(active && inactive, "each holds its key");
+      h.check(active && inactive && active.rid !== inactive.rid, `one thing per key: ${JSON.stringify(dieps)}`);
       h.check((await sourceRefs(h, "mssql:dbo_Employee:NGUD")).length === 1 && (await sourceRefs(h, "mssql:dbo_Employee:NGDT")).length === 1, "each row has one SourceRef");
       h.check((await refersTo(h, String(active.rid))).includes("mssql:dbo_Employee:NGUD"), "the instance refers to its row");
       // the floor's note names Diep with no key: the linker on its own links neither and mints no third
@@ -108,17 +110,16 @@ export default [
       await linkedUp(h, note);
       const links = await about(h, String(note.rid));
       h.check(!links.some((l) => [String(active.rid), String(inactive.rid)].includes(l.dst)), `neither Diep linked on a bare name: ${JSON.stringify(links)}`);
-      h.check((await things(h, "Diep")).length === 2, "no third Diep minted");
-      const after = await h.entry("e2e-adm2 diep on cnc 5");
-      const unresolved = JSON.parse(after?._unresolved ?? "[]");
+      h.check((await things(h, "Diep")).length === dieps.length, "no further Diep minted");
+      const unresolved = await unresolvedOn(h, "e2e-adm2 diep on cnc 5");
       const diep = unresolved.find((u) => u.name === "Diep");
-      h.check(diep && (diep.candidates ?? []).length === 2, `the mention comes back unresolved with both candidates: ${after?._unresolved}`);
+      h.check(diep && [String(active.rid), String(inactive.rid)].every((c) => (diep.candidates ?? []).includes(c)), `the mention comes back unresolved with both keyed Dieps among its candidates: ${JSON.stringify(unresolved)}`);
       // the worker that checked the roster links with the key: the active employee, nothing new
       const settled = await workerLinks(h, note, [{ name: "Diep", type: "person", key: "mssql:dbo_Employee:NGUD" }]);
       h.check((settled.linked ?? []).some((l) => l.linked && l.how === "key" && !l.created), `linked by key, not created: ${JSON.stringify(settled).slice(0, 300)}`);
       const now = await about(h, String(note.rid));
       h.check(now.some((l) => l.dst === String(active.rid)) && !now.some((l) => l.dst === String(inactive.rid)), `about the active Diep only: ${JSON.stringify(now)}`);
-      h.check((await things(h, "Diep")).length === 2, "still two");
+      h.check((await things(h, "Diep")).length === dieps.length, "still nothing new");
     },
   },
   {
@@ -135,10 +136,9 @@ export default [
       h.check((await about(h, String(e.rid))).length === 0, "the note is linked to nothing");
       const after = Number((await h.sql("SELECT count(*) AS n FROM Entity WHERE _kind = 'thing'"))[0]?.n ?? 0);
       h.check(after === before, `no thing minted at all (${before} -> ${after})`);
-      const row = await h.entry("e2e-adm3 holiday schedule posted");
-      const unresolved = JSON.parse(row?._unresolved ?? "[]").map((u) => u.name);
-      h.check(unresolved.includes("holiday schedule") && unresolved.includes("time clock"), `both names come back unresolved for a worker or a person: ${row?._unresolved}`);
-      h.check(row._mentions_at, "the linking step is recorded as run");
+      const unresolved = (await unresolvedOn(h, "e2e-adm3 holiday schedule posted")).map((u) => u.name);
+      h.check(unresolved.includes("holiday schedule") && unresolved.includes("time clock"), `both names come back unresolved for a worker or a person: ${JSON.stringify(unresolved)}`);
+      h.check((await h.entry("e2e-adm3 holiday schedule posted"))._mentions_at, "the linking step is recorded as run");
       // no "other" type anywhere: the fake's type was dropped, not stored
       const others = await h.sql("SELECT count(*) AS n FROM Entity WHERE _kind = 'thing' AND _thing_type = 'other'");
       h.check(Number(others[0]?.n ?? 0) === 0, "nothing is typed other");
@@ -154,6 +154,8 @@ export default [
       await h.tool("admin", "execute_graph", { language: "sql", command: "CREATE PROPERTY CommitmentClass.name IF NOT EXISTS STRING" });
       if (!(await h.sql("SELECT name FROM CommitmentClass WHERE name = 'orders'")).length)
         await h.tool("admin", "execute_graph", { language: "sql", command: "INSERT INTO CommitmentClass SET name = 'orders', description = 'a customer order', stages = ['quoted', 'ordered', 'shipped', 'paid'], record_table = 'mssql:dbo_Order', status = 'confirmed', confirmed_by = 'admin'" });
+      // the linker rereads the confirmed classes within a few seconds when it had none
+      await new Promise((r) => setTimeout(r, 6000));
       // the two notes behind the PO 78912 cluster (ux-note 13 and 14); neither says "PO 78912": a worker found it in the ERP row
       await h.save("alice", "e2e-adm4 job 3260356 slips", "Alexander said the inspect- is backed up again, so job 3260356 for Exatron (EPP-D98-1-A) probably slips to next week.");
       await h.save("bob", "e2e-adm5 exatron wants it earlier", "Called Exatron about EPP-D98-2-B - they want the next batch earlier. Darrin S. is checking material.");
@@ -191,14 +193,14 @@ export default [
     },
   },
 ];
+export default SCENARIOS;
 
 // run on its own: the same loop run.mjs uses
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
   const h = harness();
   await h.until("graph-rag up", async () => (await h.api("/api/worker")).enabled !== undefined, 120_000);
   let failed = 0;
-  const scenarios = (await import(import.meta.url)).default;
-  for (const s of scenarios) {
+  for (const s of SCENARIOS) {
     const t0 = Date.now();
     try {
       await s.run(h);
@@ -208,6 +210,6 @@ if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).
       console.log(`FAIL ${s.name}: ${String(e?.message ?? e).slice(0, 600)}`);
     }
   }
-  console.log(`${scenarios.length - failed}/${scenarios.length} admission scenarios pass`);
+  console.log(`${SCENARIOS.length - failed}/${SCENARIOS.length} admission scenarios pass`);
   process.exit(failed ? 1 : 0);
 }
