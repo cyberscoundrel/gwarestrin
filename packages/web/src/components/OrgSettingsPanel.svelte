@@ -2,6 +2,7 @@
   import { onMount, type Snippet } from "svelte";
   import { History, ShieldCheck, TriangleAlert } from "lucide";
   import { api, type OrgPolicy, type PolicyView, type PrunedEntry } from "../lib/api.js";
+  import ClassConfirmPanel from "./ClassConfirmPanel.svelte";
   import Dialog from "./Dialog.svelte";
   import Icon from "./Icon.svelte";
   import PanelHeader from "./PanelHeader.svelte";
@@ -249,6 +250,10 @@
   {/if}
 {/snippet}
 
+{#snippet classesBody()}
+  <ClassConfirmPanel />
+{/snippet}
+
 {#snippet derivedBody()}
   {#if draft}
     <div class="field">
@@ -373,6 +378,7 @@
     {:else}
       {@render section("Sharing", "How long shares last and who makes them.", sharingBody)}
       {@render section("Grading", "Filing new entries where they belong.", gradingBody)}
+      {@render section("Commitment classes", "What the organization commits to (orders, jobs, hires), discovered from the connected systems. Nothing maps onto a class until you confirm it; a wrong name here misleads every later mapping.", classesBody)}
       {@render section("Derived data", "Summaries and notes built from what an agent read.", derivedBody)}
       {@render section("Expired entries", "Entries that end (a visit, this week's schedule) leave searches on their date, and the graph later.", pruningBody)}
       {@render section("Deployment", "For reference; changed at deploy, not here.", deployBody)}
