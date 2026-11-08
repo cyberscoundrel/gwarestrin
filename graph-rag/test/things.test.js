@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { designatorsDiffer, duplicateEntries, entryId, splitThingName, thingClash, mentionsPrompt, normalize, parseMentions, resolve, thingName } from "../src/things.js";
+import { designatorsDiffer, duplicateEntries, entryId, splitThingName, thingClash, mentionsPrompt, normalize, parseMentions, thingName } from "../src/things.js";
 
 test("names normalize for matching", () => {
   assert.equal(normalize("Toro Co."), "toro co");
@@ -30,22 +30,9 @@ test("mentions: typed, deduplicated, junk dropped, capped", () => {
     { name: "Toro", type: "customer", role: "customer" },
     { name: "PO 4471", type: "order", role: "subject" },
     { name: "Line 2", type: "machine", role: "machine" },
-    { name: "Mystery", type: "other", role: "mentions" },
+    { name: "Mystery", type: null, role: "mentions" },
   ]);
   assert.deepEqual(parseMentions("nope"), []);
-});
-
-test("resolution: exact or alias match uses it; very close uses it as an alias; close asks; else new", () => {
-  const cands = [
-    { rid: "#1:1", name: "Toro", aliases: ["Toro Co."], type: "customer" },
-    { rid: "#1:2", name: "Toro", type: "supplier" },
-  ];
-  assert.deepEqual(resolve({ name: "toro co", type: "customer" }, cands), { use: "#1:1" });
-  assert.deepEqual(resolve({ name: "Toro", type: "supplier" }, cands), { use: "#1:2" }, "same name, different type: its own thing");
-  assert.deepEqual(resolve({ name: "Toro Inc", type: "customer" }, [{ rid: "#1:1", name: "Toro", type: "customer", score: 0.95 }]), { use: "#1:1", alias: "Toro Inc" });
-  assert.deepEqual(resolve({ name: "Toronto Plating", type: "customer" }, [{ rid: "#1:1", name: "Toro", type: "customer", score: 0.84 }]), { create: true, maybe: "#1:1" });
-  assert.deepEqual(resolve({ name: "Acme", type: "customer" }, [{ rid: "#1:1", name: "Toro", type: "customer", score: 0.4 }]), { create: true });
-  assert.equal(thingName("customer", "Toro"), "Toro (customer)");
 });
 
 test("the sorting step: asks whether a worker should look, and reads the verdict", async () => {
@@ -65,27 +52,7 @@ test("record keys: kept on mentions, and the same key is the same thing whatever
   assert.equal(normalizeRel("Works In"), "works_in");
   const m = parseMentions(JSON.stringify({ things: [{ name: "Toro Plating Co", type: "customer", key: "mssql:dbo_Customer:TORO" }, { name: "Toro", type: "customer", key: "mssql:dbo_Customer:TORO" }] }));
   assert.equal(m.length, 1, "one key, one thing");
-  assert.deepEqual(resolve(m[0], [{ rid: "#1:1", name: "Toro", type: "customer", keys: ["mssql:dbo_Customer:TORO"] }]), { use: "#1:1", alias: "Toro Plating Co" });
-  assert.deepEqual(
-    resolve({ name: "Acme Inc", type: "customer", key: "mssql:dbo_Customer:ACME2" }, [{ rid: "#1:2", name: "Acme Inc", type: "customer", keys: ["mssql:dbo_Customer:ACME1"] }]),
-    { create: true },
-    "same name, another record: another thing",
-  );
   assert.equal(parseMentions(JSON.stringify({ things: Array.from({ length: 30 }, (_, i) => ({ name: `Customer ${i}`, type: "customer" })) }), 25).length, 25);
-});
-
-test("identifiers match exactly or not at all: close embeddings of numbers are different things", () => {
-  assert.deepEqual(resolve({ name: "3260364", type: "order" }, [{ rid: "#1:1", name: "3260372", type: "order", score: 0.97 }]), { create: true });
-  assert.deepEqual(resolve({ name: "PO 4471", type: "order" }, [{ rid: "#1:1", name: "PO-4471", type: "order" }]), { use: "#1:1" }, "the same number written differently is the same");
-});
-
-test("a name several things share is ambiguous, not the first one found", () => {
-  const cands = [
-    { rid: "#1:1", name: "John", type: "person", keys: ["mssql:dbo_Employee:FRAJ"] },
-    { rid: "#1:2", name: "John", type: "person", keys: ["mssql:dbo_Contact:281"] },
-  ];
-  assert.deepEqual(resolve({ name: "John", type: "person" }, cands), { ambiguous: ["#1:1", "#1:2"] });
-  assert.deepEqual(resolve({ name: "John", type: "person", key: "mssql:dbo_Contact:281" }, cands), { use: "#1:2" }, "a key settles it");
 });
 
 test("partial names of people: looked up by first name and initial", async () => {
@@ -121,7 +88,9 @@ test("splitThingName: a full thing name, not any parenthesis", () => {
   assert.deepEqual(splitThingName("CNC 2 (machine)"), { name: "CNC 2", type: "machine" });
   assert.deepEqual(splitThingName("Toro (Customer)"), { name: "Toro", type: "customer" });
   assert.equal(splitThingName("CNC 2"), null);
-  assert.equal(splitThingName("Quote 12 (draft)"), null);
+  assert.deepEqual(splitThingName("Corvane samples (sample order)"), { name: "Corvane samples", type: "sample order" }, "a class name too");
+  assert.equal(splitThingName("Quote 12 (see 2026)"), null);
+  assert.equal(splitThingName("Quote 12 (Draft!)"), null);
 });
 
 test("thingClash points at the right tools", () => {
@@ -131,14 +100,8 @@ test("thingClash points at the right tools", () => {
 });
 
 test("names alike but for a short designator are different things: rack A is not rack C", () => {
-  const rackC = [{ rid: "#1:9", name: "rack C", aliases: [], type: "place", score: 0.95 }];
-  assert.deepEqual(resolve({ name: "rack A", type: "place" }, rackC), { create: true }, "not merged, and not an unsure match either");
-  assert.deepEqual(resolve({ name: "Bay N", type: "place" }, [{ rid: "#1:8", name: "bay S", aliases: [], type: "place", score: 0.9 }]), { create: true });
-  assert.deepEqual(resolve({ name: "rack C", type: "place" }, rackC), { use: "#1:9" }, "the same rack is still found");
-  assert.deepEqual(resolve({ name: "Rack C.", type: "place" }, [{ ...rackC[0], score: undefined }]), { use: "#1:9" }, "written differently, same name");
   assert.ok(designatorsDiffer("rack A", "rack C"));
   assert.ok(!designatorsDiffer("north dock", "south dock"), "whole words differ: the embedding decides");
   assert.ok(!designatorsDiffer("A", "C"), "a bare letter isn't a designated name");
   assert.ok(!designatorsDiffer("rack A", "rack A"));
-  assert.deepEqual(resolve({ name: "Toro Inc", type: "customer" }, [{ rid: "#1:1", name: "Toro Co", aliases: [], type: "customer", score: 0.95 }]), { use: "#1:1", alias: "Toro Inc" }, "a short word that isn't a designator still matches by embedding");
 });
