@@ -36,6 +36,13 @@ export interface PositionsView {
   canGrantStanding?: boolean;
 }
 
+/** the authority map: `classes[name].authority`, `classes[name].attributes[attr]` and `attributes[attr]` name position ids */
+export interface AuthorityMap {
+  classes: Record<string, { authority?: string; attributes?: Record<string, string> }>;
+  attributes: Record<string, string>;
+  default?: string;
+}
+
 export interface OrgPolicy {
   maxGrantDays: number;
   defaultShareDays: number;
@@ -43,8 +50,10 @@ export interface OrgPolicy {
   peopleShareDirectly: boolean;
   gradingEnabled: boolean;
   gradingConfidence: number;
-  /** what grading may hide an entry from its writer's team for; anything else stays where it's written */
+  /** what grading may hide an entry from its writer's team for; anything else stays where it's written (the residue: text that maps to no class) */
   restrictedTopics: string[];
+  /** commitment classes and attributes -> the position holding authority over them (visibility, proposals and placement read it) */
+  authorityMap: AuthorityMap;
   derivedWindowHours: number;
   requestDays: number;
   pruneAfterDays: number;

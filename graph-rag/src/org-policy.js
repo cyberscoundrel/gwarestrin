@@ -5,7 +5,8 @@
 import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
 import { log } from "./context.js";
 import { adbCommand, adbQuery } from "./db.js";
-import { SCOPED } from "./scope.js";
+import { positionMap, SCOPED } from "./scope.js";
+import { authorityOf } from "./model/authority.js";
 
 /** ---- organization policy (Organization settings; see policy.js) ---- */
 
@@ -32,7 +33,7 @@ export async function ensurePolicySchema() {
 export async function loadPolicy() {
   try {
     const row = (await adbQuery("SELECT FROM OrgPolicy WHERE scope = 'org' LIMIT 1"))[0];
-    policy = row ? normalizeStored(JSON.parse(row.json), policyDefaults) : policyDefaults;
+    policy = row ? normalizeStored(JSON.parse(row.json), policyDefaults, positionMap) : policyDefaults;
     policyMeta = { updated_by: row?.updated_by ?? null, updated_at: row?.updated_at ?? null };
   } catch (e) {
     log.warn(`policy load failed (keeping the current one): ${String(e).slice(0, 120)}`);
@@ -41,7 +42,7 @@ export async function loadPolicy() {
 
 /** a root person changes the policy; every change is recorded */
 export async function savePolicy(input, identity) {
-  const next = applyPolicyUpdate(policy, input);
+  const next = applyPolicyUpdate(policy, input, positionMap);
   const now = new Date().toISOString();
   const updated = await adbCommand("UPDATE OrgPolicy SET json = :json, updated_by = :by_user, updated_at = :now WHERE scope = 'org'", "sql", {
     json: JSON.stringify(next),
@@ -68,3 +69,6 @@ export async function savePolicy(input, identity) {
 }
 
 export const canEditPolicy = (identity, scope) => !identity.agent && !identity.open && scope.root && SCOPED;
+
+/** the position holding authority over a class (and attribute) under the current policy, or null when no rule applies */
+export const authorityFor = (cls, attribute) => authorityOf(policy.authorityMap, cls, attribute);

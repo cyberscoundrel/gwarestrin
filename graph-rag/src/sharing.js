@@ -7,10 +7,10 @@ import { effectiveHome, visibleHomes } from "./positions.js";
 import { danglingGrants, isActive, resolveExpiry } from "./grants.js";
 import { log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.js";
-import { entriesByUser, homeFilter, ownsHome, peopleView, personOf, personScope, positionId, positionMap, positionName, SCOPED, scopeOf } from "./scope.js";
+import { coversClass, entriesByUser, homeFilter, ownsHome, peopleView, personOf, personScope, positionId, positionMap, positionName, SCOPED, scopeOf } from "./scope.js";
 import { searchGraph } from "./search.js";
-import { recordReads } from "./floor.js";
-import { queueWrite } from "./write.js";
+import { claimsOfEntry, recordReads } from "./floor.js";
+import { decideWrite, queueWrite } from "./write.js";
 import { ASSERTIONS, QUESTION_GRANTOR } from "./requests.js";
 import { expiryRules, policy } from "./org-policy.js";
 
@@ -89,7 +89,12 @@ function recipientOf({ to, person }, identity) {
 const recipientName = (g) => g.to_user ?? positionName(g.to_pos);
 const recipientKind = (g) => (g.to_user ? "person" : "position");
 
-/** does the recipient already see data homed at `home` by its own positions */
+/**
+ * Does the recipient already see data homed at `home` by its own positions (the visibility
+ * reading: a position sees the classes its authority covers, homed where it sees, plus what is
+ * granted). A grant is the "plus what is granted": it adds to a recipient's view, and is only
+ * needed where the recipient's own positions don't reach.
+ */
 function recipientSees(r, home) {
   // homes null = sees everything (the root)
   const homes = r.to_user ? personScope(r.to_user)?.homes : visibleHomes(positionMap, [r.to_pos]);
@@ -97,7 +102,14 @@ function recipientSees(r, home) {
   return homes === null || homes.has(home);
 }
 
-/** propose or make a grant; owners only, agents and queued writers propose */
+/** the recipient's own standing toward a claim-bearing entry's classes: does its authority cover them (a grant then only widens by home) */
+export function recipientCovers(r, claims, rules = policy.authorityMap) {
+  const scope = r.to_user ? personScope(r.to_user) : { homes: visibleHomes(positionMap, [r.to_pos]), held: [r.to_pos] };
+  if (!scope) return false;
+  return (claims ?? []).every((c) => coversClass(scope, c.class, c.attribute, rules));
+}
+
+/** propose or make a grant; owners only, agents and queued writers propose; a share of claims whose authority the sharer lacks is proposed too */
 export async function grantAccess({ entities, subtree: subtreeRef, to, person, reason, until }, identity, scope) {
   if (!SCOPED || !positionMap) throw new Error("position scoping is not enabled");
   if (!!entities === !!subtreeRef) throw new Error("grant either entities or a subtree, not both");
@@ -132,7 +144,7 @@ export async function grantAccess({ entities, subtree: subtreeRef, to, person, r
       if (hits.length > 1) throw new Error(`${ref.name} exists at several homes you own; pass its home`);
       const home = effectiveHome(positionMap, hits[0]._home);
       if (recipientSees(recipient, home)) throw new Error(`${who} already sees ${ref.name}`);
-      targets.push({ kind: "entity", target: String(hits[0].rid), target_name: ref.name, target_origin: hits[0]._origin ?? null, target_home: home });
+      targets.push({ kind: "entity", target: String(hits[0].rid), target_name: ref.name, target_origin: hits[0]._origin ?? null, target_home: home, claims: await claimsOfEntry(String(hits[0].rid)) });
       if (hits[0]._kind === "document") {
         // a document is shared with its sections (those the owner owns and the recipient doesn't see)
         const secs = await adbQuery(`SELECT @rid AS rid, name, _home, _origin FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d${homeFilter(scope, { own: true })}`, { d: hits[0]._doc_id });
@@ -144,8 +156,12 @@ export async function grantAccess({ entities, subtree: subtreeRef, to, person, r
     }
   }
   const results = [];
-  for (const t of targets) {
+  for (const { claims, ...t } of targets) {
     const grant = { id: randomUUID(), ...base, ...t };
+    // people share what they own directly (it's theirs to share; time-limited and recorded) unless
+    // the organization routes shares through review; agents only propose, and a person confirms;
+    // a share of claims whose class lies with an authority the sharer lacks is a proposal too
+    const d = decideWrite(identity, { kind: "grant", lives: t.target_home, claims }, { propose: Boolean(identity.agent) || !(policy.peopleShareDirectly || scope.root), reason });
     if (t.after) {
       // waits on the entity's pending write: a person's own share is confirmed
       // already (applies on approval); an agent's waits for the person too
@@ -154,20 +170,17 @@ export async function grantAccess({ entities, subtree: subtreeRef, to, person, r
         payload: JSON.stringify(grant),
         user: identity.user,
         home: t.target_home,
-        status: identity.agent || !(policy.peopleShareDirectly || scope.root) ? "waiting" : "confirmed",
+        status: d.action !== "direct" ? "waiting" : "confirmed",
       });
       results.push({ proposed: true, waits_for_write: t.after, target: t.target_name, to: who, to_kind: recipientKind(recipient), ...q });
       continue;
     }
-    // people share what they own directly (it's theirs to share; time-limited
-    // and recorded) unless the organization routes shares through review;
-    // agents only propose, and a person confirms
-    if (!identity.agent && (policy.peopleShareDirectly || scope.root)) {
+    if (d.action === "direct") {
       await storeGrant(grant);
       results.push({ granted: true, id: grant.id, target: t.target_name, to: who, to_kind: recipientKind(recipient), expires_at });
     } else {
-      const q = await queueWrite({ kind: "grant", payload: JSON.stringify(grant), user: identity.user, home: t.target_home });
-      results.push({ proposed: true, target: t.target_name, to: who, to_kind: recipientKind(recipient), ...q });
+      const q = await queueWrite({ kind: "grant", payload: JSON.stringify(grant), user: identity.user, home: d.home ?? t.target_home });
+      results.push({ proposed: true, target: t.target_name, to: who, to_kind: recipientKind(recipient), ...(d.authority ? { authority: positionName(d.authority) } : {}), ...q });
     }
   }
   return { results };

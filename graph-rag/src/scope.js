@@ -9,6 +9,9 @@ import { entityPredicate, grantedView } from "./grants.js";
 import { GRAPH_RAG_OPEN_MODE, POSITION_MAP_PATH, TOKEN_MAP_PATH } from "./context.js";
 import { esc, RID_RE } from "./db.js";
 import { grantCache } from "./sharing.js";
+import { authorityOf, claimHome, visible } from "./model/authority.js";
+import { policy } from "./org-policy.js";
+import { claimKeys } from "./placement.js";
 
 /**
  * Identity model: callers present a bearer token (issued by the surrounding
@@ -102,6 +105,34 @@ export function homeFilter(scope, { own = false } = {}) {
   if (homes.size) conds.push(`(_kind = 'thing' AND _homes CONTAINSANY [${[...homes].map((h) => `'${esc(h)}'`).join(",")}])`);
   if (entities) conds.push(entities);
   return conds.length ? ` AND (${conds.join(" OR ")})` : " AND 1 = 0";
+}
+
+/**
+ * The visibility reading of the authority rule (docs/ORGANIZATION-MODEL.md: a claim is seen by
+ * those whose authority covers its class): does the caller's authority cover this class and
+ * attribute? By position alone (a queued writer sees what its position sees). Unscoped: yes.
+ * Grants are not authority: what a caller was granted it sees whatever its authority (seesClaim).
+ */
+export function coversClass(scope, cls, attribute = null, rules = policy.authorityMap) {
+  if (!SCOPED || !positionMap || scope.homes === null) return true;
+  return visible({ positions: scope.held ?? [] }, cls, attribute, rules, positionMap);
+}
+
+/**
+ * Does the caller see this claim: its authority covers the claim's class, and the claim is homed
+ * where the caller sees (provenance: a claim is seen by whoever sees its section, never below its
+ * origin), or the claim's section was granted to it. The same rule the grading reading places by
+ * (placeByClaims) and the proposal reading decides by (decideWrite), read as a question.
+ * `claim` is { class, attribute, _home | home } (a CLAIMS edge, or an entry row with its claims'
+ * classes); `origin` is the writer's position when the claim has no home yet.
+ */
+export function seesClaim(scope, claim, origin, rules = policy.authorityMap) {
+  if (!SCOPED || !positionMap || scope.homes === null) return true;
+  const [key] = claimKeys([claim]);
+  const home = claim?._home ?? claim?.home ?? (origin === undefined ? undefined : claimHome(positionMap, origin, authorityOf(rules, key?.class ?? null, key?.attribute ?? null)));
+  const at = effectiveHome(positionMap, home);
+  if (scope.granted?.homes?.has(at)) return true;
+  return scope.homes.has(at) && (!key || coversClass(scope, key.class, key.attribute, rules));
 }
 
 /** how the caller sees a row it can read but doesn't own: as its writer, or through a share */

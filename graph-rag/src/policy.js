@@ -2,6 +2,7 @@
 // (Organization settings in the app). Stored in ArcadeDB by graph-rag, which
 // enforces it; environment variables only provide the defaults.
 import { DEFAULT_TOPICS } from "./grading.js";
+import { validatePolicy as validateAuthorityMap } from "./model/authority.js";
 
 /** @typedef {{
  *   maxGrantDays: number,          // longest a share may last (non-standing)
@@ -10,7 +11,8 @@ import { DEFAULT_TOPICS } from "./grading.js";
  *   peopleShareDirectly: boolean,  // people share what they own at once (else: through review)
  *   gradingEnabled: boolean,       // grade new entries (needs a grader model)
  *   gradingConfidence: number,     // how sure the grader must be to act
- *   restrictedTopics: string[],    // what grading may hide an entry from its writer's team for
+ *   restrictedTopics: string[],    // what grading may hide an entry from its writer's team for (the residue: text that maps to no class)
+ *   authorityMap: AuthorityMap,    // commitment classes and attributes -> the position holding authority (model/authority.js)
  *   derivedWindowHours: number,    // how long what an identity read bounds where its writes land (0 = off)
  *   requestDays: number,           // how long a request for access stays open
  *   pruneAfterDays: number,        // expired entries are removed this long after their end (0 = never)
@@ -36,6 +38,7 @@ export function defaultPolicy(env = process.env) {
     gradingEnabled: env.GRADING_ENABLED !== "false",
     gradingConfidence: num("GRADING_CONFIDENCE", 0.6),
     restrictedTopics: env.RESTRICTED_TOPICS?.trim() ? topicList(env.RESTRICTED_TOPICS.split(",")) : [...DEFAULT_TOPICS],
+    authorityMap: env.AUTHORITY_MAP?.trim() ? authorityMap(JSON.parse(env.AUTHORITY_MAP)) : EMPTY_AUTHORITY_MAP,
     derivedWindowHours: num("DERIVED_WINDOW_HOURS", 12),
     requestDays: num("REQUEST_DAYS", 14),
     pruneAfterDays: num("PRUNE_AFTER_DAYS", 30),
@@ -51,8 +54,42 @@ function topicList(v) {
   return out;
 }
 
-/** validate a (partial) update against the current policy; throws with a person-readable message */
-export function applyPolicyUpdate(current, input) {
+/** no rule for any class: every write is the writer's own, and the grader judges every section */
+export const EMPTY_AUTHORITY_MAP = Object.freeze({ classes: {}, attributes: {} });
+
+/**
+ * The authority map (docs/ORGANIZATION-MODEL.md, "Authority: the hierarchy read the other way"):
+ * `{ classes: { [class]: { authority?, attributes?: { [attribute]: position } } }, attributes: { [attribute]: position }, default? }`.
+ * Checked against the position tree when one is given (model/authority.js validatePolicy: every
+ * authority a known position, never everyone); by shape alone when not (the defaults load before
+ * the tree does). Throws naming the field. Returns a normalized copy, keys sorted so two maps that
+ * say the same thing compare equal.
+ */
+export function authorityMap(v, positions = null) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("authorityMap must be an object with classes and attributes");
+  const out = validateAuthorityMap(v, positions ?? anyPosition);
+  const sortKeys = (o) => Object.fromEntries(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
+  const classes = sortKeys(
+    Object.fromEntries(
+      Object.entries(out.classes)
+        .map(([c, r]) => [c, { ...(r.authority ? { authority: r.authority } : {}), ...(r.attributes && Object.keys(r.attributes).length ? { attributes: sortKeys(r.attributes) } : {}) }])
+        .filter(([, r]) => Object.keys(r).length),
+    ),
+  );
+  const names = [...Object.keys(classes), ...Object.keys(out.attributes), ...Object.values(classes).flatMap((r) => Object.keys(r.attributes ?? {}))];
+  if (names.length > 500) throw new Error("authorityMap: at most 500 rules");
+  for (const k of names) if (k.length > 80) throw new Error(`authorityMap: "${k.slice(0, 20)}…" is longer than 80 characters`);
+  return { classes, attributes: sortKeys(out.attributes), ...(out.default ? { default: out.default } : {}) };
+}
+
+/** a position map that knows every id: shape validation when no tree is at hand */
+const anyPosition = { root: "", positions: new Proxy({}, { get: (_, k) => (typeof k === "string" && k ? { name: k, parent: null } : undefined), has: () => true }) };
+
+/**
+ * Validate a (partial) update against the current policy; throws with a person-readable message.
+ * `positions` (a parsed position map) checks the authority map's positions against the tree.
+ */
+export function applyPolicyUpdate(current, input, positions = null) {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("settings must be an object");
   const next = { ...current };
   const known = new Set(Object.keys(current));
@@ -65,6 +102,8 @@ export function applyPolicyUpdate(current, input) {
       next[k] = k === "gradingConfidence" ? Math.round(n * 100) / 100 : Math.round(n);
     } else if (k === "restrictedTopics") {
       next[k] = topicList(v);
+    } else if (k === "authorityMap") {
+      next[k] = authorityMap(v, positions);
     } else if (k === "standingGrants") {
       if (v !== "root" && v !== "nobody") throw new Error('standingGrants must be "root" or "nobody"');
       next[k] = v;
@@ -77,11 +116,21 @@ export function applyPolicyUpdate(current, input) {
   return next;
 }
 
-/** a stored policy may predate a setting: fill it from the defaults, drop what's invalid */
-export function normalizeStored(stored, defaults) {
+/**
+ * A stored policy may predate a setting: fill it from the defaults, drop what's invalid. With a
+ * position tree, an authority map naming a position the tree no longer has is dropped on its own
+ * (the rest of the policy stands; an unknown authority would otherwise fail upward to the root).
+ */
+export function normalizeStored(stored, defaults, positions = null) {
+  const known = Object.fromEntries(Object.entries(stored ?? {}).filter(([k]) => k in defaults));
   try {
-    return applyPolicyUpdate(defaults, Object.fromEntries(Object.entries(stored ?? {}).filter(([k]) => k in defaults)));
+    return applyPolicyUpdate(defaults, known, positions);
   } catch {
-    return defaults;
+    try {
+      const { authorityMap: _dropped, ...rest } = known;
+      return applyPolicyUpdate(defaults, rest, positions);
+    } catch {
+      return defaults;
+    }
   }
 }
