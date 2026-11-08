@@ -189,6 +189,9 @@ export class OpenShellAgentLauncher {
     const standing = await readFile(path.join(dirs.home, "standing-instructions.md"), "utf8").catch(() => null);
     // always written: an empty file clears instructions a reused sandbox had
     files.push([`${g.home}/standing-instructions.md`, standing ?? ""]);
+    // the conversation's on/off-record state (agents/condenser.ts); empty clears a reused sandbox's
+    const onRecord = await readFile(path.join(dirs.home, "on-record.md"), "utf8").catch(() => null);
+    files.push([`${g.home}/on-record.md`, onRecord ?? ""]);
     if (mcp) files.push([`${g.workspace}/.mcp.json`, JSON.stringify(mcp, null, 2) + "\n"]);
     for (const [file, content] of files) await this.writeFile(sandbox, file, content);
     await this.exec(sandbox, ["mkdir", "-p", g.sessions, g.workspace]);
@@ -274,6 +277,19 @@ export class OpenShellAgentLauncher {
   private async attached(sandbox: string): Promise<string[]> {
     const scope = this.deps.workspace ? { workspace: this.deps.workspace } : {};
     return (await this.deps.sandbox.listAllProviders(sandbox, scope)).map((p) => p.name);
+  }
+
+  /**
+   * Write one of the agent's home files inside its running sandbox (the
+   * server's copy is written by the caller): the per-turn files graph-context
+   * reads, such as the conversation's record state when the person switches it.
+   */
+  async writeHomeFile(agentId: string, name: string, content: string): Promise<void> {
+    const sandbox = sandboxNameFor(agentId);
+    const scope = this.deps.workspace ? { workspace: this.deps.workspace } : {};
+    const pwd = await this.deps.sandbox.exec(sandbox, ["pwd"], { ...scope, noLoginShell: true });
+    const root = pwd.stdout.toString("utf8").trim() || "/sandbox";
+    await this.writeFile(sandbox, `${root}/.gw/home/${name}`, content);
   }
 
   /** File access to the agent's workspace inside its sandbox (the files API on this runtime). */

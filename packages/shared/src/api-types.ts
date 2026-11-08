@@ -31,6 +31,11 @@ export interface AgentRecord {
   mcpServers: string[];
   gondolin: GondolinConfig;
   sessionFile?: string | null | undefined;
+  /**
+   * each conversation (pi session) of this agent that was ever put on record,
+   * by thread id (the session file's name): see ThreadRecordState
+   */
+  threads?: Record<string, ThreadRecordState> | undefined;
   /** outcome of the profile context engine at creation time */
   contextStatus?: "skipped" | "ok" | "failed" | undefined;
   /**
@@ -39,6 +44,39 @@ export interface AgentRecord {
    * questions and proposals to the admin
    */
   graphRole?: GraphRole | undefined;
+}
+
+/**
+ * A thread (one conversation of a person's chat agent) is on record or off,
+ * chosen by the person (docs/ORGANIZATION-MODEL.md, "On record is a
+ * deliberate act"). Off is the default; switching off again stops further
+ * recording and unrecords nothing. While on record, the agent condenses
+ * sections of the conversation into documents with claims.
+ */
+export interface ThreadRecordState {
+  /** the conversation: its session file's name, or null before the agent has one */
+  thread: string | null;
+  on: boolean;
+  /** when it was last switched on (ISO); null if never */
+  since: string | null;
+  /** when it was switched off after being on (ISO); null while on, or never on */
+  until: string | null;
+  /** the person who switched it on, the position the record is made under, and why */
+  by: string | null;
+  position: string | null;
+  reason: string | null;
+  /** documents condensed from this thread so far (seen from the agent's tool calls) */
+  documents: number;
+  /** when the last of them was recorded (ISO) */
+  condensed_at: string | null;
+  /** switched on at least once */
+  ever: boolean;
+}
+
+export interface SetThreadRecordInput {
+  on: boolean;
+  /** why it goes on record, in the person's words (kept while on) */
+  reason?: string | undefined;
 }
 
 export type GraphRole =

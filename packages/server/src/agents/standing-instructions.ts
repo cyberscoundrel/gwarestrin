@@ -12,7 +12,7 @@ import { buildChatInstructions } from "./instructions/chat.js";
 import { buildGraphRoleInstructions, type GraphRoleKind } from "./instructions/graph-roles.js";
 import type { SourceInfo } from "./instructions/types.js";
 
-export { SHARING_INSTRUCTIONS, buildChatInstructions } from "./instructions/chat.js";
+export { RECORD_INSTRUCTIONS, SHARING_INSTRUCTIONS, buildChatInstructions } from "./instructions/chat.js";
 export { WORKER_INSTRUCTIONS } from "./instructions/worker.js";
 export { MASTER_INSTRUCTIONS } from "./instructions/master.js";
 export { HANDLER_INSTRUCTIONS } from "./instructions/handler.js";

@@ -162,6 +162,7 @@ describe("OpenShellAgentLauncher", () => {
     expect([...f.written.keys()].sort()).toEqual([
       "/sandbox/.gw/home/agent-config.json",
       "/sandbox/.gw/home/context-injection.md",
+      "/sandbox/.gw/home/on-record.md",
       "/sandbox/.gw/home/providers.gen.json",
       "/sandbox/.gw/home/settings.json",
       "/sandbox/.gw/home/standing-instructions.md",
@@ -169,6 +170,7 @@ describe("OpenShellAgentLauncher", () => {
     ]);
     // none in this fixture's home: pushed empty, so a reused sandbox loses stale ones
     expect(f.written.get("/sandbox/.gw/home/standing-instructions.md")).toBe("");
+    expect(f.written.get("/sandbox/.gw/home/on-record.md")).toBe("");
     const gen = JSON.parse(f.written.get("/sandbox/.gw/home/providers.gen.json")!);
     expect(gen.providers.litellm.baseUrl).toBe("http://172.31.99.11:4000/v1");
     const mcp = JSON.parse(f.written.get("/sandbox/workspace/.mcp.json")!);

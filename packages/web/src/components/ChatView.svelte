@@ -4,6 +4,7 @@
   import LitAgentInterface from "./LitAgentInterface.svelte";
   import ModelBar from "./ModelBar.svelte";
   import SessionPanel from "./SessionPanel.svelte";
+  import RecordToggle from "./RecordToggle.svelte";
   import FilesPanel from "./FilesPanel.svelte";
   import McpPanel from "./McpPanel.svelte";
   import ContextPanel from "./ContextPanel.svelte";
@@ -129,6 +130,8 @@
           </div>
         {/if}
       </div>
+      <!-- on or off record: the person's switch for this conversation (every screen size) -->
+      <RecordToggle {agentId} />
       <div class="flex items-center gap-0.5 max-sm:hidden">
         <SessionPanel {agentId} />
         <span class="mx-1 h-4 w-px bg-edge" aria-hidden="true"></span>

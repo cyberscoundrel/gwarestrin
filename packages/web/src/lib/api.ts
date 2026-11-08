@@ -1,4 +1,4 @@
-import type { AgentRecord, AgentRuntimeSummary, ModelLabel, ModelView, ProfileRecord, ProviderView } from "@gwarestrin/shared";
+import type { AgentRecord, AgentRuntimeSummary, ModelLabel, ModelView, ProfileRecord, ProviderView, SetThreadRecordInput, ThreadRecordState } from "@gwarestrin/shared";
 
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
@@ -331,6 +331,18 @@ export const api = {
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       throw new Error(body.error ?? `delete failed: ${res.status}`);
     }
+  },
+  /** the current conversation's on/off-record state */
+  async threadRecord(id: string): Promise<ThreadRecordState> {
+    const r = await json<{ record: ThreadRecordState }>(await fetch(`/api/agents/${id}/record`));
+    return r.record;
+  },
+  /** the person switches the current conversation on or off record */
+  async setThreadRecord(id: string, input: SetThreadRecordInput): Promise<ThreadRecordState> {
+    const r = await json<{ record: ThreadRecordState }>(
+      await fetch(`/api/agents/${id}/record`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }),
+    );
+    return r.record;
   },
   async startAgent(id: string): Promise<AgentRuntimeSummary> {
     const r = await json<{ runtime: AgentRuntimeSummary }>(await fetch(`/api/agents/${id}/start`, { method: "POST" }));

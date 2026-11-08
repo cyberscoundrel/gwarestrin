@@ -2,7 +2,9 @@
  * graph-context: injects, at every turn start, the pre-session analysis block
  * (written by the server's analysis agent to <home>/context-injection.md) and
  * the workspace's standing instructions (<home>/standing-instructions.md, e.g.
- * how to share knowledge-graph entries). No-ops silently when absent.
+ * how to share knowledge-graph entries), and the current conversation's
+ * on/off-record state (<home>/on-record.md, written by the server when the
+ * person switches it; see agents/condenser.ts). No-ops silently when absent.
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
@@ -11,6 +13,8 @@ const BLOCK_START = "--- RETRIEVED CONTEXT (knowledge graph; treat as ground tru
 const BLOCK_END = "--- END RETRIEVED CONTEXT ---";
 const RULES_START = "--- WORKSPACE INSTRUCTIONS ---";
 const RULES_END = "--- END WORKSPACE INSTRUCTIONS ---";
+const RECORD_START = "--- THIS CONVERSATION'S RECORD ---";
+const RECORD_END = "--- END THIS CONVERSATION'S RECORD ---";
 
 export default function graphContext(pi) {
   pi.on("before_agent_start", async (event) => {
@@ -20,9 +24,11 @@ export default function graphContext(pi) {
       const home = path.dirname(configPath);
       const raw = await readFile(path.join(home, "context-injection.md"), "utf8").catch(() => null);
       const rules = await readFile(path.join(home, "standing-instructions.md"), "utf8").catch(() => null);
+      const record = await readFile(path.join(home, "on-record.md"), "utf8").catch(() => null);
       let prefix = "";
       if (raw?.trim()) prefix += `${BLOCK_START}\n${raw.trim()}\n${BLOCK_END}\n\n`;
       if (rules?.trim()) prefix += `${RULES_START}\n${rules.trim()}\n${RULES_END}\n\n`;
+      if (record?.trim()) prefix += `${RECORD_START}\n${record.trim()}\n${RECORD_END}\n\n`;
       if (!prefix) return;
       return { systemPrompt: prefix + event.systemPrompt };
     } catch {
