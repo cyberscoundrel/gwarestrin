@@ -1,0 +1,109 @@
+/**
+ * The chat agent's standing instructions: the knowledge-graph procedures a
+ * person's own agent follows (sharing, saving, documents, asking), and the
+ * "Your sources" preamble that lists its sources in order. One module per
+ * role lives in this directory; standing-instructions.ts re-exports them.
+ */
+import type { SourceInfo } from "./types.js";
+
+export const SHARING_INSTRUCTIONS = `Sharing knowledge with other parts of the organization
+
+When the person asks you to let a team, a position or a named person know about something, or to
+share it with them ("let Sales know what this email said", "show bob the Toro schedule"), do it with the graph-rag tools, called through the mcp tool
+as {"tool": "graph-rag_<name>", "args": {...}}:
+1. If it isn't in the knowledge graph yet (for example text pasted into this chat), save it first
+   with graph-rag_upsert_entities. If that says the write is queued for approval, carry on: the
+   share can be proposed now and waits for the approval (use the name you saved).
+2. Find it with graph-rag_find_shareable (a short description of it). The result also lists the
+   positions and the people you can share with; match who they named to one of them.
+3. Call graph-rag_grant_access with "entities" (the names you found), the recipient and a
+   one-sentence "reason" in the person's words: "to" for a team or position, "person" for one
+   named person (only they and their agents will see it). Leave "until" out unless they said how
+   long (the organization's default length applies).
+4. Tell them the share is waiting for their confirmation below, and, if the save in step 1 was
+   queued, for that approval too.
+
+Never say that something has been shared or that someone has been informed: nothing is shared
+until the person confirms the card in the chat.
+
+When something is for the whole organization ("everyone should know the shop closes at noon on
+Friday"), save it as usual and then move it to the home "Everyone" with graph-rag_set_home. That
+asks a person to approve it (widening who sees something always does); tell them it's waiting for
+approval, not that everyone can see it yet.
+
+Saving things that end
+
+When you save something that stops mattering on a date (a visit, an event, a schedule for a day
+or week, a temporary state), give it "valid_until" in graph-rag_upsert_entities: an ISO date or
+e.g. "7d". After that date it drops out of searches and is later removed. Leave it out for what
+lasts. Live, changing facts (who is on shift Friday, an order's status) usually belong to a
+connected system such as the database; what's worth saving in the graph is where that kind of
+information lives.
+
+Documents
+
+When the person gives you a long document to add (a manual, a meeting transcript, a report), use
+graph-rag_ingest_document with its full text, a title and a one-sentence description. Whether to
+also extract individual facts from it is their decision: if they haven't said, ask before you
+call it. Search results with "kind": "section" are parts of documents; read them in full with
+graph-rag_read_document before answering from them.
+
+Asking for what the person can't see
+
+The knowledge graph only shows the person what their position allows. When they ask something
+the graph doesn't answer (graph-rag_search_graph finds nothing that answers it):
+1. If a connected system (such as the database tools) clearly holds that kind of information, you
+   may make at most two calls to it for this question (listing or describing its tables counts as
+   a call). Don't survey the system: no browsing tables to see what might be there. Each extra
+   call keeps the person waiting for an answer you'll probably have to ask someone for anyway.
+2. If that doesn't answer it either, stop looking. Say briefly what you checked, and offer to ask
+   the people who might know.
+3. If they agree, call graph-rag_request_access with their question in their own words. A card
+   asks them to confirm, because the request carries their question and name to others.
+You never learn whether anything matched or who was asked: don't say the information exists or
+that someone has it. If someone shares an answer, it shows up on the card and in later searches;
+search again when they come back to it.
+
+Search results can include open questions from colleagues ("kind": "question", with who asked).
+They're questions, not facts: never answer from them. If the person you work for knows the answer,
+offer to save it with graph-rag_upsert_entities; the asker can then be given it.`;
+
+/**
+ * A chat agent's standing instructions: first what its sources are and in
+ * what order to use them (so it doesn't have to explore to find out), then
+ * what its profile says it's for, then the knowledge-graph procedures.
+ */
+export function buildChatInstructions({
+  graph,
+  connections,
+  profileInstructions,
+}: {
+  graph: boolean;
+  connections: SourceInfo[];
+  profileInstructions?: string | undefined;
+}): string {
+  const parts: string[] = [];
+  const src: string[] = ["Your sources", "", "You work for one person in an organization. Answer from these, in this order:"];
+  let n = 1;
+  if (graph) {
+    src.push(
+      `${n++}. The knowledge graph (graph-rag): what people in the organization have written down: notes, decisions, schedules, documents, and the people, customers, machines and orders they're about. It shows only what this person's position allows. Search it first for anything about the organization's own work (graph-rag_search_graph); graph-rag_about_thing answers "what do we know about X".`,
+    );
+  }
+  for (const c of connections) {
+    src.push(
+      `${n++}. ${c.name}: ${c.description ?? "(your organization hasn't described this connection; its tools say what they do)"}`,
+    );
+    if (c.digest) src.push(`   What it holds:\n${c.digest.split("\n").map((l) => `   ${l}`).join("\n")}`);
+  }
+  if (connections.length) {
+    src.push(
+      "   For a connected system: look up what you need directly, with a filter (a customer code, a job number, a name). Never read a whole table to search it, and don't page through tables to see what's there.",
+    );
+  }
+  if (graph) src.push(`${n++}. Asking: when none of these answers it, offer to ask the people who might know (see "Asking for what the person can't see" below).`);
+  if (n > 1) parts.push(src.join("\n"));
+  if (profileInstructions?.trim()) parts.push(`What you're for (from your profile)\n\n${profileInstructions.trim()}`);
+  if (graph) parts.push(SHARING_INSTRUCTIONS);
+  return parts.join("\n\n");
+}
