@@ -1,9 +1,17 @@
 // The replay harness's scenarios: each one a failure the live batches found,
 // replayed against a real ArcadeDB and graph-rag with fake models (see
 // fake-models.mjs and e2e.sh). Run by e2e.sh inside the harness network.
+//
+// After its own scenarios it runs every stream's: each `scenarios-<stream>.mjs`
+// in this directory exporting an array of { name, run } (the contract is
+// SCENARIOS.md; the loader is scenarios.mjs). One suite, one summary line.
+// ONLY=term[,term] runs the scenarios whose name, file or stream matches.
+import { discoverScenarioFiles, loadScenarioFiles, selected, skipReason, summaryLine } from "./scenarios.mjs";
 const GRAPH = process.env.GRAPH_URL ?? "http://graph-rag:8000";
 const MODELS = process.env.MODELS_URL ?? "http://models:4000";
 import { createHmac, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 const TOKENS = { admin: "e2e-admin", alice: "e2e-alice", bob: "e2e-bob" };
 // a graph worker thread's token, as the admin's workspace signs it (graph-rag/src/delegation.js)
 const delegated = (claims) => {
@@ -54,7 +62,9 @@ async function until(label, fn, timeoutMs = 240_000) {
 }
 
 const results = [];
-async function scenario(name, fn) {
+const OWN = { file: "run.mjs", stream: "harness" };
+async function scenario(name, fn, meta = OWN) {
+  if (!selected({ name, ...meta })) return;
   const t0 = Date.now();
   try {
     await fn();
@@ -64,8 +74,9 @@ async function scenario(name, fn) {
     results.push({ name, ok: false, error: String(e?.message ?? e) });
     console.log(`FAIL ${name}: ${String(e?.message ?? e).slice(0, 500)}`);
   } finally {
-    // a failed scenario never leaves a model failing for the next one
+    // a failed scenario never leaves a model failing, slowed or primed for the next one
     for (const model of ["grader", "ds-flash", "embed", "decisions"]) await models("/__ok", { model });
+    await models("/__reset", {}).catch(() => {});
   }
 }
 const check = (cond, msg) => {
@@ -473,6 +484,52 @@ await scenario("nothing in the background kept failing", async () => {
   check(Object.values(st.dependencies ?? {}).every((d) => d.ok), `still out: ${JSON.stringify(st.dependencies)}`);
 });
 
-const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} scenarios passed`);
+// ---- the streams' scenarios: every scenarios-<stream>.mjs next to this file (SCENARIOS.md) ----
+const E2E_DIR = fileURLToPath(new URL("./", import.meta.url));
+const FIXTURES = new URL("../test/fixtures/", import.meta.url);
+/** what a scenario file's run(context) receives: this file's helpers, by name */
+const context = {
+  GRAPH,
+  MODELS,
+  TOKENS,
+  POS,
+  tool,
+  sql,
+  api,
+  models,
+  entry,
+  thing,
+  job,
+  until,
+  check,
+  save,
+  delegated,
+  workerToken,
+  handlerToken,
+  randomUUID,
+  fixtures: {
+    dir: fileURLToPath(FIXTURES),
+    read: (name) => JSON.parse(readFileSync(new URL(name, FIXTURES), "utf8")),
+    url: (name) => new URL(name, FIXTURES),
+  },
+  e2eDir: E2E_DIR,
+  // a stream's scenario can import this checkout's modules read-only (`src/model/claims.js`)
+  srcUrl: (rel) => new URL(`../src/${rel}`, import.meta.url),
+};
+const files = discoverScenarioFiles(E2E_DIR);
+const streams = await loadScenarioFiles(files);
+if (files.length) console.log(`\n${streams.length} scenario${streams.length === 1 ? "" : "s"} from ${files.length} stream file${files.length === 1 ? "" : "s"}: ${files.map((f) => f.split("/").pop()).join(", ")}`);
+for (const s of streams) {
+  if (!selected(s)) continue;
+  const reason = await skipReason(s, context);
+  if (reason) {
+    results.push({ name: s.name, ok: true, skipped: true, reason });
+    console.log(`SKIP ${s.name} [${s.file}]: ${reason}`);
+    continue;
+  }
+  await scenario(`${s.name} [${s.stream}]`, () => s.run(context), s);
+}
+
+const failed = results.filter((r) => !r.skipped && !r.ok);
+console.log(`\n${summaryLine(results)}`);
 process.exit(failed.length ? 1 : 0);
