@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { mentions, residue } from "../e2e/fake-models.mjs";
 import { keysInText, mentionsPrompt, ngrams, parseMentions, parseResidue, residuePrompt, splitThingName, THING_TYPES, thingName } from "../src/things.js";
 
 const CLASSES = JSON.parse(readFileSync(new URL("./fixtures/classes.json", import.meta.url), "utf8"));
@@ -73,6 +74,19 @@ test("same-named people: the prompt tells the model to give no number, and a num
   const [picked] = parseMentions(JSON.stringify({ things: [{ name: "Diep", role: "operator", candidate: 1 }] }), 8, { candidates: CANDIDATES });
   assert.equal(picked.candidate, "#1:1");
   assert.equal(picked.key, undefined, "picking from the list hands over no key: a key would settle it (B16)");
+});
+
+test("the harness's fake can answer as a model that picks and composes keys: a scenario's name is only as good as this", () => {
+  const user = (content) => [{ role: "user", content }];
+  const text = "x [things: PO 78912/order/key=mssql|dbo_Order|78912/class=orders, Diep/person/1, HILL/supplier]";
+  assert.deepEqual(JSON.parse(mentions(user(text))).things, [
+    { name: "PO 78912", type: "order", role: "mentions", key: "mssql:dbo_Order:78912", class: "orders" },
+    { name: "Diep", type: "person", role: "mentions", candidate: 1 },
+    { name: "HILL", type: "supplier", role: "mentions" },
+  ]);
+  assert.deepEqual(keysInText(text), [], "the tag itself is no key written in the statement");
+  const asked = 'Zelda took over. [pick: Zelda=ZK2]\n\n"Zelda" could be:\n  #1:1: Zelda (person) [mssql:dbo_Employee:ZK1]\n  #1:2: Zelda (person) [mssql:dbo_Employee:ZK2]';
+  assert.deepEqual(JSON.parse(residue(user(asked))).picks, [{ name: "Zelda", candidate: "#1:2" }]);
 });
 
 test("record keys written in a text resolve without a model", () => {

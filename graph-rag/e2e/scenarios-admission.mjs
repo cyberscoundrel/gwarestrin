@@ -231,14 +231,14 @@ const SCENARIOS = [
       const [poClaim] = await claimsOf(h, "e2e-adm6 po on the job");
       h.check(poClaim.dst === j13.thing && poClaim.value === "78912", `the number is a value on the job: ${JSON.stringify(poClaim)}`);
       // a model that makes the number a key (the prompt lists orders' record table; nothing checked the row) mints nothing and finds nothing
-      await h.save("alice", "e2e-adm6a po 78912 prose", "Customer PO 78912 covers both EPP-D98 jobs. [things: PO 78912/order/key=mssql,dbo_Order,78912/class=orders, PO 78912 for Exatron/order, order 78912/order, Exatron PO 78912/order]");
+      await h.save("alice", "e2e-adm6a po 78912 prose", "Customer PO 78912 covers both EPP-D98 jobs. [things: PO 78912/order/key=mssql|dbo_Order|78912/class=orders, PO 78912 for Exatron/order, order 78912/order, Exatron PO 78912/order]");
       const n = await h.entry("e2e-adm6a po 78912 prose");
       await linkedUp(h, n);
       const pos = await h.sql("SELECT label, _keys FROM Entity WHERE _kind = 'thing' AND (_norm LIKE '%78912%' OR _alias_norms CONTAINS 'order 78912' OR _keys CONTAINS 'mssql:dbo_Order:78912')");
       h.check(pos.length === 0, `the PO is no node, keyed or not: ${JSON.stringify(pos)}`);
       h.check((await sourceRefs(h, "mssql:dbo_Order:78912")).length === 0, "and no SourceRef for a row nothing checked");
       const left = await unresolvedOn(h, "e2e-adm6a po 78912 prose");
-      h.check(left.some((u) => u.name === "PO 78912"), `the name goes back for a worker or a person: ${JSON.stringify(left)}`);
+      h.check(left.some((u) => u.name === "PO 78912" && u.key === "mssql:dbo_Order:78912"), `the name goes back with the model's key as a hint, for a worker or a person: ${JSON.stringify(left)}`);
       // a key the statement itself writes is an identity all the same
       await h.save("alice", "e2e-adm7 a job by key", "Job mssql:dbo_Job:3260359 ships next week.");
       const k = await h.entry("e2e-adm7 a job by key");

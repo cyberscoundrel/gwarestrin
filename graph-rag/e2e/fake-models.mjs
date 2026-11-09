@@ -9,7 +9,7 @@
 //                                an item marked [claimed] is a section with claims: the grader is not
 //                                its judge, it stays at the writer's position and the call is counted),
 //                                the linker (mentions from the statement's [things: Name/type/option..., ...] tag;
-//                                an option is a number (the model picks that listed candidate), key=sys,table,row or class=C),
+//                                an option is a number (the model picks that listed candidate), key=sys|table|row or class=C),
 //                                the residue's pick ([pick: Name=PICK] picks the candidate whose line contains PICK),
 //                                the condenser (a request whose model or system prompt says "condens":
 //                                fake-condenser.mjs next to this file when present, else the built-in
@@ -94,7 +94,7 @@ export function mentions(messages) {
           const thing = { name, type, role: "mentions" };
           for (const o of options) {
             if (/^\d+$/.test(o)) thing.candidate = Number(o);
-            else if (o.startsWith("key=")) thing.key = o.slice(4).replaceAll(",", ":"); // key=mssql,dbo_Order,78912: commas, so the tag in the statement's text is not itself a key written in it
+            else if (o.startsWith("key=")) thing.key = o.slice(4).replaceAll("|", ":"); // key=mssql|dbo_Order|78912: bars, so the tag in the statement's text is not itself a key written in it
             else if (o.startsWith("class=")) thing.class = o.slice(6);
           }
           return thing;
