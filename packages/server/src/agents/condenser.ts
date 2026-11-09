@@ -11,9 +11,9 @@
  *  - the block the agent reads at every turn (<home>/on-record.md, injected
  *    by the graph-context extension): the state, and the confirmed
  *    commitment classes its claims may name
- *  - the confirmed classes, read from the graph through the existing MCP
- *    tools as this instance (CommitmentClass rows; the Discovery stream's
- *    confirm flow fills them)
+ *  - the confirmed classes, read from graph-rag as this instance: the
+ *    Discovery stream's listing (GET /api/discovery/classes), or the raw
+ *    read through the MCP tools where the token is the root's
  *  - a document the agent recorded, recognized in its tool events, so the
  *    thread view can count them
  */
@@ -137,13 +137,65 @@ export async function writeRecordContext(home: string, text: string): Promise<vo
   else await rm(file, { force: true });
 }
 
+/** what fetchConfirmedClasses reaches the graph with; replaceable in tests */
+export interface ClassSources {
+  /** graph-rag's HTTP app (the Discovery stream's listing lives there) */
+  fetch?: typeof fetch;
+  /** the MCP tools, for the root-only raw read */
+  client?: Pick<McpHttpClient, "callTool">;
+}
+
+/** one row of either source as a ConfirmedClass, or null when it has no name */
+function asClass(r: unknown): ConfirmedClass | null {
+  if (!r || typeof r !== "object") return null;
+  const row = r as Record<string, unknown>;
+  if (typeof row.name !== "string" || !row.name) return null;
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
+  const attributes = list(row.attributes);
+  return {
+    name: row.name,
+    description: typeof row.description === "string" ? row.description : null,
+    stages: list(row.stages),
+    record_table: typeof row.record_table === "string" ? row.record_table : null,
+    ...(attributes.length ? { attributes } : {}),
+  };
+}
+
 /**
- * The confirmed classes, through the existing MCP tools as this instance
- * (query_graph is a root-only raw read, so on an instance below the root
- * this comes back null and the agent is told the classes couldn't be read;
- * the Discovery stream's listing replaces this). Null when unreadable.
+ * The confirmed classes, as this instance. First the Discovery stream's
+ * listing, GET /api/discovery/classes?status=confirmed on graph-rag's HTTP
+ * app (same token as /mcp, open to any identity that can read, so a
+ * person's agent below the root sees them too); when that route isn't there
+ * or fails, the raw read through query_graph, which only the root's token may
+ * make. Null when neither answers (the agent is then told the classes
+ * couldn't be read, never given an empty list by mistake).
  */
-export async function fetchConfirmedClasses(mcpUrl: string, token: string | undefined, client: Pick<McpHttpClient, "callTool"> = new McpHttpClient(mcpUrl, token)): Promise<ConfirmedClass[] | null> {
+export async function fetchConfirmedClasses(mcpUrl: string, token: string | undefined, sources: ClassSources = {}): Promise<ConfirmedClass[] | null> {
+  return (await fromDiscovery(mcpUrl, token, sources.fetch ?? globalThis.fetch)) ?? (await fromQueryGraph(sources.client ?? new McpHttpClient(mcpUrl, token)));
+}
+
+/** graph-rag's HTTP base is the MCP URL's (the knowledge proxies resolve their paths the same way) */
+export function discoveryClassesUrl(mcpUrl: string): string {
+  return new URL("/api/discovery/classes?status=confirmed", mcpUrl).toString();
+}
+
+async function fromDiscovery(mcpUrl: string, token: string | undefined, fetchFn: typeof fetch | undefined): Promise<ConfirmedClass[] | null> {
+  if (!fetchFn) return null;
+  try {
+    const res = await fetchFn(discoveryClassesUrl(mcpUrl), {
+      headers: { accept: "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { classes?: unknown };
+    if (!Array.isArray(body.classes)) return null;
+    return body.classes.filter((c) => !c || typeof c !== "object" || (c as { status?: unknown }).status === undefined || (c as { status?: unknown }).status === "confirmed").map(asClass).filter((c): c is ConfirmedClass => c !== null);
+  } catch {
+    return null;
+  }
+}
+
+async function fromQueryGraph(client: Pick<McpHttpClient, "callTool">): Promise<ConfirmedClass[] | null> {
   try {
     const text = await client.callTool("query_graph", {
       language: "sql",
@@ -151,15 +203,7 @@ export async function fetchConfirmedClasses(mcpUrl: string, token: string | unde
     });
     const parsed = JSON.parse(text) as { rows?: unknown[]; error?: string };
     if (!Array.isArray(parsed.rows)) return null;
-    return parsed.rows
-      .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
-      .filter((r) => typeof r.name === "string" && r.name)
-      .map((r) => ({
-        name: String(r.name),
-        description: typeof r.description === "string" ? r.description : null,
-        stages: Array.isArray(r.stages) ? r.stages.map(String) : [],
-        record_table: typeof r.record_table === "string" ? r.record_table : null,
-      }));
+    return parsed.rows.map(asClass).filter((c): c is ConfirmedClass => c !== null);
   } catch {
     return null;
   }

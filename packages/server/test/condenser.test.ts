@@ -2,7 +2,7 @@ import { mkdtemp, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { classesBlock, condensedFromEvent, fetchConfirmedClasses, offRecord, RECORD_FILE, recordContext, switchRecord, threadIdOf, writeRecordContext } from "../src/agents/condenser.js";
+import { classesBlock, condensedFromEvent, discoveryClassesUrl, fetchConfirmedClasses, offRecord, RECORD_FILE, recordContext, switchRecord, threadIdOf, writeRecordContext } from "../src/agents/condenser.js";
 import { buildStandingInstructions, RECORD_INSTRUCTIONS } from "../src/agents/standing-instructions.js";
 import { AgentStore } from "../src/agents/store.js";
 
@@ -90,18 +90,47 @@ describe("what the agent reads at every turn", () => {
   });
 });
 
-describe("the confirmed classes, through the graph's own tools", () => {
-  it("reads CommitmentClass rows through query_graph; an identity that can't is told so (null), not given an empty list", async () => {
-    const rows = [{ name: "orders", description: "a customer order", stages: ["quoted", "ordered"], record_table: "mssql:dbo_Order" }, { name: "", stages: [] }];
-    const ok = await fetchConfirmedClasses("http://graph-rag/mcp", "t", { callTool: async (name, args) => (name === "query_graph" && /CommitmentClass/.test(String(args.query)) ? JSON.stringify({ rows }) : "{}") });
-    expect(ok).toEqual([{ name: "orders", description: "a customer order", stages: ["quoted", "ordered"], record_table: "mssql:dbo_Order" }]);
+describe("the confirmed classes, as this instance", () => {
+  const rows = [{ name: "orders", description: "a customer order", stages: ["quoted", "ordered"], record_table: "mssql:dbo_Order" }, { name: "", stages: [] }];
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const noTools = {
+    callTool: async () => {
+      throw new Error("query_graph must not be called when the listing answered");
+    },
+  };
+
+  it("reads the Discovery listing first (GET /api/discovery/classes?status=confirmed on graph-rag's HTTP base, with the token), so an agent below the root sees them", async () => {
+    const calls: { url: string; auth: string | null }[] = [];
+    const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), auth: new Headers(init?.headers).get("authorization") });
+      return json({ classes: [{ ...rows[0], status: "confirmed", attributes: ["unit_price", "qty"], reasons: [] }, { name: "drafty", status: "draft", stages: [] }, rows[1]], canConfirm: false });
+    }) as typeof fetch;
+    const list = await fetchConfirmedClasses("http://graph-rag:7700/mcp", "t", { fetch: fetchFn, client: noTools });
+    expect(calls).toEqual([{ url: "http://graph-rag:7700/api/discovery/classes?status=confirmed", auth: "Bearer t" }]);
+    expect(list).toEqual([{ name: "orders", description: "a customer order", stages: ["quoted", "ordered"], record_table: "mssql:dbo_Order", attributes: ["unit_price", "qty"] }]);
+    expect(discoveryClassesUrl("https://graph.example.org/mcp")).toBe("https://graph.example.org/api/discovery/classes?status=confirmed");
+  });
+
+  it("falls back to query_graph when the listing isn't there or fails; an identity that can't read either is told so (null), not given an empty list", async () => {
+    const missing = (async () => json({ error: "not found" }, 404)) as typeof fetch;
+    const client = { callTool: async (name: string, args: Record<string, unknown>) => (name === "query_graph" && /CommitmentClass/.test(String(args.query)) ? JSON.stringify({ rows }) : "{}") };
+    expect(await fetchConfirmedClasses("http://graph-rag/mcp", "t", { fetch: missing, client })).toEqual([{ name: "orders", description: "a customer order", stages: ["quoted", "ordered"], record_table: "mssql:dbo_Order" }]);
+    const down = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as typeof fetch;
+    expect(await fetchConfirmedClasses("http://graph-rag/mcp", "t", { fetch: down, client })).toEqual([expect.objectContaining({ name: "orders" })]);
     const refused = await fetchConfirmedClasses("http://graph-rag/mcp", "t", {
-      callTool: async () => {
-        throw new Error("tool error: requires raw capability");
+      fetch: missing,
+      client: {
+        callTool: async () => {
+          throw new Error("tool error: requires raw capability");
+        },
       },
     });
     expect(refused).toBeNull();
-    expect(await fetchConfirmedClasses("http://graph-rag/mcp", "t", { callTool: async () => JSON.stringify({ error: "no such tool" }) })).toBeNull();
+    expect(await fetchConfirmedClasses("http://graph-rag/mcp", "t", { fetch: missing, client: { callTool: async () => JSON.stringify({ error: "no such tool" }) } })).toBeNull();
+    const odd = (async () => json({ rows })) as typeof fetch;
+    expect(await fetchConfirmedClasses("http://graph-rag/mcp", "t", { fetch: odd, client: { callTool: async () => "{}" } })).toBeNull();
   });
 });
 
