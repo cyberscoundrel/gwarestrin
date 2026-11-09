@@ -16,18 +16,21 @@ class, and classes are of anything, in one tree. `docs/ORGANIZATION-MODEL.md`,
 writers and readers have not moved yet: `CommitmentClass`, `_class`,
 `_thing_type` and `ACTOR_TYPES` stay in use until they do.
 
-**Class** (`Class` vertex; `schema.validateClass`; fixture `classes.json`): a
-kind the organization recognizes. `name` (unique; what claims and policy use),
-`stages` (in order; optional), `record_table` (`system:table`, e.g.
-`mssql:dbo_Order`, or null when no source system records it), `status` (proposed
-| confirmed | retired), `attributes`, `confirmed_by`, `confirmed_at`. Pure
-functions take rows carrying `parent`, the confirmed parent's name. The four
-primitives are the only roots and the only classes nobody confirms
-(`schema.rootClassStatements()`).
+**Class** (an `Entity` with `_kind: 'class'`, scoped by `_home` and `_homes` like
+any node; `schema.validateClass`; fixture `classes.json`): a kind the organization
+recognizes. Stored as `_class_name` (unique; what claims and policy use), `_stages`
+(in order; optional), `_record_table` (`system:table`, e.g. `mssql:dbo_Order`, or
+null when no source system records it), `_status` (proposed | confirmed | retired),
+`_attributes`, `_confirmed_by`, `_confirmed_at`, `_evidence`, `_discovered_as`,
+`_homed_by`. `_confirmed_by` is a person, or `discovery` for what a read-only run
+made, usable at once with no person. `schema.CLASS_SELECT` and `classFromRow` read
+those columns into the plain shape the pure functions take (`name`, `status`,
+`parent`, `parent_by`, ...). The four primitives are the only roots and the only
+classes nobody confirms (`schema.rootClassStatements(root)`).
 
 **Tree** (`SUBCLASS_OF`, class to parent; `schema.classChain`,
 `classAndSubclasses`, `assertSubclassLink`): one confirmed parent per class, a
-link confirmed by a person, confirmed from the top, no cycles. A class counts only
+link confirmed by a discovery run or a person, confirmed from the top, no cycles. A class counts only
 when its chain reaches a root through confirmed classes. Rules, stage lists and
 attributes inherit, the nearest class winning (`effectiveStages`,
 `effectiveAttributes`, `effectiveRecordTable`, `authorityInChain`). A class's
@@ -42,7 +45,7 @@ with no record table is keyed by name and origin. Nothing else about the instanc
 lives in the graph.
 
 **Claim** (`CLAIMS` edge, out = the section or entry it was extracted from,
-in = the instance, or the `Class` for a class subject, or the section again
+in = the instance, or the class for a class subject, or the section again
 while the subject is a value): one primitive bound to a subject with an
 interval. While the subject is a value the edge also carries `subject` (JSON),
 `subject_norm` and `unresolved` (no-class | no-row | ambiguous).
@@ -104,11 +107,23 @@ admin edits. `classes[name].authority`, `classes[name].attributes[attr]`,
   record table holds it, or the subclass of it named; a confirmed class stated for
   the subject, which needs the row when a table is in force. Otherwise the subject
   is a value on its claim, and `reason` says why. A primitive holds no instances
-  directly, and nobody is exempt: a person before any class is confirmed is a
-  value. The gate is about classes, not who may mint: a key, a person, a worker.
+  directly, and nobody is exempt: a person before any class exists is a value. The gate is about classes, not who may mint: a key, a person, a worker.
 - **The edge is the only record.** A mint writes entity and first edge in one
   transaction; nothing stores a class name beside it, and a read of a class filters
   by `authority.visible`.
+- **Discovery is unattended and read-only.** `schema.planDiscoveryClass` says what a
+  run does with each class it finds: create it, settle a proposal, refresh its own
+  work, add evidence to a person's, or skip what a person retired. Evidence is
+  required (`normalizeEvidence`) and rows are cited by key. Read-only is an exact
+  tool list (`DISCOVERY_SOURCE_TOOLS`, `isDiscoveryReadTool`), enforced on the token,
+  not by prompt.
+- **A class is seen like any node.** `discoveredHome` homes what a discovery pass
+  writes no lower than the pass, its evidence and what the run read. Every read
+  honours the class's homes: `listedClasses` for lists, and what the gate is asked
+  with (a class a writer can't see is `no-class`), `shownClasses` for an instance's
+  classes (the nearest one the reader can see). A class's home says who can see it
+  exists; the authority map says who may commit against it. Outside discovery a class
+  still needs a person.
 - **Migration is a plan, and idempotent.** `schema.planInstanceMigration` turns
   `_class`, `_thing_type` and `CommitmentClass` rows into new classes and edges.
   It never confirms a class. Run it twice and the second plan is empty.

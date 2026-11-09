@@ -12,7 +12,8 @@
 //   PART_OF, NEXT, SOURCED_FROM (edges)   documents.js
 //   ABOUT, RELATES (edges)                things.js
 // New here:
-//   Class (vertex)             a kind the organization recognizes, of anything; the four primitives are its roots
+//   Entity, _kind 'class'      a kind the organization recognizes, of anything; the four primitives are its roots.
+//                              An Entity so it is scoped by the same _homes, reads and re-homing as every other node
 //   SUBCLASS_OF (edge)         class -> parent class: one tree under the four roots
 //   INSTANCE_OF (edge)         entity -> Class: the only record of what an instance is
 //   CLAIMS (edge)              section or entry -> subject, one primitive with an interval
@@ -23,10 +24,12 @@
 //   Entity._on_record ...      the on-record marker on a document
 // Going away (the code still uses them until the writers and readers move;
 // see "The instance rule" in docs/ORGANIZATION-MODEL.md):
-//   CommitmentClass (vertex)   becomes Class; planInstanceMigration copies its rows
+//   CommitmentClass (vertex)   becomes a class Entity; planInstanceMigration copies its rows
 //   Entity._class              becomes the INSTANCE_OF edge
 //   Entity._thing_type         becomes the INSTANCE_OF edge (declared by worker-pool.js, not here)
-//   ACTOR_TYPES                goes: a person is an instance of a class a person confirmed
+//   ACTOR_TYPES                goes: a person is an instance of a class discovered or confirmed like any other
+
+import { commonAncestor, EVERYONE } from "../positions.js";
 
 /** the four primitives: the only roots of the class tree, and the only classes nobody confirms */
 export const PRIMITIVES = ["actor", "commitment", "event", "resource"];
@@ -34,14 +37,21 @@ export const PRIMITIVES = ["actor", "commitment", "event", "resource"];
 export const CLAIM_KINDS = ["commitment", "event", "state", "observation"];
 /** who "confirmed" a root: no person, by design */
 export const BUILTIN = "built-in";
+/** who confirmed what a discovery run made: nobody, and nobody needed to (read-only, so nothing can break) */
+export const DISCOVERY = "discovery";
+/** what a discovery run's evidence can be: facts about a table, or notes it read. Rows are cited by key, never copied */
+export const EVIDENCE_KINDS = ["columns", "status_values", "rows", "aggregate", "note"];
+/** the only tools a discovery run may call on a source system: an exact list, because the model is not the control and a server's read-only hint is only a hint */
+export const DISCOVERY_SOURCE_TOOLS = ["describe_entities", "read_records", "aggregate_records"];
 /** going away: the code still validates a subject's `actor` against this until the writers move; nothing new uses it */
 export const ACTOR_TYPES = ["person", "position", "customer", "supplier", "agent"];
-/** a class's life: proposed by discovery or a worker, confirmed by a person, retired by one */
+/** a class's life: proposed by a worker or the condenser, confirmed by a discovery run or a person, retired by a person */
 export const CLASS_STATUSES = ["proposed", "confirmed", "retired"];
-/** the edge that makes an entity an instance, the class vertex it points at, and the edge that makes one class a kind of another */
+/** the edge that makes an entity an instance, the class it points at, and the edge that makes one class a kind of another */
 export const INSTANCE_EDGE = "INSTANCE_OF";
 export const SUBCLASS_EDGE = "SUBCLASS_OF";
-export const CLASS_TYPE = "Class";
+/** what makes an Entity a class */
+export const CLASS_KIND = "class";
 /** an edge to a class in one of these makes an instance. A retired class admits no new one and takes none away. An edge to a proposed class is held: see planInstanceMigration */
 export const INSTANCE_CLASS_STATUSES = ["confirmed", "retired"];
 /** why a claim's subject stayed a value on the claim (CLAIMS.unresolved) */
@@ -87,36 +97,19 @@ export function recordKey(cls, rowKey) {
  * constrain them. Indexes: `unique` or not, over the named properties.
  */
 export const TYPES = {
-  Class: {
-    kind: "vertex",
-    doc: "a kind the organization recognizes, of anything: its own internal symbols. The four primitives are the roots; every other class has one parent (SUBCLASS_OF)",
-    properties: {
-      name: "STRING", // unique; what claims and policy use
-      description: "STRING",
-      stages: "LIST", // of STRING, in order; its own list, or empty to take the nearest up the chain
-      record_table: "STRING", // system:table, or null when no source system records it
-      status: "STRING", // CLASS_STATUSES
-      proposed_by: "STRING", // discovery, a worker, a person, or the migration
-      confirmed_by: "STRING", // the person (BUILTIN for a root); null until confirmed
-      confirmed_at: "STRING", // ISO
-      attributes: "LIST", // of STRING: what can be claimed about it; a subclass has its ancestors' too
-      occurrences: "LIST", // of STRING: the sections a draft was seen in
-      reasons: "LIST", // of STRING: why it was drafted, and what became of it
-    },
-    indexes: [{ properties: ["name"], unique: true }, { properties: ["status"], unique: false }],
-  },
   SUBCLASS_OF: {
     kind: "edge",
-    doc: "a class is a kind of its parent: out = the class, in = its parent. A person confirms each link; one confirmed parent, and at most one proposed in its place. Reading it: outE('SUBCLASS_OF')[status = 'confirmed'].inV(), since out(...)[...] filters on the class's own status",
-    from: ["Class"],
-    to: ["Class"],
+    doc: "a class is a kind of its parent: out = the class, in = its parent. A discovery run or a person confirms each link; one confirmed parent, and at most one proposed in its place. Reading it: outE('SUBCLASS_OF')[status = 'confirmed'].inV(), since out(...)[...] filters on the class's own status",
+    from: ["Entity:class"],
+    to: ["Entity:class"],
     properties: {
       child: "STRING", // the class's rid; with status, what the unique index holds to one parent per status
       status: "STRING", // proposed | confirmed; a move is a proposed link replacing the confirmed one
       proposed_by: "STRING",
-      confirmed_by: "STRING", // the person
+      confirmed_by: "STRING", // the person, or DISCOVERY; a person's link is never replaced by a re-run
       confirmed_at: "STRING", // ISO
       reason: "STRING", // why the class is a kind of this parent
+      evidence: "STRING", // JSON, as on Class
     },
     indexes: [{ properties: ["child", "status"], unique: true }],
   },
@@ -124,10 +117,11 @@ export const TYPES = {
     kind: "edge",
     doc: "the instance relationship: out = the entity, in = a class it is an instance of; the only record of what an instance is. An entity may have several, one per class",
     from: ["Entity:thing"],
-    to: ["Class"],
+    to: ["Entity:class"],
     properties: {
       instance: "STRING", // the entity's rid
       class_rid: "STRING", // the class's rid; with instance, what the unique index holds to one edge per pair
+      added_by: "STRING", // who related it: a person, a worker, DISCOVERY; an entity a person classified is left alone by a re-run
       migrated: "BOOLEAN", // written by the boot migration, not by a mint
     },
     indexes: [{ properties: ["instance", "class_rid"], unique: true }],
@@ -152,23 +146,40 @@ export const TYPES = {
     doc: "what the model adds to the existing entry type: instances and the on-record marker",
     properties: {
       _class: "STRING", // going away: the INSTANCE_OF edge replaces it
+      _retired_by: "STRING", // on an instance or a class: the person who retired it; a re-run never brings it back
+      _retired_at: "STRING", // ISO
+      // on a class (_kind 'class'), which is scoped like any node by _home and _homes:
+      _class_name: "STRING", // unique: what claims and policy use, and what is shown; the unique index is what holds names apart
+      _status: "STRING", // CLASS_STATUSES (a need uses the same column for its own life)
+      _description: "STRING",
+      _stages: "LIST", // of STRING, in order; its own list, or empty to take the nearest up the chain
+      _record_table: "STRING", // system:table, or null when no source system records it
+      _proposed_by: "STRING", // a worker, a person, or the migration
+      _confirmed_by: "STRING", // the person, DISCOVERY, or BUILTIN for a root; null until confirmed. A person's name here is what no re-run overwrites
+      _confirmed_at: "STRING", // ISO
+      _evidence: "STRING", // JSON: what discovery rested it on ([{ kind, ref, home, detail }]); never a row's contents
+      _discovered_as: "LIST", // of STRING: every name discovery has used for it, so a renamed class is still found
+      _homed_by: "STRING", // the person who set its _homes: a re-run widens nothing they set
+      _attributes: "LIST", // of STRING: what can be claimed about it; a subclass has its ancestors' too
+      _occurrences: "LIST", // of STRING: the sections a draft was seen in
+      _reasons: "LIST", // of STRING: why it was drafted, and what became of it
       _on_record: "BOOLEAN", // on a document: a person put it on record
       _recorded_by: "STRING", // that person (an agent's record counts as the person it acts for)
       _recorded_at: "STRING", // ISO
       _record_position: "STRING", // the position the record was made under
       _record_reason: "STRING", // why it is on record
     },
-    indexes: [{ properties: ["_class"], unique: false }],
+    indexes: [{ properties: ["_class"], unique: false }, { properties: ["_class_name"], unique: true }],
   },
   CLAIMS: {
     kind: "edge",
     doc: "one primitive bound to a subject with an interval; out = the section or entry it was extracted from, in = the instance, the class itself (scope: class), or the section again when the subject stayed a value",
     from: ["Entity:section", "Entity:entry"],
-    to: ["Entity:thing", "Class", "Entity:section"],
+    to: ["Entity:thing", "Entity:class", "Entity:section"],
     properties: {
       id: "STRING", // unique
       kind: "STRING", // CLAIM_KINDS
-      class: "STRING", // Class.name: the class the claim bears on, which is not the subject's class (a pay claim about Tomas is hires/pay; Tomas is a person)
+      class: "STRING", // a class's name: the class the claim bears on, which is not the subject's class (a pay claim about Tomas is hires/pay; Tomas is a person)
       attribute: "STRING", // snake_case
       value: "STRING", // as stated; numbers and booleans JSON-encoded
       value_num: "DOUBLE", // the number when the value is one
@@ -297,7 +308,7 @@ const ROOT_DESCRIPTIONS = {
   event: "something that happened at a point in time",
   resource: "what the organization owns, uses, moves or consumes: money, parts, buildings, vehicles, software, machine time",
 };
-const rootRow = (name) => ({ name, description: ROOT_DESCRIPTIONS[name], parent: null, stages: [], record_table: null, status: "confirmed", proposed_by: BUILTIN, confirmed_by: BUILTIN, confirmed_at: null });
+const rootRow = (name) => ({ name, description: ROOT_DESCRIPTIONS[name], parent: null, stages: [], record_table: null, status: "confirmed", proposed_by: BUILTIN, confirmed_by: BUILTIN, confirmed_at: null, _homes: [EVERYONE] });
 const isRoot = (name) => PRIMITIVES.includes(name);
 const rowsOf = (classes) => (Array.isArray(classes) ? classes : classes?.classes ? classes.classes : classes instanceof Map ? [...classes.values()] : Object.values(classes ?? {}));
 
@@ -337,7 +348,7 @@ const chainIn = (name, confirmed) => {
 export const classChain = (name, classes) => chainIn(name, confirmedClassMap(classes));
 /** the root a confirmed class sits under, or null. Derived, so it cannot disagree with the tree when a class moves */
 export const primitiveOf = (name, classes) => classChain(name, classes).at(-1) ?? null;
-/** a class and everything under it: what a query on the class covers */
+/** a class and everything under it: what a query on the class covers. The whole tree, on the server: a hidden subclass's instances are covered, its name is never returned from here to a reader (shownClasses) */
 export function classAndSubclasses(name, classes) {
   const confirmed = confirmedClassMap(classes);
   return [...confirmed.keys()].filter((c) => chainIn(c, confirmed).includes(name));
@@ -412,7 +423,7 @@ const tableOwner = (k, confirmed) => {
  *
  * Returns { class, via: "key" | "class" }, or { class: null, reason, why },
  * reason being "class-subject" (the subject is the class: the claim points at
- * the Class vertex), "no-class" or "no-row" (the last two are what is stored
+ * the class entity), "no-class" or "no-row" (the last two are what is stored
  * as CLAIMS.unresolved).
  *   key     the confirmed class whose record table holds the key, or the
  *           subclass of it the subject names. Nothing else gives a key a class
@@ -468,25 +479,174 @@ export function assertSubclassLink(child, parent, classes) {
 
 const sqlText = (v) => `'${String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
 
-/** the four roots, safe to run at every start */
-export function rootClassStatements() {
-  return PRIMITIVES.map((p) => `UPDATE ${CLASS_TYPE} SET description = ${sqlText(ROOT_DESCRIPTIONS[p])}, stages = [], status = 'confirmed', proposed_by = ${sqlText(BUILTIN)}, confirmed_by = ${sqlText(BUILTIN)} UPSERT WHERE name = ${sqlText(p)}`);
+/** the four roots, safe to run at every start. `rootPosition`: positions.root, the home every class's `_home` carries as a thing's does; who sees a root is its `_homes`: everyone */
+export function rootClassStatements(rootPosition) {
+  return PRIMITIVES.map((p) => `UPDATE Entity SET name = ${sqlText(`class:${p}`)}, _kind = ${sqlText(CLASS_KIND)}, _origin = ${sqlText(rootPosition)}, _home = ${sqlText(rootPosition)}, _homes = [${sqlText(EVERYONE)}], _description = ${sqlText(ROOT_DESCRIPTIONS[p])}, _stages = [], _status = 'confirmed', _proposed_by = ${sqlText(BUILTIN)}, _confirmed_by = ${sqlText(BUILTIN)} UPSERT WHERE _class_name = ${sqlText(p)}`);
+}
+
+/** the columns of a class row read back into the contract's plain shape: every pure function here takes these */
+export const CLASS_SELECT = `SELECT @rid AS rid, _class_name AS name, _status AS status, _description AS description, _stages AS stages, _record_table AS record_table, _attributes AS attributes, _homes AS _homes, _proposed_by AS proposed_by, _confirmed_by AS confirmed_by, _confirmed_at AS confirmed_at, _evidence AS evidence_json, _discovered_as AS discovered_as, _homed_by AS homed_by, _retired_by AS retired_by, _occurrences AS occurrences, _reasons AS reasons, first(outE('SUBCLASS_OF')[status = 'confirmed'].inV()._class_name) AS parent, first(outE('SUBCLASS_OF')[status = 'confirmed'].confirmed_by) AS parent_by FROM Entity WHERE _kind = '${CLASS_KIND}'`;
+
+/** a row of CLASS_SELECT as a contract row: the stored evidence parsed, lists as lists */
+export function classFromRow(r) {
+  let evidence = [];
+  try {
+    evidence = r?.evidence_json ? JSON.parse(r.evidence_json) : [];
+  } catch {
+    evidence = [];
+  }
+  const { evidence_json: _json, ...rest } = r ?? {};
+  return { ...rest, stages: Array.isArray(r?.stages) ? r.stages : [], attributes: Array.isArray(r?.attributes) ? r.attributes : [], discovered_as: Array.isArray(r?.discovered_as) ? r.discovered_as : [], evidence };
 }
 
 const RID = /^#\d+:\d+$/;
 
 /**
  * An entity's edge to one class, for an entity and class that exist (a boot
- * migration, a person or worker adding a class), by rids. Repeating it changes
- * nothing. A mint doesn't use this: it creates the vertex and the edge in one
- * transaction.
+ * migration, a run, a person or worker adding a class), by rids. Repeating it
+ * changes nothing. A mint doesn't use this: it creates the vertex and the edge
+ * in one transaction.
  */
-export function instanceEdgeSql(entityRid, classRid, { migrated = false } = {}) {
+export function instanceEdgeSql(entityRid, classRid, { migrated = false, by = null } = {}) {
   for (const r of [entityRid, classRid]) if (!RID.test(String(r))) throw new Error(`not a rid: ${r}`);
-  return `CREATE EDGE ${INSTANCE_EDGE} FROM ${entityRid} TO ${classRid} IF NOT EXISTS SET instance = '${entityRid}', class_rid = '${classRid}'${migrated ? ", migrated = true" : ""}`;
+  return `CREATE EDGE ${INSTANCE_EDGE} FROM ${entityRid} TO ${classRid} IF NOT EXISTS SET instance = '${entityRid}', class_rid = '${classRid}'${by ? `, added_by = ${sqlText(by)}` : ""}${migrated ? ", migrated = true" : ""}`;
 }
 
-/** the root a class proposed for a legacy `_thing_type` goes under (a person corrects it at confirm) */
+/** may a discovery run call this source tool? Exact names only; a connection's own readTools list can add names, never the model */
+export const isDiscoveryReadTool = (name, configured = []) => DISCOVERY_SOURCE_TOOLS.includes(name) || (Array.isArray(configured) && configured.includes(name));
+
+const EVIDENCE_DETAIL_MAX = 300;
+
+/** a discovery run's evidence, normalized; throws naming the field. There must be some, and a "rows" item cites keys, not contents */
+export function normalizeEvidence(list) {
+  if (!Array.isArray(list) || !list.length) throw new Error("evidence: a discovered class or link says what it rests on");
+  return list.map((e, i) => {
+    if (!EVIDENCE_KINDS.includes(e?.kind)) throw new Error(`evidence[${i}].kind: must be one of ${EVIDENCE_KINDS.join(", ")}`);
+    const ref = typeof e.ref === "string" ? e.ref.trim() : "";
+    if (!ref) throw new Error(`evidence[${i}].ref: which table, note or key`);
+    if (e.kind === "rows" && !ref.split(",").every((k) => parseKey(k.trim()))) throw new Error(`evidence[${i}].ref: rows are cited by record key, never copied`);
+    const detail = e.detail === undefined || e.detail === null ? null : String(e.detail).replace(/\s+/g, " ").trim().slice(0, EVIDENCE_DETAIL_MAX);
+    return { kind: e.kind, ref, home: typeof e.home === "string" && e.home ? e.home : null, ...(detail ? { detail } : {}) };
+  });
+}
+
+/**
+ * Where something a discovery pass writes is seen from: no lower than the
+ * pass, than any evidence it rests on, or than anything else the run has read
+ * (`read`, floor.js's record of it). An evidence item with no home counts as
+ * the root, so restricted material can't produce a name anyone lower can see.
+ */
+export function discoveredHome({ pass, evidence = [], read = [] }, positions) {
+  return commonAncestor(positions, [pass, ...evidence.map((e) => e.home ?? positions.root), ...read]);
+}
+
+const isListed = (r, homes) => homes === null || isRoot(r.name) || (Array.isArray(r._homes) && r._homes.some((h) => homes.has(h)));
+
+/**
+ * The classes as a reader sees them: those homed where it can see (`homes`:
+ * visibleHomes, null for the root), each parent replaced by its nearest listed
+ * ancestor so a hidden name doesn't travel in the tree. A class with no homes is
+ * seen by the root alone, as a node with no home is. The list the gate is asked
+ * with: a class a writer can't see is "no-class", the same as one that doesn't
+ * exist. Inheritance and authority walk the whole tree on the server.
+ */
+export function listedClasses(classes, homes) {
+  const rows = rowsOf(classes).filter((r) => r && typeof r.name === "string");
+  const by = new Map(rows.map((r) => [r.name, r]));
+  return rows.filter((r) => isListed(r, homes)).map((r) => {
+    const seen = new Set([r.name]);
+    let p = r.parent;
+    while (p && !isRoot(p) && by.has(p) && !isListed(by.get(p), homes) && !seen.has(p)) {
+      seen.add(p);
+      p = by.get(p).parent;
+    }
+    return { ...r, parent: p ?? r.parent };
+  });
+}
+
+/**
+ * What a reader is shown of an instance's classes: each one if it can see it,
+ * else its nearest ancestor it can see, never a root. A hidden subclass's
+ * visible instance reads as an instance of the class above it, or of nothing.
+ */
+export function shownClasses(names, classes, homes) {
+  const rows = rowsOf(classes).filter((r) => r && typeof r.name === "string");
+  const by = new Map(rows.map((r) => [r.name, r]));
+  const out = new Set();
+  for (const name of names ?? []) {
+    const seen = new Set();
+    for (let cur = name; cur && !isRoot(cur) && by.has(cur) && !seen.has(cur); cur = by.get(cur).parent) {
+      seen.add(cur);
+      if (isListed(by.get(cur), homes)) {
+        out.add(cur);
+        break;
+      }
+    }
+  }
+  return [...out];
+}
+
+const byPerson = (who) => Boolean(who) && who !== DISCOVERY && who !== BUILTIN;
+
+/**
+ * What a discovery run does with one class it found, as data. People correct
+ * afterwards, and a person's correction wins:
+ *   draft    { name, parent, pass, evidence, description?, stages?, attributes?, record_table? }
+ *   classes  every Class row, of every status, with `parent`, `parent_by` (who
+ *            confirmed the link), `confirmed_by`, `discovered_as`, `_homes`
+ *   options  { positions, read }
+ * Returns { action, ..., reason? }:
+ *   create    a new class, usable at once: `row`, confirmed by DISCOVERY
+ *   confirm   a draft from a worker or the migration, which this evidence settles
+ *   update    a class discovery made: description, stages and attributes refreshed; its parent too, unless a person set it
+ *   evidence  a class a person confirmed: the evidence is added, nothing else changes
+ *   skip      with `reason`: a class a person retired, or one that isn't supported yet
+ * A name matches its row by name, by any name discovery used before, or by
+ * record table, so a renamed class is still that class and a retired one
+ * stays retired. A home a pass adds is the home that pass could reach, and it
+ * looks the same whether the name was new or already listed higher up, so
+ * nothing tells a pass that a hidden class exists.
+ */
+export function planDiscoveryClass(draft, classes, { positions, read = [] } = {}) {
+  const name = String(draft?.name ?? "").trim();
+  validateClass({ name, parent: draft?.parent, stages: draft?.stages ?? [], record_table: draft?.record_table ?? null });
+  const evidence = normalizeEvidence(draft.evidence);
+  if (evidence.every((e) => e.kind === "note") && new Set(evidence.map((e) => e.ref)).size < 2) return { action: "skip", name, reason: "a class resting on notes alone needs at least two: a class is a pattern that recurs" };
+  const rows = rowsOf(classes);
+  const table = draft.record_table ?? null;
+  const match = rows.find((r) => r.name === name || r.discovered_as?.includes(name)) ?? (table ? rows.find((r) => r.record_table === table) : null);
+  if (match?.status === "retired") return { action: "skip", name: match.name, reason: "a person retired it" };
+  const target = match?.name ?? name;
+  const usable = (() => {
+    try {
+      return assertSubclassLink(target, draft.parent, rows);
+    } catch (e) {
+      return e;
+    }
+  })();
+  const home = discoveredHome({ pass: draft.pass, evidence, read }, positions);
+  const homesSet = byPerson(match?.confirmed_by) || byPerson(match?.homed_by);
+  const _homes = homesSet ? (match._homes ?? []) : [...new Set([...(match?._homes ?? []), home])];
+  const seen = new Set();
+  const merged = [...(match?.evidence ?? []), ...evidence].filter((e) => {
+    const k = `${e.kind}|${e.ref}`;
+    return seen.has(k) ? false : seen.add(k);
+  }).slice(-50);
+  if (match && byPerson(match.confirmed_by)) return { action: "evidence", name: match.name, evidence: merged, _homes };
+  if (!match) {
+    if (usable !== true) return { action: "skip", name, reason: usable.message };
+    return { action: "create", name, row: { name, parent: draft.parent, description: draft.description ?? null, stages: draft.stages ?? [], attributes: draft.attributes ?? [], record_table: table, status: "confirmed", confirmed_by: DISCOVERY, proposed_by: DISCOVERY, discovered_as: [name], evidence: merged, _homes } };
+  }
+  const patch = { ...(match.status === "proposed" ? { status: "confirmed", confirmed_by: DISCOVERY } : {}), ...(draft.description !== undefined ? { description: draft.description } : {}), ...(draft.stages !== undefined ? { stages: draft.stages } : {}), ...(draft.attributes !== undefined ? { attributes: draft.attributes } : {}) };
+  const keepsParent = byPerson(match.parent_by) || usable !== true;
+  const discovered_as = [...new Set([...(match.discovered_as ?? []), name])];
+  return { action: match.status === "proposed" ? "confirm" : "update", name: match.name, patch, parent: keepsParent ? (match.parent ?? null) : draft.parent, discovered_as, evidence: merged, _homes, ...(keepsParent && usable !== true && !byPerson(match.parent_by) ? { reason: usable.message } : {}) };
+}
+
+/** may a discovery run give this entity a class? Not one a person retired, nor one a person already classified */
+export const discoveryMayClassify = (entity) => !entity?._retired_by && !(entity?.classed_by ?? []).some(byPerson);
+
+/** the root a class proposed for a legacy `_thing_type` goes under (a discovery run or a person corrects it) */
 const LEGACY_TYPE_ROOT = { person: "actor", position: "actor", customer: "actor", supplier: "actor", agent: "actor", team: "actor", machine: "resource", part: "resource", place: "resource", order: "commitment", project: "commitment" };
 
 /**
@@ -508,7 +668,7 @@ const LEGACY_TYPE_ROOT = { person: "actor", position: "actor", customer: "actor"
  *   4. any other `_thing_type` but "thing" and "class"
  *   5. `_class`
  * A `_thing_type` of "class" is the placeholder a class-scope claim was
- * pointed at: its claims move to the Class vertex (`classSubjects`), and it
+ * pointed at: its claims move to the class entity (`classSubjects`), and it
  * gets no edge. With nothing to go on an entity is `unclassified`, left for a
  * person.
  *
@@ -516,7 +676,8 @@ const LEGACY_TYPE_ROOT = { person: "actor", position: "actor", customer: "actor"
  * Class rows, CommitmentClass copies with their status under `commitment`, and
  * `proposed` ones for any other name the things use. A migration never
  * confirms a class. An edge whose class is not confirmed is `held: true`: a
- * held entity is not an instance until a person confirms the class.
+ * held entity is not an instance until a discovery run or a person confirms
+ * the class.
  * `discarded` on an edge names a signal that lost.
  */
 export function planInstanceMigration({ things = [], classes = [], legacyClasses = [] } = {}) {
@@ -529,11 +690,12 @@ export function planInstanceMigration({ things = [], classes = [], legacyClasses
   };
   for (const c of legacyClasses) {
     if (!c?.name || known.has(c.name)) continue;
-    add({ ...c, parent: c.parent ?? "commitment", stages: c.stages ?? [], status: c.status ?? (c.confirmed_by ? "confirmed" : "proposed") });
+    const status = c.status ?? (c.confirmed_by ? "confirmed" : "proposed");
+    add({ ...c, parent: c.parent ?? "commitment", stages: c.stages ?? [], status, _homes: c._homes ?? (status === "confirmed" ? [EVERYONE] : []) });
   }
   const confirmed = confirmedClassMap([...known.values()]);
   const proposedFor = (name, parent) => {
-    if (!known.has(name)) add({ name, parent, stages: [], record_table: null, status: "proposed", proposed_by: "migration", reasons: ["named by things already in the graph before classes covered them"] });
+    if (!known.has(name)) add({ name, parent, stages: [], record_table: null, status: "proposed", proposed_by: "migration", _homes: [], reasons: ["named by things already in the graph before classes covered them"] });
     return name;
   };
   const edges = [];

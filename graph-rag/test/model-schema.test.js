@@ -6,6 +6,16 @@ import {
   assertSubclassLink,
   authorityInChain,
   BUILTIN,
+  CLASS_SELECT,
+  classFromRow,
+  shownClasses,
+  DISCOVERY,
+  discoveredHome,
+  discoveryMayClassify,
+  isDiscoveryReadTool,
+  listedClasses,
+  normalizeEvidence,
+  planDiscoveryClass,
   CLAIM_KINDS,
   classAndSubclasses,
   classChain,
@@ -112,17 +122,19 @@ const classes = [
   row("loop_b", "confirmed", "loop_a"),
 ];
 
-test("the hierarchy is declared: one Class vertex type, the two edges, and the database holds a class to one parent and an instance to one edge per class", () => {
+test("the hierarchy is declared: a class is an Entity, two edges, and the database holds names apart, a class to one parent and an instance to one edge per class", () => {
   const list = statements();
   assert.deepEqual(PRIMITIVES, ["actor", "commitment", "event", "resource"]);
-  assert.ok(list.includes("CREATE VERTEX TYPE Class IF NOT EXISTS"));
+  assert.ok(!list.some((s) => /TYPE Class\b/.test(s)), "no separate vertex type: a class is an Entity, scoped like any node");
   assert.ok(list.includes("CREATE EDGE TYPE SUBCLASS_OF IF NOT EXISTS"));
   assert.ok(list.includes("CREATE EDGE TYPE INSTANCE_OF IF NOT EXISTS"));
+  assert.deepEqual(TYPES.INSTANCE_OF.to, ["Entity:class"]);
+  assert.deepEqual(TYPES.SUBCLASS_OF.from, ["Entity:class"]);
   assert.ok(list.includes("CREATE INDEX IF NOT EXISTS ON SUBCLASS_OF (child, status) UNIQUE"), "one confirmed parent, and at most one proposed in its place");
   assert.ok(list.includes("CREATE INDEX IF NOT EXISTS ON INSTANCE_OF (instance, class_rid) UNIQUE"), "several classes, one edge to each");
-  assert.ok(list.includes("CREATE INDEX IF NOT EXISTS ON Class (name) UNIQUE"));
-  for (const f of ["name", "stages", "record_table", "status", "confirmed_by", "attributes", "occurrences", "reasons"]) assert.ok(f in TYPES.Class.properties, f);
-  assert.ok(!("primitive" in TYPES.Class.properties), "a class's primitive is its root: storing it could disagree when a class moves");
+  assert.ok(list.includes("CREATE INDEX IF NOT EXISTS ON Entity (_class_name) UNIQUE"), "names held apart by the database");
+  for (const f of ["_class_name", "_stages", "_record_table", "_status", "_confirmed_by", "_attributes", "_occurrences", "_reasons", "_evidence", "_discovered_as", "_homed_by"]) assert.ok(f in TYPES.Entity.properties, f);
+  assert.ok(!Object.keys(TYPES.Entity.properties).some((p) => /primitive/.test(p)), "a class's primitive is its root: storing it could disagree when a class moves");
   for (const f of ["child", "status", "confirmed_by", "reason"]) assert.ok(f in TYPES.SUBCLASS_OF.properties, f);
   for (const f of ["subject", "subject_norm", "unresolved"]) assert.ok(f in TYPES.CLAIMS.properties, f);
   assert.deepEqual(UNRESOLVED_REASONS, ["no-class", "no-row", "ambiguous"]);
@@ -254,14 +266,16 @@ test("a class's shape: a parent, a name that isn't a primitive, and stages on an
 });
 
 test("the roots are seeded with statements safe to repeat", () => {
-  const list = rootClassStatements();
+  const list = rootClassStatements("org");
   assert.equal(list.length, PRIMITIVES.length);
   for (const [i, p] of PRIMITIVES.entries()) {
-    assert.match(list[i], new RegExp(`^UPDATE Class SET .* UPSERT WHERE name = '${p}'$`));
-    assert.match(list[i], /status = 'confirmed'/);
-    assert.match(list[i], /confirmed_by = 'built-in'/);
+    assert.match(list[i], new RegExp(`^UPDATE Entity SET .* UPSERT WHERE _class_name = '${p}'$`));
+    assert.match(list[i], /_kind = 'class'/);
+    assert.match(list[i], /_status = 'confirmed'/);
+    assert.match(list[i], /_confirmed_by = 'built-in'/);
+    assert.match(list[i], /_homes = \['everyone'\]/, "a root is the one class everyone sees");
   }
-  assert.deepEqual(rootClassStatements(), list, "the same on every start");
+  assert.deepEqual(rootClassStatements("org"), list, "the same on every start");
 });
 
 test("the edge statement repeats harmlessly and takes only rids", () => {
@@ -341,4 +355,161 @@ test("migration is idempotent: applying a plan and planning again does nothing",
 test("the old actor list is not a class vocabulary any more", () => {
   assert.ok(ACTOR_TYPES.includes("person"), "still exported while claims.js validates against it");
   assert.equal(instanceClass({ name: "x", actor: "person" }, []).class, null);
+});
+
+const tree = { root: "org", positions: { org: { name: "org" }, ops: { name: "Operations", parent: "org" }, floor: { name: "Floor", parent: "ops" }, sales: { name: "Sales", parent: "org" } } };
+const notes = [{ kind: "note", ref: "#1:1", home: "floor" }, { kind: "note", ref: "#1:2", home: "floor" }];
+const tableEv = [{ kind: "columns", ref: "mssql:dbo_Disciplinary", home: "org", detail: "EmployeeID, Action, Date" }];
+const opts = { positions: tree };
+
+test("what a discovery run made counts as confirmed, with nobody having confirmed it", () => {
+  const made = row("employees", "confirmed", "actor", "mssql:dbo_Employee", { confirmed_by: "discovery" });
+  assert.ok(confirmedClassMap([made]).has("employees"));
+  assert.deepEqual(instanceClass({ key: "mssql:dbo_Employee:NGUD" }, [made]), { class: "employees", via: "key" }, "people are instances without anyone confirming anything");
+  assert.deepEqual(instanceClass({ name: "x", class: "employees" }, [{ ...made, record_table: null }]), { class: "employees", via: "class" });
+});
+
+test("read-only is an exact tool list: nothing that writes, and no hint can add one", () => {
+  for (const t of ["describe_entities", "read_records", "aggregate_records"]) assert.ok(isDiscoveryReadTool(t), t);
+  for (const t of ["update_record", "create_record", "delete_record", "execute_entity", "enter_data", "READ_RECORDS", "read_records ", ""]) assert.ok(!isDiscoveryReadTool(t), JSON.stringify(t));
+  assert.ok(isDiscoveryReadTool("list_views", ["list_views"]), "only a connection's own configured list adds a name");
+});
+
+test("evidence: required, bounded, and rows are cited by key", () => {
+  assert.throws(() => normalizeEvidence([]), /^Error: evidence: /);
+  assert.throws(() => normalizeEvidence(undefined), /^Error: evidence: /);
+  assert.throws(() => normalizeEvidence([{ kind: "vibes", ref: "x" }]), /^Error: evidence\[0\]\.kind: /);
+  assert.throws(() => normalizeEvidence([{ kind: "note" }]), /^Error: evidence\[0\]\.ref: /);
+  assert.throws(() => normalizeEvidence([{ kind: "rows", ref: "Tomas Reyes, 34.50" }]), /cited by record key/);
+  assert.deepEqual(normalizeEvidence([{ kind: "rows", ref: "mssql:dbo_Job:1, mssql:dbo_Job:2" }])[0].home, null);
+  assert.equal(normalizeEvidence([{ kind: "columns", ref: "t", detail: "x".repeat(900) }])[0].detail.length, 300);
+});
+
+test("a discovered class's home follows its evidence: restricted material can't produce a name anyone lower can see", () => {
+  assert.equal(discoveredHome({ pass: "floor", evidence: notes }, tree), "floor");
+  assert.equal(discoveredHome({ pass: "floor", evidence: tableEv }, tree), "org", "evidence above the pass raises it");
+  assert.equal(discoveredHome({ pass: "floor", evidence: [{ kind: "note", ref: "#1:9" }] }, tree), "org", "no home on the evidence fails to the root");
+  assert.equal(discoveredHome({ pass: "floor", evidence: notes, read: ["ops"] }, tree), "ops", "what the run read raises it, whatever it cites");
+  assert.equal(discoveredHome({ pass: "floor", evidence: [{ kind: "note", ref: "#1:9", home: "sales" }] }, tree), "org", "two branches meet at their common ancestor");
+  assert.equal(discoveredHome({ pass: "ops", evidence: [{ kind: "note", ref: "#1:9", home: "everyone" }] }, tree), "ops", "what everyone can see constrains nothing");
+});
+
+test("a reader is listed only the classes it can see, and a hidden parent doesn't travel in the tree", () => {
+  const rows = [row("buildings", "confirmed", "resource", null, { _homes: ["org"] }), row("warehouse", "confirmed", "buildings", null, { _homes: ["floor"] }), row("disciplinary_actions", "confirmed", "commitment", null, { _homes: ["org"] }), row("no_home_yet", "confirmed", "resource")];
+  const floorHomes = new Set(["everyone", "floor"]);
+  const seen = listedClasses(rows, floorHomes);
+  assert.deepEqual(seen.map((c) => c.name).sort(), ["warehouse"], "a class with no home is the root's, as any node with no home is");
+  assert.equal(seen.find((c) => c.name === "warehouse").parent, "resource", "the hidden parent is skipped");
+  assert.deepEqual(listedClasses(rows, null).map((c) => c.name).sort(), ["buildings", "disciplinary_actions", "no_home_yet", "warehouse"], "the root reader sees all");
+  assert.equal(listedClasses(rows, null).find((c) => c.name === "warehouse").parent, "buildings");
+  assert.equal(instanceClass({ name: "x", class: "disciplinary_actions" }, seen).reason, "no-class", "to a writer who can't see it the class is simply not there");
+  assert.deepEqual(instanceClass({ name: "x", class: "warehouse" }, seen), { class: "warehouse", via: "class" }, "and its chain still reaches a root for one who can");
+});
+
+const draft = (over = {}) => ({ name: "employees", parent: "actor", pass: "floor", evidence: [{ kind: "columns", ref: "mssql:dbo_Employee", home: "floor" }], record_table: "mssql:dbo_Employee", stages: [], ...over });
+
+test("a discovery run creates a class usable at once, with its evidence and home", () => {
+  const r = planDiscoveryClass(draft(), [], opts);
+  assert.equal(r.action, "create");
+  assert.equal(r.row.status, "confirmed");
+  assert.equal(r.row.confirmed_by, DISCOVERY);
+  assert.deepEqual(r.row._homes, ["floor"]);
+  assert.deepEqual(r.row.discovered_as, ["employees"]);
+  assert.equal(r.row.evidence[0].ref, "mssql:dbo_Employee");
+  assert.deepEqual(instanceClass({ key: "mssql:dbo_Employee:NGUD" }, [r.row]), { class: "employees", via: "key" });
+  assert.throws(() => planDiscoveryClass(draft({ evidence: [] }), [], opts), /evidence/, "nothing without evidence");
+  assert.throws(() => planDiscoveryClass(draft({ parent: undefined }), [], opts), /parent/, "the agent decides the parent, but there is one");
+  assert.throws(() => planDiscoveryClass(draft({ name: "actor" }), [], opts), /primitive/);
+  assert.equal(planDiscoveryClass(draft({ name: "x", record_table: null, evidence: [notes[0]] }), [], opts).action, "skip", "one note is not a pattern");
+  assert.equal(planDiscoveryClass(draft({ name: "x", record_table: null, evidence: notes }), [], opts).action, "create", "two are");
+  assert.match(planDiscoveryClass(draft({ parent: "nope" }), [], opts).reason, /not a confirmed class/, "parents first");
+});
+
+const madeRow = (over = {}) => ({ name: "employees", parent: "actor", parent_by: DISCOVERY, status: "confirmed", confirmed_by: DISCOVERY, record_table: "mssql:dbo_Employee", discovered_as: ["employees"], evidence: [], _homes: ["ops"], ...over });
+
+test("a re-run refreshes what discovery made and never touches what a person corrected", () => {
+  const up = planDiscoveryClass(draft({ description: "staff", stages: ["active", "left"] }), [madeRow()], opts);
+  assert.equal(up.action, "update");
+  assert.deepEqual(up.patch, { description: "staff", stages: ["active", "left"] });
+  assert.deepEqual(up._homes, ["ops", "floor"], "a lower pass that found it itself lists it there too");
+  const locked = planDiscoveryClass(draft({ description: "staff", stages: ["x"], parent: "resource" }), [madeRow({ name: "people", confirmed_by: "alice", discovered_as: ["employees"] })], opts);
+  assert.equal(locked.action, "evidence", "a person's name on it: found by the name discovery first used, and only the evidence grows");
+  assert.equal(locked.name, "people");
+  assert.equal(locked.patch, undefined);
+  assert.equal(locked.parent, undefined);
+  const moved = planDiscoveryClass(draft({ parent: "resource" }), [madeRow({ parent: "actor", parent_by: "alice" })], opts);
+  assert.equal(moved.parent, "actor", "a person's move stands");
+  assert.equal(planDiscoveryClass(draft({ parent: "resource" }), [madeRow()], opts).parent, "resource", "discovery's own link can change");
+});
+
+test("what a person retired stays retired, by name, by an older name or by table", () => {
+  const retired = madeRow({ status: "retired", retired_by: "alice" });
+  assert.equal(planDiscoveryClass(draft(), [retired], opts).action, "skip");
+  assert.match(planDiscoveryClass(draft(), [retired], opts).reason, /retired/);
+  assert.equal(planDiscoveryClass(draft({ name: "staff" }), [retired], opts).action, "skip", "the same table under another name");
+  assert.equal(planDiscoveryClass(draft({ name: "staff", record_table: null }), [{ ...retired, discovered_as: ["staff", "employees"] }], opts).action, "skip", "an older name");
+});
+
+test("a run settles a draft from a worker or the migration", () => {
+  const r = planDiscoveryClass(draft(), [{ name: "employees", status: "proposed", parent: "actor", confirmed_by: null }], opts);
+  assert.equal(r.action, "confirm");
+  assert.deepEqual(r.patch, { status: "confirmed", confirmed_by: DISCOVERY, stages: [] });
+  const held = planInstanceMigration({ things: [thing("#1:1", { _thing_type: "machine" })] });
+  assert.equal(planDiscoveryClass({ name: "machine", parent: "resource", pass: "org", evidence: tableEv }, held.classes, opts).action, "confirm", "the migration's held things can be settled by a run");
+});
+
+test("a run never moves a class under itself", () => {
+  const rows = [madeRow({ name: "a", record_table: null, parent: "resource" }), madeRow({ name: "b", record_table: null, parent: "a" })];
+  const r = planDiscoveryClass(draft({ name: "a", record_table: null, parent: "b" }), rows, opts);
+  assert.equal(r.parent, "resource", "the cycle is refused and the existing link kept");
+  assert.match(r.reason, /cycle/);
+});
+
+test("nothing a hidden name does tells a pass it exists", () => {
+  const hidden = madeRow({ name: "disciplinary_actions", record_table: "mssql:dbo_D", discovered_as: ["disciplinary_actions"], _homes: ["org"] });
+  const r = planDiscoveryClass(draft({ name: "disciplinary_actions", record_table: "mssql:dbo_D" }), [hidden], opts);
+  assert.equal(r.action, "update");
+  assert.deepEqual(r._homes, ["org", "floor"], "a lower pass that found it from what it can read adds its own home");
+  assert.equal(r.reason, undefined);
+});
+
+test("a re-run leaves an entity a person retired or classified", () => {
+  assert.ok(discoveryMayClassify({}));
+  assert.ok(discoveryMayClassify({ classed_by: ["discovery"] }));
+  assert.ok(!discoveryMayClassify({ _retired_by: "alice" }));
+  assert.ok(!discoveryMayClassify({ classed_by: ["discovery", "alice"] }));
+  assert.equal(instanceEdgeSql("#1:2", "#4:1", { by: DISCOVERY }), "CREATE EDGE INSTANCE_OF FROM #1:2 TO #4:1 IF NOT EXISTS SET instance = '#1:2', class_rid = '#4:1', added_by = 'discovery'");
+});
+
+test("a hidden subclass's visible instance reads as the class above it; a visible subclass under a hidden parent keeps its own name", () => {
+  const rows = [row("buildings", "confirmed", "resource", null, { _homes: ["floor"] }), row("secret_sites", "confirmed", "buildings", null, { _homes: ["org"] }), row("hidden_top", "confirmed", "resource", null, { _homes: ["org"] }), row("visible_under", "confirmed", "hidden_top", null, { _homes: ["floor"] }), row("only_hidden", "confirmed", "resource", null, { _homes: ["org"] })];
+  const floor = new Set(["everyone", "floor"]);
+  assert.deepEqual(shownClasses(["secret_sites"], rows, floor), ["buildings"], "shown as the nearest class it can see");
+  assert.deepEqual(shownClasses(["visible_under"], rows, floor), ["visible_under"]);
+  assert.deepEqual(shownClasses(["only_hidden"], rows, floor), [], "never a root: it shows no class");
+  assert.deepEqual(shownClasses(["only_hidden", "buildings"], rows, null), ["only_hidden", "buildings"], "the root reader sees them as they are");
+  assert.deepEqual(classAndSubclasses("buildings", rows.map((r) => r)).sort(), ["buildings", "secret_sites"], "a query on the visible parent still covers the hidden subclass's instances, on the server");
+});
+
+test("a re-run never widens a home a person set", () => {
+  const set = planDiscoveryClass(draft(), [madeRow({ _homes: ["org"], homed_by: "alice" })], opts);
+  assert.deepEqual(set._homes, ["org"], "a person homed it; a lower pass adds nothing");
+  const confirmed = planDiscoveryClass(draft(), [madeRow({ _homes: ["org"], confirmed_by: "alice" })], opts);
+  assert.equal(confirmed.action, "evidence");
+  assert.deepEqual(confirmed._homes, ["org"]);
+});
+
+test("the migration keeps today's vocabulary visible and files its own proposals for the root alone", () => {
+  const plan = planInstanceMigration({ legacyClasses: legacy, things: [thing("#1:1", { _thing_type: "machine" })] });
+  const of = Object.fromEntries(plan.classes.map((c) => [c.name, c]));
+  assert.deepEqual(of.jobs._homes, ["everyone"], "a confirmed vocabulary everyone could read stays that way until someone re-homes it");
+  assert.deepEqual(of.machine._homes, [], "a proposal seen by the root only (N2)");
+});
+
+test("a class row round-trips through its stored columns, and a bad evidence column costs nothing", () => {
+  assert.match(CLASS_SELECT, /_class_name AS name/);
+  assert.match(CLASS_SELECT, /outE\('SUBCLASS_OF'\)\[status = 'confirmed'\]\.inV\(\)\._class_name\) AS parent/, "the link's own status, not the class's");
+  assert.deepEqual(classFromRow({ name: "x", status: "confirmed", evidence_json: '[{"kind":"note","ref":"#1:1"}]', stages: null }).evidence, [{ kind: "note", ref: "#1:1" }]);
+  assert.deepEqual(classFromRow({ name: "x", evidence_json: "{broken" }).evidence, []);
+  assert.deepEqual(classFromRow({ name: "x", stages: null }).stages, []);
 });
