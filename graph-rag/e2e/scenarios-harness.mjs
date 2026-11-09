@@ -140,6 +140,19 @@ export default [
       const tool = await condenseTool(ctx);
       const full = loadBatch();
       const batch = { ...full, conversations: full.conversations.filter((c) => ["ux-m01", "ux-al04", "ux-aa11", "ux-aq01", "ux-ak06"].includes(c.note)) };
+      // the classes the batch's claims name are the oracle's (discovery output, not fixtures/classes.json); the
+      // record path checks claims against the graph's confirmed classes once it holds any (another scenario
+      // seeds three), so a person's confirmation of these is stood in for here: confirmed, no stages (no claim
+      // below is on `stage`), no record table
+      const q = (s) => `'${String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+      const named = [...new Set(batch.conversations.flatMap((c) => c.expected.document.sections.flatMap((s) => (s.claims ?? []).map((cl) => cl.class))).filter(Boolean))];
+      for (const name of named) {
+        const r = await ctx.tool("admin", "execute_graph", {
+          language: "sql",
+          command: `UPDATE CommitmentClass SET name = ${q(name)}, description = ${q(`${name}: confirmed for the conversation batch`)}, stages = [], record_table = null, status = 'confirmed', proposed_by = 'e2e-harness', confirmed_by = 'admin', confirmed_at = '2026-11-01T09:00:00.000Z' UPSERT WHERE name = ${q(name)}`,
+        });
+        ctx.check(!r.error, `class ${name} confirmed: ${JSON.stringify(r).slice(0, 200)}`);
+      }
       for (const c of batch.conversations) {
         // record_document (record-tools.js) takes the contract's document under `document`; any other
         // condensing tool gets the document's fields and the conversation itself
