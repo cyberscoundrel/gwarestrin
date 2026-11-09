@@ -44,26 +44,26 @@ const classes = async (status) => (await api(`/api/discovery/classes${status ? `
 const named = async (name) => (await classes()).find((c) => c.name === name);
 const resolve = async (key) => (await api(`/api/discovery/resolve?key=${encodeURIComponent(key)}`)).class ?? null;
 
-/** the ux test tree's ERP, digested the way an agent gets it (connection-digest.ts), with the status values the survey read */
+/** the ux test tree's ERP, digested the way an agent gets it (connection-digest.ts), with the status values the survey read; every table carries an E2ed prefix so the classes it drafts (e2ed_orders, ...) are this file's alone on the harness's shared graph */
 const UX_DIGEST_TEXT = [
-  "Tables (8, all named dbo_…): Customer, Employee, Vendor, WorkCenter, Order, Job, Maintenance, OrderStatus",
-  "dbo_Customer columns: CustomerID, Name, CreditLimit, PaymentTerms",
-  "dbo_Employee columns: EmployeeID, Name, WorkCenterID, Shift",
-  "dbo_Vendor columns: VendorID, Name, Terms",
-  "dbo_WorkCenter columns: WorkCenterID, Name, Capacity",
-  "dbo_OrderStatus columns: StatusCode, Description",
-  "dbo_Order columns: OrderID, CustomerID, Status, Quantity, DueDate, Price, Margin",
-  "dbo_Order rows: 9,120",
-  "dbo_Order Status values: Quoted, Ordered, In Production, Shipped, Invoiced, Paid",
-  "dbo_Job columns: JobID, Status, MachineID, OperatorID, ShiftCover, Quantity, DueDate",
-  "dbo_Job rows: 31,400",
-  "dbo_Job Status values: Planned, Running, Paused, Done",
-  "dbo_Maintenance columns: MaintenanceID, Status, MachineID, TechnicianID, BookedFor, Parts",
-  "dbo_Maintenance rows: 403",
-  "dbo_Maintenance Status values: Booked, In Progress, Done",
+  "Tables (8, all named dbo_…): E2edCustomer, E2edEmployee, E2edVendor, E2edWorkCenter, E2edOrder, E2edJob, E2edMaintenance, E2edOrderStatus",
+  "dbo_E2edCustomer columns: CustomerID, Name, CreditLimit, PaymentTerms",
+  "dbo_E2edEmployee columns: EmployeeID, Name, WorkCenterID, Shift",
+  "dbo_E2edVendor columns: VendorID, Name, Terms",
+  "dbo_E2edWorkCenter columns: WorkCenterID, Name, Capacity",
+  "dbo_E2edOrderStatus columns: StatusCode, Description",
+  "dbo_E2edOrder columns: OrderID, CustomerID, Status, Quantity, DueDate, Price, Margin",
+  "dbo_E2edOrder rows: 9,120",
+  "dbo_E2edOrder Status values: Quoted, Ordered, In Production, Shipped, Invoiced, Paid",
+  "dbo_E2edJob columns: JobID, Status, MachineID, OperatorID, ShiftCover, Quantity, DueDate",
+  "dbo_E2edJob rows: 31,400",
+  "dbo_E2edJob Status values: Planned, Running, Paused, Done",
+  "dbo_E2edMaintenance columns: MaintenanceID, Status, MachineID, TechnicianID, BookedFor, Parts",
+  "dbo_E2edMaintenance rows: 403",
+  "dbo_E2edMaintenance Status values: Booked, In Progress, Done",
 ].join("\n");
-const UX_PATTERNS = [{ name: "mssql: hiring (pattern)", text: "Hiring runs outside the ERP. [class: hires; stages: opened, interviewing, offered, hired, declined; table: none; attributes: candidate, start_date, pay, dismissal; description: a hire: a commitment of a position to a person; no source system records it]" }];
-const UX_CLASSES = { orders: "mssql:dbo_Order", jobs: "mssql:dbo_Job", maintenance: "mssql:dbo_Maintenance", hires: null };
+const UX_PATTERNS = [{ name: "mssql: hiring (pattern)", text: "Hiring runs outside the ERP. [class: e2ed hires; stages: opened, interviewing, offered, hired, declined; table: none; attributes: candidate, start_date, pay, dismissal; description: a hire: a commitment of a position to a person; no source system records it]" }];
+const UX_CLASSES = { e2ed_orders: "mssql:dbo_E2edOrder", e2ed_jobs: "mssql:dbo_E2edJob", e2ed_maintenance: "mssql:dbo_E2edMaintenance", e2ed_hires: null };
 
 export const scenarios = [
   {
@@ -77,27 +77,27 @@ export const scenarios = [
       const filed = await tool(workerToken(String(task.rid)), "execute_graph", {
         language: "sql",
         command:
-          "INSERT INTO CommitmentClass SET name = 'maintenance', description = 'a maintenance booking: a commitment of a machine\\'s time to a service', stages = ['booked', 'in_progress', 'done'], record_table = 'mssql:dbo_Maintenance', status = 'proposed', proposed_by = 'survey:mssql', confirmed_by = null, confirmed_at = null, attributes = ['stage', 'machine', 'technician', 'booked_for', 'parts'], reasons = ['dbo_Maintenance names maintenance: rows are commitments', 'stages from the distinct values of Status', '403 rows']",
-        reason: "the survey's draft class for dbo_Maintenance",
+          "INSERT INTO CommitmentClass SET name = 'e2ed_maintenance', description = 'a maintenance booking: a commitment of a machine\\'s time to a service', stages = ['booked', 'in_progress', 'done'], record_table = 'mssql:dbo_E2edMaintenance', status = 'proposed', proposed_by = 'survey:mssql', confirmed_by = null, confirmed_at = null, attributes = ['stage', 'machine', 'technician', 'booked_for', 'parts'], reasons = ['dbo_E2edMaintenance names maintenance: rows are commitments', 'stages from the distinct values of Status', '403 rows']",
+        reason: "the survey's draft class for dbo_E2edMaintenance",
       });
       check(filed.pendingId, `a worker's raw write is a proposal, not a confirmation: ${JSON.stringify(filed).slice(0, 300)}`);
-      check(!(await named("maintenance")), "nothing is filed until the admin applies the proposal");
+      check(!(await named("e2ed_maintenance")), "nothing is filed until the admin applies the proposal");
       const applied = await post(`/api/worker/proposals/${filed.pendingId}`, { approve: true, reason: "e2e" });
       check(applied.approved, `applied: ${JSON.stringify(applied).slice(0, 300)}`);
-      const m = await named("maintenance");
+      const m = await named("e2ed_maintenance");
       check(m?.status === "proposed", `the survey's draft is proposed, not confirmed: ${JSON.stringify(m)}`);
       check(m.confirmed_by === null && m.confirmed_at === null, "nobody has confirmed it");
       // the loader drafts the rest from the digest; the survey's own draft is not drafted twice
       const r = await post("/api/discovery/draft", { system: "mssql", digest: UX_DIGEST_TEXT, patterns: UX_PATTERNS });
       check(r.status === 200, `drafted: ${JSON.stringify(r).slice(0, 300)}`);
       check(
-        r.drafted.map((d) => d.name).sort().join(",") === "hires,jobs,orders",
+        r.drafted.map((d) => d.name).sort().join(",") === "e2ed_hires,e2ed_jobs,e2ed_orders",
         `three new drafts: ${r.drafted.map((d) => d.name).join(", ")}`,
       );
-      check(r.not_drafted.some((s) => s.name === "maintenance" && /already proposed/.test(s.reason)), `maintenance skipped as the survey's: ${JSON.stringify(r.not_drafted)}`);
+      check(r.not_drafted.some((s) => s.name === "e2ed_maintenance" && /already proposed/.test(s.reason)), `maintenance skipped as the survey's: ${JSON.stringify(r.not_drafted)}`);
       const master = Object.fromEntries(r.tables_skipped.map((s) => [s.table, s]));
-      check(master.dbo_Customer?.role === "actor" && master.dbo_WorkCenter?.role === "resource", `master data are actors or resources: ${JSON.stringify(r.tables_skipped).slice(0, 300)}`);
-      check(master.dbo_OrderStatus?.kind === "lookup", "a lookup table is neither");
+      check(master.dbo_E2edCustomer?.role === "actor" && master.dbo_E2edWorkCenter?.role === "resource", `master data are actors or resources: ${JSON.stringify(r.tables_skipped).slice(0, 300)}`);
+      check(master.dbo_E2edOrderStatus?.kind === "lookup", "a lookup table is neither");
       for (const [name, table] of Object.entries(UX_CLASSES)) {
         const c = await named(name);
         check(c?.status === "proposed", `${name} is proposed: ${JSON.stringify(c)}`);
@@ -105,7 +105,7 @@ export const scenarios = [
         check(c.stages.length >= 3, `${name} has stages: ${c.stages.join(", ")}`);
         check(c.reasons.length >= 1, `${name} says why`);
       }
-      check((await named("orders")).stages.join(",") === "quoted,ordered,in_production,shipped,invoiced,paid", "orders' stages come from the status column's values");
+      check((await named("e2ed_orders")).stages.join(",") === "quoted,ordered,in_production,shipped,invoiced,paid", "orders' stages come from the status column's values");
       // the same digest again drafts nothing new
       const again = await post("/api/discovery/draft", { system: "mssql", digest: UX_DIGEST_TEXT, patterns: UX_PATTERNS });
       check(again.drafted.length === 0 && again.not_drafted.length === 4, `a re-run adds nothing: ${JSON.stringify(again).slice(0, 300)}`);
@@ -114,24 +114,24 @@ export const scenarios = [
   {
     name: "discovery: an unconfirmed class maps nothing, and only a person at the root may confirm",
     async run() {
-      check((await named("orders"))?.status === "proposed", "orders is still a draft");
-      check((await resolve("mssql:dbo_Order:9001")) === null, "a record key of a proposed class maps to no class");
-      check((await resolve("mssql:dbo_Job:4471")) === null, "nor does a job's");
+      check((await named("e2ed_orders"))?.status === "proposed", "orders is still a draft");
+      check((await resolve("mssql:dbo_E2edOrder:9001")) === null, "a record key of a proposed class maps to no class");
+      check((await resolve("mssql:dbo_E2edJob:4471")) === null, "nor does a job's");
       check((await classes("confirmed")).every((c) => !(c.name in UX_CLASSES)), "none of the drafts is listed as confirmed");
       // alice (Operations) and bob (the floor) may read but not confirm
       const alice = await api("/api/discovery/classes", {}, "alice");
       check(alice.status === 200 && alice.canConfirm === false, `alice reads, cannot confirm: ${JSON.stringify(alice).slice(0, 120)}`);
-      const denied = await post("/api/discovery/classes/orders/confirm", {}, "alice");
+      const denied = await post("/api/discovery/classes/e2ed_orders/confirm", {}, "alice");
       check(denied.status === 403, `alice's confirmation is refused: ${JSON.stringify(denied)}`);
-      const deniedBob = await post("/api/discovery/classes/orders/retire", {}, "bob");
+      const deniedBob = await post("/api/discovery/classes/e2ed_orders/retire", {}, "bob");
       check(deniedBob.status === 403, `bob's retirement is refused: ${JSON.stringify(deniedBob)}`);
       // a worker (an agent at the root) may not either: a person confirms
       const task = (await sql("SELECT @rid AS rid FROM Entity WHERE name = 'e2e-disc survey task' AND _kind = 'task'"))[0];
-      const agent = await post("/api/discovery/classes/orders/confirm", {}, workerToken(String(task.rid)));
+      const agent = await post("/api/discovery/classes/e2ed_orders/confirm", {}, workerToken(String(task.rid)));
       check(agent.status === 403, `an agent's confirmation is refused: ${JSON.stringify(agent)}`);
-      check((await named("orders"))?.status === "proposed", "orders is still a draft after the refusals");
+      check((await named("e2ed_orders"))?.status === "proposed", "orders is still a draft after the refusals");
       // a confirmation with no stages is refused too
-      const bare = await post("/api/discovery/classes/orders/confirm", { stages: [] });
+      const bare = await post("/api/discovery/classes/e2ed_orders/confirm", { stages: [] });
       check(bare.status === 400 && /at least one stage/.test(bare.error ?? ""), `no stages, no class: ${JSON.stringify(bare)}`);
     },
   },
@@ -139,37 +139,37 @@ export const scenarios = [
     name: "discovery: confirmation makes a class available; a retired one maps nothing; a new table is one event",
     async run() {
       // the admin confirms orders, correcting a stage name as they do
-      const ok = await post("/api/discovery/classes/orders/confirm", { stages: ["quoted", "ordered", "in production", "shipped", "invoiced", "paid"], description: "a customer order: a commitment to deliver" });
+      const ok = await post("/api/discovery/classes/e2ed_orders/confirm", { stages: ["quoted", "ordered", "in production", "shipped", "invoiced", "paid"], description: "a customer order: a commitment to deliver" });
       check(ok.status === 200 && ok.class?.status === "confirmed", `confirmed: ${JSON.stringify(ok).slice(0, 300)}`);
       check(ok.class.confirmed_by === "admin" && ok.class.confirmed_at, "by whom and when");
       check(ok.class.stages.join(",") === "quoted,ordered,in_production,shipped,invoiced,paid", `stages normalized: ${ok.class.stages}`);
-      const mapped = await resolve("mssql:dbo_Order:9001");
-      check(mapped?.name === "orders", `a record key maps to the confirmed class: ${JSON.stringify(mapped)}`);
-      check((await classes("confirmed")).some((c) => c.name === "orders"), "listed as confirmed");
-      check((await resolve("mssql:dbo_Job:4471")) === null, "jobs, still a draft, maps nothing");
+      const mapped = await resolve("mssql:dbo_E2edOrder:9001");
+      check(mapped?.name === "e2ed_orders", `a record key maps to the confirmed class: ${JSON.stringify(mapped)}`);
+      check((await classes("confirmed")).some((c) => c.name === "e2ed_orders"), "listed as confirmed");
+      check((await resolve("mssql:dbo_E2edJob:4471")) === null, "jobs, still a draft, maps nothing");
       // a confirmation may rename; the old name is gone, the table follows
-      const renamed = await post("/api/discovery/classes/maintenance/confirm", { name: "maintenance bookings" });
-      check(renamed.status === 200 && renamed.class.name === "maintenance_bookings", `renamed on confirmation: ${JSON.stringify(renamed).slice(0, 200)}`);
-      check(!(await named("maintenance")) && (await resolve("mssql:dbo_Maintenance:77"))?.name === "maintenance_bookings", "the record table maps to the new name");
+      const renamed = await post("/api/discovery/classes/e2ed_maintenance/confirm", { name: "e2ed maintenance bookings" });
+      check(renamed.status === 200 && renamed.class.name === "e2ed_maintenance_bookings", `renamed on confirmation: ${JSON.stringify(renamed).slice(0, 200)}`);
+      check(!(await named("e2ed_maintenance")) && (await resolve("mssql:dbo_E2edMaintenance:77"))?.name === "e2ed_maintenance_bookings", "the record table maps to the new name");
       // a second class cannot take a confirmed class's table
-      const clash = await post("/api/discovery/classes/jobs/confirm", { record_table: "mssql:dbo_Order" });
+      const clash = await post("/api/discovery/classes/e2ed_jobs/confirm", { record_table: "mssql:dbo_E2edOrder" });
       check(clash.status === 409, `one table, one class: ${JSON.stringify(clash)}`);
       // retiring takes a class out of every mapping
-      const retired = await post("/api/discovery/classes/orders/retire", { reason: "e2e" });
+      const retired = await post("/api/discovery/classes/e2ed_orders/retire", { reason: "e2e" });
       check(retired.status === 200 && retired.class.status === "retired", `retired: ${JSON.stringify(retired).slice(0, 200)}`);
-      check((await resolve("mssql:dbo_Order:9001")) === null, "a retired class maps nothing");
+      check((await resolve("mssql:dbo_E2edOrder:9001")) === null, "a retired class maps nothing");
       // incremental discovery: a table already known or retired is no event; a new one is one draft
-      const known = await post("/api/discovery/event", { system: "mssql", table: "dbo_Job" });
-      check(known.draft === null && /already the record table of "jobs"/.test(known.reason), `a known table drafts nothing: ${JSON.stringify(known)}`);
-      const gone = await post("/api/discovery/event", { system: "mssql", table: "dbo_Order" });
+      const known = await post("/api/discovery/event", { system: "mssql", table: "dbo_E2edJob" });
+      check(known.draft === null && /already the record table of "e2ed_jobs"/.test(known.reason), `a known table drafts nothing: ${JSON.stringify(known)}`);
+      const gone = await post("/api/discovery/event", { system: "mssql", table: "dbo_E2edOrder" });
       check(gone.draft === null && /retired/.test(gone.reason), `a retired class is not drafted again: ${JSON.stringify(gone)}`);
-      const fresh = await post("/api/discovery/event", { system: "mssql", table: { name: "dbo_Quote", columns: ["QuoteID", "CustomerID", "Status", "Price"], status_values: { Status: ["Sent", "Accepted", "Declined"] } } });
-      check(fresh.draft?.name === "quotes" && fresh.draft.status === "proposed", `a new table is one draft: ${JSON.stringify(fresh).slice(0, 200)}`);
-      check((await named("quotes"))?.stages.join(",") === "sent,accepted,declined", "filed with its stages");
+      const fresh = await post("/api/discovery/event", { system: "mssql", table: { name: "dbo_E2edQuote", columns: ["QuoteID", "CustomerID", "Status", "Price"], status_values: { Status: ["Sent", "Accepted", "Declined"] } } });
+      check(fresh.draft?.name === "e2ed_quotes" && fresh.draft.status === "proposed", `a new table is one draft: ${JSON.stringify(fresh).slice(0, 200)}`);
+      check((await named("e2ed_quotes"))?.stages.join(",") === "sent,accepted,declined", "filed with its stages");
       // a worker filing a class it keeps meeting: a draft by that worker, never confirmed
-      const filed = await post("/api/discovery/event", { filed: { name: "shift swaps", stages: ["asked", "agreed", "done"], reason: "three notes this week" }, by: "worker:e2e" });
-      check(filed.draft?.name === "shift_swaps" && filed.draft.proposed_by === "worker:e2e" && filed.draft.status === "proposed", `a worker's filing is a draft: ${JSON.stringify(filed).slice(0, 200)}`);
-      check((await resolve("mssql:dbo_Quote:1")) === null && (await classes("confirmed")).every((c) => c.name !== "shift_swaps"), "neither maps until a person confirms");
+      const filed = await post("/api/discovery/event", { filed: { name: "e2ed shift swaps", stages: ["asked", "agreed", "done"], reason: "three notes this week" }, by: "worker:e2e" });
+      check(filed.draft?.name === "e2ed_shift_swaps" && filed.draft.proposed_by === "worker:e2e" && filed.draft.status === "proposed", `a worker's filing is a draft: ${JSON.stringify(filed).slice(0, 200)}`);
+      check((await resolve("mssql:dbo_E2edQuote:1")) === null && (await classes("confirmed")).every((c) => c.name !== "e2ed_shift_swaps"), "neither maps until a person confirms");
     },
   },
 ];
