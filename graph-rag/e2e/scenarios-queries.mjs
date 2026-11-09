@@ -260,21 +260,22 @@ export const scenarios = [
     name: "a worker whose scope excludes a claim never sees it in state; beyond: true does",
     run: async () => {
       await schema();
-      await save("bob", "e2e-q4 diep shift", "Diep ran the late shift this week.");
-      await save("admin", "e2e-q4 diep pay", "Diep's rate goes to 21.50 an hour. [admins]");
+      await save("bob", "e2e-q4 diep shift", "Diep Q4 ran the late shift this week.");
+      await save("admin", "e2e-q4 diep pay", "Diep Q4's rate goes to 21.50 an hour. [admins]");
       await homed("e2e-q4 diep shift", "Production floor", POS.floor);
       check((await entry("e2e-q4 diep pay"))?._home === POS.org, "the pay note is graded to the top");
-      // a key of the scenario's own: the batch notes' Diep (mssql:dbo_Employee:NGUD) is minted by the Condenser when they run
-      const d = await thing({ label: "Diep", type: "person", keys: ["mssql:dbo_Employee:E2EQ4"], homes: [POS.floor, POS.org] });
+      // a name and a key of the scenario's own: other streams write Dieps (the batch notes' NGUD, the admission scenarios' same-named
+      // pair), so nothing here is looked up by a name another stream might also write
+      const d = await thing({ label: "Diep Q4", type: "person", keys: ["mssql:dbo_Employee:E2EQ4"], homes: [POS.floor, POS.org] });
       await claim("e2e-q4 diep shift", d.rid, { class: "work assignment", attribute: "shift", value: "late", valid_from: iso(Date.now() - 2 * DAY), recorded_by: "bob" });
       await claim("e2e-q4 diep pay", d.rid, { class: "employment", attribute: "pay_rate", value: "21.50 per hour", valid_from: iso(Date.now() - 2 * DAY), recorded_by: "admin" });
       const e = await entry("e2e-q4 diep shift");
       const w = workerToken(String(e.rid));
-      const mine = await tool(w, "current_state", { subject: "Diep" });
+      const mine = await tool(w, "current_state", { subject: "Diep Q4" });
       check(stateOf(mine, "shift")?.value === "late", `the floor's claim: ${JSON.stringify(mine).slice(0, 400)}`);
       check(stateOf(mine, "pay_rate") === undefined, `never the pay claim: ${JSON.stringify(mine).slice(0, 400)}`);
       const diep = (mine.things ?? []).find((t) => t.state?.shift);
-      check(diep?.claims === 1, `one claim counted on Diep: ${JSON.stringify((mine.things ?? []).map((t) => [t.name, t.claims]))}`);
+      check(diep?.claims === 1, `one claim counted on Diep Q4: ${JSON.stringify((mine.things ?? []).map((t) => [t.name, t.claims]))}`);
       // a claim read bounds the worker's writes like any read: nothing beyond the floor was shown, so its one write to
       // the graph (resolve_subject: its judgement on a subject, minting a thing) isn't held, and is seen from the entry's home
       const resolve = (name, type) => tool(w, "resolve_subject", { name, thing: { name, type }, reason: "e2e" });
@@ -289,15 +290,15 @@ export const scenarios = [
       check(!(await sql("SELECT @rid FROM Entity WHERE _kind = 'thing' AND _norm = 'e2e-q4 pay ledger'")).length, "nothing minted while held");
       // the same for the person on the floor, and for alice above the floor but below the top; the admin sees both
       for (const who of ["bob", "alice"]) {
-        const r = await tool(who, "current_state", { subject: "Diep" });
+        const r = await tool(who, "current_state", { subject: "Diep Q4" });
         check(stateOf(r, "shift") && !stateOf(r, "pay_rate"), `${who} sees the shift and not the pay: ${JSON.stringify(r).slice(0, 300)}`);
       }
-      const admin = await tool("admin", "current_state", { subject: "Diep" });
+      const admin = await tool("admin", "current_state", { subject: "Diep Q4" });
       check(stateOf(admin, "pay_rate") && stateOf(admin, "shift"), "the admin sees both");
       // history and the HTTP route keep the same line
-      const h = await tool("bob", "state_history", { subject: "Diep", attribute: "pay_rate" });
+      const h = await tool("bob", "state_history", { subject: "Diep Q4", attribute: "pay_rate" });
       check((h.things ?? []).every((t) => (t.history ?? []).length === 0), `no pay history for the floor: ${JSON.stringify(h).slice(0, 300)}`);
-      const http = await api("/api/state/current?subject=Diep", "bob");
+      const http = await api("/api/state/current?subject=Diep%20Q4", "bob");
       check(stateOf(http, "shift") && !stateOf(http, "pay_rate"), `the route scopes alike: ${JSON.stringify(http).slice(0, 300)}`);
     },
   },
