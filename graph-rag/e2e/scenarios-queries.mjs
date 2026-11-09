@@ -285,7 +285,7 @@ export const scenarios = [
       const all = await tool(w, "current_state", { subject: "mssql:dbo_Employee:E2EQ4", beyond: true });
       check(stateOf(all, "pay_rate")?.value === "21.50 per hour" && stateOf(all, "shift")?.value === "late", `beyond: both, by key too: ${JSON.stringify(all).slice(0, 400)}`);
       // having read the pay claim's section at the top, the worker's next judgement is held: nothing minted
-      const held = await resolve("e2e-q4 pay ledger", "other");
+      const held = await resolve("e2e-q4 pay ledger", "part");
       check(/Not written/.test(held.error ?? ""), `a read beyond the floor holds the write: ${JSON.stringify(held).slice(0, 300)}`);
       check(!(await sql("SELECT @rid FROM Entity WHERE _kind = 'thing' AND _norm = 'e2e-q4 pay ledger'")).length, "nothing minted while held");
       // the same for the person on the floor, and for alice above the floor but below the top; the admin sees both
