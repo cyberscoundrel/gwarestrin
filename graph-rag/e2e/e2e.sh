@@ -14,11 +14,14 @@ NET="gr-e2e-$$"
 CFG="$(mktemp -d)"
 ADB_IMAGE="${ADB_IMAGE:-arcadedata/arcadedb:latest}"
 NODE="node:22-alpine"
+# per run: sessions running the harness side by side must not run each other's build
+GR_IMAGE="graph-rag:e2e-$$"
 
 cleanup() {
   if [ "${KEEP:-}" != "1" ]; then
     docker rm -f "$NET-gr" "$NET-adb" "$NET-models" >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
+    docker rmi "$GR_IMAGE" >/dev/null 2>&1 || true
     rm -rf "$CFG"
   else
     echo "kept: containers $NET-{gr,adb,models} on network $NET"
@@ -35,8 +38,8 @@ EOF
 cat >"$CFG/tokens.json" <<'EOF'
 { "tokens": [
   { "token": "e2e-admin", "user": "admin", "caps": { "read": true, "write": "direct", "approve": true, "raw": true }, "positions": ["org"], "delegationKey": "e2e-delegation-key-0123456789abcdef" },
-  { "token": "e2e-alice", "user": "alice", "caps": { "read": true, "write": "direct" }, "positions": ["ops"] },
-  { "token": "e2e-bob", "user": "bob", "caps": { "read": true, "write": "direct" }, "positions": ["floor"] },
+  { "token": "e2e-alice", "user": "alice", "caps": { "read": true, "write": "direct" }, "positions": ["ops"], "delegationKey": "e2e-delegation-key-0123456789abcdef" },
+  { "token": "e2e-bob", "user": "bob", "caps": { "read": true, "write": "direct" }, "positions": ["floor"], "delegationKey": "e2e-delegation-key-0123456789abcdef" },
   { "token": "e2e-carol", "user": "carol", "caps": { "read": true, "write": "direct" }, "positions": ["ops"] } ] }
 EOF
 chmod -R a+rX "$CFG"
@@ -48,7 +51,7 @@ docker run -d --name "$NET-adb" --network "$NET" --network-alias arcadedb \
   "$ADB_IMAGE" >/dev/null
 docker run -d --name "$NET-models" --network "$NET" --network-alias models -v "$PWD/e2e:/e2e:ro" "$NODE" node /e2e/fake-models.mjs >/dev/null
 echo "building graph-rag from this checkout"
-docker build -q -t graph-rag:e2e . >/dev/null
+docker build -q -t "$GR_IMAGE" . >/dev/null
 
 echo "waiting for ArcadeDB"
 docker run --rm --network "$NET" "$NODE" node -e '
@@ -68,7 +71,7 @@ docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$C
   -e DECISION_URL=http://models:4000/decisions -e DECISION_API_KEY=e2e \
   -e TOKEN_MAP_PATH=/cfg/tokens.json -e POSITION_MAP_PATH=/cfg/positions.json \
   -e SWEEP_INTERVAL_MS=5000 -e DOC_STORE=fs:/tmp/documents \
-  graph-rag:e2e >/dev/null
+  "$GR_IMAGE" >/dev/null
 
 status=0
 # the whole checkout, read-only: scenario files reach test/fixtures and src/model through run.mjs

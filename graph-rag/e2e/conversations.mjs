@@ -8,7 +8,7 @@
 // scripts/batch-bar.mjs, e2e/scenarios-harness.mjs and test/harness-batch.test.js.
 // The batch file's shape is documented in test/fixtures/conversations/README.md.
 import { claimHome } from "../src/model/authority.js";
-import { normalizeAttribute, normalizeDocument, normalizeName } from "../src/model/claims.js";
+import { claimsOf, closeIntervals, normalizeDocument, normalizeName } from "../src/model/claims.js";
 import { ancestors, commonAncestor, parsePositionMap } from "../src/positions.js";
 
 export const BATCH_SHAPE = 1;
@@ -203,39 +203,6 @@ export function prefixed(batch, prefix) {
 }
 
 /**
- * The authority map a batch's placements imply, in the policy's shape
- * ({ classes: { name: { authority } | { attributes: { attr: position } } },
- * attributes: {} }): each claim's class and attribute take the position of
- * its authority; a class whose claims all agree gets one `authority`; where
- * two notes disagree on one attribute the more restrictive position (the
- * ancestor) wins. Built from the conversations given, so a scenario's subset
- * yields the rules its own claims need.
- */
-export function authorityMapOf(batch, treeDoc = batch.tree ?? TREE) {
-  const tree = parsePositionMap(treeDoc);
-  const position = batch.positions ?? POSITION;
-  const above = (a, b) => a !== b && ancestors(tree, b).includes(a);
-  const perClass = new Map();
-  for (const c of batch.conversations) {
-    for (const pl of c.expected.placements) {
-      const claim = c.expected.document.sections.flatMap((s) => s.claims ?? []).find((cl) => cl.id === pl.id);
-      if (!claim) continue;
-      const pos = position[pl.authority] ?? pl.home;
-      const attr = normalizeAttribute(claim.attribute);
-      if (!perClass.has(claim.class)) perClass.set(claim.class, new Map());
-      const cur = perClass.get(claim.class).get(attr);
-      if (!cur || above(pos, cur)) perClass.get(claim.class).set(attr, pos);
-    }
-  }
-  const classes = {};
-  for (const [cls, attrs] of perClass) {
-    const values = new Set(attrs.values());
-    classes[cls] = values.size === 1 ? { authority: [...values][0] } : { attributes: Object.fromEntries(attrs) };
-  }
-  return { classes, attributes: {} };
-}
-
-/**
  * Every problem with a batch file, as strings (empty = sound): the shape,
  * alternating turns, and every expected document normalizing with
  * `normalizeDocument` (no class gate: the oracle's classes are discovery
@@ -318,31 +285,74 @@ export const fold = (s) =>
 export const PREVIEW_CHARS = 380;
 
 /**
+ * What every claim of a batch must say once it has landed, by claim id: the
+ * expected document as the contract normalizes it (relative dates resolved
+ * against the recording), with decision 3 applied over the whole batch (a
+ * later claim on the same attribute of the same subject closes the open one).
+ */
+export function expectedClaims(batch) {
+  const all = batch.conversations.flatMap((c) => claimsOf(normalizeDocument(c.expected.document, { now: c.recorded_at })));
+  return new Map(closeIntervals(all).map((cl) => [cl.id, cl]));
+}
+
+/** the same instant, however the store writes it; both absent counts as the same */
+const sameDate = (a, b) => {
+  if (a === null || a === undefined || a === "") return b === null || b === undefined || b === "";
+  if (b === null || b === undefined || b === "") return false;
+  const at = (v) => Date.parse(String(v).replace(" ", "T"));
+  return at(a) === at(b) && !Number.isNaN(at(a));
+};
+
+/** why a landed claim's subject is not the expected one, or null: by the row's key, else by name; a thing holding another row's key is two rows on one thing */
+function subjectProblem(want, thing, batchKeys) {
+  if (!thing) return "its subject is not in the graph";
+  const keys = thing._keys ?? [];
+  const seen = thing.label ?? thing.name;
+  if (want.key) {
+    if (!keys.includes(want.key)) return `about "${seen}" (${keys.join(", ") || "no key"}), expected the row ${want.key}`;
+    const others = keys.filter((k) => k !== want.key && batchKeys.has(k));
+    return others.length ? `about a thing that also holds ${others.join(", ")}: two rows on one thing` : null;
+  }
+  // a class subject's own thing is named "class (qualifier)", or the class alone
+  const expected = want.scope === "class" ? (want.name ? `${want.class} (${want.name})` : want.class) : want.name;
+  if (normalizeName(seen) !== normalizeName(expected)) return `about "${seen}", expected "${expected}"`;
+  const others = keys.filter((k) => batchKeys.has(k));
+  return others.length ? `about a thing that holds the row ${others.join(", ")}, expected "${expected}" by name` : null;
+}
+
+/**
  * The bar, as the live batches applied it (docs/GRAPH-WORKER-RELIABILITY.md,
- * test/fixtures/ORACLE.md), now over claims. `rows` is what `collectRows`
- * (or a scenario) read from the graph:
- *   documents: [{ rid, name, _home, _origin, _placed_by }]
+ * test/fixtures/ORACLE.md), now over what the claims say. `rows` is what
+ * `collectRows` (or a scenario) read from the graph:
+ *   documents: [{ rid, name, _home, _origin, _placed_by, _doc_id, _on_record, _recorded_by, _recorded_at, _record_position }]
  *   sections:  [{ rid, name, _doc_title, _section, _home, _placed_by, text }]
- *   claims:    [{ id, _home, out_rid, in_rid }]         (CLAIMS edges; [] when the type does not exist)
- *   rescues:   [{ kind, status, approved_by, payload }] (approved rehomes and other person-approved moves)
- * Four checks, each a list of findings, and `ok` when all four are empty:
+ *   claims:    [{ id, kind, class, attribute, value, valid_from, valid_until, recorded_at, recorded_by, _home, out_rid, in_rid }]   (CLAIMS edges; [] when the type does not exist)
+ *   things:    [{ rid, name, label, _keys }]                (every claim's subject)
+ *   rescues:   [{ kind, status, approved_by, payload }]     (approved rehomes and other person-approved moves)
+ * Five checks, each a list of findings, and `ok` when all five are empty:
  *   rescues:    a person moved or approved a move of a batch entry (`_placed_by`, an approved rehome naming it)
- *   misplaced:  a claim or section seen from somewhere other than expected (a missing claim counts here)
+ *   misplaced:  a document, section or claim seen from somewhere other than expected (a missing claim counts here)
  *   lost:       an expected section whose text is not stored, or a document with no entry
  *   hidden:     a section's text names a batch entry (document, section) homed above that section
+ *   content:    a landed claim that does not say what the oracle says (subject, kind, class, attribute, value, dates,
+ *               recorder, the section it came from), a claim on a batch section the oracle does not have, or a
+ *               document whose on-record marker is wrong
  */
 export function bar(batch, rows, treeDoc = batch.tree ?? TREE) {
   const tree = parsePositionMap(treeDoc);
   const isAbove = (home, than) => home !== than && ancestors(tree, than).includes(home);
-  const findings = { rescues: [], misplaced: [], lost: [], hidden: [] };
+  const findings = { rescues: [], misplaced: [], lost: [], hidden: [], content: [] };
   const docs = new Map((rows.documents ?? []).map((d) => [d.name, d]));
   const sections = rows.sections ?? [];
   const claims = new Map((rows.claims ?? []).map((c) => [c.id, c]));
+  const things = new Map((rows.things ?? []).map((t) => [String(t.rid), t]));
   const sectionByRid = new Map(sections.map((s) => [String(s.rid), s]));
+  const wanted = expectedClaims(batch);
+  const batchKeys = new Set([...wanted.values()].map((c) => c.subject.key).filter(Boolean));
   // every batch entry's name and home, for the hidden-title check
   const named = [];
-  let expectedClaims = 0;
-  let foundClaims = 0;
+  let expectedCount = 0;
+  let foundCount = 0;
   for (const c of batch.conversations) {
     const x = c.expected;
     const doc = docs.get(x.document.title);
@@ -350,6 +360,11 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE) {
     else {
       named.push({ name: doc.name, home: doc._home, kind: "document" });
       if (doc._placed_by) findings.rescues.push(`${c.id}: a person placed the document (${doc._placed_by})`);
+      if (doc._home !== x.document_home) findings.misplaced.push(`${c.id}: the document seen from ${doc._home}, expected ${x.document_home}`);
+      if (doc._on_record !== true) findings.content.push(`${c.id}: the document is not marked on record`);
+      if (doc._recorded_by !== x.document.recorded_by) findings.content.push(`${c.id}: the document recorded by ${JSON.stringify(doc._recorded_by)}, expected ${JSON.stringify(x.document.recorded_by)}`);
+      if (doc._record_position !== x.document.position) findings.content.push(`${c.id}: the document recorded under ${JSON.stringify(doc._record_position)}, expected ${JSON.stringify(x.document.position)}`);
+      if (!sameDate(doc._recorded_at, x.document.recorded_at)) findings.content.push(`${c.id}: the document recorded at ${JSON.stringify(doc._recorded_at)}, expected ${JSON.stringify(x.document.recorded_at)}`);
     }
     const own = sections.filter((s) => s._doc_title === x.document.title || (doc && s._doc_id && s._doc_id === doc._doc_id));
     for (const es of x.sections) {
@@ -371,18 +386,37 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE) {
       if (!have.startsWith(want.slice(0, Math.min(PREVIEW_CHARS, want.length)))) findings.lost.push(`${c.id} §${es.index + 1}: stored text differs ("${have.slice(0, 60)}…")`);
     }
     for (const pl of x.placements) {
-      expectedClaims++;
+      expectedCount++;
       const cl = claims.get(pl.id);
       if (!cl) {
         findings.misplaced.push(`${c.id} claim ${pl.id}: not in the graph`);
         continue;
       }
-      foundClaims++;
-      const home = cl._home ?? sectionByRid.get(String(cl.out_rid))?._home ?? null;
-      if (home !== pl.home) findings.misplaced.push(`${c.id} claim ${pl.id}: seen from ${home}, expected ${pl.home}`);
+      foundCount++;
       const sec = sectionByRid.get(String(cl.out_rid));
-      if (sec && Number(sec._section) !== pl.section) findings.misplaced.push(`${c.id} claim ${pl.id}: from §${Number(sec._section) + 1}, expected §${pl.section + 1}`);
+      const home = cl._home ?? sec?._home ?? null;
+      if (home !== pl.home) findings.misplaced.push(`${c.id} claim ${pl.id}: seen from ${home}, expected ${pl.home}`);
+      if (!sec) findings.content.push(`${c.id} claim ${pl.id}: not from a section of this batch`);
+      else if (sec._doc_title !== x.document.title) findings.content.push(`${c.id} claim ${pl.id}: from a section of "${sec._doc_title}", expected "${x.document.title}"`);
+      else if (Number(sec._section) !== pl.section) findings.misplaced.push(`${c.id} claim ${pl.id}: from §${Number(sec._section) + 1}, expected §${pl.section + 1}`);
+      const want = wanted.get(pl.id);
+      if (!want) {
+        findings.content.push(`${c.id} claim ${pl.id}: placed, but the expected document has no such claim`);
+        continue;
+      }
+      const wrong = (field, have, exp) => findings.content.push(`${c.id} claim ${pl.id}: ${field} ${JSON.stringify(have ?? null)}, expected ${JSON.stringify(exp ?? null)}`);
+      const subject = subjectProblem(want.subject, things.get(String(cl.in_rid)), batchKeys);
+      if (subject) findings.content.push(`${c.id} claim ${pl.id}: subject: ${subject}`);
+      for (const field of ["kind", "class", "attribute", "value", "recorded_by"]) if (cl[field] !== want[field]) wrong(field, cl[field], want[field]);
+      for (const field of ["valid_from", "valid_until", "recorded_at"]) if (!sameDate(cl[field], want[field])) wrong(field, cl[field], want[field]);
     }
+  }
+  // a claim nobody expected, on a section of the batch
+  const expectedIds = new Set(batch.conversations.flatMap((c) => c.expected.placements.map((p) => p.id)));
+  for (const cl of rows.claims ?? []) {
+    if (expectedIds.has(cl.id)) continue;
+    const sec = sectionByRid.get(String(cl.out_rid));
+    if (sec) findings.content.push(`"${sec.name}": an unexpected claim ${cl.id} (${cl.class}/${cl.attribute})`);
   }
   // operator rescues recorded as approved moves naming a batch entry
   const names = named.map((n) => n.name);
@@ -401,37 +435,62 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE) {
       if (text.includes(t.title)) findings.hidden.push(`"${s.name}" (seen from ${s._home}) names "${t.title}" (seen from ${t.home})`);
     }
   }
-  const counts = { documents: docs.size, documents_expected: batch.conversations.length, claims: foundClaims, claims_expected: expectedClaims };
-  return { ok: Object.values(findings).every((l) => l.length === 0), counts, findings };
+  const counts = { documents: batch.conversations.filter((c) => docs.has(c.expected.document.title)).length, documents_expected: batch.conversations.length, claims: foundCount, claims_expected: expectedCount };
+  return { ok: Object.values(findings).every((l) => l.length === 0) && foundCount === expectedCount, counts, findings };
+}
+
+/** the findings per note, for a report: note id -> [check: finding] (only notes with findings); a finding names its conversation or its document's title */
+export function failingNotes(batch, result) {
+  const out = new Map();
+  for (const c of batch.conversations) {
+    const mine = Object.entries(result.findings).flatMap(([check, list]) => list.filter((f) => f.includes(`${c.id}:`) || f.includes(`${c.id} `) || f.includes(`"${c.expected.document.title}`)).map((f) => `${check}: ${f}`));
+    if (mine.length) out.set(c.note, mine);
+  }
+  return out;
 }
 
 /** the one line: CLEAN or NOT CLEAN, with the counts */
 export function verdictLine(batch, result) {
   const { counts: c, findings: f } = result;
-  return `${result.ok ? "CLEAN" : "NOT CLEAN"} ${batch.batch}: ${c.documents}/${c.documents_expected} documents, ${c.claims}/${c.claims_expected} claims; rescues ${f.rescues.length}, misplaced ${f.misplaced.length}, lost ${f.lost.length}, hidden titles ${f.hidden.length}`;
+  return `${result.ok ? "CLEAN" : "NOT CLEAN"} ${batch.batch}: ${c.documents}/${c.documents_expected} documents, ${c.claims}/${c.claims_expected} claims; rescues ${f.rescues.length}, misplaced ${f.misplaced.length}, lost ${f.lost.length}, hidden titles ${f.hidden.length}, wrong content ${f.content.length}`;
 }
 
 const inList = (xs) => `[${xs.map((x) => `'${String(x).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`).join(", ")}]`;
 
+const CLAIM_FIELDS = "id, kind, class, attribute, value, valid_from, valid_until, recorded_at, recorded_by, closed_by, _home, @out AS out_rid, @in AS in_rid";
+
 /**
  * The rows the bar reads, through a `query(sql) -> rows` that runs SQL as
- * someone with the raw capability (query_graph as the admin). A missing
- * CLAIMS type (the model's DDL not run) reads as no claims, which the bar
- * then reports as every claim missing.
+ * someone with the raw capability (query_graph as the admin). Claims are read
+ * two ways, by the batch's ids and off the batch's sections, so a claim the
+ * oracle does not have shows too. A missing CLAIMS type (the model's DDL not
+ * run) reads as no claims, which the bar then reports as every claim missing.
  */
 export async function collectRows(batch, query) {
   const titles = batch.conversations.map((c) => c.expected.document.title);
   const claimIds = batch.conversations.flatMap((c) => c.expected.placements.map((p) => p.id));
-  const documents = await query(`SELECT @rid AS rid, name, _home, _origin, _placed_by, _doc_id FROM Entity WHERE _kind = 'document' AND name IN ${inList(titles)}`);
-  const sections = await query(`SELECT @rid AS rid, name, _doc_title, _doc_id, _section, _home, _placed_by, text_identity AS text FROM Entity WHERE _kind = 'section' AND _doc_title IN ${inList(titles)}`);
-  let claims = [];
+  const documents = (await query(`SELECT @rid AS rid, name, _home, _origin, _placed_by, _doc_id, _doc_status, _on_record, _recorded_by, _recorded_at, _record_position FROM Entity WHERE _kind = 'document' AND name IN ${inList(titles)}`)) ?? [];
+  const sections = (await query(`SELECT @rid AS rid, name, _doc_title, _doc_id, _section, _home, _placed_by, text_identity AS text FROM Entity WHERE _kind = 'section' AND _doc_title IN ${inList(titles)}`)) ?? [];
+  const byId = new Map();
+  const add = (list) => (list ?? []).forEach((c) => byId.set(String(c.id), c));
   if (claimIds.length) {
     try {
-      claims = (await query(`SELECT id, _home, @out AS out_rid, @in AS in_rid FROM CLAIMS WHERE id IN ${inList(claimIds)}`)) ?? [];
+      add(await query(`SELECT ${CLAIM_FIELDS} FROM CLAIMS WHERE id IN ${inList(claimIds)}`));
     } catch {
-      claims = [];
+      // no CLAIMS type: every claim missing
     }
   }
+  const rids = sections.map((s) => String(s.rid)).filter((r) => /^#\d+:\d+$/.test(r));
+  if (rids.length) {
+    try {
+      add(await query(`SELECT ${CLAIM_FIELDS} FROM (SELECT expand(outE('CLAIMS')) FROM [${rids.join(", ")}])`));
+    } catch {
+      // as above
+    }
+  }
+  const claims = [...byId.values()];
+  const thingRids = [...new Set(claims.map((c) => String(c.in_rid)).filter((r) => /^#\d+:\d+$/.test(r)))];
+  const things = thingRids.length ? ((await query(`SELECT @rid AS rid, name, label, _keys FROM [${thingRids.join(", ")}]`).catch(() => [])) ?? []) : [];
   const rescues = (await query("SELECT kind, status, approved_by, payload FROM PendingWrite WHERE kind = 'rehome' AND status = 'approved'").catch(() => [])) ?? [];
-  return { documents: documents ?? [], sections: sections ?? [], claims, rescues };
+  return { documents, sections, claims, things, rescues };
 }

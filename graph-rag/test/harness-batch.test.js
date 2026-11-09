@@ -8,10 +8,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { claimHome } from "../src/model/authority.js";
-import { claimsOf, normalizeDocument } from "../src/model/claims.js";
+import { claimsOf, normalizeDocument, subjectId } from "../src/model/claims.js";
 import { parsePositionMap } from "../src/positions.js";
 import { sectionName } from "../src/documents.js";
-import { authorityMapOf, bar, checkBatch, collectRows, conversationOf, generateBatch, POSITION, prefixed, TREE, verdictLine } from "../e2e/conversations.mjs";
+import { adaptClaim, bar, checkBatch, collectRows, conversationOf, expectedClaims, failingNotes, generateBatch, POSITION, prefixed, TREE, verdictLine } from "../e2e/conversations.mjs";
 
 const read = (f) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8"));
 const oracle = read("oracle-sixty.json");
@@ -125,20 +125,33 @@ test("conversationOf is deterministic for a note and a time", () => {
 
 /** rows as an instance that stored the batch exactly as expected would answer */
 function cleanRows(b) {
+  const wanted = expectedClaims(b);
   const documents = [];
   const sections = [];
   const claims = [];
+  const things = new Map();
   let rid = 1;
+  const thingOf = (subject) => {
+    const id = subjectId(subject);
+    if (!things.has(id)) {
+      const label = subject.scope === "class" ? (subject.name ? `${subject.class} (${subject.name})` : subject.class) : (subject.name ?? subject.key);
+      things.set(id, { rid: `#3:${rid++}`, name: label, label, _keys: subject.key ? [subject.key] : [] });
+    }
+    return things.get(id).rid;
+  };
   for (const c of b.conversations) {
     const d = c.expected.document;
-    documents.push({ rid: `#1:${rid++}`, name: d.title, _home: c.position, _origin: c.position, _placed_by: null, _doc_id: c.id });
+    documents.push({ rid: `#1:${rid++}`, name: d.title, _home: c.expected.document_home, _origin: c.position, _placed_by: null, _doc_id: c.id, _on_record: true, _recorded_by: d.recorded_by, _recorded_at: d.recorded_at, _record_position: d.position });
     d.sections.forEach((s, i) => {
       const srid = `#2:${rid++}`;
       sections.push({ rid: srid, name: sectionName(d.title, i, s.heading), _doc_title: d.title, _doc_id: c.id, _section: i, _home: c.expected.sections[i].home, _placed_by: null, text: s.text });
-      for (const cl of s.claims) claims.push({ id: cl.id, _home: c.expected.placements.find((p) => p.id === cl.id).home, out_rid: srid, in_rid: "#3:1" });
+      for (const cl of s.claims) {
+        const w = wanted.get(cl.id);
+        claims.push({ id: cl.id, kind: w.kind, class: w.class, attribute: w.attribute, value: w.value, valid_from: w.valid_from, valid_until: w.valid_until, recorded_at: w.recorded_at, recorded_by: w.recorded_by, _home: c.expected.placements.find((p) => p.id === cl.id).home, out_rid: srid, in_rid: thingOf(w.subject) });
+      }
     });
   }
-  return { documents, sections, claims, rescues: [] };
+  return { documents, sections, claims, things: [...things.values()], rescues: [] };
 }
 
 test("the bar: a batch stored as expected is clean; each of the four failures is found and counted", () => {
@@ -146,7 +159,7 @@ test("the bar: a batch stored as expected is clean; each of the four failures is
   const rows = cleanRows(small);
   const clean = bar(small, rows);
   assert.equal(clean.ok, true, JSON.stringify(clean.findings));
-  assert.equal(verdictLine(small, clean), "CLEAN oracle-sixty: 4/4 documents, 6/6 claims; rescues 0, misplaced 0, lost 0, hidden titles 0");
+  assert.equal(verdictLine(small, clean), "CLEAN oracle-sixty: 4/4 documents, 6/6 claims; rescues 0, misplaced 0, lost 0, hidden titles 0, wrong content 0");
   // a rescue: a person placed a section, and an approved rehome names a document
   const r1 = structuredClone(rows);
   r1.sections[0]._placed_by = "admin";
@@ -190,7 +203,7 @@ test("the bar: a batch stored as expected is clean; each of the four failures is
   const v6 = bar(small, r6);
   assert.equal(v6.ok, false);
   assert.equal(v6.counts.claims, 0);
-  assert.match(verdictLine(small, v6), /^NOT CLEAN oracle-sixty: 4\/4 documents, 0\/6 claims; rescues 0, misplaced 6, lost 0, hidden titles 0$/);
+  assert.match(verdictLine(small, v6), /^NOT CLEAN oracle-sixty: 4\/4 documents, 0\/6 claims; rescues 0, misplaced 6, lost 0, hidden titles 0, wrong content 0$/);
 });
 
 test("collectRows asks for the batch's titles and claim ids and survives a missing CLAIMS type", async () => {
@@ -201,7 +214,7 @@ test("collectRows asks for the batch's titles and claim ids and survives a missi
     if (/FROM CLAIMS/.test(sql)) throw new Error("Type 'CLAIMS' was not found");
     return [];
   });
-  assert.deepEqual(rows, { documents: [], sections: [], claims: [], rescues: [] });
+  assert.deepEqual(rows, { documents: [], sections: [], claims: [], things: [], rescues: [] });
   assert.ok(asked[0].includes(`'${small.conversations[0].expected.document.title}'`));
   assert.ok(asked.some((s) => /FROM CLAIMS WHERE id IN \['ux-m01#0'/.test(s)));
   assert.ok(asked.some((s) => /FROM PendingWrite WHERE kind = 'rehome' AND status = 'approved'/.test(s)));
@@ -255,34 +268,6 @@ test("prefixed: titles, headings, conversation ids and claim ids carry the prefi
   assert.equal(bar(p, cleanRows(p)).ok, true);
 });
 
-test("authorityMapOf: each claim's class and attribute take its authority's position; a class whose claims agree gets one authority; disagreement goes to the ancestor", () => {
-  const small = { ...fixture, conversations: fixture.conversations.filter((c) => ["ux-m01", "ux-al04", "ux-aa11", "ux-aq01", "ux-ak06"].includes(c.note)) };
-  const map = authorityMapOf(small);
-  assert.deepEqual(map.attributes, {});
-  assert.deepEqual(map.classes["customer order"], { attributes: { status: "floor", placed: "ops", unit_price: "org" } }, JSON.stringify(map.classes["customer order"]));
-  assert.deepEqual(map.classes["work center"], { authority: "floor" });
-  assert.ok(Object.values(map.classes).every((c) => (c.authority ? ["floor", "ops", "org"].includes(c.authority) : Object.values(c.attributes).every((v) => ["floor", "ops", "org"].includes(v)))));
-  // the whole batch: every claim's position is the rule's answer or a stricter one (never a looser one)
-  const all = authorityMapOf(fixture);
-  for (const c of fixture.conversations)
-    for (const pl of c.expected.placements) {
-      const cl = c.expected.document.sections.flatMap((s) => s.claims).find((x) => x.id === pl.id);
-      const rule = all.classes[cl.class];
-      const got = rule.authority ?? rule.attributes[cl.attribute];
-      const rank = { floor: 0, ops: 1, org: 2 };
-      assert.ok(rank[got] >= rank[POSITION[pl.authority]], `${pl.id}: ${got} is at least ${POSITION[pl.authority]}`);
-    }
-  // a disagreement: two notes, one attribute, floor and org -> org
-  const a = structuredClone(small.conversations.find((c) => c.note === "ux-aq01"));
-  const b = structuredClone(a);
-  b.id = "x";
-  b.expected.placements[0].authority = "admins-only";
-  b.expected.placements[0].home = "org";
-  const m = authorityMapOf({ ...small, conversations: [a, b] });
-  const cls = a.expected.document.sections[0].claims[0].class;
-  assert.deepEqual(m.classes[cls], { authority: "org" });
-});
-
 test("the bar tolerates a stored section whose text starts with its heading line", () => {
   const small = { ...fixture, conversations: fixture.conversations.filter((c) => ["ux-m01"].includes(c.note)) };
   const rows = cleanRows(small);
@@ -294,4 +279,144 @@ test("the bar tolerates a stored section whose text starts with its heading line
   assert.equal(bar(small, rows).ok, true, JSON.stringify(bar(small, rows).findings));
   rows.sections[0].text = `## something else\n\nnot the text`;
   assert.equal(bar(small, rows).findings.lost.length, 1);
+});
+
+test("the batch's expected claims are the oracle's, field by field, and every date is the contract's reading of the oracle's", () => {
+  for (const c of fixture.conversations) {
+    const note = oracle.find((n) => n.id === c.note);
+    const claims = c.expected.document.sections.flatMap((s) => s.claims);
+    assert.equal(claims.length, note.claims.length, c.note);
+    for (const cl of claims) {
+      const j = Number(cl.id.split("#")[1]);
+      assert.deepEqual(cl, adaptClaim(note.claims[j], cl.id), cl.id);
+    }
+  }
+  const wanted = expectedClaims(fixture);
+  assert.equal(wanted.size, 100);
+  const m01 = fixture.conversations.find((c) => c.note === "ux-m01");
+  assert.equal(wanted.get("ux-m01#0").valid_from, m01.recorded_at, "recorded_at resolves against the recording");
+  assert.equal(wanted.get("ux-m01#2").valid_until, m01.recorded_at, "so does the end");
+});
+
+test("expectedClaims applies decision 3: a later claim on the same attribute of the same subject closes the open one", () => {
+  const one = structuredClone(fixture.conversations.find((c) => c.note === "ux-t03"));
+  const two = structuredClone(one);
+  two.id = "conv-later";
+  two.recorded_at = "2026-11-07T09:00:00.000Z";
+  two.expected.document.recorded_at = two.recorded_at;
+  two.expected.document.title = "later";
+  two.expected.document.sections[0].claims[0].id = "later#0";
+  two.expected.placements[0].id = "later#0";
+  const wanted = expectedClaims({ ...fixture, conversations: [one, two] });
+  assert.equal(wanted.get("ux-t03#0").valid_until, two.recorded_at);
+  assert.equal(wanted.get("later#0").valid_until, null);
+});
+
+const small = () => ({ ...fixture, conversations: fixture.conversations.filter((c) => ["ux-m01", "ux-al04", "ux-aa11", "ux-ak06"].includes(c.note)) });
+
+test("the bar reads what a landed claim says: one wrong field on one row fails it, and the finding names the field", () => {
+  const b = small();
+  const rows = cleanRows(b);
+  assert.equal(bar(b, rows).ok, true);
+  for (const [field, bad] of [
+    ["kind", "event"],
+    ["class", "not the class"],
+    ["attribute", "not_the_attribute"],
+    ["value", "not the value"],
+    ["valid_from", "2001-01-01T00:00:00.000Z"],
+    ["valid_until", "2001-01-02T00:00:00.000Z"],
+    ["recorded_at", "2001-01-01T00:00:00.000Z"],
+    ["recorded_by", "mallory"],
+  ]) {
+    const r = structuredClone(rows);
+    r.claims[0][field] = bad;
+    const v = bar(b, r);
+    assert.equal(v.ok, false, `${field} wrong and still clean`);
+    assert.ok(v.findings.content.some((f) => f.includes(rows.claims[0].id) && f.includes(`: ${field} `)), `${field}: ${JSON.stringify(v.findings.content)}`);
+    assert.match(verdictLine(b, v), /^NOT CLEAN/);
+    assert.match(verdictLine(b, v), /wrong content [1-9]/);
+  }
+});
+
+test("the bar compares the subject by its row's key or its name, and two rows on one thing is wrong", () => {
+  const b = small();
+  const rows = cleanRows(b);
+  const m01 = rows.claims.find((c) => c.id === "ux-m01#0");
+  const named = rows.claims.find((c) => c.id === "ux-m01#1");
+  const edit = (id, fn) => {
+    const r = structuredClone(rows);
+    fn(r, r.things.find((t) => t.rid === rows.claims.find((c) => c.id === id).in_rid));
+    return bar(b, r).findings.content.filter((f) => f.includes(": subject: "));
+  };
+  assert.match(edit("ux-m01#0", (_, t) => (t._keys = ["mssql:dbo_Work_Center:OTHER"]))[0], /expected the row mssql:dbo_Work_Center:INSPECT-2/);
+  assert.match(edit("ux-m01#0", (_, t) => t._keys.push("mssql:dbo_Customer:BSE"))[0] ?? "", /^$/, "another key nobody in the batch claims is no finding");
+  const otherBatchKey = [...expectedClaims(b).values()].map((c) => c.subject.key).find((k) => k && k !== "mssql:dbo_Work_Center:INSPECT-2");
+  assert.match(edit("ux-m01#0", (_, t) => t._keys.push(otherBatchKey))[0], /two rows on one thing/);
+  assert.match(edit("ux-m01#1", (_, t) => (t.label = "something else"))[0], /expected "Exatron EPP-D98 parts \(job not named\)"/);
+  // a subject thing that is not there, and a claim pointed at another thing
+  const r = structuredClone(rows);
+  r.things = r.things.filter((t) => t.rid !== m01.in_rid);
+  assert.ok(bar(b, r).findings.content.some((f) => f.includes("ux-m01#0") && /not in the graph/.test(f)));
+  const r2 = structuredClone(rows);
+  r2.claims.find((c) => c.id === "ux-m01#0").in_rid = named.in_rid;
+  assert.ok(bar(b, r2).findings.content.some((f) => f.includes("ux-m01#0") && f.includes(": subject: ")));
+});
+
+test("the bar compares the section and document a claim landed in, and both homes", () => {
+  const b = small();
+  const rows = cleanRows(b);
+  // the document's home, generated as expected and compared now
+  const r1 = structuredClone(rows);
+  r1.documents.find((d) => d.name === b.conversations[0].expected.document.title)._home = "org";
+  assert.match(bar(b, r1).findings.misplaced.join("\n"), /the document seen from org, expected ops/);
+  // the document's on-record marker, recorder, position and time
+  for (const [field, bad, re] of [
+    ["_on_record", null, /not marked on record/],
+    ["_recorded_by", "mallory", /recorded by "mallory"/],
+    ["_record_position", "org", /recorded under "org"/],
+    ["_recorded_at", "2001-01-01T00:00:00.000Z", /recorded at "2001/],
+  ]) {
+    const r = structuredClone(rows);
+    r.documents[0][field] = bad;
+    assert.match(bar(b, r).findings.content.join("\n"), re, field);
+  }
+  // a claim from no section of the batch, from another document's section, from the wrong section of its own
+  const r2 = structuredClone(rows);
+  r2.claims[0].out_rid = "#9:9";
+  assert.match(bar(b, r2).findings.content.join("\n"), /ux-m01#0: not from a section of this batch/);
+  const al04 = b.conversations.find((c) => c.note === "ux-al04");
+  const r3 = structuredClone(rows);
+  r3.claims[0].out_rid = rows.sections.find((s) => s._doc_title === al04.expected.document.title).rid;
+  assert.match(bar(b, r3).findings.content.join("\n"), /ux-m01#0: from a section of ".*brightline/);
+  const r4 = structuredClone(rows);
+  r4.claims.find((c) => c.id === "ux-al04#0").out_rid = rows.sections.find((s) => s._doc_title === al04.expected.document.title && s._section === 1).rid;
+  assert.match(bar(b, r4).findings.misplaced.join("\n"), /ux-al04#0: from §2, expected §1/);
+  // a claim on a batch section the oracle does not have
+  const r5 = structuredClone(rows);
+  r5.claims.push({ ...rows.claims[0], id: "not-in-the-oracle" });
+  assert.match(bar(b, r5).findings.content.join("\n"), /an unexpected claim not-in-the-oracle/);
+});
+
+test("the review's case: all sixty-two with every subject, class, value and date wrong and every document at the root is not clean", () => {
+  const rows = cleanRows(fixture);
+  assert.equal(bar(fixture, rows).ok, true, JSON.stringify(bar(fixture, rows).findings));
+  assert.equal(verdictLine(fixture, bar(fixture, rows)), "CLEAN oracle-sixty: 62/62 documents, 100/100 claims; rescues 0, misplaced 0, lost 0, hidden titles 0, wrong content 0");
+  for (const c of rows.claims) Object.assign(c, { class: "x", value: "x", valid_from: "2001-01-01T00:00:00.000Z", valid_until: "2001-01-02T00:00:00.000Z" });
+  for (const t of rows.things) Object.assign(t, { label: "x", _keys: ["mssql:x:y"] });
+  for (const d of rows.documents) d._home = "org";
+  const v = bar(fixture, rows);
+  assert.equal(v.ok, false);
+  assert.equal(v.counts.claims, 100, "the rows are all there: this is about what they say");
+  assert.ok(v.findings.content.length >= 400, `${v.findings.content.length} findings`);
+  assert.ok(v.findings.misplaced.length >= 40, "every document not expected at the root");
+  assert.equal(failingNotes(fixture, v).size, 62);
+});
+
+test("failingNotes groups findings by note", () => {
+  const b = small();
+  const rows = cleanRows(b);
+  rows.claims.find((c) => c.id === "ux-al04#1").value = "wrong";
+  const notes = failingNotes(b, bar(b, rows));
+  assert.deepEqual([...notes.keys()], ["ux-al04"]);
+  assert.match(notes.get("ux-al04")[0], /^content: conv-ux-al04 claim ux-al04#1: value "wrong"/);
 });

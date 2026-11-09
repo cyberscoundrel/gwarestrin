@@ -1,45 +1,53 @@
 // The Test harness stream's own scenarios (SCENARIOS.md is the contract this
 // file follows, like every stream's): the conversation batch generated from
-// the oracle, and the clean-batch bar over claims in a real ArcadeDB.
+// the oracle, all sixty-two of its notes end to end through the record tool
+// and held to the landing bar (docs/ORGANIZATION-MODEL.md: "any stream that
+// cannot handle all sixty oracle notes has not met the contract"), the bar's
+// own teeth against rows in a real ArcadeDB, and the record path under a live
+// derived floor.
 //
-// Until the Condenser's ingest route is on main, the end-to-end scenario is
-// skipped with its reason and the batch is stored directly in the contract's
-// shape (src/model/README.md: a document entry with the on-record marker,
-// sections PART_OF it, CLAIMS edges from each section to its subject) so the
-// bar is exercised against the graph today. When a tool matching
-// CONDENSE_TOOL_RE appears in tools/list, the last scenario runs for real.
+// What the batch does not stand in for: a real condenser. The chat agent is a
+// model and none runs here, so each person's agent posts the document the
+// oracle says it should have condensed. Everything after that call is the real
+// path. The policy is test/fixtures/policy-oracle.json, written by hand;
+// nothing here computes a rule from the expected placements.
 import { readFileSync } from "node:fs";
+import { authorityOf } from "../src/model/authority.js";
 import { normalizeDocument } from "../src/model/claims.js";
 import { statements } from "../src/model/schema.js";
 import { sectionName } from "../src/documents.js";
-import { authorityMapOf, bar, checkBatch, collectRows, prefixed, subjectLabel, verdictLine } from "./conversations.mjs";
+const RECORD_TOOL = "record_document"; // record-tools.js is not imported: it needs zod, and the runner has no node_modules
+import { bar, checkBatch, collectRows, expectedClaims, failingNotes, prefixed, subjectLabel, verdictLine } from "./conversations.mjs";
 
-export const CONDENSE_TOOL_RE = /condens|on_record|record_document|record_conversation/i;
 const BATCH = new URL("../test/fixtures/conversations/oracle-sixty.batch.json", import.meta.url);
 const loadBatch = () => JSON.parse(readFileSync(BATCH, "utf8"));
 const q = (s) => String(s ?? "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 
-/** the MCP tools this graph-rag offers the admin (tools/list) */
-async function toolNames(ctx) {
-  const r = await fetch(`${ctx.GRAPH}/mcp`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${ctx.TOKENS.admin}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
-  });
-  const t = await r.text();
-  const line = t.split("\n").find((l) => l.startsWith("data:"));
-  const msg = JSON.parse(line ? line.slice(5) : t);
-  return (msg.result?.tools ?? []).map((x) => x.name);
+/** a person's confirmation of the classes a batch's claims name, stood in for by raw SQL (the confirm route takes snake_case names and at least one stage; the oracle's classes have neither) */
+async function confirmClasses(ctx, names) {
+  for (const name of names) {
+    const r = await ctx.tool("admin", "execute_graph", {
+      language: "sql",
+      command: `UPDATE CommitmentClass SET name = '${q(name)}', description = '${q(`${name}: confirmed for the conversation batch`)}', stages = [], record_table = null, status = 'confirmed', proposed_by = 'e2e-harness', confirmed_by = 'admin', confirmed_at = '2026-11-01T09:00:00.000Z' UPSERT WHERE name = '${q(name)}'`,
+    });
+    ctx.check(!r.error, `class ${name} confirmed: ${JSON.stringify(r).slice(0, 200)}`);
+  }
 }
-const condenseTool = async (ctx) => (await toolNames(ctx)).find((n) => CONDENSE_TOOL_RE.test(n)) ?? null;
+
+/** a record the rule proposed is approved by the person holding the authority: the designed flow, not a rescue */
+async function approveIfProposed(ctx, r) {
+  const pending = r.pendingId ?? (r.queued ? r.id : null);
+  if (!pending) return { proposed: false };
+  const ok = await ctx.api(`/api/queue/${pending}/approve`, { method: "POST", body: "{}" });
+  return { proposed: true, approved: Boolean(ok.result?.approved || ok.approved), reply: ok };
+}
 
 /**
- * One conversation stored as the contract says, by hand, through the
- * admin's raw SQL: what the Condenser's ingest path will do. Claims carry
- * their expected home (the authority rule's answer); subjects become things
- * keyed by their record key or named.
+ * One conversation stored as the contract says, by hand, through the admin's
+ * raw SQL: rows for the bar's own scenario, which is about the bar and not
+ * about the ingest path.
  */
-async function storeAsContract(ctx, c, prefix) {
+async function storeAsContract(ctx, c, prefix, wanted) {
   const d = c.expected.document;
   const x = c.expected;
   const exec = async (command) => {
@@ -55,16 +63,15 @@ async function storeAsContract(ctx, c, prefix) {
     await exec(`CREATE EDGE PART_OF FROM (SELECT FROM Entity WHERE _kind = 'section' AND _doc_id = '${docId}' AND _section = ${i}) TO (SELECT FROM Entity WHERE _kind = 'document' AND _doc_id = '${docId}')`);
     for (const cl of s.claims) {
       const pl = x.placements.find((p) => p.id === cl.id);
-      const subject = typeof cl.subject === "string" ? cl.subject : (cl.subject.key ?? cl.subject.name ?? cl.subject.class);
-      const label = subjectLabel(cl.subject);
-      const key = typeof cl.subject === "string" && cl.subject.split(":").length === 3 ? cl.subject : null;
+      const want = wanted.get(cl.id);
+      const key = want.subject.key;
+      const label = want.subject.name ?? subjectLabel(cl.subject);
       const thingName = `${prefix} ${label}`;
       const have = await ctx.sql(`SELECT @rid AS rid FROM Entity WHERE _kind = 'thing' AND name = '${q(thingName)}'`);
       if (!have.length) await exec(`CREATE VERTEX Entity SET name = '${q(thingName)}', _kind = 'thing', _home = '${x.document_home}', _origin = '${x.document_home}', _thing_type = 'other', label = '${q(label)}'${key ? `, _keys = ['${q(key)}']` : ""}`);
       await exec(
-        `CREATE EDGE CLAIMS FROM (SELECT FROM Entity WHERE _kind = 'section' AND _doc_id = '${docId}' AND _section = ${i}) TO (SELECT FROM Entity WHERE _kind = 'thing' AND name = '${q(thingName)}') SET id = '${q(cl.id)}', kind = '${q(cl.kind)}', class = '${q(cl.class)}', attribute = '${q(cl.attribute)}', value = '${q(String(cl.value))}', recorded_at = '${d.recorded_at}', recorded_by = '${q(d.recorded_by)}', _home = '${pl.home}'`,
+        `CREATE EDGE CLAIMS FROM (SELECT FROM Entity WHERE _kind = 'section' AND _doc_id = '${docId}' AND _section = ${i}) TO (SELECT FROM Entity WHERE _kind = 'thing' AND name = '${q(thingName)}') SET id = '${q(cl.id)}', kind = '${q(want.kind)}', class = '${q(want.class)}', attribute = '${q(want.attribute)}', value = '${q(want.value)}', valid_from = '${want.valid_from}'${want.valid_until ? `, valid_until = '${want.valid_until}'` : ""}, recorded_at = '${want.recorded_at}', recorded_by = '${q(want.recorded_by)}', _home = '${pl.home}'`,
       );
-      void subject;
     }
   }
 }
@@ -91,12 +98,74 @@ export default [
     },
   },
   {
-    name: "the clean-batch bar reads claims from the graph: a batch stored as the contract says is clean; a rescue, a misplacement, lost text and a hidden title each fail it",
+    name: "the landing bar: all sixty-two oracle notes through record_document as each person's own agent, under the hand-written policy with the derived window live; every landed claim says what the oracle says",
+    run: async (ctx) => {
+      const batch = loadBatch();
+      ctx.check(batch.conversations.length === 62, `all sixty-two, no subset: ${batch.conversations.length}`);
+      await confirmClasses(ctx, [...new Set(batch.conversations.flatMap((c) => c.expected.document.sections.flatMap((s) => (s.claims ?? []).map((cl) => cl.class))))]);
+      // the organization's policy as a person wrote it (a file, not computed from the placements below); the derived window is left as shipped
+      const before = (await ctx.api("/api/policy")).policy ?? {};
+      const authorityMap = ctx.fixtures.read("policy-oracle.json");
+      const set = await ctx.api("/api/policy", { method: "PUT", body: JSON.stringify({ authorityMap }) });
+      ctx.check(set.policy?.authorityMap, `the authority map is a policy setting: ${JSON.stringify(set).slice(0, 300)}`);
+      ctx.check(set.policy.derivedWindowHours > 0, `the derived-data window is live: ${set.policy.derivedWindowHours}`);
+      const failures = [];
+      try {
+        // each conversation is its own person's chat agent: a fresh agent has read nothing, so what earlier scenarios
+        // had people read lifts nothing here, with the window on. An agent records as the person it acts for
+        const refused = new Set();
+        const proposed = [];
+        for (const c of batch.conversations) {
+          const agent = ctx.delegated({ u: c.person, p: [c.position] });
+          const r = await ctx.tool(agent, RECORD_TOOL, { document: c.expected.document });
+          if (r.error) {
+            refused.add(c.id);
+            failures.push(`${c.note}: refused by ${RECORD_TOOL}: ${String(r.error).slice(0, 200)}`);
+            continue;
+          }
+          const a = await approveIfProposed(ctx, r);
+          if (a.proposed) proposed.push(c.id);
+          if (a.proposed && !a.approved) failures.push(`${c.note}: the admin could not approve the proposed record: ${JSON.stringify(a.reply).slice(0, 200)}`);
+        }
+        // the authority rule proposes exactly the records with a claim above the recorder's position
+        const expectedProposed = batch.conversations.filter((c) => c.expected.placements.some((p) => p.home !== c.position) && !refused.has(c.id)).map((c) => c.id);
+        for (const id of proposed) if (!expectedProposed.includes(id)) failures.push(`${id}: proposed, but none of its claims lies above the recorder`);
+        for (const id of expectedProposed) if (!proposed.includes(id)) failures.push(`${id}: a claim lies above the recorder, and it was not proposed`);
+
+        // ingests run one at a time: wait for every accepted document to finish (ready or failed), then judge what is there
+        const accepted = batch.conversations.filter((c) => !refused.has(c.id));
+        const finished = async () => (await ctx.sql(`SELECT count(*) AS n FROM Entity WHERE _kind = 'document' AND _doc_status IN ['ready', 'failed'] AND name IN [${accepted.map((c) => `'${q(c.expected.document.title)}'`).join(", ")}]`))[0]?.n >= accepted.length;
+        await ctx.until("every accepted record has finished ingesting", finished, 420_000).catch((e) => failures.push(String(e.message ?? e)));
+        const result = bar(batch, await collectRows(batch, ctx.sql));
+
+        // the grader judges the residue only: never a section whose claims a rule covers, always one with no claims
+        const graded = new Set((await (await fetch(`${ctx.MODELS}/__graded`)).json()).graded);
+        for (const c of accepted)
+          for (const [i, s] of c.expected.document.sections.entries()) {
+            const name = sectionName(c.expected.document.title, i, s.heading);
+            const claims = s.claims ?? [];
+            if (!claims.length && !graded.has(name)) failures.push(`${c.note}: "${name}" has no claims and the grader never saw it`);
+            if (claims.length && claims.every((cl) => authorityOf(authorityMap, cl.class, cl.attribute)) && graded.has(name)) failures.push(`${c.note}: "${name}" is covered by the policy and the grader was asked about it`);
+          }
+
+        // the report: every failing note and why, so a red run names them all
+        for (const [note, list] of failingNotes(batch, result)) console.log(`  BAR ${note}\n${list.map((f) => `      ${f}`).join("\n")}`);
+        for (const f of failures) console.log(`  BAR ${f}`);
+        const bad = new Set([...failingNotes(batch, result).keys(), ...failures.map((f) => f.split(":")[0])]);
+        console.log(`  ${verdictLine(batch, result)}; ${bad.size} of 62 notes failing${failures.length ? `, ${failures.length} route failure${failures.length === 1 ? "" : "s"}` : ""}`);
+        ctx.check(result.ok && failures.length === 0, `${verdictLine(batch, result)}; route failures ${failures.length}; ${bad.size} of 62 notes failing: ${[...bad].join(", ")}`);
+      } finally {
+        await ctx.api("/api/policy", { method: "PUT", body: JSON.stringify({ authorityMap: before.authorityMap ?? { classes: {}, attributes: {} } }) });
+      }
+    },
+  },
+  {
+    name: "the bar's teeth, on rows read back from a real graph: a batch stored as the contract says is clean; a rescue, a misplacement, lost text, a hidden title and a wrong claim field each fail it",
     run: async (ctx) => {
       const full = loadBatch();
       const pick = ["ux-m01", "ux-al04", "ux-aa11"]; // one authority, two authorities, the residue
       const prefix = `e2e-bar-${ctx.randomUUID().slice(0, 8)}`;
-      // under a prefix of its own: the end-to-end scenario below records the same conversations through the real path
+      // under a prefix of its own: the landing bar above records these same conversations through the real path
       const batch = prefixed({ ...full, conversations: full.conversations.filter((c) => pick.includes(c.note)) }, prefix);
       ctx.check(batch.conversations.length === 3, "the three picked conversations are in the batch");
       // the model's DDL is idempotent; the harness runs it since nothing on main does yet
@@ -104,9 +173,11 @@ export default [
         const r = await ctx.tool("admin", "execute_graph", { language: "sql", command: ddl });
         ctx.check(!r.error || /already exists/i.test(r.error), `${ddl}: ${r.error ?? "ok"}`);
       }
-      for (const c of batch.conversations) await storeAsContract(ctx, c, prefix);
+      const wanted = expectedClaims(batch);
+      for (const c of batch.conversations) await storeAsContract(ctx, c, prefix, wanted);
       const rows = await collectRows(batch, ctx.sql);
       ctx.check(rows.documents.length === 3 && rows.sections.length === 4 && rows.claims.length === 5, `read back 3 documents, 4 sections, 5 claims: ${rows.documents.length}/${rows.sections.length}/${rows.claims.length}`);
+      ctx.check(rows.things.length === 3, `the claims' subjects read back: ${JSON.stringify(rows.things)}`);
       const clean = bar(batch, rows);
       ctx.check(clean.ok, `clean as stored: ${verdictLine(batch, clean)} ${JSON.stringify(clean.findings)}`);
       // a person rescues the owners' section down to Operations: a rescue and a misplacement
@@ -130,64 +201,63 @@ export default [
       await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Entity SET _home = 'org' WHERE name = '${q(ownersSection)}' AND _kind = 'section'` });
       const hidden = bar(batch, await collectRows(batch, ctx.sql));
       ctx.check(hidden.findings.hidden.length === 1 && /names ".*the owners part" \(seen from org\)/.test(hidden.findings.hidden[0]), `one hidden title: ${JSON.stringify(hidden.findings.hidden)}`);
-      ctx.check(/^NOT CLEAN oracle-sixty: 3\/3 documents, 5\/5 claims; rescues 1, misplaced 0, lost 1, hidden titles 1$/.test(verdictLine(batch, hidden)), `the verdict line: ${verdictLine(batch, hidden)}`);
+      ctx.check(/^NOT CLEAN oracle-sixty: 3\/3 documents, 5\/5 claims; rescues 1, misplaced 0, lost 1, hidden titles 1, wrong content 0$/.test(verdictLine(batch, hidden)), `the verdict line: ${verdictLine(batch, hidden)}`);
+      // one row corrupted on every field the bar reads, in the graph, read back through the same query: each is named
+      const m01 = batch.conversations.find((c) => c.note === "ux-m01");
+      const target = m01.expected.placements[0].id;
+      const corrupt = await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE CLAIMS SET kind = 'event', class = 'not the class', attribute = 'not_the_attribute', value = 'not the value', valid_from = '2001-01-01T00:00:00.000Z', valid_until = '2001-01-02T00:00:00.000Z', recorded_at = '2001-01-01T00:00:00.000Z', recorded_by = 'mallory' WHERE id = '${q(target)}'` });
+      ctx.check(!corrupt.error, `corrupted: ${JSON.stringify(corrupt).slice(0, 200)}`);
+      await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Entity SET _keys = ['mssql:dbo_Work_Center:NOT-THIS-ONE'] WHERE name = '${q(`${prefix} INSPECT-2`)}' AND _kind = 'thing'` });
+      await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Entity SET _home = 'org', _recorded_by = 'mallory' WHERE _kind = 'document' AND name = '${q(m01.expected.document.title)}'` });
+      const wrong = bar(batch, await collectRows(batch, ctx.sql));
+      ctx.check(!wrong.ok, "not clean with a wrong row");
+      const about = (field) => wrong.findings.content.some((x) => x.includes(target) && x.includes(`: ${field}`));
+      for (const field of ["kind", "class", "attribute", "value", "valid_from", "valid_until", "recorded_at", "recorded_by", "subject"]) ctx.check(about(field), `the wrong ${field} is named: ${JSON.stringify(wrong.findings.content)}`);
+      ctx.check(wrong.findings.misplaced.some((x) => /the document seen from org, expected ops/.test(x)), `the document's home is compared: ${JSON.stringify(wrong.findings.misplaced)}`);
+      ctx.check(wrong.findings.content.some((x) => /the document recorded by "mallory"/.test(x)), `the document's recorder is compared: ${JSON.stringify(wrong.findings.content)}`);
     },
   },
   {
-    name: "a conversation batch end to end through the fakes: condensed documents in, claims placed, the bar clean",
-    // switch: this runs once the Condenser stream's ingest tool is on main (CONDENSE_TOOL_RE names it)
-    skip: async (ctx) => ((await condenseTool(ctx)) ? null : "the Condenser's ingest route is not on main yet: the batch's shape and the bar are covered above; this runs once a tool matching /condens|on_record|record_document/ is in tools/list"),
+    name: "the record path under the live derived floor: what an agent read above its position holds its record there, and an agent that read nothing lands at its own",
     run: async (ctx) => {
-      const tool = await condenseTool(ctx);
-      const full = loadBatch();
-      const batch = { ...full, conversations: full.conversations.filter((c) => ["ux-m01", "ux-al04", "ux-aa11", "ux-aq01", "ux-ak06"].includes(c.note)) };
-      // the classes the batch's claims name are the oracle's (discovery output, not fixtures/classes.json); the
-      // record path checks claims against the graph's confirmed classes once it holds any (another scenario
-      // seeds three), so a person's confirmation of these is stood in for here: confirmed, no stages (no claim
-      // below is on `stage`), no record table
-      const q = (s) => `'${String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-      const named = [...new Set(batch.conversations.flatMap((c) => c.expected.document.sections.flatMap((s) => (s.claims ?? []).map((cl) => cl.class))).filter(Boolean))];
-      for (const name of named) {
-        const r = await ctx.tool("admin", "execute_graph", {
-          language: "sql",
-          command: `UPDATE CommitmentClass SET name = ${q(name)}, description = ${q(`${name}: confirmed for the conversation batch`)}, stages = [], record_table = null, status = 'confirmed', proposed_by = 'e2e-harness', confirmed_by = 'admin', confirmed_at = '2026-11-01T09:00:00.000Z' UPSERT WHERE name = ${q(name)}`,
-        });
-        ctx.check(!r.error, `class ${name} confirmed: ${JSON.stringify(r).slice(0, 200)}`);
+      const { POS, check, tool, sql, until, api } = ctx;
+      const policy = (await api("/api/policy")).policy;
+      check(policy.derivedWindowHours > 0, `the window is on: ${policy.derivedWindowHours}`);
+      await confirmClasses(ctx, ["work center"]);
+      const prefix = `e2e-floor-${ctx.randomUUID().slice(0, 8)}`;
+      // another person's note at the top: a read of it is a read from above (a writer's own note, decision 1, is not what this checks)
+      const secret = `${prefix} quenchwort budget`;
+      await ctx.save("admin", secret, "The quenchwort fixture budget is 9,000. [admins]");
+      check((await ctx.entry(secret))?._home === POS.org, "the note is at the top");
+      const document = (title) => ({ title, recorded_by: "alice", position: POS.ops, reason: "e2e", sections: [{ heading: `${title} section`, text: `${title}: the quenchwort cell is running.`, claims: [{ kind: "state", subject: `${title} cell`, class: "work center", attribute: "e2e_running", value: "yes" }] }] });
+      const reader = ctx.delegated({ u: "alice", p: [POS.ops] });
+      // the top's note, shared with alice by the admin: a read the rule lets her agent have, of something above her position
+      const granted = await tool("admin", "grant_access", { entities: [{ name: secret }], person: "alice", reason: "e2e: a read from above" });
+      check(!granted.error, `granted: ${JSON.stringify(granted).slice(0, 300)}`);
+      const seen = (await tool(reader, "search_graph", { query: "quenchwort fixture budget 9,000" })).results ?? [];
+      check(seen.some((r) => r.name === secret), `the agent read the note: ${JSON.stringify(seen.map((r) => r.name)).slice(0, 200)}`);
+      const held = `${prefix} held`;
+      const plain = `${prefix} plain`;
+      for (const [who, title] of [
+        [reader, held],
+        [ctx.delegated({ u: "alice", p: [POS.ops] }), plain],
+      ]) {
+        const r = await tool(who, RECORD_TOOL, { document: document(title) });
+        check(!r.error, `${title} recorded: ${JSON.stringify(r).slice(0, 300)}`);
+        const a = await approveIfProposed(ctx, r);
+        check(!a.proposed || a.approved, `${title} approved: ${String(JSON.stringify(a.reply)).slice(0, 300)}`);
       }
-      // the organization's policy for the batch: the authority map its placements imply (the rule that homes a
-      // claimed section above its origin), and no derived-data window (earlier scenarios' reads would otherwise
-      // lift a recorder's writes); both put back afterwards, as the Authority scenarios do
-      const before = (await ctx.api("/api/policy")).policy ?? {};
-      const set = await ctx.api("/api/policy", { method: "PUT", body: JSON.stringify({ authorityMap: authorityMapOf(batch), derivedWindowHours: 0 }) });
-      ctx.check(set.policy?.authorityMap, `the authority map is a policy setting: ${JSON.stringify(set).slice(0, 300)}`);
-      try {
-        const proposed = [];
-        for (const c of batch.conversations) {
-          // record_document (record-tools.js) takes the contract's document under `document`; any other
-          // condensing tool gets the document's fields and the conversation itself
-          const r = await ctx.tool(c.person, tool, tool === "record_document" ? { document: c.expected.document } : { ...c.expected.document, conversation: c.turns });
-          ctx.check(!r.error, `${c.id} posted by ${c.person} through ${tool}: ${JSON.stringify(r).slice(0, 200)}`);
-          const pending = r.pendingId ?? (r.queued ? r.id : null);
-          if (pending) {
-            // the authority rule: a record with a claim above the recorder's authority is proposed, and the person
-            // holding that authority approves it. That is the designed flow, not a rescue (nothing is moved by hand)
-            proposed.push(c.id);
-            const ok = await ctx.api(`/api/queue/${pending}/approve`, { method: "POST", body: "{}" });
-            ctx.check(ok.result?.approved || ok.approved, `${c.id}: the admin approves the proposed record: ${JSON.stringify(ok).slice(0, 200)}`);
-          }
-        }
-        const expectedProposed = batch.conversations.filter((c) => c.expected.placements.some((p) => p.home !== c.position)).map((c) => c.id);
-        ctx.check(JSON.stringify(proposed.sort()) === JSON.stringify(expectedProposed.sort()), `exactly the records with a claim above the recorder's position are proposed: ${JSON.stringify(proposed)} vs expected ${JSON.stringify(expectedProposed)}`);
-        await ctx.until("the batch's sections are stored", async () => (await collectRows(batch, ctx.sql)).sections.length >= batch.conversations.reduce((a, c) => a + c.expected.sections.length, 0));
-        // the claims land a moment after the sections: wait for all of them before judging
-        await ctx.until("the batch's claims are stored", async () => (await collectRows(batch, ctx.sql)).claims.length >= batch.conversations.reduce((a, c) => a + c.expected.placements.length, 0), 60_000).catch(() => {});
-        const result = bar(batch, await collectRows(batch, ctx.sql));
-        ctx.check(result.ok, `${verdictLine(batch, result)} ${JSON.stringify(result.findings).slice(0, 600)}`);
-        const calls = await (await fetch(`${ctx.MODELS}/__calls`)).json();
-        ctx.check((calls["grader:claimed"] ?? 0) === 0, `the grader was never asked about a section with claims: ${calls["grader:claimed"]}`);
-      } finally {
-        await ctx.api("/api/policy", { method: "PUT", body: JSON.stringify({ authorityMap: before.authorityMap ?? { classes: {}, attributes: {} }, derivedWindowHours: before.derivedWindowHours ?? 12 }) });
-      }
+      const landed = async (title) => {
+        const doc = (await sql(`SELECT _home, _doc_status FROM Entity WHERE _kind = 'document' AND name = '${q(title)}'`))[0];
+        const section = (await sql(`SELECT @rid AS rid, _home FROM Entity WHERE _kind = 'section' AND _doc_title = '${q(title)}'`))[0];
+        const claim = section ? (await sql(`SELECT _home FROM (SELECT expand(outE('CLAIMS')) FROM ${section.rid})`))[0] : null;
+        return { doc: doc?._home, section: section?._home, claim: claim?._home, status: doc?._doc_status };
+      };
+      for (const title of [held, plain]) await until(`${title} ingested`, async () => (await landed(title)).status === "ready" && (await landed(title)).claim);
+      const h = await landed(held);
+      check(h.doc === POS.org && h.section === POS.org && h.claim === POS.org, `held at what it read: ${JSON.stringify(h)}`);
+      const p = await landed(plain);
+      check(p.doc === POS.ops && p.section === POS.ops && p.claim === POS.ops, `an agent that read nothing lands at its own: ${JSON.stringify(p)}`);
     },
   },
 ];

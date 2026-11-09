@@ -417,10 +417,12 @@ await scenario("a writer still reads a note grading put above them; others at th
   check(mine, "its writer finds it");
   check(mine.via === "writer", `seen as its writer, got ${mine.via}`);
   check(!(await found("carol")), "carol, above bob but below the top, doesn't");
-  // a worker's update never takes the writer over
-  await tool(workerToken(String(e.rid)), "update_entry", { entry: String(e.rid), facets: { identity: "Diep starts at 21.50 an hour; review at 90 days. [admins]" } });
-  const after = (await sql("SELECT _written_by FROM Entity WHERE name = 'e2e-w1 pay note'"))[0]?._written_by;
-  check(after === "bob", `still written by bob, got ${after}`);
+  // a worker writes no entry text, so no update of its takes the writer over: the way in is refused and the entry is as bob left it
+  const up = await tool(workerToken(String(e.rid)), "upsert_entities", { entities: [{ name: "e2e-w1 pay note", facets: { identity: "Diep starts at 21.50 an hour; review at 90 days. [admins]" } }] });
+  check(/writes no entries/.test(up.error ?? ""), `a worker's update is refused: ${JSON.stringify(up).slice(0, 300)}`);
+  const after = (await sql("SELECT _written_by, text_identity FROM Entity WHERE name = 'e2e-w1 pay note'"))[0];
+  check(after?._written_by === "bob", `still written by bob, got ${after?._written_by}`);
+  check(after?.text_identity === "Diep starts at 21.50 an hour. [admins]", `the text is bob's: ${after?.text_identity}`);
   // reading isn't owning: its writer can't move it back down
   const moved = await tool("bob", "set_home", { entities: [{ name: "e2e-w1 pay note" }], to: "Production floor" });
   check(moved.error || moved.pendingId || moved.proposed, `bob's move isn't made directly: ${JSON.stringify(moved).slice(0, 200)}`);
@@ -544,7 +546,8 @@ const context = {
   srcUrl: (rel) => new URL(`../src/${rel}`, import.meta.url),
 };
 const files = discoverScenarioFiles(E2E_DIR);
-const streams = await loadScenarioFiles(files);
+// the harness's own stream last: its 62-note batch would surface in every later search and raise what people have read
+const streams = (await loadScenarioFiles(files)).sort((a, b) => Number(a.stream === "harness") - Number(b.stream === "harness"));
 if (files.length) console.log(`\n${streams.length} scenario${streams.length === 1 ? "" : "s"} from ${files.length} stream file${files.length === 1 ? "" : "s"}: ${files.map((f) => f.split("/").pop()).join(", ")}`);
 for (const s of streams) {
   if (!selected(s)) continue;

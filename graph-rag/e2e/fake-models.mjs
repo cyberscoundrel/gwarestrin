@@ -26,6 +26,7 @@
 //                                the conversation contains match ({} clears them)
 //   POST /__reset                clears every override above (run.mjs calls it after each scenario)
 //   GET  /__calls                calls per model, plus grader:claimed (claimed items the grader was asked about)
+//   GET  /__graded               the name of every item the grader was asked about, in order (kept across /__reset)
 //   GET  /__condenser            whether fake-condenser.mjs was loaded
 // Imported by test/harness-fakes.test.js for its pure parts; listens only when run as a program.
 import { createServer } from "node:http";
@@ -64,6 +65,7 @@ export function grade(messages, counts = null) {
   // P1 is the writer's own position: routine for its writer's team
   return JSON.stringify({
     items: items.map(({ name, text }) => {
+      if (counts) (counts.graded ??= []).push(name);
       if (text.includes(CLAIMED_TAG)) {
         if (counts) counts.claimed = (counts.claimed ?? 0) + 1;
         return { name, visible_from: "P1", topic: null, release_to: null, until: null, confidence: 0.9, reason: "has claims: their authority places them, not the grader" };
@@ -244,6 +246,7 @@ export function createFakeModels({ condenser = null } = {}) {
     if (path === "/__fail") return failing.set(body.model, Number(body.status) || 402), send(200, { failing: Object.fromEntries(failing) });
     if (path === "/__ok") return failing.delete(body.model), send(200, { failing: Object.fromEntries(failing) });
     if (path === "/__calls") return send(200, { ...calls, "grader:claimed": counts.claimed ?? 0 });
+    if (path === "/__graded") return send(200, { graded: counts.graded ?? [] });
     if (path === "/__slow") return (slow = body.model ? [...slow, body] : []), send(200, { slow });
     if (path === "/__resolve") return (resolve = body.name ? { ...resolve, [body.name]: String(body.pick) } : {}), send(200, { resolve });
     if (path === "/__condense") return (condenseLookups = body.match ? [...condenseLookups, body] : []), send(200, { condense: condenseLookups.map((l) => l.match) });
