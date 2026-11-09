@@ -351,9 +351,10 @@ export async function regradeTick() {
       // a section waits for its document, then stays no lower than where it settled
       let docHome = [];
       if (r._kind === "section" && r._doc_id) {
-        const doc = (await adbQuery(`SELECT _home, _ungraded FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: r._doc_id }))[0];
+        const doc = (await adbQuery(`SELECT _home, _doc_base, _ungraded FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: r._doc_id }))[0];
         if (doc?._ungraded) continue;
-        if (doc) docHome = [effectiveHome(positionMap, doc._home)];
+        // the document's own grade: its _home has been raised to this very section's while it waits (document-home.js)
+        if (doc) docHome = [effectiveHome(positionMap, doc._doc_base ?? doc._home)];
       }
       // an entry that also carries claims stays no lower than their authority puts it
       let claimed = [];

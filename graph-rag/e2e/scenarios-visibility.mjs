@@ -15,7 +15,13 @@ const job = (id, attribute, value, valid_from = valid) => ({ kind: "state", subj
 const doc = (who, title, sections) => ({ title, recorded_by: who, position: "floor", reason: "e2e", sections });
 const record = (ctx, who, title, text, claims, heading) => ctx.tool(who, "record_document", { document: doc(who, title, [{ ...(heading ? { heading } : {}), text, claims }]) });
 const graded = async (ctx) => (await (await fetch(`${ctx.MODELS}/__graded`)).json()).graded;
-const sectionOf = async (ctx, title) => (await ctx.sql(`SELECT @rid AS rid, name, _home, _grade, _ungraded FROM Entity WHERE _kind = 'section' AND _doc_title = '${q(title)}'`))[0];
+// the grader sees a section under the name it has while it is placed: no title yet (src/document-home.js)
+const askedAbout = async (ctx, s) => (await graded(ctx)).some((n) => n === s.name || n === s.name.replace(/^.*?(?= §\d+)/, `Document ${String(s._doc_id).slice(0, 8)}`));
+// by its document: a section below its document's title doesn't carry that title (src/document-home.js)
+const sectionOf = async (ctx, title) => {
+  const d = (await ctx.sql(`SELECT _doc_id FROM Entity WHERE _kind = 'document' AND name = '${q(title)}'`))[0];
+  return d ? (await ctx.sql(`SELECT @rid AS rid, name, _doc_id, _home, _grade, _ungraded FROM Entity WHERE _kind = 'section' AND _doc_id = '${q(d._doc_id)}'`))[0] : undefined;
+};
 const stored = (ctx, title) => ctx.until(`${title} ingested`, async () => (await ctx.sql(`SELECT _doc_status FROM Entity WHERE _kind = 'document' AND name = '${q(title)}'`))[0]?._doc_status === "ready" && sectionOf(ctx, title), 120_000);
 const edgesOf = async (ctx, rid) => ctx.sql(`SELECT @rid AS rid, id, value, _home FROM (SELECT expand(outE('CLAIMS')) FROM ${rid})`);
 
@@ -76,12 +82,12 @@ export default [
         ctx.check(!(await record(ctx, "bob", a, "The gauge is set and Bob's pay is rising to 34.50 an hour [admins]", [job(90901, "gauge", "set")])).error, "recorded");
         const s = await stored(ctx, a);
         ctx.check(s._home === POS.org, `graded like the same text with no claim; got ${s._home} (${s._grade})`);
-        ctx.check((await graded(ctx)).includes(s.name), "the grader was asked");
+        ctx.check(await askedAbout(ctx, s), "the grader was asked");
         const b = "e2e-vis gauge alone";
         ctx.check(!(await record(ctx, "bob", b, "The gauge is set.", [job(90902, "gauge", "set")])).error, "recorded");
         const t = await stored(ctx, b);
         ctx.check(t._home === POS.floor, `placed by its claim: ${t._home}`);
-        ctx.check(!(await graded(ctx)).includes(t.name), "nothing for the grader: the sentence is the claim");
+        ctx.check(!(await askedAbout(ctx, t)), "nothing for the grader: the sentence is the claim");
       }),
   },
   {
@@ -223,7 +229,8 @@ export default [
         ctx.check(homes["9"] === POS.ops, `the ruled claim stops at its authority: ${JSON.stringify(homes)}`);
         const state = await stateOf(ctx, "bob", `${JOB}90933`);
         ctx.check(state.size?.value === "4" && !state.zz_kept, `bob reads what was released to him and not the rest: ${JSON.stringify(state).slice(0, 240)}`);
-        const up = await ctx.tool("admin", "set_home", { entities: [{ name: s.name }], to: "Top of the organization" });
+        // released below its document's title: the section no longer shows that title, so its name is the one it has now
+        const up = await ctx.tool("admin", "set_home", { entities: [{ name: (await sectionOf(ctx, title)).name }], to: "Top of the organization" });
         ctx.check(!up.error, JSON.stringify(up).slice(0, 300));
         ctx.check((await edgesOf(ctx, s.rid)).every((e) => e._home === POS.org), "restricted: every claim goes up with it");
       }),

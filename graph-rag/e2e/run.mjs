@@ -48,7 +48,7 @@ const entry = async (name) => (await sql(`SELECT @rid AS rid, name, _home, _grad
 const thing = async (label) => (await sql(`SELECT @rid AS rid, name FROM Entity WHERE _kind = 'thing' AND label = '${label}'`))[0];
 /** what the linker left unresolved on an entry (the Admission stream: a bare name is a worker's or a person's to settle, never minted) */
 const unresolved = async (name) => JSON.parse((await sql(`SELECT _unresolved FROM Entity WHERE name = '${name}'`))[0]?._unresolved ?? "[]");
-const job = async (rid, kind = "mentions") => (await sql(`SELECT status, attempts, error, payload FROM Job WHERE kind = '${kind}' AND payload LIKE '%${rid}%' ORDER BY created_at DESC LIMIT 1`))[0];
+const job = async (rid, kind = "mentions") => (await sql(`SELECT status, attempts, error, payload FROM Job WHERE kind = '${kind}' AND payload LIKE '%"${rid}"%' ORDER BY created_at DESC LIMIT 1`))[0];
 
 async function until(label, fn, timeoutMs = 240_000) {
   const end = Date.now() + timeoutMs;
@@ -185,7 +185,8 @@ await scenario("with triage ahead, a bare name becomes a thing for nobody: triag
   check(String(intake.payload).includes(String(t2.rid)), `the investigation goes to the master: ${intake.payload}`);
   check(!(await thing("John Henry Foster")), "no thing made before a worker decides");
   check((await unresolved("e2e-t2 john henry quote [L2]")).some((u) => u.name === "John Henry Foster"), "the name waits on the entry for the master's worker");
-  check(!(await job(String(t1.rid), "intake")), "the plain one needs no worker");
+  const plainIntake = await job(String(t1.rid), "intake");
+  check(!plainIntake, `the plain one needs no worker: ${JSON.stringify(plainIntake)} (${t1.rid})`);
 });
 
 await scenario("a worker restricts an entry on its own, but asks before moving one a person placed", async () => {
