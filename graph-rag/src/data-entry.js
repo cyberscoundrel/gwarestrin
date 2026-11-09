@@ -38,6 +38,7 @@ import { parseKey, parseTable } from "./model/schema.js";
 import { commonAncestor, defaultHome, EVERYONE, heldPositions } from "./positions.js";
 import { authorityMap } from "./policy.js";
 import { attemptProposed, openAttempts, recordAuditEvent, settleAttempt, settleAuditEvent } from "./audit.js";
+import { sameKey } from "./resolve.js";
 
 const realDb = { adbCommand: realCommand, adbQuery: realQuery };
 // the live position map, token map and pending-write queue, reached when used (not at load: a test imports this module alone)
@@ -205,6 +206,7 @@ export function sourceClient(system, urls, opts = {}) {
       if (literal === null) return null;
       const rows = rowsOf(await call(urls.read, DAB_CALLS.read(table, pk.name, literal)));
       if (rows.length > 1) throw new Error(`${system}:${table}:${rowKey} matched ${rows.length} rows by ${pk.name}: not one row`);
+      if (rows[0] && !sameValue(rows[0][pk.name], rowKey)) throw new Error(`${system}:${table}:${rowKey}: the source answered with a row whose ${pk.name} is ${rows[0][pk.name] ?? "not shown"}: not the row asked for`);
       return rows[0] ? { row: rows[0], key_column: pk.name, key_value: rows[0][pk.name] } : null;
     },
     /** write fields to the row (`hit`, what readRow returned for it); the source's answer */
@@ -221,6 +223,8 @@ export function assertWritable(fields, hit) {
   const unknown = Object.keys(fields).filter((c) => !(c in hit.row));
   if (unknown.length) throw new Error(`the row has no column ${unknown.join(", ")}: it has ${Object.keys(hit.row).join(", ")}`);
   if (hit.key_column in fields) throw new Error(`${hit.key_column} is the row's key: a data entry doesn't change it`);
+  // the write names its row by this value, and a key past what a JSON number holds exactly would name its neighbour
+  if (typeof hit.key_value === "number" && !Number.isSafeInteger(Math.trunc(hit.key_value))) throw new Error(`${hit.key_column} ${hit.key_value} is too large to name one row exactly: nothing is written`);
 }
 
 /** a client for the system a key names (`mssql:dbo_Job:4471` -> mssql) */
@@ -273,12 +277,20 @@ export function fieldsForClaim(claim, given, hit) {
 
 /**
  * The row a claim is about, among its subject's record keys (parsed, parseKey), from what says so: the key the
- * claim's subject names, else the one key in the table its class records in, else the thing's only key.
- * `why` says what's missing when none can be determined; there is no first key to fall back on.
+ * claim's subject names, which the thing must hold (in any case: keys are one identity whatever their case); only
+ * when the claim names none, the one key in the table its class records in, else the thing's only key. A claim
+ * about a class as a whole is about no row. `why` says what's missing when none can be determined; there is no
+ * key to fall back on, whether the first or the only one.
  */
-export function rowKeyFor({ subjectKey, keys, recordTable }) {
-  const named = subjectKey ? keys.find((k) => k.key === subjectKey) : null;
-  if (named) return { key: named };
+export function rowKeyFor({ subjectKey, keys, recordTable, scope = null }) {
+  if (scope === "class") return { key: null, why: "the claim is about its class as a whole, which no one row is" };
+  if (subjectKey) {
+    const given = parseKey(subjectKey)?.key ?? null;
+    const same = given ? keys.filter((k) => sameKey(k.key, given)) : [];
+    const named = same.find((k) => k.key === given) ?? (same.length === 1 ? same[0] : null);
+    if (named) return { key: named };
+    return { key: null, why: `the claim names ${subjectKey}, and that isn't one of this thing's record keys (${keys.map((k) => k.key).join(", ") || "it has none"}): the claim and the thing disagree on the row` };
+  }
   if (recordTable) {
     const inTable = keys.filter((k) => `${k.system}:${k.table}` === recordTable);
     if (inTable.length === 1) return { key: inTable[0] };

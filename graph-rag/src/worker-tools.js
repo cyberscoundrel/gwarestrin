@@ -65,16 +65,16 @@ async function briefClaim(id, identity) {
 }
 
 /**
- * The row a claim's subject means, among the thing's record keys: the one the claim names, else the one in
- * its class's table, else the only one (data-entry.js rowKeyFor). `why` says what's missing when none can
- * be determined.
+ * The row a claim's subject means, among the thing's record keys: the one the claim names, which the thing must
+ * hold; when it names none, the one in its class's table, else the only one (data-entry.js rowKeyFor). `why` says
+ * what's missing when none can be determined.
  */
 async function keyOf(claim) {
   if (!claim.resolved) return null;
   const t = (await adbQuery(`SELECT label, _keys, _class FROM ${claim.thing}`).catch(() => []))[0];
   const keys = (Array.isArray(t?._keys) ? t._keys : []).map((k) => parseKey(k)).filter(Boolean);
   const cls = claim.class ? (await adbQuery("SELECT record_table FROM CommitmentClass WHERE name = :n AND status = 'confirmed' LIMIT 1", { n: claim.class }))[0] : null;
-  return { thing: t, keys, ...rowKeyFor({ subjectKey: claim.subject?.key ?? null, keys, recordTable: cls?.record_table ?? null }) };
+  return { thing: t, keys, ...rowKeyFor({ subjectKey: claim.subject?.key ?? null, keys, recordTable: cls?.record_table ?? null, scope: claim.subject?.scope ?? null }) };
 }
 
 /** a key a worker offers for an existing thing must be a row the source holds; anything else is refused, not stored */
@@ -183,6 +183,8 @@ async function workerResolveSubject(args, identity) {
   const want = { key: args.thing?.key ?? null, name: args.thing?.name ?? args.name ?? claim?.subject?.name ?? null, type: args.thing?.type ?? null };
   const key = want.key ? parseKey(want.key) : null;
   if (want.key && !key) throw new Error(`not a record key (system:table:row): ${want.key}`);
+  // which row a claim names is what its section said: resolving finds the thing, it doesn't change the row
+  if (key && claim?.subject?.key && !sameKey(key.key, String(claim.subject.key).trim())) throw new Error(`claim ${claim.id} names ${claim.subject.key}, not ${key.key}: a worker doesn't change which row a claim is about. Resolve it to the row it names, or report it.`);
   const home = claim ? await sectionHome(claim) : effectiveHome(positionMap, (await adbQuery(`SELECT _home FROM ${sectionRid}`).catch(() => []))[0]?._home);
   const { lift, floor } = workerWriteFloor(identity, home);
   let thing = await resolveSubjectStub({ key: key?.key ?? null, name: want.name }, floor);

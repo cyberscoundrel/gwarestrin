@@ -460,6 +460,40 @@ export default [
     },
   },
   {
+    // B19: which row is what the claim says; the thing's own key doesn't stand in for a different one
+    name: "a claim naming another row than its thing's is refused, and a worker can't change which row it names",
+    run: async (ctx) => {
+      const { job4472 } = await setup(ctx);
+      const named = "mssql:dbo_Job:4471";
+      const held = "mssql:dbo_Job:4472";
+      const updates = () => fake.calls.filter((x) => x.name === "update_record").length;
+      const [before, sent, trail] = [{ ...fake.rows.dbo_Job.find((r) => r.Job === 4472) }, updates(), (await audit(ctx, held)).length];
+      const s = await section(ctx, `${PREFIX} s10 mismatch`, { person: "admin", position: ctx.POS.org, text: "Job 4471 is on hold." });
+      const c = await claim(ctx, s, job4472, { cls: "jobs", attribute: "status", value: "wrong-row", recorded_by: "admin", home: ctx.POS.org, subject: { key: named } });
+      const w = ctx.workerToken(s, ctx.randomUUID());
+      const entered = await ctx.tool(w, "enter_data", { claim_id: c, reason: "mismatch" });
+      ctx.check(/names mssql:dbo_Job:4471.*disagree/.test(entered.error ?? ""), `enter_data is refused: ${JSON.stringify(entered).slice(0, 300)}`);
+      const confirmed = await ctx.tool(w, "confirm_claim", { claim_id: c, reason: "mismatch" });
+      ctx.check(/names mssql:dbo_Job:4471.*disagree/.test(confirmed.error ?? ""), `confirm_claim is refused: ${JSON.stringify(confirmed).slice(0, 300)}`);
+      ctx.check(updates() === sent, "no update was sent");
+      ctx.check(JSON.stringify(fake.rows.dbo_Job.find((r) => r.Job === 4472)) === JSON.stringify(before), "the thing's own row is untouched");
+      ctx.check((await audit(ctx, held)).length === trail, "nothing on its trail");
+      // an unresolved claim naming 4471: resolving it can't re-point the claim at 4472
+      const s2 = await section(ctx, `${PREFIX} s10 repoint`, { person: "admin", position: ctx.POS.org, text: "Job 4471 is on hold." });
+      const u = await claim(ctx, s2, s2, { cls: "jobs", attribute: "status", value: "wrong-row", recorded_by: "admin", home: ctx.POS.org, subject: { key: named, name: `${PREFIX} job 4471` } });
+      const w2 = ctx.workerToken(s2, ctx.randomUUID());
+      const resolved = await ctx.tool(w2, "resolve_subject", { claim_id: u, thing: { key: held, name: `${PREFIX} job 4472`, type: "order" }, reason: "re-point" });
+      ctx.check(/names mssql:dbo_Job:4471, not mssql:dbo_Job:4472/.test(resolved.error ?? ""), `the worker can't change the row: ${JSON.stringify(resolved).slice(0, 300)}`);
+      const edge = (await ctx.sql(`SELECT subject, @in AS dst FROM CLAIMS WHERE id = '${u}'`))[0];
+      ctx.check(String(edge?.dst) === s2 && JSON.parse(edge?.subject ?? "{}").key === named, `the claim is as it was: ${JSON.stringify(edge)}`);
+      // the key it does hold, in any case, still finds the row
+      const s3 = await section(ctx, `${PREFIX} s10 case`, { person: "admin", position: ctx.POS.org, text: "Job 4472 is planned." });
+      const c3 = await claim(ctx, s3, job4472, { cls: "jobs", attribute: "status", value: before.Status, recorded_by: "admin", home: ctx.POS.org, subject: { key: "MSSQL:DBO_JOB:4472" } });
+      const same = await ctx.tool(ctx.workerToken(s3, ctx.randomUUID()), "confirm_claim", { claim_id: c3, reason: "any case" });
+      ctx.check(same.key === held && same.confirmed === true, `the thing's own key in another case: ${JSON.stringify(same).slice(0, 300)}`);
+    },
+  },
+  {
     name: "a brief above the worker's floor is refused at brief time",
     run: async (ctx) => {
       const { job4472 } = await setup(ctx);

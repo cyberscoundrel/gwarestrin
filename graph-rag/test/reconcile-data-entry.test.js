@@ -94,6 +94,43 @@ test("B19: the row is the key the claim's subject names, the one in its class's 
   assert.equal(rowKeyFor({ subjectKey: null, keys: [keys[1]], recordTable: "mssql:dbo_Job" }).key, null, "no key in its table: refused");
 });
 
+test("B19: a key the claim names must be the thing's; it never falls through to the key the thing has", () => {
+  const job4472 = parseKey("mssql:dbo_Job:4472");
+  for (const recordTable of [null, "mssql:dbo_Job"]) {
+    const r = rowKeyFor({ subjectKey: "mssql:dbo_Job:4471", keys: [job4472], recordTable });
+    assert.equal(r.key, null, "the claim says 4471, the thing is 4472: refused");
+    assert.match(r.why, /names mssql:dbo_Job:4471.*mssql:dbo_Job:4472.*disagree/);
+  }
+  assert.equal(rowKeyFor({ subjectKey: "mssql:dbo_Job:4471", keys: [], recordTable: null }).key, null, "a thing with no keys holds no key the claim names");
+  assert.equal(rowKeyFor({ subjectKey: "not a key", keys: [job4472], recordTable: null }).key, null, "a key that doesn't read as one names no row of this thing's");
+  // keys are one identity in any case; the row is the thing's own spelling of it
+  assert.equal(rowKeyFor({ subjectKey: "MSSQL:dbo_job:4472", keys: [job4472], recordTable: null }).key.key, "mssql:dbo_Job:4472");
+  const twoCases = ["mssql:dbo_Customer:abc", "mssql:dbo_Customer:ABC"].map(parseKey);
+  assert.equal(rowKeyFor({ subjectKey: "mssql:dbo_Customer:ABC", keys: twoCases, recordTable: null }).key.key, "mssql:dbo_Customer:ABC", "the one written exactly");
+  assert.equal(rowKeyFor({ subjectKey: "mssql:dbo_Customer:Abc", keys: twoCases, recordTable: null }).key, null, "two spellings, neither exact: can't tell which");
+  // with no key named, what already held still holds; a claim on the class as a whole is about no row
+  assert.equal(rowKeyFor({ subjectKey: null, keys: [job4472], recordTable: "mssql:dbo_Job" }).key.key, "mssql:dbo_Job:4472");
+  assert.match(rowKeyFor({ subjectKey: null, keys: [job4472], recordTable: null, scope: "class" }).why, /class as a whole/);
+});
+
+test("B19: the row answered is the row asked for, and its key can name it exactly", async () => {
+  // a source that answers with another row than the filter asked for
+  const dab = fakeDab([{ Job: 4471, Status: "a" }, { Job: 4472, Status: "b" }]);
+  const lying = async (url, init) => {
+    const res = await dab.fetch(url, init);
+    if (JSON.parse(init.body).params?.arguments?.first !== 2) return res;
+    const text = await res.text();
+    return { ...res, text: async () => text.replaceAll("4471", "4472") };
+  };
+  forgetPrimaryKeys();
+  const c = sourceClient("mssql", { read: "http://fake/lying", write: "http://fake/write" }, { fetch: lying });
+  await assert.rejects(() => c.readRow("dbo_Job", "4471"), /not the row asked for/);
+  // past 2^53 the JSON number is its neighbour: the update would name another row
+  assert.throws(() => assertWritable({ Status: "x" }, { row: { Job: 9007199254740992, Status: "a" }, key_column: "Job", key_value: 9007199254740992 }), /too large to name one row/);
+  assert.doesNotThrow(() => assertWritable({ Status: "x" }, { row: { Job: 9007199254740991, Status: "a" }, key_column: "Job", key_value: 9007199254740991 }));
+  assert.doesNotThrow(() => assertWritable({ Status: "x" }, { row: { Code: "9007199254740993", Status: "a" }, key_column: "Code", key_value: "9007199254740993" }), "a text key is exact");
+});
+
 test("B20: DAB's answers as they are: rows under result.value, the primary key out of the cursor, literals by column type", () => {
   assert.deepEqual(rowsOf({ entity: "dbo_Job", result: { value: [{ a: 1 }] }, status: "success" }), [{ a: 1 }]);
   assert.deepEqual(rowsOf({ value: [{ a: 1 }] }), [{ a: 1 }]);
