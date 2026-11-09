@@ -1,10 +1,20 @@
 // The replay harness's scenarios: each one a failure the live batches found,
 // replayed against a real ArcadeDB and graph-rag with fake models (see
 // fake-models.mjs and e2e.sh). Run by e2e.sh inside the harness network.
+//
+// After its own scenarios it runs every stream's: each `scenarios-<stream>.mjs`
+// in this directory exporting an array of { name, run } (the contract is
+// SCENARIOS.md; the loader is scenarios.mjs). One suite, one summary line.
+// ONLY=term[,term] runs the scenarios whose name, file or stream matches.
+import { discoverScenarioFiles, loadScenarioFiles, selected, skipReason, summaryLine } from "./scenarios.mjs";
 const GRAPH = process.env.GRAPH_URL ?? "http://graph-rag:8000";
 const MODELS = process.env.MODELS_URL ?? "http://models:4000";
 import { createHmac, randomUUID } from "node:crypto";
-const TOKENS = { admin: "e2e-admin", alice: "e2e-alice", bob: "e2e-bob" };
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+// carol: a second person at Operations who never writes, for negative checks (a search records what it shows as reads,
+// and a writer's own notes graded above them show via "writer", so alice searching would raise her derived floor for hours)
+const TOKENS = { admin: "e2e-admin", alice: "e2e-alice", bob: "e2e-bob", carol: "e2e-carol" };
 // a graph worker thread's token, as the admin's workspace signs it (graph-rag/src/delegation.js)
 const delegated = (claims) => {
   const body = Buffer.from(JSON.stringify({ u: "admin", a: randomUUID(), iat: Math.floor(Date.now() / 1000), ...claims })).toString("base64url");
@@ -36,6 +46,8 @@ const api = async (path, opts = {}) => (await fetch(`${GRAPH}${path}`, { ...opts
 const models = (path, body) => fetch(`${MODELS}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
 const entry = async (name) => (await sql(`SELECT @rid AS rid, name, _home, _grade, _ungraded, _mentions_at FROM Entity WHERE name = '${name}'`))[0];
 const thing = async (label) => (await sql(`SELECT @rid AS rid, name FROM Entity WHERE _kind = 'thing' AND label = '${label}'`))[0];
+/** what the linker left unresolved on an entry (the Admission stream: a bare name is a worker's or a person's to settle, never minted) */
+const unresolved = async (name) => JSON.parse((await sql(`SELECT _unresolved FROM Entity WHERE name = '${name}'`))[0]?._unresolved ?? "[]");
 const job = async (rid, kind = "mentions") => (await sql(`SELECT status, attempts, error, payload FROM Job WHERE kind = '${kind}' AND payload LIKE '%${rid}%' ORDER BY created_at DESC LIMIT 1`))[0];
 
 async function until(label, fn, timeoutMs = 240_000) {
@@ -54,7 +66,9 @@ async function until(label, fn, timeoutMs = 240_000) {
 }
 
 const results = [];
-async function scenario(name, fn) {
+const OWN = { file: "run.mjs", stream: "harness" };
+async function scenario(name, fn, meta = OWN) {
+  if (!selected({ name, ...meta })) return;
   const t0 = Date.now();
   try {
     await fn();
@@ -64,8 +78,9 @@ async function scenario(name, fn) {
     results.push({ name, ok: false, error: String(e?.message ?? e) });
     console.log(`FAIL ${name}: ${String(e?.message ?? e).slice(0, 500)}`);
   } finally {
-    // a failed scenario never leaves a model failing for the next one
+    // a failed scenario never leaves a model failing, slowed or primed for the next one
     for (const model of ["grader", "ds-flash", "embed", "decisions"]) await models("/__ok", { model });
+    await models("/__reset", {}).catch(() => {});
   }
 }
 const check = (cond, msg) => {
@@ -102,7 +117,7 @@ await scenario("the grader out: held one level up, no proposal, graded on its ow
   check(/graded/.test(back._grade), `grade note: ${back._grade}`);
 });
 
-await scenario("the linking model out of credit: the job waits without spending retries, then runs", async () => {
+await scenario("the linking model out of credit: the job waits without spending retries, then runs; a bare name is left unresolved, not minted", async () => {
   await models("/__fail", { model: "ds-flash", status: 402 });
   await save("alice", "e2e-a3 hill pins", "HILL shipped the gage pins. [things: HILL/supplier]");
   const e = await entry("e2e-a3 hill pins");
@@ -115,15 +130,21 @@ await scenario("the linking model out of credit: the job waits without spending 
   check(st.dependencies?.["model:ds-flash"]?.ok === false, "the model route shown out");
   await models("/__ok", { model: "ds-flash" });
   await until("job done", async () => ((await job(String(e.rid)))?.status === "done" ? true : false));
-  check(await thing("HILL"), "HILL linked");
+  // admission (docs/ORGANIZATION-MODEL.md): the linker on its own mints nothing from a name; it comes back on the entry for a worker or a person
+  check(!(await thing("HILL")), "HILL is not minted from a bare name");
+  const left = await unresolved("e2e-a3 hill pins");
+  check(left.some((u) => u.name === "HILL"), `HILL is left unresolved on the entry: ${JSON.stringify(left)}`);
 });
 
-await scenario("an entry's code is never a placeholder thing", async () => {
+await scenario("an entry's code is never a placeholder thing, and a bare machine name is left unresolved rather than minted", async () => {
   await save("alice", "e2e-z04 inspect-2 new pins", "The old pin gauges on INSPECT-2 are retired. [things: e2e-z04/part, INSPECT-2/machine]");
   const e = await entry("e2e-z04 inspect-2 new pins");
   await until("linked", async () => ((await job(String(e.rid)))?.status === "done" ? true : false));
-  check(await thing("INSPECT-2"), "INSPECT-2 made a thing");
+  check(!(await thing("INSPECT-2")), "no thing minted from the bare name INSPECT-2 (a key, a person or a worker mints)");
   check(!(await thing("e2e-z04")), "no placeholder for the entry's code");
+  const left = await unresolved("e2e-z04 inspect-2 new pins");
+  check(left.some((u) => u.name === "INSPECT-2"), `INSPECT-2 waits on the entry for a worker or a person: ${JSON.stringify(left)}`);
+  check(!left.some((u) => u.name === "e2e-z04"), "the entry's own code is a cross-reference, not an unresolved name");
 });
 
 await scenario("the sweep embeds rows whose text the old inline SQL couldn't parse", async () => {
@@ -149,16 +170,21 @@ await scenario("the sweep never writes over the text a save stored while it ran"
   }
 });
 
-await scenario("with triage ahead, a new name becomes a thing only after triage: now for no work, else for a worker", async () => {
+await scenario("with triage ahead, a bare name becomes a thing for nobody: triage mints nothing for a plain note, and the investigation reaches the master with the name still unminted", async () => {
   await api("/api/worker", { method: "PUT", body: JSON.stringify({ pool: { poolSize: 2, master: true, batchSize: 50, batchMinutes: 60 } }) });
   await save("alice", "e2e-t1 diep starts", "Diep starts on CNC 2 Monday. [things: Diep/person]");
   await save("alice", "e2e-t2 john henry quote [L2]", "Ask John Henry Foster for a quote. [L2] [things: John Henry Foster/supplier]");
   const t1 = await entry("e2e-t1 diep starts");
   const t2 = await entry("e2e-t2 john henry quote [L2]");
-  await until("plain one linked after triage", async () => ((await thing("Diep")) ? true : false), 120_000);
+  // before admission, triage made the plain note's new name a thing once it found no work; now nothing but a key, a person or a worker mints
+  const triaged = await until("the plain one triaged", async () => (await sql("SELECT level FROM Triage WHERE name = 'e2e-t1 diep starts'"))[0] ?? false, 120_000);
+  check(Number(triaged.level) === 0, `triaged as nothing to do: ${JSON.stringify(triaged)}`);
+  check(!(await thing("Diep")), "no Diep minted from a bare name, before or after triage");
+  check((await unresolved("e2e-t1 diep starts")).some((u) => u.name === "Diep"), "Diep stays unresolved on the entry for a worker or a person");
   const intake = await until("investigation queued for the master", async () => (await job(String(t2.rid), "intake")) ?? false, 120_000);
-  check(String(intake.payload).includes("John Henry Foster"), `the new name goes to the master: ${intake.payload}`);
+  check(String(intake.payload).includes(String(t2.rid)), `the investigation goes to the master: ${intake.payload}`);
   check(!(await thing("John Henry Foster")), "no thing made before a worker decides");
+  check((await unresolved("e2e-t2 john henry quote [L2]")).some((u) => u.name === "John Henry Foster"), "the name waits on the entry for the master's worker");
   check(!(await job(String(t1.rid), "intake")), "the plain one needs no worker");
 });
 
@@ -183,42 +209,27 @@ await scenario("a worker restricts an entry on its own, but asks before moving o
   check((await entry("e2e-p2 placed"))?._home === POS.floor, "still where the person put it");
 });
 
-await scenario("a worker updates an entry where grading put it, and its proposals say where they land", async () => {
+await scenario("a worker acts on an entry where grading put it: what it resolves is seen from there, and a worker writes no entry text", async () => {
   await save("bob", "e2e-l1 bonus note", "The weekend shift bonus is 40 a week. [admins]");
   const e = await entry("e2e-l1 bonus note");
   check(e?._home === POS.org, `graded to the top, got ${e?._home}`);
   const w = workerToken(String(e.rid));
-  // reading it marks the top as read: that is where it lives, so the update isn't held anywhere else
+  // reading it marks the top as read: that is where it lives, so nothing the worker does is held anywhere else
   await tool(w, "search_graph", { query: "weekend shift bonus 40 a week" });
-  const done = await tool(w, "upsert_entities", { entities: [{ name: "e2e-l1 bonus note", facets: { state: "Paid weekly from November." } }] });
-  check(!done.error, `applied where it lives: ${JSON.stringify(done).slice(0, 300)}`);
-  check((await entry("e2e-l1 bonus note"))?._home === POS.org, "still at the top");
-  const asked = await tool(w, "upsert_entities", { entities: [{ name: "e2e-l1 bonus note", facets: { temporal: "From 2026-11-01." } }], propose: true, reason: "e2e" });
-  check(asked.pendingId, `proposed: ${JSON.stringify(asked).slice(0, 300)}`);
-  const listed = (await api("/api/worker/proposals")).proposals.find((p) => p.id === asked.pendingId);
-  check(/seen from now, Top of the organization \(admins only\); who sees it doesn't change/.test(listed?.lands?.[0] ?? ""), `lands: ${JSON.stringify(listed?.lands)}`);
-  await api(`/api/worker/proposals/${asked.pendingId}`, { method: "POST", body: JSON.stringify({ approve: false, reason: "e2e" }) });
+  // reconciliation (docs/ORGANIZATION-MODEL.md, "The worker's job"): a worker writes no entries; the old job's update is refused and names the new tools
+  const up = await tool(w, "upsert_entities", { entities: [{ name: "e2e-l1 bonus note", facets: { state: "Paid weekly from November." } }] });
+  check(/writes no entries/.test(up.error ?? ""), `upsert refused, the new tools named: ${JSON.stringify(up).slice(0, 300)}`);
+  check(!(await sql("SELECT text_state FROM Entity WHERE name = 'e2e-l1 bonus note'"))[0]?.text_state, "nothing was written to the entry");
+  // what it does instead: resolve a subject by its own judgement; the thing is seen from where the entry lives
+  const made = await tool(w, "resolve_subject", { name: "weekend bonus plan", thing: { name: "weekend bonus plan", type: "project" }, reason: "e2e" });
+  check(made.minted === true && made.thing, `minted on the worker's word: ${JSON.stringify(made).slice(0, 300)}`);
+  const t = (await sql(`SELECT _homes FROM ${made.thing}`))[0];
+  check((t?._homes ?? []).includes(POS.org), `seen from the top, where the entry lives: ${JSON.stringify(t)}`);
+  check((await sql(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${e.rid})`)).some((l) => String(l.dst) === made.thing), "the entry is about it");
+  check((await entry("e2e-l1 bonus note"))?._home === POS.org, "the entry is still at the top");
 });
 
-await scenario("a worker's update grading finds more sensitive doesn't hide the entry from its people, approved or not", async () => {
-  await save("alice", "e2e-g1 bar bought", "Bought three bundles of bar stock, stored in rack A.");
-  const e = await entry("e2e-g1 bar bought");
-  check(e?._home === POS.ops, `at Operations, got ${e?._home}`);
-  const w = workerToken(String(e.rid));
-  const held = await tool(w, "upsert_entities", { entities: [{ name: "e2e-g1 bar bought", facets: { state: "Bought against the hold. [admins]" } }] });
-  check(!held.error && /kept where it's seen from/.test(JSON.stringify(held)), `applied, and says it was kept: ${JSON.stringify(held).slice(0, 300)}`);
-  check((await entry("e2e-g1 bar bought"))?._home === POS.ops, "still seen from Operations");
-  const viaUpdate = await tool(w, "update_entry", { entry: String(e.rid), facets: { state: "Bought against the hold, again. [admins]" } });
-  check(!viaUpdate.error, `update_entry applies too: ${JSON.stringify(viaUpdate).slice(0, 300)}`);
-  check((await entry("e2e-g1 bar bought"))?._home === POS.ops, "still seen from Operations after update_entry");
-  const asked = await tool(w, "upsert_entities", { entities: [{ name: "e2e-g1 bar bought", facets: { state: "Bought against the hold. [admins]" } }], propose: true, reason: "e2e" });
-  check(asked.pendingId, `proposed: ${JSON.stringify(asked).slice(0, 300)}`);
-  const ok = await api(`/api/worker/proposals/${asked.pendingId}`, { method: "POST", body: JSON.stringify({ approve: true, reason: "e2e" }) });
-  check(!ok.error, `approved: ${JSON.stringify(ok).slice(0, 300)}`);
-  check((await entry("e2e-g1 bar bought"))?._home === POS.ops, "approved: still seen from Operations");
-});
-
-await scenario("a worker (or a master's task) searches its entries' audience, so a search alone doesn't hold its write; beyond: true does", async () => {
+await scenario("a worker (or a master's task) searches its entries' audience, so a search alone doesn't hold what it resolves; beyond: true does", async () => {
   await save("alice", "e2e-s1 zephyrine budget", "The zephyrine fixture budget is 9,000. [admins]");
   check((await entry("e2e-s1 zephyrine budget"))?._home === POS.org, "the budget note is at the top");
   await save("bob", "e2e-s2 zephyrine fixture", "The zephyrine fixture is on the bench.");
@@ -227,23 +238,28 @@ await scenario("a worker (or a master's task) searches its entries' audience, so
   const names = (r) => (r.results ?? []).map((x) => x.name);
   const mine = await tool(w, "search_graph", { query: "zephyrine fixture budget" });
   check(!names(mine).includes("e2e-s1 zephyrine budget"), `not found by default: ${names(mine).join(", ")}`);
-  const plain = await tool(w, "upsert_entities", { entities: [{ name: "e2e-s2 zephyrine fixture", facets: { state: "On the bench since Monday." } }] });
-  check(!plain.error && !plain.pendingId, `the write isn't held: ${JSON.stringify(plain).slice(0, 300)}`);
-  // about_thing too: the fixture's statements as the floor sees them
+  // the worker's judgement on a subject (the one write it makes to the graph): not held, seen from where the entry lives
+  const resolve = (token, name) => tool(token, "resolve_subject", { name, thing: { name, type: "part" }, reason: "e2e" });
+  const plain = await resolve(w, "zephyrine fixture");
+  check(plain.thing && !plain.error, `resolved without a hold: ${JSON.stringify(plain).slice(0, 300)}`);
+  check(((await sql(`SELECT _homes FROM ${plain.thing}`))[0]?._homes ?? []).includes(POS.floor), "seen from the floor, where the entry lives");
+  // about_thing too: the fixture's statements as the floor sees them. The top's note is about the same fixture, as a
+  // claim from its section would make it (resolve_subject on an existing thing re-points a claim; for a bare name it links nothing)
   const top = await entry("e2e-s1 zephyrine budget");
-  await tool(workerToken(String(top.rid)), "link_things", { things: [{ name: "zephyrine fixture", type: "part" }] });
-  await tool(w, "link_things", { things: [{ name: "zephyrine fixture", type: "part" }] });
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE EDGE ABOUT FROM ${top.rid} TO ${plain.thing} SET role = 'mentions'` });
+  await tool("admin", "execute_graph", { language: "sql", command: `UPDATE ${plain.thing} SET _homes = ['${POS.floor}', '${POS.org}']` });
   const said = (r) => (r.things ?? []).flatMap((t) => (t.statements ?? []).map((x) => x.name));
   const about = await tool(w, "about_thing", { name: "zephyrine fixture" });
   check(said(about).includes("e2e-s2 zephyrine fixture") && !said(about).includes("e2e-s1 zephyrine budget"), `about_thing shows the floor's view: ${JSON.stringify(about).slice(0, 300)}`);
-  const plain2 = await tool(w, "upsert_entities", { entities: [{ name: "e2e-s2 zephyrine fixture", facets: { state: "On the bench since Monday, checked." } }] });
-  check(!plain2.error && !plain2.pendingId, `still not held: ${JSON.stringify(plain2).slice(0, 300)}`);
+  const plain2 = await resolve(w, "zephyrine clamp");
+  check(plain2.thing && !plain2.error, `still not held: ${JSON.stringify(plain2).slice(0, 300)}`);
   const aboutAll = await tool(w, "about_thing", { name: "zephyrine fixture", beyond: true });
   check(said(aboutAll).includes("e2e-s1 zephyrine budget"), `beyond shows the top's: ${JSON.stringify(aboutAll).slice(0, 300)}`);
   const all = await tool(w, "search_graph", { query: "zephyrine fixture budget", beyond: true });
   check(names(all).includes("e2e-s1 zephyrine budget"), `found with beyond: ${names(all).join(", ")}`);
-  const held = await tool(w, "upsert_entities", { entities: [{ name: "e2e-s2 zephyrine fixture", facets: { state: "On the bench; budgeted." } }] });
-  check(/Not written/.test(held.error ?? "") || held.pendingId, `now held: ${JSON.stringify(held).slice(0, 300)}`);
+  const held = await resolve(w, "zephyrine tray");
+  check(/Not written/.test(held.error ?? ""), `now held: ${JSON.stringify(held).slice(0, 300)}`);
+  check(!(await sql("SELECT @rid FROM Entity WHERE _kind = 'thing' AND _norm = 'zephyrine tray'")).length, "nothing minted while held");
   // a master's task (a record at the top) about the floor's entry: its worker sees what the floor sees
   await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = 'e2e-s3 zephyrine task', _kind = 'task', _home = '${POS.org}', _origin = '${POS.org}'` });
   const task = (await sql("SELECT @rid AS rid FROM Entity WHERE name = 'e2e-s3 zephyrine task' AND _kind = 'task'"))[0];
@@ -252,11 +268,11 @@ await scenario("a worker (or a master's task) searches its entries' audience, so
   const tw = workerToken(String(task.rid), tj);
   const taskAbout = await tool(tw, "about_thing", { name: "zephyrine fixture" });
   check(said(taskAbout).includes("e2e-s2 zephyrine fixture") && !said(taskAbout).includes("e2e-s1 zephyrine budget"), `a task's worker sees its entries' view: ${JSON.stringify(taskAbout).slice(0, 300)}`);
-  const taskWrite = await tool(tw, "update_entry", { entry: "e2e-s2 zephyrine fixture", facets: { state: "On the bench, task checked." } });
-  check(!taskWrite.error && !taskWrite.pendingId, `a task's write isn't held: ${JSON.stringify(taskWrite).slice(0, 300)}`);
+  const taskWrite = await resolve(tw, "zephyrine jig");
+  check(taskWrite.thing && !taskWrite.error, `a task's judgement isn't held: ${JSON.stringify(taskWrite).slice(0, 300)}`);
 });
 
-await scenario("a worker reads documents as its entry's people do: a section above them doesn't hold its write, beyond: true does", async () => {
+await scenario("a worker reads documents as its entry's people do: a section above them doesn't hold what it resolves; beyond: true does", async () => {
   const doc = await tool("alice", "ingest_document", { title: "e2e-d1 quillon contract", description: "The quillon supply contract.", text: "The quillon supply contract pays 12,000 a year. [admins]", extract: false });
   check(doc.doc_id, `ingested: ${JSON.stringify(doc).slice(0, 300)}`);
   await until("the section is placed", async () => (await sql(`SELECT _home FROM Entity WHERE _kind = 'section' AND _doc_id = '${doc.doc_id}'`))[0]?._home === POS.org);
@@ -265,18 +281,17 @@ await scenario("a worker reads documents as its entry's people do: a section abo
   const w = workerToken(String(e.rid));
   const hidden = await tool(w, "read_document", { document: doc.doc_id, section: 1 });
   check(!(hidden.sections ?? []).length, `the floor's view has no section: ${JSON.stringify(hidden).slice(0, 300)}`);
-  const plain = await tool(w, "update_entry", { entry: "e2e-d2 quillon bench", facets: { state: "On bench 2 since Monday." } });
-  check(!plain.error && !plain.pendingId, `update_entry isn't held: ${JSON.stringify(plain).slice(0, 300)}`);
+  const resolve = (name, type) => tool(w, "resolve_subject", { name, thing: { name, type }, reason: "e2e" });
+  const plain = await resolve("quillon jig", "part");
+  check(plain.thing && !plain.error, `resolving isn't held: ${JSON.stringify(plain).slice(0, 300)}`);
   const all = await tool(w, "read_document", { document: doc.doc_id, section: 1, beyond: true });
   check((all.sections ?? []).length === 1, `beyond reads the section: ${JSON.stringify(all).slice(0, 300)}`);
-  // the same entry, the same reads: update_entry and upsert_entities judge it alike
-  const viaUpdate = await tool(w, "update_entry", { entry: "e2e-d2 quillon bench", facets: { state: "On bench 2; under contract." } });
+  // the same read holds any judgement the worker would put in front of the floor
+  const held = await resolve("quillon bench 2", "place");
+  check(/Not written/.test(held.error ?? ""), `refused after reading above: ${JSON.stringify(held).slice(0, 300)}`);
+  // and a worker writes no entry text at all, held or not
   const viaUpsert = await tool(w, "upsert_entities", { entities: [{ name: "e2e-d2 quillon bench", facets: { state: "On bench 2; under contract." } }] });
-  check(/Not written/.test(viaUpdate.error ?? ""), `update_entry is refused: ${JSON.stringify(viaUpdate).slice(0, 300)}`);
-  check(/Not written/.test(viaUpsert.error ?? ""), `upsert_entities is refused alike: ${JSON.stringify(viaUpsert).slice(0, 300)}`);
-  const asked = await tool(w, "update_entry", { entry: "e2e-d2 quillon bench", facets: { state: "On bench 2; under contract." }, propose: true, reason: "e2e" });
-  check(asked.pendingId, `proposed: ${JSON.stringify(asked).slice(0, 300)}`);
-  if (asked.pendingId) await api(`/api/worker/proposals/${asked.pendingId}`, { method: "POST", body: JSON.stringify({ approve: false, reason: "e2e" }) });
+  check(/writes no entries/.test(viaUpsert.error ?? ""), `upsert_entities is refused: ${JSON.stringify(viaUpsert).slice(0, 300)}`);
 });
 
 await scenario("grading restricts only for a listed topic: one it can't name stays with the writer's team", async () => {
@@ -289,10 +304,17 @@ await scenario("grading restricts only for a listed topic: one it can't name sta
 
 await scenario("a handler records the operator's decision only when it names one, and takes a proposal's short id", async () => {
   await save("alice", "e2e-h1 dock lights", "Two dock lights are out by door 3.");
+  // a person releases it to the floor (a widening: queued, then approved), so a worker's move back up is a proposal, not a change
+  const released = await tool("admin", "set_home", { entities: [{ name: "e2e-h1 dock lights" }], to: "Production floor" });
+  const rid0 = released.results?.[0]?.id ?? released.results?.[0]?.pendingId;
+  check(rid0, `the release is queued: ${JSON.stringify(released).slice(0, 300)}`);
+  await api(`/api/queue/${rid0}/approve`, { method: "POST", body: "{}" });
+  check((await entry("e2e-h1 dock lights"))?._home === POS.floor, "placed on the floor by a person");
   const e = await entry("e2e-h1 dock lights");
   const job = randomUUID();
-  const asked = await tool(workerToken(String(e.rid), job), "upsert_entities", { entities: [{ name: "e2e-h1 dock lights", facets: { state: "Reported 2026-10-30; not yet fixed." } }], propose: true, reason: "e2e" });
-  check(asked.pendingId, `proposed: ${JSON.stringify(asked).slice(0, 300)}`);
+  const moved0 = await tool(workerToken(String(e.rid), job), "set_home", { entities: [{ name: "e2e-h1 dock lights" }], to: "Operations", reason: "e2e: an Operations matter" });
+  const asked = { pendingId: moved0.results?.[0]?.pendingId ?? moved0.results?.[0]?.id };
+  check(moved0.results?.[0]?.placed_by_person && asked.pendingId, `proposed, not applied: ${JSON.stringify(moved0).slice(0, 300)}`);
   const h = randomUUID();
   await tool("admin", "execute_graph", { language: "sql", command: `INSERT INTO Job SET id = '${h}', kind = 'handler', status = 'waiting', payload = '{"for_job":"${job}"}'` });
   const empty = await tool(handlerToken(h), "decide_for_worker", {});
@@ -303,6 +325,7 @@ await scenario("a handler records the operator's decision only when it names one
   check(ok.decided, `decided: ${JSON.stringify(ok).slice(0, 300)}`);
   const st = (await sql(`SELECT status FROM PendingWrite WHERE id = '${asked.pendingId}'`))[0]?.status;
   check(st === "approved", `the short id applied it: ${st}`);
+  check((await entry("e2e-h1 dock lights"))?._home === POS.ops, "the worker's move is made on the operator's word");
   // a pending proposal the worker didn't raise (here an admin's widening): the operator's word applies it too
   const moved = await tool("admin", "set_home", { entities: [{ name: "e2e-h1 dock lights" }], to: "Production floor", reason: "e2e" });
   const pid = moved.results?.[0]?.pendingId ?? moved.results?.[0]?.id;
@@ -331,42 +354,56 @@ await scenario("an approved raw command that changes nothing isn't recorded as a
   check((await sql(`SELECT e2e_mark FROM ${e.rid}`))[0]?.e2e_mark === "x", "the change is in the graph");
 });
 
-await scenario("an unlink that leaves a keyless thing with nothing linking it deletes the thing; a keyed or still-linked one stays", async () => {
-  await save("bob", "e2e-u1 quillwort bench", "The quillwort gauge sits by the quillwort clamp and the quillwort tray.");
+await scenario("a name nobody vouches for mints nothing; a worker's judgement mints it once, and a record key resolves to the one existing instance", async () => {
+  await save("bob", "e2e-u1 quillwort bench", "The quillwort gauge sits by the quillwort clamp.");
   await save("bob", "e2e-u2 quillwort tray", "The quillwort tray is full.");
-  const w1 = workerToken(String((await entry("e2e-u1 quillwort bench")).rid));
-  const w2 = workerToken(String((await entry("e2e-u2 quillwort tray")).rid));
-  const things = [{ name: "quillwort gauge", type: "part" }, { name: "quillwort clamp", type: "part" }, { name: "quillwort tray", type: "part" }];
-  await tool(w1, "link_things", { things });
-  await tool(w2, "link_things", { things: [things[2]] });
-  const thing = async (n) => (await sql(`SELECT @rid AS rid FROM Entity WHERE _kind = 'thing' AND _norm = '${n}'`))[0];
-  await tool("admin", "execute_graph", { language: "sql", command: `UPDATE ${(await thing("quillwort clamp")).rid} SET _keys = ['e2e:clamp']` });
-  const r = await tool(w1, "unlink_things", { things, reason: "e2e" });
-  check((r.results ?? []).every((x) => x.unlinked), `all unlinked: ${JSON.stringify(r).slice(0, 300)}`);
-  check(!(await thing("quillwort gauge")), "the keyless thing nothing links any more is gone");
-  check(await thing("quillwort clamp"), "a thing from a source record stays");
-  check(await thing("quillwort tray"), "a thing another entry still links stays");
+  const e1 = await entry("e2e-u1 quillwort bench");
+  const e2 = await entry("e2e-u2 quillwort tray");
+  for (const e of [e1, e2]) await until(`linked: ${e.name}`, async () => ((await job(String(e.rid)))?.status === "done" ? true : false));
+  const thing = async (n) => (await sql(`SELECT @rid AS rid, _homes, _keys FROM Entity WHERE _kind = 'thing' AND _norm = '${n}'`))[0];
+  check(!(await thing("quillwort gauge")) && !(await thing("quillwort clamp")) && !(await thing("quillwort tray")), "nothing minted from the text alone");
+  const w1 = workerToken(String(e1.rid));
+  const w2 = workerToken(String(e2.rid));
+  const resolve = (token, name, extra = {}) => tool(token, "resolve_subject", { name, thing: { name, type: "part", ...extra }, reason: "e2e" });
+  // a worker that looked vouches for the gauge: minted once, the entry about it
+  const made = await resolve(w1, "quillwort gauge");
+  check(made.minted === true && made.thing, `minted on the worker's word: ${JSON.stringify(made).slice(0, 300)}`);
+  check(await thing("quillwort gauge"), "the gauge is a thing now");
+  check((await sql(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${e1.rid})`)).some((l) => String(l.dst) === made.thing), "and the entry is about it");
+  // a keyed instance from a source row: resolving by key finds it, mints nothing
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = 'quillwort clamp (part)', label = 'quillwort clamp', _kind = 'thing', _thing_type = 'part', _norm = 'quillwort clamp', _alias_norms = [], _keys = ['e2e:clamp:1'], _homes = ['${POS.floor}'], _home = '${POS.org}', updated_at = '${new Date().toISOString()}'` });
+  const byKey = await resolve(w1, "quillwort clamp", { key: "e2e:clamp:1" });
+  check(byKey.minted === false && byKey.key === "e2e:clamp:1" && byKey.thing, `the keyed instance, not a second: ${JSON.stringify(byKey).slice(0, 300)}`);
+  check(Number((await sql("SELECT count(*) AS n FROM Entity WHERE _kind = 'thing' AND _norm = 'quillwort clamp'"))[0]?.n) === 1, "one clamp");
+  // a second worker naming the same gauge gets the one thing, not a second
+  const same = await resolve(w2, "quillwort gauge");
+  check(same.minted === false && same.thing === made.thing, `the existing gauge: ${JSON.stringify(same).slice(0, 300)}`);
+  check(Number((await sql("SELECT count(*) AS n FROM Entity WHERE _kind = 'thing' AND _norm = 'quillwort gauge'"))[0]?.n) === 1, "one gauge");
+  // what nobody vouched for stays content in the text
+  check(!(await thing("quillwort tray")), "the tray, which nobody vouched for, is no thing");
 });
 
-await scenario("a worker can't name, in what it writes, an entry hidden from the people who see it", async () => {
+await scenario("a worker can't make a thing of an entry's title (hidden from the people who'd see it, or not), nor of its code, and writes no note to name it in", async () => {
   await save("bob", "e2e-h2 quillwort raise", "Quillwort Sam's pay goes to 26 an hour. [admins]");
   check((await entry("e2e-h2 quillwort raise"))?._home === POS.org, "the raise is at the top");
   await save("bob", "e2e-h1 quillwort shift", "Quillwort Sam ran the late shift.");
   const e = await entry("e2e-h1 quillwort shift");
   const w = workerToken(String(e.rid));
-  const named = await tool(w, "update_entry", { entry: String(e.rid), facets: { relations: "Same person as in 'e2e-h2 quillwort raise'." } });
-  check(String(named.error ?? "").includes("can't see"), `refused: ${JSON.stringify(named).slice(0, 300)}`);
+  // the one text a worker puts in front of the floor is a thing's name: an entry's title, here one the floor can't see, is refused
+  const resolve = (name) => tool(w, "resolve_subject", { name, thing: { name, type: "project" }, reason: "e2e" });
+  const named = await resolve("e2e-h2 quillwort raise");
+  check(/that's an entry/.test(named.error ?? ""), `refused: ${JSON.stringify(named).slice(0, 300)}`);
+  check(!(await sql("SELECT @rid FROM Entity WHERE _kind = 'thing' AND label = 'e2e-h2 quillwort raise'")).length, "no thing carries the hidden title");
+  const code = await resolve("e2e-h2");
+  check(/that's an entry/.test(code.error ?? ""), `nor its code: ${JSON.stringify(code).slice(0, 300)}`);
+  // a worker writes no entry text at all, so there is no note of its own to name the hidden entry in
   const up = await tool(w, "upsert_entities", { entities: [{ name: "e2e-h1 quillwort shift", facets: { relations: "See e2e-h2 quillwort raise." } }] });
-  check(String(up.error ?? "").includes("can't see"), `refused through upsert too: ${JSON.stringify(up).slice(0, 300)}`);
-  const ok = await tool(w, "update_entry", { entry: String(e.rid), facets: { relations: "Quillwort Sam works the late shift." } });
-  check(!ok.error, `written without it: ${JSON.stringify(ok).slice(0, 300)}`);
+  check(/writes no entries/.test(up.error ?? ""), `refused through upsert: ${JSON.stringify(up).slice(0, 300)}`);
   const text = (await sql("SELECT text_relations FROM Entity WHERE name = 'e2e-h1 quillwort shift'"))[0]?.text_relations;
-  check(!String(text).includes("quillwort raise"), "the hidden name isn't in the note");
-  // a one-word name (a part number) is what a text is about, not a title: naming it is fine
-  await save("bob", "QWX-4471-B", "Quillwort part QWX-4471-B costs 41 dollars. [admins]");
-  check((await entry("QWX-4471-B"))?._home === POS.org, "the part's note is at the top");
-  const part = await tool(w, "update_entry", { entry: String(e.rid), facets: { relations: "Quillwort Sam cut QWX-4471-B blanks." } });
-  check(!part.error, `a part number isn't a title: ${JSON.stringify(part).slice(0, 300)}`);
+  check(!String(text ?? "").includes("quillwort raise"), "the hidden name isn't in the note");
+  // a worker's own judgement about the shift is fine: a person named in it, as a thing
+  const ok = await tool(w, "resolve_subject", { name: "Quillwort Sam", thing: { name: "Quillwort Sam", type: "person" }, reason: "e2e" });
+  check(ok.thing && !ok.error, `a name in the text is resolved: ${JSON.stringify(ok).slice(0, 300)}`);
 });
 
 await scenario("a writer still reads a note grading put above them; others at their position don't", async () => {
@@ -379,7 +416,7 @@ await scenario("a writer still reads a note grading put above them; others at th
   const mine = await found("bob");
   check(mine, "its writer finds it");
   check(mine.via === "writer", `seen as its writer, got ${mine.via}`);
-  check(!(await found("alice")), "alice, above bob but below the top, doesn't");
+  check(!(await found("carol")), "carol, above bob but below the top, doesn't");
   // a worker's update never takes the writer over
   await tool(workerToken(String(e.rid)), "update_entry", { entry: String(e.rid), facets: { identity: "Diep starts at 21.50 an hour; review at 90 days. [admins]" } });
   const after = (await sql("SELECT _written_by FROM Entity WHERE name = 'e2e-w1 pay note'"))[0]?._written_by;
@@ -473,6 +510,53 @@ await scenario("nothing in the background kept failing", async () => {
   check(Object.values(st.dependencies ?? {}).every((d) => d.ok), `still out: ${JSON.stringify(st.dependencies)}`);
 });
 
-const failed = results.filter((r) => !r.ok);
-console.log(`\n${results.length - failed.length}/${results.length} scenarios passed`);
+// ---- the streams' scenarios: every scenarios-<stream>.mjs next to this file (SCENARIOS.md) ----
+const E2E_DIR = fileURLToPath(new URL("./", import.meta.url));
+const FIXTURES = new URL("../test/fixtures/", import.meta.url);
+/** what a scenario file's run(context) receives: this file's helpers, by name */
+const context = {
+  GRAPH,
+  MODELS,
+  TOKENS,
+  POS,
+  tool,
+  sql,
+  api,
+  models,
+  entry,
+  thing,
+  job,
+  unresolved,
+  until,
+  check,
+  save,
+  delegated,
+  workerToken,
+  handlerToken,
+  randomUUID,
+  fixtures: {
+    dir: fileURLToPath(FIXTURES),
+    read: (name) => JSON.parse(readFileSync(new URL(name, FIXTURES), "utf8")),
+    url: (name) => new URL(name, FIXTURES),
+  },
+  e2eDir: E2E_DIR,
+  // a stream's scenario can import this checkout's modules read-only (`src/model/claims.js`)
+  srcUrl: (rel) => new URL(`../src/${rel}`, import.meta.url),
+};
+const files = discoverScenarioFiles(E2E_DIR);
+const streams = await loadScenarioFiles(files);
+if (files.length) console.log(`\n${streams.length} scenario${streams.length === 1 ? "" : "s"} from ${files.length} stream file${files.length === 1 ? "" : "s"}: ${files.map((f) => f.split("/").pop()).join(", ")}`);
+for (const s of streams) {
+  if (!selected(s)) continue;
+  const reason = await skipReason(s, context);
+  if (reason) {
+    results.push({ name: s.name, ok: true, skipped: true, reason });
+    console.log(`SKIP ${s.name} [${s.file}]: ${reason}`);
+    continue;
+  }
+  await scenario(`${s.name} [${s.stream}]`, () => s.run(context), s);
+}
+
+const failed = results.filter((r) => !r.skipped && !r.ok);
+console.log(`\n${summaryLine(results)}`);
 process.exit(failed.length ? 1 : 0);

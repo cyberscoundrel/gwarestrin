@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # The replay harness: a throwaway ArcadeDB, graph-rag built from this
 # checkout, and fake models (fake-models.mjs) on a private Docker network;
-# then the scenarios (run.mjs). Nothing touches a running stack, and nothing
-# calls a real model. Needs only Docker.
+# then the scenarios (run.mjs, plus every stream's scenarios-<stream>.mjs: see
+# SCENARIOS.md). Nothing touches a running stack, and nothing calls a real
+# model. Needs only Docker.
 #
-#   graph-rag/e2e/e2e.sh            run every scenario
-#   KEEP=1 graph-rag/e2e/e2e.sh     leave the containers up afterwards
+#   graph-rag/e2e/e2e.sh                 run every scenario
+#   KEEP=1 graph-rag/e2e/e2e.sh          leave the containers up afterwards
+#   ONLY=condenser graph-rag/e2e/e2e.sh  only the scenarios whose name, file or stream matches
 set -euo pipefail
 cd "$(dirname "$0")/.."
 NET="gr-e2e-$$"
@@ -34,7 +36,8 @@ cat >"$CFG/tokens.json" <<'EOF'
 { "tokens": [
   { "token": "e2e-admin", "user": "admin", "caps": { "read": true, "write": "direct", "approve": true, "raw": true }, "positions": ["org"], "delegationKey": "e2e-delegation-key-0123456789abcdef" },
   { "token": "e2e-alice", "user": "alice", "caps": { "read": true, "write": "direct" }, "positions": ["ops"] },
-  { "token": "e2e-bob", "user": "bob", "caps": { "read": true, "write": "direct" }, "positions": ["floor"] } ] }
+  { "token": "e2e-bob", "user": "bob", "caps": { "read": true, "write": "direct" }, "positions": ["floor"] },
+  { "token": "e2e-carol", "user": "carol", "caps": { "read": true, "write": "direct" }, "positions": ["ops"] } ] }
 EOF
 chmod -R a+rX "$CFG"
 
@@ -68,7 +71,8 @@ docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$C
   graph-rag:e2e >/dev/null
 
 status=0
-docker run --rm --network "$NET" -v "$PWD/e2e:/e2e:ro" "$NODE" node /e2e/run.mjs || status=$?
+# the whole checkout, read-only: scenario files reach test/fixtures and src/model through run.mjs
+docker run --rm --network "$NET" -v "$PWD:/gr:ro" -e ONLY="${ONLY:-}" "$NODE" node /gr/e2e/run.mjs || status=$?
 if [ "$status" -ne 0 ]; then
   echo "--- graph-rag log (last 60 lines) ---"
   docker logs "$NET-gr" 2>&1 | grep -v LSMVector | tail -60
