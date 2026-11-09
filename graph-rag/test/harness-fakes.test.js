@@ -103,9 +103,18 @@ test("the fake-condenser.mjs hook: absent -> null; present -> its condense; the 
   const bad = mkdtempSync(join(tmpdir(), "fake-condenser-bad-"));
   try {
     writeFileSync(join(bad, "fake-condenser.mjs"), "export const nothing = 1;");
-    await assert.rejects(loadCondenser(bad), /must export condense/);
+    await assert.rejects(loadCondenser(bad), /must export complete\(body\) or condense/);
   } finally {
     rmSync(bad, { recursive: true, force: true });
+  }
+  // the Condenser stream's shape: complete(body) answering as chat completions
+  const cc = mkdtempSync(join(tmpdir(), "fake-condenser-cc-"));
+  try {
+    writeFileSync(join(cc, "fake-condenser.mjs"), 'export function complete(body) { return { choices: [{ message: { role: "assistant", content: JSON.stringify({ title: "via complete", n: body.messages.length }) } }] }; }');
+    const c = await loadCondenser(cc);
+    assert.deepEqual(JSON.parse(await c.condense([{ role: "user", content: "x" }], { model: "condenser" })), { title: "via complete", n: 1 });
+  } finally {
+    rmSync(cc, { recursive: true, force: true });
   }
 });
 

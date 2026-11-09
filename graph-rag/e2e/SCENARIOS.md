@@ -46,7 +46,7 @@ Everything `run.mjs` has, by name, on one object:
 | field | what it is |
 |---|---|
 | `GRAPH`, `MODELS` | the graph-rag and fake-models base URLs inside the network |
-| `TOKENS` | `{ admin, alice, bob }` -> bearer tokens (e2e.sh): admin at the root (`write: direct`, `approve`, `raw`), alice at Operations, bob at the Production floor |
+| `TOKENS` | `{ admin, alice, bob, carol }` -> bearer tokens (e2e.sh): admin at the root (`write: direct`, `approve`, `raw`), alice at Operations, bob at the Production floor, carol at Operations for negative checks (she never writes; a search records what it shows as reads, and a writer's own notes graded above them show via "writer", so searching as alice raises her derived floor for the rest of the run) |
 | `POS` | `{ org, ops, floor }` -> position ids of the harness tree (root `org` > `ops` > `floor`) |
 | `tool(who, name, args)` | one MCP `tools/call` as `who` (a key of `TOKENS`, or a raw token); returns the tool's JSON, or `{ error }` |
 | `sql(query)` | `query_graph` in SQL as the admin (raw); rows |
@@ -94,8 +94,9 @@ contains "condens". The Condenser stream's own canned responses go in
 `graph-rag/e2e/fake-condenser.mjs`, loaded when present:
 
 ```js
-export function matches(body) { ... }          // optional: claim a request; default: model or system prompt says "condens"
+export function complete(body) { ... }          // a chat-completions response ({ choices: [{ message: { content } }] }), or
 export function condense(messages, body) { ... } // the assistant's content: a string, or an object to JSON-encode
+export function matches(body) { ... }           // optional: claim a request; default: model or system prompt says "condens"
 ```
 
 `GET /__condenser` says whether it was loaded. The decision model's closed

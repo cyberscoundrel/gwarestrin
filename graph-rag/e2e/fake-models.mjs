@@ -156,16 +156,26 @@ export const isCondenseRequest = (body) => /condens/i.test(String(body?.model ??
 
 /**
  * The Condenser stream's canned responses, when its file is next to this
- * one: `condense(messages, body)` returning the assistant's content (a string,
- * or an object to JSON-encode), optionally `matches(body)` to claim a request
- * the model name or system prompt would not. Returns null when absent.
+ * one: `complete(body)` returning a chat-completions response (the stream's
+ * stand-in), or `condense(messages, body)` returning the assistant's content
+ * (a string, or an object to JSON-encode); optionally `matches(body)` to
+ * claim a request the model name or system prompt would not. Returns null
+ * when absent.
  */
 export async function loadCondenser(dir = fileURLToPath(new URL("./", import.meta.url))) {
   const file = `${dir.replace(/\/?$/, "/")}fake-condenser.mjs`;
   if (!existsSync(file)) return null;
   const mod = await import(pathToFileURL(file).href);
-  const condense = mod.condense ?? mod.default?.condense ?? (typeof mod.default === "function" ? mod.default : null);
-  if (typeof condense !== "function") throw new Error(`${file}: must export condense(messages, body)`);
+  const complete = mod.complete ?? mod.default?.complete ?? null;
+  const own = mod.condense ?? mod.default?.condense ?? (typeof mod.default === "function" ? mod.default : null);
+  const condense =
+    typeof complete === "function"
+      ? async (messages, body) => {
+          const r = await complete({ ...body, messages });
+          return r?.choices?.[0]?.message?.content ?? r;
+        }
+      : own;
+  if (typeof condense !== "function") throw new Error(`${file}: must export complete(body) or condense(messages, body)`);
   return { file, condense, matches: mod.matches ?? mod.default?.matches ?? null };
 }
 

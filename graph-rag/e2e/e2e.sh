@@ -36,7 +36,8 @@ cat >"$CFG/tokens.json" <<'EOF'
 { "tokens": [
   { "token": "e2e-admin", "user": "admin", "caps": { "read": true, "write": "direct", "approve": true, "raw": true }, "positions": ["org"], "delegationKey": "e2e-delegation-key-0123456789abcdef" },
   { "token": "e2e-alice", "user": "alice", "caps": { "read": true, "write": "direct" }, "positions": ["ops"] },
-  { "token": "e2e-bob", "user": "bob", "caps": { "read": true, "write": "direct" }, "positions": ["floor"] } ] }
+  { "token": "e2e-bob", "user": "bob", "caps": { "read": true, "write": "direct" }, "positions": ["floor"] },
+  { "token": "e2e-carol", "user": "carol", "caps": { "read": true, "write": "direct" }, "positions": ["ops"] } ] }
 EOF
 chmod -R a+rX "$CFG"
 
