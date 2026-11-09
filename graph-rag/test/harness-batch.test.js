@@ -436,6 +436,28 @@ test("the server stamps the recording: a later stamp is right, the claims must c
   assert.ok(strict.findings.content.every((f) => /recorded at/.test(f) || /: recorded_at |: valid_/.test(f)), JSON.stringify(strict.findings.content));
 });
 
+test("a claim left with no thing is compared by the subject written on it; a row key must not end up there", () => {
+  const b = small();
+  const wanted = expectedClaims(b);
+  const point = (rows, id, subject) => {
+    const c = rows.claims.find((x) => x.id === id);
+    c.in_rid = c.out_rid;
+    c.subject = subject;
+  };
+  const named = cleanRows(b);
+  point(named, "ux-m01#1", JSON.stringify(wanted.get("ux-m01#1").subject));
+  assert.equal(bar(b, named).ok, true, JSON.stringify(bar(b, named).findings));
+  const wrongName = cleanRows(b);
+  point(wrongName, "ux-m01#1", JSON.stringify({ ...wanted.get("ux-m01#1").subject, name: "something else" }));
+  assert.match(bar(b, wrongName).findings.content.join("\n"), /ux-m01#1: subject: written as/);
+  const unreadable = cleanRows(b);
+  point(unreadable, "ux-m01#1", undefined);
+  assert.match(bar(b, unreadable).findings.content.join("\n"), /no subject written on the claim/);
+  const keyed = cleanRows(b);
+  point(keyed, "ux-m01#0", JSON.stringify(wanted.get("ux-m01#0").subject));
+  assert.match(bar(b, keyed).findings.content.join("\n"), /left without a thing, expected the row mssql:dbo_Work_Center:INSPECT-2/);
+});
+
 test("failingNotes groups findings by note", () => {
   const b = small();
   const rows = cleanRows(b);

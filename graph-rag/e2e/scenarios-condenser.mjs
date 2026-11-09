@@ -328,7 +328,8 @@ export const scenarios = [
         const sent = await sendRecord(ctx, "bob", {
           title: "e2e-cond confidential note",
           reason: "a hires matter",
-          sections: [{ heading: "Case", text: "A dismissal case.", claims: [{ kind: "state", subject: { name, class: "hires" }, class: "hires", attribute: "status", value: "open" }] }],
+          sections: [{ heading: "Case", text: "A dismissal case.", // an actor, so it earns a node on first mention (admission rule 1): that node is what must be homed with the claim
+          claims: [{ kind: "state", subject: { name, actor: "person" }, class: "hires", attribute: "status", value: "open" }] }],
         });
         check(sent.queued === true, `the floor proposes an org-level claim: ${JSON.stringify(sent).slice(0, 300)}`);
         const ok = await api(`/api/queue/${sent.pendingId}/approve`, { method: "POST", body: "{}" });
@@ -404,7 +405,7 @@ export const scenarios = [
       check(retry.doc_id === first.doc_id && !retry.already_on_record, `a failed one runs again: ${JSON.stringify(retry).slice(0, 200)}`);
       await ready(first.doc_id);
       check((await count(first.doc_id)) === 2, "the retry adds no claims either");
-      const events = await sql(`SELECT count(*) AS n FROM CLAIMS WHERE kind = 'event' AND attribute = 'failure' AND @in.label = 'e2e-cond furnace 2'`);
+      const events = await sql(`SELECT count(*) AS n FROM CLAIMS WHERE kind = 'event' AND attribute = 'failure' AND @out._doc_id = '${first.doc_id}'`);
       check(Number(events[0]?.n) === 1, `one failure event: ${JSON.stringify(events)}`);
       check((await sql(`SELECT recorded_at FROM CLAIMS WHERE @out._doc_id = '${first.doc_id}'`))[0].recorded_at === at, "the claims keep their first recording");
     },

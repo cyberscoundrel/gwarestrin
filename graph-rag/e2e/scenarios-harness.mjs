@@ -13,7 +13,7 @@
 // nothing here computes a rule from the expected placements.
 import { readFileSync } from "node:fs";
 import { claimsSettle } from "../src/placement.js";
-import { normalizeDocument } from "../src/model/claims.js";
+import { closeIntervals, normalizeDocument } from "../src/model/claims.js";
 import { statements } from "../src/model/schema.js";
 import { sectionName } from "../src/documents.js";
 const RECORD_TOOL = "record_document"; // record-tools.js is not imported: it needs zod, and the runner has no node_modules
@@ -161,13 +161,28 @@ export default [
             if (claims.length && stored && claimsSettle({ claims, facets: { identity: stored.text } }, authorityMap) && graded.has(name)) failures.push(`${c.note}: "${name}" is settled by its claims and the grader was asked about it`);
           }
 
-        // decision 3 is a read: ad15 changes what ac13 said a rack holds, so a reader sees ac13's claim closed where ad15's starts (its recording, the server's stamp)
-        const history = await ctx.tool("admin", "state_history", { subject: "rack C1", attribute: "holds" });
-        const steps = history.things?.[0]?.history ?? [];
-        const ad15 = batch.conversations.find((c) => c.note === "ux-ad15");
-        const titanium = steps.find((h) => h.value === "titanium");
-        const ad15At = rows.documents.find((d) => d.name === ad15.expected.document.title)?._recorded_at;
-        if (!titanium || Date.parse(titanium.valid_until) !== Date.parse(ad15At)) failures.push(`ux-ad15: the rack's earlier claim is not closed where this one starts: ${JSON.stringify(history).slice(0, 300)}`);
+        // decision 3 is a read (state.js): over every run of claims on one attribute of one thing, a reader sees each open
+        // claim closed where the next starts, the contract's closeIntervals over those claims. A claim with no thing yet
+        // (admission: the first mention of a keyless name) waits on a worker and is in no such run
+        const onThings = rows.claims.filter((c) => wanted.has(c.id) && c.kind !== "event" && String(c.in_rid) !== String(c.out_rid));
+        const waiting = rows.claims.filter((c) => wanted.has(c.id) && String(c.in_rid) === String(c.out_rid));
+        let runsRead = 0;
+        for (const [, run] of Map.groupBy(onThings, (c) => `${c.in_rid}|${c.attribute}`)) {
+          if (run.length < 2) continue;
+          runsRead++;
+          const thing = rows.things.find((t) => String(t.rid) === String(run[0].in_rid));
+          const subject = thing?._keys?.[0] ?? thing?.label;
+          const history = await ctx.tool("admin", "state_history", { subject, attribute: run[0].attribute });
+          const shown = (history.things ?? []).flatMap((t) => t.history ?? []);
+          for (const want of closeIntervals(run.map((c) => ({ ...c, subject: { key: "one-thing" } })))) {
+            const h = shown.find((x) => x.id === want.id);
+            // a claim outside the batch on the same attribute may close it first; that closing is theirs to test
+            if (h?.closed_by && !wanted.has(h.closed_by)) continue;
+            const reads = h ? (h.valid_until ? Date.parse(h.valid_until) : null) : undefined;
+            if (reads !== (want.valid_until ? Date.parse(want.valid_until) : null)) failures.push(`${want.id.split("#")[0]}: ${subject} ${run[0].attribute}: ${want.id} reads closed at ${h?.valid_until ?? "never"}, expected ${want.valid_until ?? "open"}`);
+          }
+        }
+        console.log(`  decision 3 read over ${runsRead} run${runsRead === 1 ? "" : "s"} of claims on one attribute of one thing; ${waiting.length} of ${rows.claims.length} claims have no thing yet (admission's first mention, for a worker): ${waiting.map((c) => c.id).join(", ")}`);
 
         // the report: every failing note and why, so a red run names them all
         for (const [note, list] of failingNotes(batch, result)) console.log(`  BAR ${note}\n${list.map((f) => `      ${f}`).join("\n")}`);

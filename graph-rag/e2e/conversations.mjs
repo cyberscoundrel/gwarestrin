@@ -323,12 +323,29 @@ function subjectProblem(want, thing, batchKeys) {
 }
 
 /**
+ * A claim with no thing points back at its own section, its subject as written on the edge (admission: content
+ * inside a claim is no node; linker.js recordSubject). A subject the oracle gives a row for must not end up here.
+ */
+function statedSubjectProblem(want, claim) {
+  if (want.key) return `left without a thing, expected the row ${want.key}`;
+  let stated = null;
+  try {
+    stated = JSON.parse(claim.subject);
+  } catch {
+    /* nothing readable on the edge */
+  }
+  if (!stated) return "left without a thing and no subject written on the claim";
+  const same = normalizeName(stated.name) === normalizeName(want.name) && (stated.scope ?? null) === (want.scope ?? null) && (stated.class ?? null) === (want.class ?? null);
+  return same ? null : `written as ${JSON.stringify(stated)}, expected ${JSON.stringify({ name: want.name, class: want.class, scope: want.scope })}`;
+}
+
+/**
  * The bar, as the live batches applied it (docs/GRAPH-WORKER-RELIABILITY.md,
  * test/fixtures/ORACLE.md), now over what the claims say. `rows` is what
  * `collectRows` (or a scenario) read from the graph:
  *   documents: [{ rid, name, _home, _origin, _placed_by, _doc_id, _on_record, _recorded_by, _recorded_at, _record_position }]
  *   sections:  [{ rid, name, _doc_title, _section, _home, _placed_by, text }]
- *   claims:    [{ id, kind, class, attribute, value, valid_from, valid_until, recorded_at, recorded_by, _home, out_rid, in_rid }]   (CLAIMS edges; [] when the type does not exist)
+ *   claims:    [{ id, kind, class, attribute, value, valid_from, valid_until, recorded_at, recorded_by, subject, _home, out_rid, in_rid }]   (CLAIMS edges; [] when the type does not exist)
  *   things:    [{ rid, name, label, _keys }]                (every claim's subject)
  *   rescues:   [{ kind, status, approved_by, payload }]     (approved rehomes and other person-approved moves)
  * Five checks, each a list of findings, and `ok` when all five are empty:
@@ -417,7 +434,7 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince =
         continue;
       }
       const wrong = (field, have, exp) => findings.content.push(`${c.id} claim ${pl.id}: ${field} ${JSON.stringify(have ?? null)}, expected ${JSON.stringify(exp ?? null)}`);
-      const subject = subjectProblem(want.subject, things.get(String(cl.in_rid)), batchKeys);
+      const subject = String(cl.in_rid) === String(cl.out_rid) ? statedSubjectProblem(want.subject, cl) : subjectProblem(want.subject, things.get(String(cl.in_rid)), batchKeys);
       if (subject) findings.content.push(`${c.id} claim ${pl.id}: subject: ${subject}`);
       for (const field of ["kind", "class", "attribute", "value", "recorded_by"]) if (cl[field] !== want[field]) wrong(field, cl[field], want[field]);
       for (const field of ["valid_from", "valid_until", "recorded_at"]) if (!sameDate(cl[field], want[field])) wrong(field, cl[field], want[field]);
@@ -469,7 +486,7 @@ export function verdictLine(batch, result) {
 
 const inList = (xs) => `[${xs.map((x) => `'${String(x).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`).join(", ")}]`;
 
-const CLAIM_FIELDS = "id, kind, class, attribute, value, valid_from, valid_until, recorded_at, recorded_by, closed_by, _home, @out AS out_rid, @in AS in_rid";
+const CLAIM_FIELDS = "id, kind, class, attribute, value, valid_from, valid_until, recorded_at, recorded_by, closed_by, subject, _home, @out AS out_rid, @in AS in_rid";
 
 /**
  * The rows the bar reads, through a `query(sql) -> rows` that runs SQL as
