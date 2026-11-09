@@ -464,13 +464,16 @@ export async function requestIngest({ title, description, text, extract, home: r
   const now = Date.now();
   const v = parseValidUntil(valid_until, now);
   const doc_id = randomUUID();
+  // the one write-or-propose rule (write.js decideWrite, MAP.md): a manual carries no claims, so the identity's
+  // queuing and the derived floor decide
+  const decision = writeRules.decideWrite(identity, { kind: "ingest", claims: [] }, { origin: home });
   const payload = {
     doc_id,
     title: String(title).trim().slice(0, 200),
     description: String(description).trim().slice(0, 500),
     extract,
     home,
-    floor: derivedFloor(identity, home),
+    floor: decision.floor ?? derivedFloor(identity, home),
     written_at: new Date(now).toISOString(),
     ...(v ? { valid_until: v.valid_until ?? "lasting" } : {}),
     chars: body.length,
@@ -478,8 +481,8 @@ export async function requestIngest({ title, description, text, extract, home: r
     ...writerOf(identity),
   };
   await docStore.put(doc_id, body, { title: payload.title, by: identity.user, at: payload.written_at });
-  if (identity.caps.write === "queued") {
-    const q = await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home });
+  if (decision.action !== "direct") {
+    const q = await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home: decision.home ?? home });
     return { ...q, doc_id, sections: chunks.length, extract, note: "the document is stored; it's added to the knowledge graph once the ingest is approved" };
   }
   void startIngest(payload);

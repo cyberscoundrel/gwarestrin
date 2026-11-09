@@ -22,7 +22,7 @@ import { adbCommand, ensureIndex, ENTITY_LABEL, FACETS, knownIndexes } from "./d
 import { loadPositionMap, loadTokenMap, positionMap, requireCap, resolveWriteHome, SCOPED, scopeOf, writerOf } from "./scope.js";
 import { aboutThing, queryGraph, schemaGraph, searchGraph } from "./search.js";
 import { derivedFloor, ensureReadMarkSchema, entryAudience, recordReads, regradeTick } from "./floor.js";
-import { approvePending, backfillIdentity, ensurePendingSchema, executeGraph, listPending, queueWrite, rejectPending, setHome, upsertEntities } from "./write.js";
+import { approvePending, backfillIdentity, decideWrite, ensurePendingSchema, executeGraph, listPending, queueWrite, rejectPending, setHome, upsertEntities } from "./write.js";
 import { ensureGrantSchema, findShareable, grantAccess, listGrants, refreshGrants, revokeGrant } from "./sharing.js";
 import { ensureNeedSchema, expireRequests, requestAccess } from "./requests.js";
 import { docStore, ensureDocumentSchema, readDocument, requestIngest, sweepOrphanDocuments } from "./ingest.js";
@@ -156,6 +156,22 @@ ${facetDoc}`,
             properties: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
             facets: z.record(z.string()).optional(),
             valid_until: z.string().optional(),
+            // the claims an entry carries (model/README.md): it is then placed by their authority (placeByClaims), never graded
+            claims: z
+              .array(
+                z
+                  .object({
+                    kind: z.string(),
+                    class: z.string().optional(),
+                    attribute: z.string(),
+                    value: z.unknown(),
+                    subject: z.unknown().optional(),
+                    valid_from: z.string().optional(),
+                    valid_until: z.string().optional(),
+                  })
+                  .passthrough(),
+              )
+              .optional(),
           }),
         )
         .max(64),
@@ -172,10 +188,13 @@ ${facetDoc}`,
         return v === undefined ? e : { ...e, valid_until: v.valid_until ?? "lasting" };
       });
       // fixed at request time: what the requester read, not the approver
-      const write = { entities, home, floor: derivedFloor(identity, home), written_at: new Date(now).toISOString(), ...writerOf(identity) };
-      if (caps.write === "queued") {
-        const pending = await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home });
-        return { content: [{ type: "text", text: JSON.stringify(pending) }] };
+      // the one write-or-propose rule (write.js decideWrite, MAP.md): the claims' authority, the derived floor and
+      // the identity's queuing decide; a proposal is homed where whoever holds the authority reviews it
+      const d = decideWrite(identity, { kind: "upsert", claims: entities.flatMap((e) => e.claims ?? []) }, { origin: home });
+      const write = { entities, home, floor: d.floor ?? derivedFloor(identity, home), written_at: new Date(now).toISOString(), ...writerOf(identity) };
+      if (d.action !== "direct") {
+        const pending = await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home: d.home ?? home });
+        return { content: [{ type: "text", text: JSON.stringify({ ...pending, ...(d.reason ? { reason: d.reason } : {}) }) }] };
       }
       return { content: [{ type: "text", text: JSON.stringify(await upsertEntities(write)) }] };
     },
@@ -202,7 +221,7 @@ ${facetDoc}`,
     { limit: z.number().int().min(1).max(256).optional() },
     async (args) => {
       need("write");
-      if (caps.write === "queued") {
+      if (decideWrite(identity, { kind: "backfill" }).action !== "direct") {
         const pending = await queueWrite({ kind: "backfill", payload: JSON.stringify({ limit: args?.limit ?? 64 }), user: identity.user });
         return { content: [{ type: "text", text: JSON.stringify(pending) }] };
       }
