@@ -399,7 +399,7 @@ async function applyRehome({ rid, name, from, to, placedBy }) {
   if (rows[0]._doc_id) await settleDocument(rows[0]._doc_id).catch((e) => log.warn(`document ${rows[0]._doc_id} not settled after a move: ${String(e).slice(0, 160)}`));
   // seen from its new home: so are the things it's about
   const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
-  for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to).catch(() => {});
+  for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to, { from }).catch(() => {});
   log.info(`entity ${name} rehomed ${homeName(positionMap, from)} -> ${homeName(positionMap, to)}`);
   return { moved: true, from: homeName(positionMap, from), to: homeName(positionMap, to) };
 }
@@ -408,7 +408,7 @@ async function applyRehome({ rid, name, from, to, placedBy }) {
 export async function foldEntries({ keep, drop }) {
   if (!RID_RE.test(String(keep)) || !RID_RE.test(String(drop))) throw new Error("invalid fold");
   const k = (await adbQuery(`SELECT _home FROM ${keep} WHERE ${ENTRY_KINDS}`))[0];
-  const d = (await adbQuery(`SELECT name FROM ${drop} WHERE ${ENTRY_KINDS}`))[0];
+  const d = (await adbQuery(`SELECT name, _home FROM ${drop} WHERE ${ENTRY_KINDS}`))[0];
   if (!k || !d) throw new Error("one of the entries is gone");
   const edges = await adbQuery(`SELECT @in AS dst, role FROM (SELECT expand(outE('ABOUT')) FROM ${drop})`).catch(() => []);
   const home = effectiveHome(positionMap, k._home);
@@ -417,7 +417,7 @@ export async function foldEntries({ keep, drop }) {
     const dst = String(e.dst);
     if (!RID_RE.test(dst)) continue;
     await aboutOnce(keep, dst, e.role ?? "mentions");
-    await thingSeenFrom(dst, home);
+    await thingSeenFrom(dst, home, { from: effectiveHome(positionMap, d._home) });
     moved++;
   }
   await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE @rid = ${drop}`);
@@ -504,12 +504,14 @@ export async function refusePending(rec) {
 /** approved merge: the dropped thing's links move to the kept one */
 export async function mergeThings({ keep, drop, drop_name }) {
   if (!RID_RE.test(String(keep)) || !RID_RE.test(String(drop))) throw new Error("invalid merge");
-  const k = (await adbQuery(`SELECT _homes, _alias_norms FROM ${keep}`))[0];
-  const d = (await adbQuery(`SELECT _homes, _alias_norms, _norm FROM ${drop}`))[0];
+  const k = (await adbQuery(`SELECT _homes, _alias_norms, _held_aliases, _held_keys FROM ${keep}`))[0];
+  const d = (await adbQuery(`SELECT _homes, _alias_norms, _norm, _held_aliases, _held_keys FROM ${drop}`))[0];
   if (!k || !d) throw new Error("one of the things is gone");
   const edges = await adbQuery(`SELECT @out AS src, role FROM (SELECT expand(inE('ABOUT')) FROM ${drop})`).catch(() => []);
   for (const e of edges) await aboutOnce(String(e.src), keep, e.role ?? "mentions");
-  await adbCommand(`UPDATE ${keep} SET _homes = :homes, _alias_norms = :aliases`, "sql", {
+  await adbCommand(`UPDATE ${keep} SET _homes = :homes, _alias_norms = :aliases, _held_aliases = :ha, _held_keys = :hk`, "sql", {
+    ha: [...new Set([...(k._held_aliases ?? []), ...(d._held_aliases ?? [])])],
+    hk: [...new Set([...(k._held_keys ?? []), ...(d._held_keys ?? [])])],
     homes: [...new Set([...(k._homes ?? []), ...(d._homes ?? [])])],
     aliases: [...new Set([...(k._alias_norms ?? []), ...(d._alias_norms ?? []), d._norm, normalize(drop_name)].filter(Boolean))],
   });

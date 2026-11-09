@@ -25,7 +25,7 @@ changes.
 | `sharing.js` | 425 | grants: `grantCache`, `grantAccess`, `revokeGrant`, `listGrants`, share proposals and the shares waiting on a pending write, `findShareable` | Authority |
 | `requests.js` | 466 | needs: questions as entries, how they meet assertions, the asker's and the owners' sides | Queries |
 | `ingest.js` | 274 | documents: `requestIngest`, `ingestDocument`, `extractFacts`, `readDocument`, the document store handle | Condenser |
-| `linker.js` | 228 | `linkMentions`, `jobMentions`, `findThing`, `findEntry`, `thingNamed`, the ABOUT edge helpers | Admission and resolution |
+| `linker.js` | 228 | `linkMentions`, `jobMentions`, `findEntry`, `thingNamed`, the ABOUT edge helpers | Admission and resolution |
 | `worker-pool.js` | 518 | the job queue (`enqueue`, `workerTick`), the thread pool (`claimThreads`, `finishThread`, `resumeThread`), questions, the proposals list, `logChange`, `createTask`, the worker's settings and `workerStatus` | Reconciliation and data entry |
 | `worker-tools.js` | 579 | a worker thread's tools (`workerUpsert`, `workerLink`, `workerMerge`, …) and their MCP registration | Reconciliation and data entry |
 | `triage.js` | 136 | `intakeWithTriage`, `recordTriageOutcome`, `triageStats` | Reconciliation and data entry (it feeds the master's batches; the decision model itself is `decisions.js`) |

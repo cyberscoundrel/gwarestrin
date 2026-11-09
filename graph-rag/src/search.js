@@ -250,7 +250,7 @@ async function coveringAsOf(results, asOf, scope) {
   if (!edges.length) return results;
   // every claim on the subjects these hits bear on, so a later claim elsewhere closes an open one here
   const subjects = [...new Set(edges.map((e) => String(e.dst)).filter((x) => RID_RE.test(x)))].slice(0, 24);
-  const labels = new Map((await adbQuery(`SELECT @rid AS rid, label, _keys FROM [${subjects.join(",")}]`).catch(() => [])).map((t) => [String(t.rid), t]));
+  const labels = new Map((await adbQuery(`SELECT @rid AS rid, label, _keys FROM [${subjects.join(",")}] WHERE _kind = 'thing'${homeFilter(scope)}`).catch(() => [])).map((t) => [String(t.rid), t]));
   const claims = [];
   for (const s of subjects) {
     const t = labels.get(s);
@@ -295,12 +295,15 @@ export async function schemaGraph() {
   return { types: [], indexes };
 }
 
+/** the names a thing holds for restricted readers (linker.js, "home<TAB>value") this caller may see */
+const heldSeenBy = (list, scope) => (list ?? []).filter((e) => !scope?.homes || scope.homes.has(String(e).split("\t")[0])).map((e) => String(e).split("\t").slice(1).join("\t"));
+
 /** what we know about a thing: the statements about it the caller can see, and its current state (the latest claim per attribute) */
 export async function aboutThing({ name }, identity, scope) {
   const n = normalize(name);
   const visible = homeFilter(scope);
   const things = await adbQuery(
-    `SELECT @rid AS rid, label, _thing_type, _alias_norms, _keys, _class FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n OR _keys CONTAINS :raw)${visible} LIMIT 5`,
+    `SELECT @rid AS rid, label, _thing_type, _alias_norms, _keys, _class, _held_aliases, _held_keys FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n OR _keys CONTAINS :raw)${visible} LIMIT 5`,
     { n, raw: String(name).trim() },
   );
   if (things.length === 0) return { things: [], note: `nothing called "${name}" that you can see is known yet` };
@@ -325,8 +328,8 @@ export async function aboutThing({ name }, identity, scope) {
     out.push({
       name: t.label,
       type: t._thing_type,
-      also_called: t._alias_norms ?? [],
-      ...(t._keys?.length ? { keys: t._keys } : {}),
+      also_called: [...(t._alias_norms ?? []), ...heldSeenBy(t._held_aliases, scope)],
+      ...(t._keys?.length || heldSeenBy(t._held_keys, scope).length ? { keys: [...(t._keys ?? []), ...heldSeenBy(t._held_keys, scope)] } : {}),
       ...(t._class ? { class: t._class } : {}),
       // what holds now, from the claims the caller sees; stateAsOf (tools-queries.js) gives another date
       state: stateView(stateAt(claims, now)),

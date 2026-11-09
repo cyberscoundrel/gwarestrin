@@ -23,7 +23,7 @@ import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.
 import { chat } from "./models.js";
 import { recordReads } from "./floor.js";
 import { entriesByUser, positionMap, SCOPED } from "./scope.js";
-import { jobMentions, thingLookup } from "./linker.js";
+import { jobMentions, seenThing, thingLookup } from "./linker.js";
 import { resolveSubject } from "./resolve.js";
 import { recordTriageOutcome, triageStats } from "./triage.js";
 import { emitSignal, MASTER, masterStatus, openItems } from "./master-tools.js";
@@ -237,7 +237,11 @@ export async function resolveSubjectStub(subject, home) {
   if (!subject) return null;
   const classes = await confirmedClassesFor();
   const r = await resolveSubject(subject, { classes, lookup: thingLookup(home) }).catch(() => null);
-  if (r?.rid && r.how !== "none") return { rid: String(r.rid), label: r.thing?.label ?? r.thing?.name ?? subject.name ?? null, _thing_type: r.thing?._thing_type ?? null, _homes: r.thing?._homes ?? [] };
+  // (a key reaches a thing this home can't see: the caller gets its id, and nothing it would have to be able to see)
+  if (r?.rid && r.how !== "none") {
+    const hidden = !seenThing(r.thing ?? {}, home);
+    return { rid: String(r.rid), hidden, label: hidden ? null : (r.thing?.label ?? r.thing?.name ?? subject.name ?? null), _thing_type: hidden ? null : (r.thing?._thing_type ?? null), _homes: hidden ? [] : (r.thing?._homes ?? []) };
+  }
   if (r?.mint) return { mint: r.mint };
   return null;
 }
@@ -295,8 +299,9 @@ export async function sectionForBrief(rid) {
   const subjects = [];
   for (const c of claims) {
     if (c.resolved) {
-      const t = (await adbQuery(`SELECT label, _thing_type, _class, _keys FROM ${c.thing}`).catch(() => []))[0];
-      subjects.push({ claim: c.id, resolved: true, rid: c.thing, label: t?.label ?? null, type: t?._thing_type ?? null, class: t?._class ?? c.class, keys: Array.isArray(t?._keys) ? t._keys : [] });
+      const t = (await adbQuery(`SELECT label, _thing_type, _class, _keys, _homes FROM ${c.thing}`).catch(() => []))[0];
+      if (t && !seenThing(t, home)) subjects.push({ claim: c.id, resolved: true, rid: c.thing, label: null, type: null, class: c.class, keys: [], note: "this subject is homed where this section's people can't see it" });
+      else subjects.push({ claim: c.id, resolved: true, rid: c.thing, label: t?.label ?? null, type: t?._thing_type ?? null, class: t?._class ?? c.class, keys: Array.isArray(t?._keys) ? t._keys : [] });
     } else {
       subjects.push({ claim: c.id, resolved: false, written: c.subject });
     }

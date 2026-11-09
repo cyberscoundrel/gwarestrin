@@ -14,9 +14,9 @@
 import { z } from "zod";
 import { effectiveHome } from "./positions.js";
 import { normalize, THING_TYPES } from "./things.js";
-import { sameKey } from "./resolve.js";
+import { isRecordNumber, sameKey } from "./resolve.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
-import { aboutOnce, findThing, linkMentions, thingSeenFrom } from "./linker.js";
+import { aboutOnce, everyReaderSees, heldSeen, linkMentions, repointClaim, seenThing, teach, thingSeenFrom } from "./linker.js";
 import { positionMap } from "./scope.js";
 import { liftRefusal, workerWriteFloor } from "./floor.js";
 import { actsForOf, assertNotWaiting, claimById, claimsOnAttribute, logChange, PROPOSED_NOTE, raiseQuestion, resolveSubjectStub, unresolvedNames } from "./worker-pool.js";
@@ -46,8 +46,10 @@ async function needClaim(id) {
  */
 async function keyOf(claim) {
   if (!claim.resolved) return null;
-  const t = (await adbQuery(`SELECT label, _keys, _class FROM ${claim.thing}`).catch(() => []))[0];
-  const keys = (Array.isArray(t?._keys) ? t._keys : []).map((k) => parseKey(k)).filter(Boolean);
+  const row = (await adbQuery(`SELECT label, _keys, _class, _homes, _held_keys FROM ${claim.thing}`).catch(() => []))[0];
+  const home = await sectionHome(claim);
+  const t = row && !seenThing(row, home) ? { ...row, label: null } : row; // a thing homed where this section isn't seen: its label stays out of what's said here
+  const keys = [...(Array.isArray(t?._keys) ? t._keys : []), ...heldSeen(t?._held_keys, home)].map((k) => parseKey(k)).filter(Boolean);
   const cls = claim.class ? (await adbQuery("SELECT record_table FROM CommitmentClass WHERE name = :n AND status = 'confirmed' LIMIT 1", { n: claim.class }).catch(() => []))[0] : null;
   return { thing: t, keys, ...rowKeyFor({ subjectKey: claim.subject?.key ?? null, keys, recordTable: cls?.record_table ?? null }) };
 }
@@ -173,35 +175,29 @@ async function workerResolveSubject(args, identity) {
     const type = String(want.type).toLowerCase();
     if (!THING_TYPES.includes(type)) throw new Error(`type must be one of ${THING_TYPES.join(", ")}`);
     if (lift) throw new Error(liftRefusal(want.name, lift));
+    if (!key && isRecordNumber(want.name)) throw new Error(`"${want.name}" is a row's number: resolve it by its record key, or leave it as content of the claim`);
+    // a key only names an instance if the source has the row: anything else is refused, not stored
+    if (key) await assertRowExists(key);
     // the worker vouches for the name: the linker mints it (and links the section to it) under its admission rules
     const [r] = await linkMentions(sectionRid, [{ name: want.name, type, role: "subject", ...(key ? { key: key.key } : {}) }], floor, { unsure: "skip", create: true, seen_by: identity.user });
     if (!r || (!r.created && !r.linked)) throw new Error(`the linker made nothing of "${want.name}": ${r?.skipped ?? r?.unsure ?? "no reason given"}`);
-    thing = await findThing({ name: want.name, type, ...(key ? { key: key.key } : {}) });
-    if (!thing) throw new Error(`"${want.name}" was linked but can't be found as one thing: give its key`);
+    // the thing the linker just linked, by its id: never a second search by name, which can land on what this worker can't see
+    thing = { rid: r.thing, label: want.name, _thing_type: type };
     minted = Boolean(r.created);
     if (claim && minted) await adbCommand(`UPDATE ${thing.rid} SET _class = :c`, "sql", { c: claim.class }).catch(() => {});
   } else {
-    // an existing thing learns the key and the class it was resolved under, and is seen from here
-    const cur = (await adbQuery(`SELECT _keys, _class FROM ${thing.rid}`).catch(() => []))[0] ?? {};
-    const keys = Array.isArray(cur._keys) ? cur._keys : [];
+    // an existing thing learns the key and the class it was resolved under, and is seen from here (if it can be: thingSeenFrom)
+    const cur = (await adbQuery(`SELECT _keys, _held_keys, _class, _homes FROM ${thing.rid}`).catch(() => []))[0] ?? {};
+    const keys = [...(Array.isArray(cur._keys) ? cur._keys : []), ...(Array.isArray(cur._held_keys) ? cur._held_keys.map((k) => String(k).split("\t").pop()) : [])];
     if (key && !keys.some((x) => sameKey(x, key.key))) await assertRowExists(key);
-    await adbCommand(`UPDATE ${thing.rid} SET _keys = :k, _class = :c`, "sql", {
-      k: key && !keys.some((x) => sameKey(x, key.key)) ? [...keys, key.key].slice(-10) : keys,
-      c: cur._class ?? claim?.class ?? null,
-    }).catch(() => {});
+    if (key) await teach(thing.rid, { key: key.key }, floor, { seen_by: identity.user });
+    if (!cur._class && claim?.class && everyReaderSees(cur, floor)) await adbCommand(`UPDATE ${thing.rid} SET _class = :c`, "sql", { c: claim.class }).catch(() => {});
     await thingSeenFrom(String(thing.rid), floor).catch(() => {});
   }
   const rid = String(thing.rid);
   if (claim) {
     // the claim now points at its instance: the same edge properties, a new end
-    const props = (await adbQuery(`SELECT id, kind, class, attribute, value, value_num, valid_from, valid_until, recorded_at, recorded_by, closed_by, _home, subject FROM ${claim.edge}`))[0];
-    if (!props) throw new Error("the claim's edge is gone");
-    await adbCommand(`DELETE FROM ${claim.edge}`);
-    await adbCommand(
-      `CREATE EDGE CLAIMS FROM ${claim.section} TO ${rid} SET id = :id, kind = :kind, class = :cls, attribute = :attr, value = :value, value_num = :num, valid_from = :vf, valid_until = :vu, recorded_at = :ra, recorded_by = :rb, closed_by = :cb, _home = :home, subject = :subject`,
-      "sql",
-      { id: props.id, kind: props.kind, cls: props.class, attr: props.attribute, value: props.value, num: props.value_num ?? null, vf: props.valid_from, vu: props.valid_until ?? null, ra: props.recorded_at, rb: props.recorded_by, cb: props.closed_by ?? null, home: props._home ?? null, subject: JSON.stringify({ ...(claim.subject ?? {}), key: key?.key ?? claim.subject?.key ?? null, name: want.name }) },
-    );
+    await repointClaim(claim.edge, claim.section, rid, { subject: JSON.stringify({ ...(claim.subject ?? {}), key: key?.key ?? claim.subject?.key ?? null, name: want.name }) });
   } else {
     // the name is settled: it leaves the entry's unresolved list, and the entry is about the thing (as when the linker mints)
     const row = (await adbQuery(`SELECT _unresolved FROM ${sectionRid}`).catch(() => []))[0];
@@ -210,7 +206,8 @@ async function workerResolveSubject(args, identity) {
     const left = unresolved.filter((u) => normalize(u.name) !== normalize(args.name));
     await adbCommand(`UPDATE ${sectionRid} SET _unresolved = :u`, "sql", { u: left.length ? JSON.stringify(left) : null }).catch(() => {});
   }
-  await logChange(identity, { kind: "resolve", ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, label: thing.label, minted, ...(key ? { key: key.key } : {}), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  await logChange(identity, { kind: "resolve", ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, ...(thing.hidden ? {} : { label: thing.label }), minted, ...(key ? { key: key.key } : {}), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  if (thing.hidden) return { ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, minted, key: key.key, note: "Resolved to the instance holding this key. It is homed where this section's people can't see it, so nothing more of it is shown here." };
   return { ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, label: thing.label, type: thing._thing_type, minted, ...(key ? { key: key.key } : {}), note: minted ? `Made ${thing.label} (${thing._thing_type}) and resolved to it.` : `Resolved to the existing ${thing.label} (${thing._thing_type}).` };
 }
 

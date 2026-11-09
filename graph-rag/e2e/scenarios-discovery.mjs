@@ -6,6 +6,7 @@
 // them in). Each `run` is self-contained: it reaches graph-rag at GRAPH_URL
 // with the harness's tokens, like run.mjs does.
 import { createHmac, randomUUID } from "node:crypto";
+import { startRowSource } from "./scenarios-admission.mjs";
 
 const GRAPH = process.env.GRAPH_URL ?? "http://graph-rag:8000";
 const TOKENS = { admin: "e2e-admin", alice: "e2e-alice", bob: "e2e-bob" };
@@ -118,8 +119,14 @@ export const scenarios = [
         check(named.length >= 2 && named.every((t) => listed.has(t)), `the brief's tools (${named.join(", ")}) are all this worker's: ${[...listed].join(", ")}`);
         check(!/upsert_entities|link_things|relate_things|queue_followup/.test(me.message), "it names none of the old job's tools");
 
-        // step 2: a master-data row becomes a thing by key, the way the brief says
-        const seeded = await tool(token, "resolve_subject", { name: "E2ed Toro", thing: { name: "E2ed Toro", type: "customer", key: "mssql:dbo_E2edCustomer:E2EDTORO" }, reason: "survey: master data" });
+        // step 2: a master-data row becomes a thing by key, the way the brief says (the survey read the row from the source, so the source has it)
+        const source = await startRowSource({ sql: (query) => tool("admin", "query_graph", { query, language: "sql" }).then((r) => r.rows ?? []), tool, check }, { dbo_E2edCustomer: { primaryKey: ["Customer"], rows: [{ Customer: "E2EDTORO" }, { Customer: "E2EDOTHER" }] } });
+        let seeded;
+        try {
+          seeded = await tool(token, "resolve_subject", { name: "E2ed Toro", thing: { name: "E2ed Toro", type: "customer", key: "mssql:dbo_E2edCustomer:E2EDTORO" }, reason: "survey: master data" });
+        } finally {
+          await source.stop();
+        }
         check(seeded.minted && seeded.key === "mssql:dbo_E2edCustomer:E2EDTORO", `step 2 seeds a thing: ${JSON.stringify(seeded).slice(0, 300)}`);
         const thing = (await sql("SELECT _thing_type, _keys FROM Entity WHERE _kind = 'thing' AND _keys CONTAINS 'mssql:dbo_E2edCustomer:E2EDTORO'"))[0];
         check(thing?._thing_type === "customer", `the seeded thing has its type and key: ${JSON.stringify(thing)}`);

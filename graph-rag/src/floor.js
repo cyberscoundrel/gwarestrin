@@ -377,7 +377,7 @@ export async function regradeTick() {
       if (r._doc_id) await settleDocument(r._doc_id).catch((e) => log.warn(`document ${r._doc_id} not settled after grading: ${String(e).slice(0, 160)}`));
       if (p.home !== r.w.held) {
         const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
-        for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), p.home).catch(() => {});
+        for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), p.home, { from: r.w.held }).catch(() => {});
       }
       await askAboutPlacement(rid, r.name, p);
       log.info(`graded ${r.name} after waiting: ${homeName(positionMap, p.home)} (${p.note})`);
