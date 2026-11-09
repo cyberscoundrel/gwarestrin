@@ -58,10 +58,36 @@ export function helpers(env = process.env) {
     const body = Buffer.from(JSON.stringify({ u: "admin", a: randomUUID(), iat: Math.floor(Date.now() / 1000), ...claims })).toString("base64url");
     return `gwa1.${body}.${createHmac("sha256", "e2e-delegation-key-0123456789abcdef").update(`gwa1.${body}`).digest("base64url")}`;
   };
-  return { tool, sql, api, until, check, delegated, POS: { org: "org", ops: "ops", floor: "floor" } };
+  return { GRAPH, TOKENS, tool, sql, api, until, check, delegated, POS: { org: "org", ops: "ops", floor: "floor" } };
 }
 
-const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+/**
+ * Send a condensed document the way the agent does: through record_document when the integrator has wired
+ * it (the tool the harness also looks for), else through ingest_document with the document as JSON in text.
+ */
+async function sendRecord(ctx, who, document) {
+  const tools = await listTools(ctx, who);
+  const named = tools.find((n) => /condens|on_record|record_document/.test(n));
+  if (named) return ctx.tool(who, named, { document });
+  return ctx.tool(who, "ingest_document", ingestArgs(document));
+}
+
+async function listTools(ctx, who) {
+  const GRAPH = ctx.GRAPH ?? process.env.GRAPH_URL ?? "http://graph-rag:8000";
+  const token = ctx.TOKENS?.[who] ?? who;
+  const r = await fetch(`${GRAPH}/mcp`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+  });
+  const t = await r.text();
+  const line = t.split("\n").find((l) => l.startsWith("data:"));
+  try {
+    return (JSON.parse(line ? line.slice(5) : t).result?.tools ?? []).map((x) => x.name);
+  } catch {
+    return [];
+  }
+}
 
 export const scenarios = [
   {
@@ -98,7 +124,7 @@ export const scenarios = [
 
       const doc = documentFor("operations handover");
       check(doc && doc.sections.length === 3, "the fake condenser's document has three sections");
-      const sent = await tool(opsAgent, "ingest_document", ingestArgs(doc));
+      const sent = await sendRecord(ctx, opsAgent, doc);
       check(sent.doc_id && sent.on_record === true, `recorded: ${JSON.stringify(sent).slice(0, 300)}`);
       check(sent.sections === 3 && sent.claims === 4, `three sections and four claims announced: ${JSON.stringify(sent).slice(0, 200)}`);
       check(/3 confirmed classes/.test(sent.classes ?? ""), `checked against the confirmed classes: ${sent.classes}`);
@@ -166,12 +192,12 @@ export const scenarios = [
       const doc = documentFor("unconfirmed class");
       const count = async () => Number((await sql("SELECT count(*) AS n FROM Entity WHERE name = 'e2e-cond Aetrium quote'"))[0]?.n ?? 0);
       const before = await count();
-      const r = await tool(ctx.delegated({ p: [ctx.POS.ops] }), "ingest_document", ingestArgs(doc));
+      const r = await sendRecord(ctx, ctx.delegated({ p: [ctx.POS.ops] }), doc);
       check(/sections\[0\]\.claims\[0\]\.(subject\.)?class: not a confirmed class: quotes/.test(r.error ?? JSON.stringify(r)), `refused by field: ${JSON.stringify(r).slice(0, 300)}`);
       check((await count()) === before, "nothing stored");
       // without the claim the section still goes on record (decision 2: the text, no claim, graded as usual)
       doc.sections[0].claims = [];
-      const ok = await tool(ctx.delegated({ p: [ctx.POS.ops] }), "ingest_document", ingestArgs(doc));
+      const ok = await sendRecord(ctx, ctx.delegated({ p: [ctx.POS.ops] }), doc);
       check(ok.on_record === true && ok.claims === 0 && ok.sections === 1, `recorded without a claim: ${JSON.stringify(ok).slice(0, 200)}`);
     },
   },

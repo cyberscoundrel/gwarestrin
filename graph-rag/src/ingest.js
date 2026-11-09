@@ -18,6 +18,11 @@ import { chat, embedBatch } from "./models.js";
 import { homeFilter, personOf, positionMap, resolveWriteHome, writerOf } from "./scope.js";
 import { derivedFloor, recordReads } from "./floor.js";
 import { queueWrite, upsertEntities } from "./write.js";
+// the Authority stream's exports, once merged (docs/ORGANIZATION-MODEL.md; MAP.md): decideWrite in write.js
+// decides a record's write by its claims' authority, placeByClaims in placement.js homes an entity by the
+// claims it carries. Read through namespaces so this module runs on main as it is and takes them when present.
+import * as writeRules from "./write.js";
+import * as placementRules from "./placement.js";
 import { policy } from "./org-policy.js";
 import { findThing } from "./linker.js";
 import { normalize, thingName } from "./things.js";
@@ -96,9 +101,12 @@ async function ingestDocument(p) {
   const docHome = effectiveHome(positionMap, doc._home);
   // a condensed document's sections with claims are not the grader's to judge (the grader runs only on
   // text that maps to no class): they are written where their claims put them; the rest go the usual way
-  const claimed = new Set(p.record ? p.record.sections.filter((sec) => (sec.claims ?? []).length > 0).map((sec) => sec.index) : []);
-  for (const c of chunks) if (claimed.has(c.index)) await writeClaimedSection(p, c, docHome, vu);
-  const graded = chunks.filter((c) => !claimed.has(c.index));
+  const claimsOfSection = new Map(p.record ? p.record.sections.filter((sec) => (sec.claims ?? []).length > 0).map((sec) => [sec.index, sec.claims]) : []);
+  // with the Authority stream's placement, an entity carrying `claims` is homed by them inside upsertEntities
+  // (never graded, _claim_classes and _authority stored); until then this module writes them itself
+  const byClaims = typeof placementRules.placeByClaims === "function";
+  if (!byClaims) for (const c of chunks) if (claimsOfSection.has(c.index)) await writeClaimedSection(p, c, docHome, vu);
+  const graded = byClaims ? chunks : chunks.filter((c) => !claimsOfSection.has(c.index));
   for (let i = 0; i < graded.length; i += 32) {
     await upsertEntities({
       entities: graded.slice(i, i + 32).map((c) => ({
@@ -107,6 +115,7 @@ async function ingestDocument(p) {
         _embed: { identity: c.embedText },
         ...(c.heading ? { properties: { heading: c.heading } } : {}),
         ...(vu ? { valid_until: vu } : {}),
+        ...(byClaims && claimsOfSection.has(c.index) ? { claims: claimsOfSection.get(c.index) } : {}),
         _system: { _kind: "section", _doc_id: p.doc_id, _doc_title: p.title, _section: c.index },
       })),
       home: p.home,
@@ -170,8 +179,11 @@ async function writeClaimedSection(p, c, home, vu) {
   else await adbCommand(`CREATE VERTEX ${ENTITY_LABEL} SET name = :s_name, _origin = :s_origin, ${set}`, "sql", params);
 }
 
-/** the policy's authority map (classes and attributes to positions), once the Authority stream stores one; null until then */
-const authorityPolicy = () => (policy && (policy.classes || policy.attributes || policy.default) ? { classes: policy.classes ?? {}, attributes: policy.attributes ?? {}, default: policy.default } : null);
+/** the policy's authority map (classes and attributes to positions; policy.authorityMap once the Authority stream stores one); null until then */
+const authorityPolicy = () => {
+  const m = policy?.authorityMap ?? (policy && (policy.classes || policy.attributes || policy.default) ? { classes: policy.classes ?? {}, attributes: policy.attributes ?? {}, default: policy.default } : null);
+  return m && (Object.keys(m.classes ?? {}).length || Object.keys(m.attributes ?? {}).length || m.default) ? m : null;
+};
 
 /** an actor's thing type, or "other" for an instance (its class says what it is) */
 const subjectType = (subject) => (subject.actor && ["person", "customer", "supplier"].includes(subject.actor) ? subject.actor : "other");
@@ -396,14 +408,19 @@ export async function recordDocument(raw, identity, scope, { title, description,
   if (spans.length > MAX_SECTIONS) throw new Error(`documents are limited to ${MAX_SECTIONS} sections (this one has ${spans.length})`);
   const v = parseValidUntil(valid_until, now);
   const doc_id = randomUUID();
-  const claims = document.sections.reduce((a, s) => a + s.claims.length, 0);
+  const allClaims = document.sections.flatMap((s) => s.claims);
+  const claims = allClaims.length;
+  // the write-or-propose decision: the Authority stream's one rule over the claims' classes when it is
+  // merged (a record whose claims lie with a higher authority is proposed there), today's site rule until then
+  const decision = typeof writeRules.decideWrite === "function" ? writeRules.decideWrite(identity, { kind: "ingest", claims: allClaims }, { origin: home }) : null;
+  const queued = decision ? decision.action !== "direct" : identity.caps.write === "queued";
   const payload = {
     doc_id,
     title: document.title,
     description: (document.description ?? `${document.title}, put on record by ${document.recorded_by}`).slice(0, 500),
     extract: false,
     home,
-    floor: derivedFloor(identity, home),
+    floor: decision?.floor ?? derivedFloor(identity, home),
     written_at: document.recorded_at,
     ...(v ? { valid_until: v.valid_until ?? "lasting" } : {}),
     chars: text.length,
@@ -414,9 +431,18 @@ export async function recordDocument(raw, identity, scope, { title, description,
   };
   await docStore.put(doc_id, text, { title: payload.title, by: identity.user, at: payload.written_at, on_record: true, sections: spans });
   const checked = classes ? { classes: `checked against ${classes.length} confirmed class${classes.length === 1 ? "" : "es"}` } : { classes: "no confirmed classes in the graph yet: class names unchecked" };
-  if (identity.caps.write === "queued") {
-    const q = await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home });
-    return { ...q, doc_id, on_record: true, sections: spans.length, claims, ...checked, note: "the record is stored; it's added to the knowledge graph once the ingest is approved" };
+  if (queued) {
+    const q = await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home: decision?.home ?? home });
+    return {
+      ...q,
+      doc_id,
+      on_record: true,
+      sections: spans.length,
+      claims,
+      ...checked,
+      ...(decision?.reason ? { reason: decision.reason } : {}),
+      note: "the record is stored; it's added to the knowledge graph once the ingest is approved",
+    };
   }
   void startIngest(payload);
   return { ingesting: true, doc_id, on_record: true, sections: spans.length, claims, ...checked, note: "sections are being graded and embedded and the claims written; search finds them in a minute or two" };
