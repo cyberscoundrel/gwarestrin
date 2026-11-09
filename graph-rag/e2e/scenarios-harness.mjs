@@ -12,7 +12,7 @@
 // path. The policy is test/fixtures/policy-oracle.json, written by hand;
 // nothing here computes a rule from the expected placements.
 import { readFileSync } from "node:fs";
-import { authorityOf } from "../src/model/authority.js";
+import { claimsSettle } from "../src/placement.js";
 import { normalizeDocument } from "../src/model/claims.js";
 import { statements } from "../src/model/schema.js";
 import { sectionName } from "../src/documents.js";
@@ -136,17 +136,28 @@ export default [
         const accepted = batch.conversations.filter((c) => !refused.has(c.id));
         const finished = async () => (await ctx.sql(`SELECT count(*) AS n FROM Entity WHERE _kind = 'document' AND _doc_status IN ['ready', 'failed'] AND name IN [${accepted.map((c) => `'${q(c.expected.document.title)}'`).join(", ")}]`))[0]?.n >= accepted.length;
         await ctx.until("every accepted record has finished ingesting", finished, 420_000).catch((e) => failures.push(String(e.message ?? e)));
-        const result = bar(batch, await collectRows(batch, ctx.sql));
+        const rows = await collectRows(batch, ctx.sql);
+        const result = bar(batch, rows);
 
-        // the grader judges the residue only: never a section whose claims a rule covers, always one with no claims
+        // the grader judges what no rule settles: always a section with no claims, never one whose claims settle it
+        // (placement.js claimsSettle, over the text the grader would have been shown, as stored)
         const graded = new Set((await (await fetch(`${ctx.MODELS}/__graded`)).json()).graded);
+        const wanted = expectedClaims(batch);
         for (const c of accepted)
           for (const [i, s] of c.expected.document.sections.entries()) {
             const name = sectionName(c.expected.document.title, i, s.heading);
-            const claims = s.claims ?? [];
+            const claims = (s.claims ?? []).map((cl) => wanted.get(cl.id));
+            const stored = rows.sections.find((x) => x.name === name);
             if (!claims.length && !graded.has(name)) failures.push(`${c.note}: "${name}" has no claims and the grader never saw it`);
-            if (claims.length && claims.every((cl) => authorityOf(authorityMap, cl.class, cl.attribute)) && graded.has(name)) failures.push(`${c.note}: "${name}" is covered by the policy and the grader was asked about it`);
+            if (claims.length && stored && claimsSettle({ claims, facets: { identity: stored.text } }, authorityMap) && graded.has(name)) failures.push(`${c.note}: "${name}" is settled by its claims and the grader was asked about it`);
           }
+
+        // decision 3 is a read: ad15 changes what ac13 said a rack holds, so a reader sees ac13's claim closed where ad15's starts
+        const history = await ctx.tool("admin", "state_history", { subject: "rack C1", attribute: "holds" });
+        const steps = history.things?.[0]?.history ?? [];
+        const ad15 = batch.conversations.find((c) => c.note === "ux-ad15");
+        const titanium = steps.find((h) => h.value === "titanium");
+        if (!titanium || Date.parse(titanium.valid_until) !== Date.parse(ad15.recorded_at)) failures.push(`ux-ad15: the rack's earlier claim is not closed where this one starts: ${JSON.stringify(history).slice(0, 300)}`);
 
         // the report: every failing note and why, so a red run names them all
         for (const [note, list] of failingNotes(batch, result)) console.log(`  BAR ${note}\n${list.map((f) => `      ${f}`).join("\n")}`);

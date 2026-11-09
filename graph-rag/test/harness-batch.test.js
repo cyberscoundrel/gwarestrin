@@ -298,7 +298,7 @@ test("the batch's expected claims are the oracle's, field by field, and every da
   assert.equal(wanted.get("ux-m01#2").valid_until, m01.recorded_at, "so does the end");
 });
 
-test("expectedClaims applies decision 3: a later claim on the same attribute of the same subject closes the open one", () => {
+test("expectedClaims keeps each claim's own interval: decision 3 closes at read time, so a later claim on the attribute changes no stored row", () => {
   const one = structuredClone(fixture.conversations.find((c) => c.note === "ux-t03"));
   const two = structuredClone(one);
   two.id = "conv-later";
@@ -308,7 +308,7 @@ test("expectedClaims applies decision 3: a later claim on the same attribute of 
   two.expected.document.sections[0].claims[0].id = "later#0";
   two.expected.placements[0].id = "later#0";
   const wanted = expectedClaims({ ...fixture, conversations: [one, two] });
-  assert.equal(wanted.get("ux-t03#0").valid_until, two.recorded_at);
+  assert.equal(wanted.get("ux-t03#0").valid_until, null);
   assert.equal(wanted.get("later#0").valid_until, null);
 });
 

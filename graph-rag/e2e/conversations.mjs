@@ -8,7 +8,7 @@
 // scripts/batch-bar.mjs, e2e/scenarios-harness.mjs and test/harness-batch.test.js.
 // The batch file's shape is documented in test/fixtures/conversations/README.md.
 import { claimHome } from "../src/model/authority.js";
-import { claimsOf, closeIntervals, normalizeDocument, normalizeName } from "../src/model/claims.js";
+import { claimsOf, normalizeDocument, normalizeName } from "../src/model/claims.js";
 import { ancestors, commonAncestor, parsePositionMap } from "../src/positions.js";
 
 export const BATCH_SHAPE = 1;
@@ -287,12 +287,13 @@ export const PREVIEW_CHARS = 380;
 /**
  * What every claim of a batch must say once it has landed, by claim id: the
  * expected document as the contract normalizes it (relative dates resolved
- * against the recording), with decision 3 applied over the whole batch (a
- * later claim on the same attribute of the same subject closes the open one).
+ * against the recording). A stored claim keeps its own interval: decision 3
+ * closes intervals at read time, per reader (state.js), and no write touches
+ * an earlier claim.
  */
 export function expectedClaims(batch) {
   const all = batch.conversations.flatMap((c) => claimsOf(normalizeDocument(c.expected.document, { now: c.recorded_at })));
-  return new Map(closeIntervals(all).map((cl) => [cl.id, cl]));
+  return new Map(all.map((cl) => [cl.id, cl]));
 }
 
 /** the same instant, however the store writes it; both absent counts as the same */
