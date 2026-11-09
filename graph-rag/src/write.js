@@ -33,9 +33,10 @@ import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, work
  *
  *   decideWrite(identity, { kind, cls, attribute, claims, lives }, ctx)
  *     kind       upsert | rehome | grant | merge | fold | delete_entry | typed_update | command | ingest | backfill | data_entry
- *                (any other kind takes the class rule, queuing and ctx.propose alone: data_entry, a write to a
- *                source system, is decided by authority over its class, with no derived-floor lift, since it
- *                writes no graph content; the lift applies to upsert, typed_update and ingest only)
+ *                (any other kind takes the class rule, queuing and ctx.propose alone. data_entry is decided here
+ *                for the person the agent acts for, whose reads aren't the agent's: the agent's floor bounds what
+ *                reaches a source system just as it bounds the graph, and worker-tools.js applies it to enter_data.
+ *                The lift below applies to upsert, typed_update and ingest only)
  *     cls, attribute   the commitment class and attribute the write bears on (null: residue, no class)
  *     claims     instead of one class: the claims the write carries (the strictest decides)
  *     lives      where the entry lives (its home) for a write to an existing entry; undefined for a new one
