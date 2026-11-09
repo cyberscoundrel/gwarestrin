@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fakeDb, storing } from "./audit.test.js";
-import { applyProposedEntry, authorityPolicy, columnFor, confirmAgainstRow, DAB_CALLS, decideWrite, describeEntry, enterData, forgetAuthorityPolicy, forgetSources, keyColumnFrom, mcpToolCall, odata, rowsOf, sameValue, sourceClient, sourcesConfig } from "../src/data-entry.js";
+import { applyProposedEntry, authorityMapFor, authorityPolicy, columnFor, confirmAgainstRow, DAB_CALLS, decideWrite, describeEntry, enterData, forgetAuthorityPolicy, forgetSources, keyColumnFrom, mcpToolCall, odata, rowsOf, sameValue, sourceClient, sourcesConfig } from "../src/data-entry.js";
 import { parsePositionMap } from "../src/positions.js";
 
 const read = (f) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8"));
@@ -117,6 +117,9 @@ test("the authority rule, stubbed over the stored policy: direct at or above the
   assert.equal(await decideWrite(bob, "orders", "quantity", { positions: map, db }), "propose");
   assert.equal(await decideWrite(bob, "orders", "price", { positions: map, db }), "propose");
   assert.equal(await decideWrite(admin, "orders", "price", { positions: map, db }), "direct");
+  // the map the rule runs over: the one given, else the stored row (the live policy has no rule in a test)
+  assert.deepEqual(await authorityMapFor({ policy: { classes: { x: { authority: "ops" } }, attributes: {} }, positions: map, db }), { classes: { x: { authority: "ops" } }, attributes: {} });
+  assert.equal((await authorityMapFor({ positions: map, db })).classes.orders.authority, "ops");
   // no stored policy: no rule, the writer's own position holds it
   forgetAuthorityPolicy();
   assert.equal(await decideWrite(bob, "orders", "price", { positions: map, db: fakeDb() }), "direct");

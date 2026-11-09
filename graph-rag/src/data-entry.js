@@ -255,30 +255,44 @@ export async function authorityPolicy(db = realDb, { positions, ttlMs = 60_000, 
 
 export const forgetAuthorityPolicy = () => Object.assign(authorityCache, { at: 0, value: null });
 
+/** an authority map with at least one rule in it */
+const hasRules = (m) => Boolean(m && typeof m === "object" && (Object.keys(m.classes ?? {}).length || Object.keys(m.attributes ?? {}).length));
+
+/**
+ * The authority map a decision runs over: the one given; else the organization policy's `authorityMap`
+ * (org-policy.js, where the Authority stream keeps it) when it has a rule; else the stored OrgPolicy
+ * "authority" row (authorityPolicy: this stream's stub, and what tests stub).
+ */
+export async function authorityMapFor({ policy, positions, db = realDb } = {}) {
+  if (policy) return policy;
+  const live = await import("./org-policy.js").then((m) => m.policy?.authorityMap ?? null).catch(() => null);
+  if (hasRules(live)) return live;
+  return authorityPolicy(db, { positions });
+}
+
 /**
  * The one write-or-propose decision: (identity, class, attribute) -> direct | propose | hidden, for
- * `identity` = { positions, caps } of the person the agent acts for. When the Authority stream's
- * `decideWrite` is in write.js it decides (called as it documents itself:
- * decideWrite(identity, { kind: "data_entry", cls, attribute }, { policy, positions }).action, over the
- * organization policy's `authorityMap`); until then the contract's `authority.decide` runs here over the
- * policy's `authorityMap` when it has one, else the stored OrgPolicy "authority" row (authorityPolicy).
+ * `identity` = { positions, caps } of the person the agent acts for. The map is resolved first
+ * (authorityMapFor) and the Authority stream's `decideWrite` in write.js decides over it when that
+ * export exists (called as it documents itself: decideWrite(identity, { kind: "data_entry", cls,
+ * attribute }, { positions, policy }).action, pure with both given); without it the contract's
+ * `authority.decide` runs here over the same map. One rule, one map, in tests and at run time alike.
  */
 export async function decideWrite(identity, cls, attribute, { policy, positions, db = realDb } = {}) {
   positions ??= await livePositions();
   if (!positions) return "propose";
+  const map = await authorityMapFor({ policy, positions, db });
   const w = await liveQueue().catch(() => null);
-  if (typeof w?.decideWrite === "function" && !policy) {
+  if (typeof w?.decideWrite === "function") {
     try {
-      const r = w.decideWrite(identity, { kind: "data_entry", cls, attribute }, { positions });
+      const r = w.decideWrite(identity, { kind: "data_entry", cls, attribute }, { positions, policy: map });
       const action = r && typeof r === "object" ? r.action : r;
       if (["direct", "propose", "hidden"].includes(action)) return action;
     } catch (e) {
       log.warn(`decideWrite (write.js) failed, deciding from the contract: ${String(e?.message ?? e).slice(0, 120)}`);
     }
   }
-  const live = policy ? null : await import("./org-policy.js").then((m) => m.policy?.authorityMap ?? null).catch(() => null);
-  const p = policy ?? live ?? (await authorityPolicy(db, { positions }));
-  return decide(identity, cls, attribute, p, positions);
+  return decide(identity, cls, attribute, map, positions);
 }
 
 /** ---- the entry itself ---- */
