@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { mentions, residue } from "../e2e/fake-models.mjs";
 import { keysInText, mentionsPrompt, ngrams, parseMentions, parseResidue, residuePrompt, splitThingName, THING_TYPES, thingName } from "../src/things.js";
 
 const CLASSES = JSON.parse(readFileSync(new URL("./fixtures/classes.json", import.meta.url), "utf8"));
@@ -50,7 +51,7 @@ test("mentions: a candidate by number, a class with its key, an actor; a type is
     ],
   });
   assert.deepEqual(parseMentions(`ok: ${text}`, 8, { candidates: CANDIDATES }), [
-    { name: "Diep", type: "person", role: "operator", key: "mssql:dbo_Employee:NGUD", candidate: "#1:1" },
+    { name: "Diep", type: "person", role: "operator", candidate: "#1:1", picked_name: "Diep Nguyen" }, // a pick is not a key
     { name: "CNC 5", type: "machine", role: "machine", candidate: "#1:2" },
     { name: "job 4471", type: null, role: "subject", key: "mssql:dbo_Job:4471", class: "jobs" },
     { name: "Corvane Medical", type: "customer", role: "customer", actor: "customer" },
@@ -63,6 +64,29 @@ test("mentions: a candidate by number, a class with its key, an actor; a type is
   assert.ok(!THING_TYPES.includes("other"));
   // a worker's link_things goes through the same parser: its type stays a hint, its key is kept
   assert.deepEqual(parseMentions(JSON.stringify({ things: [{ name: "Toro Plating Co", type: "customer", key: "mssql:dbo_Customer:TORO" }, { name: "Toro", type: "customer", key: "mssql:dbo_Customer:TORO" }] })), [{ name: "Toro Plating Co", type: "customer", role: "mentions", key: "mssql:dbo_Customer:TORO" }], "one key, one thing");
+});
+
+test("same-named people: the prompt tells the model to give no number, and a number it gives anyway carries no key", () => {
+  const [sys] = mentionsPrompt({ name: "x", facets: { identity: "Diep is running CNC 5." } }, "", { classes: CLASSES, candidates: CANDIDATES });
+  assert.match(sys.content, /several people share the name the statement uses, do not choose between them/, "the abstain rule (B16)");
+  assert.match(sys.content, /PO number[^.]*is content, not a thing/, "the PO rule (B17)");
+  assert.doesNotMatch(sys.content, /PO 4471/, "no invitation to make a PO a record");
+  const [picked] = parseMentions(JSON.stringify({ things: [{ name: "Diep", role: "operator", candidate: 1 }] }), 8, { candidates: CANDIDATES });
+  assert.equal(picked.candidate, "#1:1");
+  assert.equal(picked.key, undefined, "picking from the list hands over no key: a key would settle it (B16)");
+});
+
+test("the harness's fake can answer as a model that picks and composes keys: a scenario's name is only as good as this", () => {
+  const user = (content) => [{ role: "user", content }];
+  const text = "x [things: PO 78912/order/key=mssql|dbo_Order|78912/class=orders, Diep/person/1, HILL/supplier]";
+  assert.deepEqual(JSON.parse(mentions(user(text))).things, [
+    { name: "PO 78912", type: "order", role: "mentions", key: "mssql:dbo_Order:78912", class: "orders" },
+    { name: "Diep", type: "person", role: "mentions", candidate: 1 },
+    { name: "HILL", type: "supplier", role: "mentions" },
+  ]);
+  assert.deepEqual(keysInText(text), [], "the tag itself is no key written in the statement");
+  const asked = 'Zelda took over. [pick: Zelda=ZK2]\n\n"Zelda" could be:\n  #1:1: Zelda (person) [mssql:dbo_Employee:ZK1]\n  #1:2: Zelda (person) [mssql:dbo_Employee:ZK2]';
+  assert.deepEqual(JSON.parse(residue(user(asked))).picks, [{ name: "Zelda", candidate: "#1:2" }]);
 });
 
 test("record keys written in a text resolve without a model", () => {

@@ -24,8 +24,8 @@ import { queueWrite, upsertEntities } from "./write.js";
 import * as writeRules from "./write.js";
 import * as placementRules from "./placement.js";
 import { policy } from "./org-policy.js";
-import { findThing } from "./linker.js";
-import { normalize, thingName } from "./things.js";
+import { recordSubject } from "./linker.js";
+import { normalize } from "./things.js";
 
 /** ---- documents (see documents.js and docstore.js) ---- */
 
@@ -209,45 +209,16 @@ const authorityPolicy = () => {
   return m && (Object.keys(m.classes ?? {}).length || Object.keys(m.attributes ?? {}).length || m.default) ? m : null;
 };
 
-/** an actor's thing type, or "other" for an instance (its class says what it is) */
-const subjectType = (subject) => (subject.actor && ["person", "customer", "supplier"].includes(subject.actor) ? subject.actor : "other");
-
 /**
- * The thing a claim is about: found by its record key, else by name (a thing of any type when exactly one
- * goes by it); made when there is none. A subject earns its node (admission rule 1: an identity that
- * outlives any one document) and is minted here by a person's record, with its class and key, so the
- * worker finds it by key when it reconciles. A class subject (scope "class") is the class's own thing.
+ * The thing a claim is about, or null when it has none (linker.js `recordSubject`: resolved as any mention
+ * is, minted only when admission says the subject earned a node). Per record, once per subject: the same
+ * name under two classes is two subjects.
  */
-async function subjectThing(subject, home, cache) {
-  const id = subject.key ? `key|${subject.key}` : `${subject.scope === "class" ? "class" : subject.class ?? subject.actor}|${normalize(subject.name ?? subject.class)}`;
+async function subjectThing(subject, home, cache, { kind } = {}) {
+  const id = subject.key ? `key|${subject.key.toLowerCase()}` : `${subject.scope === "class" ? "class|" : ""}${subject.class ?? ""}|${subject.actor ?? ""}|${normalize(subject.name ?? "")}`;
   if (cache.has(id)) return cache.get(id);
-  const name = subject.scope === "class" ? subject.name ? `${subject.class} (${subject.name})` : subject.class : subject.name ?? subject.key;
-  const type = subjectType(subject);
-  let found = await findThing({ ...(subject.key ? { key: subject.key } : {}), name, type }).catch(() => null);
-  if (!found && subject.key) found = await findThing({ key: subject.key, name }).catch(() => null);
-  if (!found) found = await findThing({ name }).catch(() => null);
-  let rid = found ? String(found.rid) : null;
-  if (rid && subject.key) {
-    const cur = (await adbQuery(`SELECT _keys, _class FROM ${rid}`))[0] ?? {};
-    const keys = cur._keys ?? [];
-    if (!keys.includes(subject.key)) await adbCommand(`UPDATE ${rid} SET _keys = :t_keys`, "sql", { t_keys: [...keys, subject.key].slice(-10) }).catch(() => {});
-    if (!cur._class && subject.class) await adbCommand(`UPDATE ${rid} SET _class = :t_class`, "sql", { t_class: subject.class }).catch(() => {});
-  }
-  if (!rid) {
-    const n = normalize(name);
-    const vec = (await embedBatch([`${type}: ${name}`]).catch(() => [null]))[0];
-    await adbCommand(
-      `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :label, _kind = 'thing', _thing_type = :t, _norm = :n, _alias_norms = :aliases, _keys = :keys, _homes = :homes, _home = :root${subject.class ? ", _class = :cls" : ""}${vec ? `, embed_thing = [${vec.join(",")}]` : ""}, updated_at = :now`,
-      "sql",
-      { name: thingName(type, name), label: name, t: type, n, aliases: [], keys: subject.key ? [subject.key] : [], homes: [home], root: positionMap?.root ?? home, cls: subject.class, now: new Date().toISOString() },
-    );
-    rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND _norm = :n ORDER BY @rid DESC LIMIT 1`, { t: type, n }))[0]?.rid);
-  } else {
-    // seen from this record's home too
-    const homes = (await adbQuery(`SELECT _homes FROM ${rid}`))[0]?._homes ?? [];
-    if (!homes.includes(home)) await adbCommand(`UPDATE ${rid} SET _homes = :t_homes`, "sql", { t_homes: [...homes, home] }).catch(() => {});
-  }
-  if (!RID_RE.test(rid)) throw new Error(`no thing for the subject ${name}`);
+  const rid = await recordSubject(subject, home, { kind });
+  if (rid && !RID_RE.test(String(rid))) throw new Error(`no thing for the subject ${subject.name ?? subject.key}`);
   cache.set(id, rid);
   return rid;
 }
@@ -286,12 +257,13 @@ async function recordClaims(p, sections) {
           s.home = raised;
         }
       }
-      const thing = await subjectThing(c.subject, home, thingsFor(home));
+      // no thing: the claim points back at its section with its subject as written, the shape worker-pool.js reads as unresolved
+      const thing = await subjectThing(c.subject, home, thingsFor(home), c);
       const id = c.id ?? stableUuid("claim", p.doc_id, section.index, j);
       if (!written.has(id)) await adbCommand(
-        `CREATE EDGE CLAIMS FROM ${s.rid} TO ${thing} SET id = :c_id, kind = :c_kind, class = :c_class, attribute = :c_attribute, value = :c_value${c.value_num === null || c.value_num === undefined ? "" : ", value_num = :c_num"}, valid_from = :c_from${c.valid_until ? ", valid_until = :c_until" : ""}, recorded_at = :c_at, recorded_by = :c_by, _home = :c_home`,
+        `CREATE EDGE CLAIMS FROM ${s.rid} TO ${thing ?? s.rid} SET id = :c_id, kind = :c_kind, class = :c_class, attribute = :c_attribute, value = :c_value${c.value_num === null || c.value_num === undefined ? "" : ", value_num = :c_num"}, valid_from = :c_from${c.valid_until ? ", valid_until = :c_until" : ""}, recorded_at = :c_at, recorded_by = :c_by, _home = :c_home${thing ? "" : ", subject = :c_subject, subject_norm = :c_norm"}`,
         "sql",
-        { c_id: id, c_kind: c.kind, c_class: c.class, c_attribute: c.attribute, c_value: c.value, c_num: c.value_num, c_from: c.valid_from, c_until: c.valid_until, c_at: c.recorded_at, c_by: c.recorded_by, c_home: home },
+        { c_id: id, c_kind: c.kind, c_class: c.class, c_attribute: c.attribute, c_value: c.value, c_num: c.value_num, c_from: c.valid_from, c_until: c.valid_until, c_at: c.recorded_at, c_by: c.recorded_by, c_home: home, c_subject: JSON.stringify(c.subject), c_norm: normalize(c.subject.name ?? "") },
       );
       // no write closes an earlier claim: decision 3 is applied per reader at read time (state.js), over
       // only the claims that reader sees, so a claim above someone can't end what they see

@@ -14,6 +14,7 @@
 import { z } from "zod";
 import { effectiveHome } from "./positions.js";
 import { normalize, THING_TYPES } from "./things.js";
+import { sameKey } from "./resolve.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { aboutOnce, findThing, linkMentions, thingSeenFrom } from "./linker.js";
 import { positionMap } from "./scope.js";
@@ -147,7 +148,7 @@ async function workerResolveSubject(args, identity) {
   if (want.key && !key) throw new Error(`not a record key (system:table:row): ${want.key}`);
   const home = claim ? await sectionHome(claim) : effectiveHome(positionMap, (await adbQuery(`SELECT _home FROM ${sectionRid}`).catch(() => []))[0]?._home);
   const { lift, floor } = workerWriteFloor(identity, home);
-  let thing = await resolveSubjectStub({ key: key?.key ?? null, name: want.name });
+  let thing = await resolveSubjectStub({ key: key?.key ?? null, name: want.name }, floor);
   let minted = false;
   if (thing?.mint) {
     // the resolver found no instance for the key and says what to make: the key is an identity, so it resolves
@@ -172,7 +173,7 @@ async function workerResolveSubject(args, identity) {
     const cur = (await adbQuery(`SELECT _keys, _class FROM ${thing.rid}`).catch(() => []))[0] ?? {};
     const keys = Array.isArray(cur._keys) ? cur._keys : [];
     await adbCommand(`UPDATE ${thing.rid} SET _keys = :k, _class = :c`, "sql", {
-      k: key && !keys.includes(key.key) ? [...keys, key.key].slice(-10) : keys,
+      k: key && !keys.some((x) => sameKey(x, key.key)) ? [...keys, key.key].slice(-10) : keys,
       c: cur._class ?? claim?.class ?? null,
     }).catch(() => {});
     await thingSeenFrom(String(thing.rid), floor).catch(() => {});
