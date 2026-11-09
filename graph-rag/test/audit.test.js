@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { auditEvent, ensureAuditSchema, listAuditEvents, recordAuditEvent, settleAuditEvent, sourceRef } from "../src/audit.js";
+import { auditEvent, ensureAuditSchema, ensureSourceRef, listAuditEvents, recordAuditEvent, referTo, settleAuditEvent, sourceRef } from "../src/audit.js";
+
+// SourceRef rows are written by the Admission stream's sourceref.js; a checkout without it skips what stores them
+export const storing = await import("../src/sourceref.js").then(() => false, () => "needs sourceref.js (the Admission stream's) in src");
 import { AUDIT_OUTCOMES } from "../src/model/schema.js";
 
 /** a fake ArcadeDB: SourceRef and AuditEvent rows, WROTE edges, the statements it saw */
@@ -17,13 +20,14 @@ export function fakeDb() {
     statements,
     async adbCommand(sql, _lang, params = {}) {
       statements.push(sql);
+      // SourceRef rows as sourceref.js (the Admission stream's) writes them
       if (sql.startsWith("CREATE VERTEX SourceRef")) {
-        refs.push({ rid: `#10:${rid++}`, key: params.k, system: params.s, table: params.t, row_key: params.r, last_seen: params.ls, seen_by: params.who });
+        refs.push({ rid: `#10:${rid++}`, key: params.key, system: params.system, table: params.table, row_key: params.row_key, last_seen: params.last_seen, seen_by: params.seen_by });
         return [{ count: 1 }];
       }
       if (sql.startsWith("UPDATE SourceRef")) {
         const r = refs.find((x) => x.key === params.k);
-        if (r) Object.assign(r, { last_seen: params.now, seen_by: params.who });
+        if (r) Object.assign(r, { last_seen: params.last_seen, seen_by: params.seen_by });
         return [{ count: r ? 1 : 0 }];
       }
       if (sql.startsWith("CREATE VERTEX AuditEvent")) {
@@ -43,7 +47,9 @@ export function fakeDb() {
       return [{ count: 0 }];
     },
     async adbQuery(sql, params = {}) {
-      if (sql.startsWith("SELECT @rid AS rid FROM SourceRef")) return refs.filter((r) => r.key === params.k).map((r) => ({ rid: r.rid }));
+      if (/FROM SourceRef WHERE key = :k/.test(sql)) return refs.filter((r) => r.key === params.k).map((r) => ({ ...r }));
+      const byRid = /^SELECT key, last_seen, seen_by FROM (#\d+:\d+)$/.exec(sql);
+      if (byRid) return refs.filter((r) => r.rid === byRid[1]).map((r) => ({ key: r.key, last_seen: r.last_seen, seen_by: r.seen_by }));
       if (sql.startsWith("SELECT @rid AS rid FROM AuditEvent")) return events.filter((e) => e.id === params.id).map((e) => ({ rid: e.rid }));
       if (sql.includes("FROM AuditEvent")) {
         let rows = [...events];
@@ -56,7 +62,10 @@ export function fakeDb() {
         const limit = Number(/LIMIT (\d+)/.exec(sql)?.[1] ?? 50);
         return rows.slice(0, limit).map(({ rid: _r, ...e }) => e);
       }
-      if (sql.includes("outE('REFERS_TO')")) return [];
+      if (sql.includes("outE('REFERS_TO')")) {
+        const from = /FROM (#\d+:\d+)\)/.exec(sql)?.[1];
+        return edges.filter((e) => e.type === "REFERS_TO" && e.from === from).map((e) => ({ dst: e.to }));
+      }
       if (sql.includes("FROM OrgPolicy")) return db.policyRows?.(params, sql) ?? [];
       return [];
     },
@@ -83,7 +92,30 @@ test("a source reference is the key split, never the row", () => {
   assert.throws(() => sourceRef("TORO"), /not a record key/);
 });
 
-test("recording an event makes the row's SourceRef once, WROTE to it, and marks the row seen only when the write applied", async () => {
+test("a reference is made once through sourceref.js, seen only when confirmed, and an instance refers to it once", { skip: storing }, async () => {
+  const db = fakeDb();
+  const a = await ensureSourceRef("mssql:dbo_Job:4471", { seen_by: "admin/worker:1", seen: false }, db);
+  assert.equal(db.refs.length, 1);
+  assert.equal(db.refs[0].last_seen, null, "nothing confirmed the row yet");
+  assert.equal(db.refs[0].seen_by, null);
+  assert.equal(await ensureSourceRef("mssql:dbo_Job:4471", { seen_by: "admin/worker:1", seen: false }, db), a, "the same reference");
+  assert.equal(db.refs[0].last_seen, null, "an unconfirmed look leaves it as it was");
+  assert.equal(await ensureSourceRef("mssql:dbo_Job:4471", { seen_by: "admin/worker:2", seen: true }, db), a);
+  assert.ok(db.refs[0].last_seen, "seen now");
+  assert.equal(db.refs[0].seen_by, "admin/worker:2");
+  const seenAt = db.refs[0].last_seen;
+  assert.equal(db.statements.filter((s) => s.startsWith("CREATE VERTEX SourceRef")).length, 1, "one writer, one row");
+  assert.equal(await referTo("#20:1", a, db), true, "the edge is new");
+  assert.equal(await referTo("#20:1", a, db), false, "and made once");
+  assert.deepEqual(db.edges, [{ type: "REFERS_TO", from: "#20:1", to: a }]);
+  assert.equal(db.refs[0].last_seen, seenAt, "referring to a row is not seeing it");
+  assert.equal(db.refs[0].seen_by, "admin/worker:2");
+  assert.equal(await referTo("Toro", a, db), false, "not a record id");
+  assert.equal(await referTo("#20:1", "#10:99", db), false, "no such reference");
+  await assert.rejects(ensureSourceRef("4471", {}, db), /not a record key/);
+});
+
+test("recording an event makes the row's SourceRef once, WROTE to it, and marks the row seen only when the write applied", { skip: storing }, async () => {
   const db = fakeDb();
   const a = await recordAuditEvent({ key: "mssql:dbo_Job:4471", authorized_by: "bob", acted_by: "admin/worker:1", position: "floor", change: { fields: { Status: "running" } }, outcome: "proposed", pending_id: "p1" }, db);
   assert.equal(db.refs.length, 1);

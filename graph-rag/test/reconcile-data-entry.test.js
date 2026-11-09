@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { fakeDb } from "./audit.test.js";
+import { fakeDb, storing } from "./audit.test.js";
 import { applyProposedEntry, authorityPolicy, columnFor, confirmAgainstRow, DAB_CALLS, decideWrite, describeEntry, enterData, forgetAuthorityPolicy, forgetSources, keyColumnFrom, mcpToolCall, odata, rowsOf, sameValue, sourceClient, sourcesConfig } from "../src/data-entry.js";
 import { parsePositionMap } from "../src/positions.js";
 
@@ -124,7 +124,7 @@ test("the authority rule, stubbed over the stored policy: direct at or above the
   assert.equal(await decideWrite(bob, "orders", "price", { positions: null, db }), "propose");
 });
 
-test("data entry for a floor person on an Operations class is proposed and audited; for an admin it is applied and audited", async () => {
+test("data entry for a floor person on an Operations class is proposed and audited; for an admin it is applied and audited", { skip: storing }, async () => {
   const db = policyDb(fakeDb());
   const dab = fakeDab([{ Job: 4471, Status: "running", Quantity: 500 }]);
   const queued = [];

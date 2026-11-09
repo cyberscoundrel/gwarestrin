@@ -9,12 +9,40 @@
  * Pure shaping (`auditEvent`, `sourceRef`) is separate from storage, and every
  * storing function takes a `db` ({ adbCommand, adbQuery }) so tests run with
  * a fake. The DDL is the contract's own `schema.statements()`, idempotent.
+ *
+ * SourceRef rows and REFERS_TO edges have one writer, the Admission stream's
+ * sourceref.js (`touchSourceRef`, `referTo`): this module creates neither
+ * itself, it only decides when a row counts as seen. That module takes a
+ * `db` of { query, command }, adapted from ours below.
  */
 import { randomUUID } from "node:crypto";
 import { adbCommand as realCommand, adbQuery as realQuery, RID_RE } from "./db.js";
 import { AUDIT_OUTCOMES, parseKey, statements, TYPES } from "./model/schema.js";
 
 const realDb = { adbCommand: realCommand, adbQuery: realQuery };
+
+let sourceRefs = null;
+/** sourceref.js (the Admission stream's), loaded when first needed: a checkout without it cannot store references */
+async function sourceRefModule() {
+  if (!sourceRefs) {
+    sourceRefs = await import("./sourceref.js").catch((e) => {
+      sourceRefs = null;
+      throw new Error(`storing a source reference needs sourceref.js (the Admission stream's): ${e?.message ?? e}`);
+    });
+  }
+  return sourceRefs;
+}
+
+const adapters = new WeakMap();
+/** our { adbQuery, adbCommand } as sourceref.js's { query, command }, one adapter per db so its schema check runs once */
+function sourceRefDb(db) {
+  let a = adapters.get(db);
+  if (!a) {
+    a = { query: (sql, params) => db.adbQuery(sql, params), command: (sql, params) => db.adbCommand(sql, "sql", params) };
+    adapters.set(db, a);
+  }
+  return a;
+}
 
 /** the DDL for what this module stores: the whole contract, every statement safe to repeat */
 export async function ensureAuditSchema(db = realDb) {
@@ -60,36 +88,41 @@ export function auditEvent({ key, authorized_by, acted_by, position, change, out
 
 /**
  * The SourceRef for a key, created when the graph has none; `seen` marks it
- * as confirmed to exist now by `seen_by`. Returns its rid.
+ * as confirmed to exist now by `seen_by`. Returns its rid. The row is made
+ * and touched by sourceref.js alone; what this adds is the distinction: a
+ * reference that nothing has confirmed yet (a proposal) is created with no
+ * last_seen, and one that exists is left as it was unless seen now.
  */
 export async function ensureSourceRef(key, { seen_by = null, seen = false } = {}, db = realDb) {
   const ref = sourceRef(key);
-  const found = (await db.adbQuery("SELECT @rid AS rid FROM SourceRef WHERE key = :k LIMIT 1", { k: ref.key }).catch(() => []))[0];
-  const now = new Date().toISOString();
-  if (found) {
-    if (seen) await db.adbCommand("UPDATE SourceRef SET last_seen = :now, seen_by = :who WHERE key = :k", "sql", { now, who: seen_by, k: ref.key });
-    return String(found.rid);
+  const refs = await sourceRefModule();
+  const sdb = sourceRefDb(db);
+  if (seen) {
+    const { rid } = await refs.touchSourceRef(ref.key, { seen_by, db: sdb });
+    if (!rid) throw new Error(`the source reference for ${ref.key} wasn't written`);
+    return String(rid);
   }
-  await db.adbCommand("CREATE VERTEX SourceRef SET key = :k, system = :s, table = :t, row_key = :r, last_seen = :ls, seen_by = :who", "sql", {
-    k: ref.key,
-    s: ref.system,
-    t: ref.table,
-    r: ref.row_key,
-    ls: seen ? now : null,
-    who: seen ? seen_by : null,
-  });
-  const made = (await db.adbQuery("SELECT @rid AS rid FROM SourceRef WHERE key = :k LIMIT 1", { k: ref.key }))[0];
-  if (!made) throw new Error(`the source reference for ${ref.key} wasn't written`);
-  return String(made.rid);
+  const found = await refs.findSourceRef(ref.key, sdb);
+  if (found) return String(found.rid);
+  // not seen: created with last_seen null (sourceRefOf keeps a null `at` as given; only an omitted one is now)
+  const { rid } = await refs.touchSourceRef(ref.key, { seen_by: null, at: null, db: sdb });
+  if (!rid) throw new Error(`the source reference for ${ref.key} wasn't written`);
+  return String(rid);
 }
 
-/** an instance (a thing with the key) refers to its row: REFERS_TO once */
+/**
+ * An instance (a thing with the key) refers to its row: REFERS_TO once, made by
+ * sourceref.js `referTo` from the reference's key (its last_seen and seen_by
+ * kept as they are: referring to a row does not count as seeing it). True
+ * when the edge is new.
+ */
 export async function referTo(thingRid, sourceRefRid, db = realDb) {
   if (!RID_RE.test(String(thingRid)) || !RID_RE.test(String(sourceRefRid))) return false;
-  const out = await db.adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('REFERS_TO')) FROM ${thingRid})`).catch(() => []);
-  if (out.some((e) => String(e.dst) === String(sourceRefRid))) return false;
-  await db.adbCommand(`CREATE EDGE REFERS_TO FROM ${thingRid} TO ${sourceRefRid}`);
-  return true;
+  const found = (await db.adbQuery(`SELECT key, last_seen, seen_by FROM ${String(sourceRefRid)}`).catch(() => []))[0];
+  if (!found?.key) return false;
+  const refs = await sourceRefModule();
+  const r = await refs.referTo(String(thingRid), found.key, { seen_by: found.seen_by ?? null, at: found.last_seen ?? null, db: sourceRefDb(db) });
+  return r.edge === "created";
 }
 
 /**
