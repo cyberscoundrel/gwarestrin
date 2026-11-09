@@ -82,7 +82,13 @@ at `d.home`, the common ancestor. `floor` is the lowest home the data may get (t
 raised to the claims' authority); `lift` is set when the derived floor would hold a content write
 above where the entry lives (the worker tools phrase `liftRefusal` from it). Queued writers, a
 worker's raw command, widening, an entry a person placed and `ctx.propose` all come out as
-`propose`, so a site keeps no test of its own. The sites inside the Authority stream's modules use
+`propose`, so a site keeps no test of its own. A kind the rule has no site rule for (the
+Reconciliation stream's `data_entry`, a write to a source system) is decided by authority over its
+class, queuing and `ctx.propose` alone, which is intended: it writes no graph content, so the
+derived-floor lift (upsert, typed_update, ingest) does not apply to it. An approved `data_entry`
+proposal runs through `executePending` by `data-entry.js`'s `applyProposedEntry(payload, pendingId,
+approver)`, a rejected one through `refusePending` by `refuseProposedEntry(pendingId)`; the module is
+loaded when first needed (`useDataEntry(mod)` stubs it), so `write.js` loads without it. The sites inside the Authority stream's modules use
 it already: `executeGraph`, `setHome`, `typedUpdate` (`write.js`), `grantAccess` (`sharing.js`),
 `askAboutPlacement` (`floor.js`). The sites outside them, and the call that replaces each:
 

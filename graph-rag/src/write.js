@@ -31,7 +31,10 @@ import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, work
  * placed) are folded in, so a site needs no test of its own.
  *
  *   decideWrite(identity, { kind, cls, attribute, claims, lives }, ctx)
- *     kind       upsert | rehome | grant | merge | fold | delete_entry | typed_update | command | ingest | backfill
+ *     kind       upsert | rehome | grant | merge | fold | delete_entry | typed_update | command | ingest | backfill | data_entry
+ *                (any other kind takes the class rule, queuing and ctx.propose alone: data_entry, a write to a
+ *                source system, is decided by authority over its class, with no derived-floor lift, since it
+ *                writes no graph content; the lift applies to upsert, typed_update and ingest only)
  *     cls, attribute   the commitment class and attribute the write bears on (null: residue, no class)
  *     claims     instead of one class: the claims the write carries (the strictest decides)
  *     lives      where the entry lives (its home) for a write to an existing entry; undefined for a new one
@@ -287,8 +290,24 @@ export async function executeGraph({ command, language = "cypher", reason }, ide
 /** a raw command that may delete entities (their grants are swept after it) */
 const DELETE_RE = /\b(DELETE|TRUNCATE)\b/i;
 
-/** execute a queued write (admin approval path); `placedBy` = the person who approved it, if a person did */
-async function executePending(rec, placedBy) {
+/**
+ * The Reconciliation stream's data-entry module (data-entry.js: a worker's write to a source system
+ * through the queue), loaded when a data_entry proposal is first decided, so this module loads
+ * without it. `useDataEntry(mod)` sets it instead: tests stub it; a deployment may wire its own.
+ */
+let dataEntryModule = null;
+export function useDataEntry(mod) {
+  dataEntryModule = mod;
+}
+const dataEntry = async () => (dataEntryModule ??= await import("./data-entry.js"));
+
+/**
+ * Execute a queued write (admin approval path); `placedBy` = the person who approved it, if a
+ * person did; `approver` = whoever approved it. A data_entry proposal (a source-system write) is
+ * applied by data-entry.js's applyProposedEntry, which records the audit event.
+ */
+export async function executePending(rec, placedBy, approver = placedBy) {
+  if (rec.kind === "data_entry") return (await dataEntry()).applyProposedEntry(rec.payload, rec.id, approver);
   // upsert payloads carry the home resolved when the write was requested
   if (rec.kind === "upsert") return upsertEntities(JSON.parse(rec.payload));
   if (rec.kind === "rehome") return applyRehome({ ...JSON.parse(rec.payload), placedBy });
@@ -466,6 +485,14 @@ async function applyTypedUpdate({ rid, properties, facets }) {
   return { updated: rid, properties: Object.keys(properties ?? {}), facets: list.map(([f]) => f) };
 }
 
+/** what a rejection leaves behind, per kind: a data_entry proposal's audit event says it was refused */
+export async function refusePending(rec) {
+  if (rec?.kind !== "data_entry") return;
+  await dataEntry()
+    .then(({ refuseProposedEntry }) => refuseProposedEntry(rec.id))
+    .catch((e) => log.warn(`data entry ${rec.id} not marked refused: ${String(e?.message ?? e).slice(0, 160)}`));
+}
+
 /** approved merge: the dropped thing's links move to the kept one */
 export async function mergeThings({ keep, drop, drop_name }) {
   if (!RID_RE.test(String(keep)) || !RID_RE.test(String(drop))) throw new Error("invalid merge");
@@ -558,7 +585,7 @@ export async function approvePending(id, identity, reason = "", { quiet = false 
   let result;
   try {
     // upsert/backfill payloads are JSON for their handlers, not SQL
-    result = await executePending(rec, isPerson(identity) ? approver : undefined);
+    result = await executePending(rec, isPerson(identity) ? approver : undefined, approver);
   } catch (err) {
     await adbCommand("UPDATE PendingWrite SET status = 'failed', executed_at = :now WHERE id = :id", "sql", {
       now: new Date().toISOString(),
@@ -593,6 +620,7 @@ export async function rejectPending(id, identity, reason = "", { quiet = false }
   if (rows[0].kind === "upsert") await dropWaitingShares(id).catch((e) => log.warn(`waiting shares for ${id}: ${String(e).slice(0, 160)}`));
   // a rejected ingest leaves nothing behind
   if (rows[0].kind === "ingest" && docStore) await docStore.remove(JSON.parse(rows[0].payload).doc_id).catch(() => {});
+  await refusePending(rows[0]);
   // a worker thread's proposal: the thread decides again (wherever it was rejected)
   if (rows[0].job_id && !quiet) await resumeThread(rows[0].job_id, { proposal: rows[0].note || rows[0].kind, decision: "rejected", reason, answered_by: rejector }).catch(() => {});
   return { rejected: true };
