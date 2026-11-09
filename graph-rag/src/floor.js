@@ -4,7 +4,7 @@
  */
 import { commonAncestor, effectiveHome, EVERYONE, homeName, visibleHomes } from "./positions.js";
 import { gradingPrompt, parseVerdicts } from "./grading.js";
-import { applyFloor, floorLifts, hasClaims, place as placeOne, placeByClaims } from "./placement.js";
+import { applyFloor, claimsSettle, floorLifts, hasClaims, place as placeOne, placeByClaims } from "./placement.js";
 import { claimHomes } from "./model/authority.js";
 import { GRADER_MODEL, GRADER_TIMEOUT_MS, health, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
@@ -194,9 +194,11 @@ const graderUntil = (v) => (v ? (v.confidence >= policy.gradingConfidence ? v.un
  * Where each entity of a scoped write lands (placement.js decides). `origin`
  * is the writer's resolved position (provenance); an existing entity is
  * (name, origin). An entity carrying claims (`claims`, the contract's shape)
- * is placed by its claims' authority and never graded; the grader runs only
- * on the residue, entities with no claims. Without a grader: new residue at
- * the origin, existing ones where they are.
+ * is placed by its claims' authority. The grader runs on the residue (entities
+ * with no claims) and on any entity whose claims don't settle it (claimsSettle:
+ * a claim with no rule, or a sentence no claim states), where the claims'
+ * placement holds as the floor under its verdict. Without a grader: new residue
+ * at the origin, existing ones where they are.
  */
 export async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
   const existing = await Promise.all(
@@ -207,13 +209,17 @@ export async function placeEntities(entities, origin, floor, writtenAt = Date.no
     ),
   );
   const at = (i) => existing[i]?.home;
-  // the claim-bearing entities: placed by the rule, no model call
+  // the claim-bearing entities: placed by the rule; the ones whose claims settle them get no model call
   const byClaims = new Map();
+  const unsettled = new Set(); // claim-bearing, and the grader judges them too
   for (const [i, e] of entities.entries()) {
     if (!hasClaims(e)) continue;
-    byClaims.set(i, placeByClaims(positionMap, { origin, claims: e.claims, policy: policy.authorityMap, existing: at(i), awaiting: existing[i]?.awaiting, floor }));
+    const placed = placeByClaims(positionMap, { origin, claims: e.claims, policy: policy.authorityMap, existing: at(i), awaiting: existing[i]?.awaiting, floor });
+    byClaims.set(i, placed);
+    // at the top already (or written for everyone on purpose) there is nothing above to restrict to
+    if (origin !== EVERYONE && placed.home !== positionMap.root && !claimsSettle(e, policy.authorityMap)) unsettled.add(i);
   }
-  const residue = entities.map((e, i) => (byClaims.has(i) ? null : e));
+  const residue = entities.map((e, i) => (byClaims.has(i) && !unsettled.has(i) ? null : e));
   const merge = (placed) => entities.map((_, i) => byClaims.get(i) ?? placed[i]);
   const grading = Boolean(GRADER_MODEL) && policy.gradingEnabled;
   if (!grading) return merge(entities.map((_, i) => applyFloor(positionMap, { home: at(i) ?? origin, note: "not graded (grading off)" }, origin, floor)));
@@ -227,22 +233,29 @@ export async function placeEntities(entities, origin, floor, writtenAt = Date.no
     // nothing above the root to restrict to: graded for its end date only
     return merge(entities.map((_, i) => ({ ...applyFloor(positionMap, { home: at(i) ?? origin, note: "at the root" }, origin, floor), until: graderUntil(verdicts[i]) })));
   }
-  return merge(
-    entities.map((_, i) => ({
-      ...placeOne(positionMap, {
-        origin,
-        verdict: verdicts[i],
-        graded: verdicts[i] !== undefined,
-        existing: at(i),
-        // still awaiting grading: this write's grading settles it like a new one
-        awaiting: existing[i]?.awaiting && verdicts[i] !== undefined,
-        floor,
-        threshold: policy.gradingConfidence,
-      }),
+  return entities.map((_, i) => {
+    if (byClaims.has(i) && !unsettled.has(i)) return byClaims.get(i);
+    const ruled = byClaims.get(i);
+    const p = placeOne(positionMap, {
+      origin,
+      verdict: verdicts[i],
       graded: verdicts[i] !== undefined,
-      until: graderUntil(verdicts[i]),
-    })),
-  );
+      existing: at(i),
+      // still awaiting grading: this write's grading settles it like a new one
+      awaiting: existing[i]?.awaiting && verdicts[i] !== undefined,
+      // the claims' placement holds under the verdict: the grader may only restrict further
+      floor: ruled ? commonAncestor(positionMap, [floor, ruled.home]) : floor,
+      threshold: policy.gradingConfidence,
+    });
+    return {
+      ...p,
+      graded: verdicts[i] !== undefined,
+      // claims carry their own intervals: the grader's end date is for residue only
+      ...(ruled
+        ? { note: ruled.authority && p.home === ruled.home ? ruled.note : p.note, claims: ruled.claims, authority: ruled.authority }
+        : { until: graderUntil(verdicts[i]) }),
+    };
+  });
 }
 
 /** grade the residue only (null slots are claim-bearing and skipped); verdicts come back by the original index */
@@ -282,7 +295,7 @@ export async function askAboutPlacement(rid, name, p) {
  */
 export async function regradeTick() {
   if (!SCOPED || !positionMap || !GRADER_MODEL || !policy.gradingEnabled || health.down(`model:${GRADER_MODEL}`)) return;
-  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _ungraded, _valid_by FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL LIMIT 16`);
+  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _ungraded, _valid_by, _claim_classes FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL LIMIT 16`);
   const waiting = [];
   for (const r of rows) {
     let w = null;
@@ -312,7 +325,14 @@ export async function regradeTick() {
         await adbCommand(`UPDATE ${rid} SET _ungraded = null`);
         continue;
       }
-      const p = placeOne(positionMap, { origin, verdict: verdicts[i], floor: r.w.floor, threshold: policy.gradingConfidence });
+      // an entry that also carries claims stays no lower than their authority puts it
+      let claimed = [];
+      try {
+        claimed = claimHomes(JSON.parse(r._claim_classes || "[]"), origin, policy.authorityMap, positionMap);
+      } catch {
+        /* unreadable: the recorded floor is all there is */
+      }
+      const p = placeOne(positionMap, { origin, verdict: verdicts[i], floor: commonAncestor(positionMap, [r.w.floor ?? origin, ...claimed]), threshold: policy.gradingConfidence });
       const until = graderUntil(verdicts[i]);
       // the grader's end date, unless its writer gave one
       const validSql = until !== undefined && r._valid_by !== "writer" ? ", _valid_until = :until, _valid_by = 'grader'" : "";

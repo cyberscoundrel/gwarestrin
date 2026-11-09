@@ -155,6 +155,24 @@ async function claim(entryName, thingRid, c) {
   return props.id;
 }
 
+/** a condensed document through the real path (record_document), one section with these claims */
+const record = async (who, title, position, text, claims) => {
+  const r = await tool(who, "record_document", { document: { title, recorded_by: who, position, reason: "e2e", sections: [{ text, claims }] } });
+  check(!r.error && !r.pendingId, `${title} recorded directly: ${JSON.stringify(r).slice(0, 300)}`);
+  return r;
+};
+
+/** with the derived-data window off: what a person read in earlier scenarios would otherwise lift their write */
+async function withWindowOff(fn) {
+  const before = (await api("/api/policy")).policy ?? {};
+  await api("/api/policy", "admin", { method: "PUT", body: JSON.stringify({ derivedWindowHours: 0 }) });
+  try {
+    return await fn();
+  } finally {
+    await api("/api/policy", "admin", { method: "PUT", body: JSON.stringify({ derivedWindowHours: before.derivedWindowHours ?? 12 }) });
+  }
+}
+
 /** the state of one attribute across every thing the answer names (a name or key can mean more than one) */
 const stateOf = (r, attr) => (r?.things ?? []).map((t) => t?.state?.[attr]).find(Boolean);
 
@@ -323,6 +341,115 @@ export const scenarios = [
       check(quoted?.claims?.[0]?.value === "quoted" && quoted.claims[0].subject === "Corvane bracket order", `the hit says what held: ${JSON.stringify(quoted?.claims)}`);
       const today = await tool("alice", "search_graph", { query: "Corvane bracket order", k: 8, as_of: iso(now) });
       check(names(today).includes("e2e-q5 corvane ordered") && !names(today).includes("e2e-q5 corvane quoted"), `today it is ordered (the quote closed): ${names(today)}`);
+    },
+  },
+  {
+    name: "B7: a claim above the reader neither closes the reader's visible claim nor shows a change, in either arrival order",
+    run: async () => {
+      await schema();
+      await withWindowOff(async () => {
+        const now = Date.now();
+        for (const [job, order] of [["88101", ["bob", "admin"]], ["88102", ["admin", "bob"]]]) {
+          const subject = { key: `mssql:dbo_Job:${job}`, class: "jobs" };
+          const write = {
+            bob: () => record("bob", `e2e-b7 ${job} bob`, POS.floor, "Job machine is CNC 2.", [{ kind: "state", subject, attribute: "machine", value: "CNC 2", valid_from: iso(now - 2 * DAY) }]),
+            admin: () => record("admin", `e2e-b7 ${job} admin`, POS.org, "Job machine is CNC 9 secret.", [{ kind: "state", subject, attribute: "machine", value: "CNC 9 secret", valid_from: iso(now - DAY) }]),
+          };
+          for (const who of order) await write[who]();
+          await until(`both claims on job ${job} are stored`, async () => (await sql(`SELECT id FROM CLAIMS WHERE @in._keys CONTAINS 'mssql:dbo_Job:${job}'`)).length >= 2);
+          const key = `mssql:dbo_Job:${job}`;
+          const cur = await tool("bob", "current_state", { subject: key });
+          const seen = stateOf(cur, "machine");
+          check(seen?.value === "CNC 2", `order ${order}: bob reads his claim: ${JSON.stringify(cur).slice(0, 400)}`);
+          check(seen.valid_until === null && seen.closed_by === undefined, `order ${order}: nothing he can see closed it: ${JSON.stringify(seen)}`);
+          check((cur.things ?? [])[0]?.claims === 1, `order ${order}: one claim counted: ${JSON.stringify(cur).slice(0, 200)}`);
+          const hist = await tool("bob", "state_history", { subject: key, attribute: "machine" });
+          check(hist.things?.[0]?.history?.length === 1 && hist.things[0].history[0].valid_until === null, `order ${order}: his history has no change in it: ${JSON.stringify(hist).slice(0, 400)}`);
+          const search = await tool("bob", "search_graph", { query: `e2e-b7 ${job} bob`, k: 4, as_of: iso(now) });
+          check((search.results ?? []).some((r) => r.name.startsWith(`e2e-b7 ${job} bob`)), `order ${order}: search as_of still shows bob's section: ${(search.results ?? []).map((r) => r.name)}`);
+          const admin = await tool("admin", "current_state", { subject: key });
+          check(stateOf(admin, "machine")?.value === "CNC 9 secret", `order ${order}: the admin reads the latest: ${JSON.stringify(admin).slice(0, 400)}`);
+          const adminHist = await tool("admin", "state_history", { subject: key, attribute: "machine" });
+          check(adminHist.things?.[0]?.history?.[0]?.closed_by !== undefined, `order ${order}: the admin sees the succession: ${JSON.stringify(adminHist).slice(0, 400)}`);
+        }
+      });
+    },
+  },
+  {
+    name: "B6: a later policy change takes effect on claims already written, in current_state, history and search as_of",
+    run: async () => {
+      await schema();
+      await withWindowOff(async () => {
+        const subject = { key: "mssql:dbo_Job:88103", class: "jobs" };
+        await record("bob", "e2e-b6 88103 rate", POS.floor, "The zz_rate is 21.50.", [{ kind: "state", subject, attribute: "zz_rate", value: 21.5, valid_from: iso(Date.now() - DAY) }]);
+        await until("the claim is stored", async () => (await sql("SELECT id FROM CLAIMS WHERE attribute = 'zz_rate'")).length >= 1);
+        const key = "mssql:dbo_Job:88103";
+        check(stateOf(await tool("bob", "current_state", { subject: key }), "zz_rate")?.value === "21.5", "before the rule, bob reads it");
+        const before = (await api("/api/policy")).policy;
+        await api("/api/policy", "admin", { method: "PUT", body: JSON.stringify({ authorityMap: { classes: {}, attributes: { zz_rate: POS.org } } }) });
+        try {
+          const cur = await tool("bob", "current_state", { subject: key });
+          check(stateOf(cur, "zz_rate") === undefined, `an admin moved zz_rate to the top: bob's state loses it: ${JSON.stringify(cur).slice(0, 400)}`);
+          check((cur.things ?? [])[0]?.claims === 0, `and doesn't count it: ${JSON.stringify(cur).slice(0, 300)}`);
+          const hist = await tool("bob", "state_history", { subject: key, attribute: "zz_rate" });
+          check((hist.things ?? []).every((t) => (t.history ?? []).length === 0), `nor in history: ${JSON.stringify(hist).slice(0, 300)}`);
+          const search = await tool("bob", "search_graph", { query: "e2e-b6 88103 rate", k: 4, as_of: iso(Date.now()) });
+          check((search.results ?? []).every((r) => !(r.claims ?? []).some((c) => c.attribute === "zz_rate")), `nor on a search hit: ${JSON.stringify(search.results?.map((r) => r.claims)).slice(0, 300)}`);
+          check(stateOf(await tool("admin", "current_state", { subject: key }), "zz_rate")?.value === "21.5", "the top still reads it");
+        } finally {
+          await api("/api/policy", "admin", { method: "PUT", body: JSON.stringify({ authorityMap: before.authorityMap ?? { classes: {}, attributes: {} } }) });
+        }
+      });
+    },
+  },
+  {
+    name: "B10: mark_need_met can't close a need with a claim the asker can't see; a claim they can see closes it",
+    run: async () => {
+      await schema();
+      await withWindowOff(async () => {
+        const asked = await tool("bob", "request_access", { question: "Who keeps the e2e-b10 spare parts crib key?" });
+        check(asked.status === "asked" && asked.id, `the need is open: ${JSON.stringify(asked).slice(0, 300)}`);
+        const subject = { key: "mssql:dbo_Job:88104", class: "jobs" };
+        const now = Date.now();
+        await record("admin", "e2e-b10 88104 admin", POS.org, "The crib key is with admin.", [{ kind: "state", subject, attribute: "crib_key", value: "admin secret", valid_from: iso(now - DAY) }]);
+        await record("bob", "e2e-b10 88104 bob", POS.floor, "The crib key is on the hook.", [{ kind: "state", subject, attribute: "crib_key", value: "on the hook", valid_from: iso(now - 2 * DAY) }]);
+        const claims = await until("both claims are stored", async () => {
+          const rows = await sql("SELECT id, value, @out AS src FROM CLAIMS WHERE attribute = 'crib_key'");
+          return rows.length >= 2 ? rows : null;
+        });
+        const hidden = claims.find((c) => c.value === "admin secret");
+        const visible = claims.find((c) => c.value === "on the hook");
+        const refused = await tool(workerToken(String(hidden.src)), "mark_need_met", { need: asked.id, claim_id: hidden.id, reason: "e2e" });
+        check(/can't see it/.test(refused.error ?? ""), `a claim the asker can't see is refused: ${JSON.stringify(refused).slice(0, 300)}`);
+        check((await sql(`SELECT _status FROM Entity WHERE _kind = 'need' AND _qid = '${asked.id}'`))[0]?._status === "open", "the need stays open");
+        const stillAsked = await api(`/api/requests/${asked.id}`, "bob").catch(() => null);
+        if (stillAsked && !stillAsked.error) check(stillAsked.status === "asked" && (stillAsked.shared ?? []).length === 0, `bob learns nothing: ${JSON.stringify(stillAsked).slice(0, 300)}`);
+        const met = await tool(workerToken(String(visible.src)), "mark_need_met", { need: asked.id, claim_id: visible.id, reason: "e2e" });
+        check(met.met === true, `a claim bob sees closes it: ${JSON.stringify(met).slice(0, 300)}`);
+        check((await sql(`SELECT _status FROM Entity WHERE _kind = 'need' AND _qid = '${asked.id}'`))[0]?._status === "met", "the need is met");
+      });
+    },
+  },
+  {
+    name: "B11: an attribute word in a question doesn't auto-close it: wrong intent or another time reach an owner; the current value is answered",
+    run: async () => {
+      await schema();
+      await withWindowOff(async () => {
+        const job = { key: "mssql:dbo_Job:88106", class: "jobs" };
+        const rack = { name: "rack Z1 e2e", class: "jobs" };
+        await record("bob", "e2e-b11 job 88106", POS.floor, "Job 88106 machine is CNC 2.", [{ kind: "state", subject: job, attribute: "machine", value: "CNC 2", valid_from: iso(Date.now() - DAY) }]);
+        await record("bob", "e2e-b11 rack", POS.floor, "Rack Z1 holds aluminum.", [{ kind: "state", subject: rack, attribute: "holds", value: "aluminum", valid_from: iso(Date.now() - DAY) }]);
+        await until("the claims are stored", async () => (await sql("SELECT id FROM CLAIMS WHERE attribute IN ['holds', 'machine'] AND value IN ['aluminum', 'CNC 2']")).length >= 2);
+        await new Promise((r) => setTimeout(r, 5500)); // the claim vocabulary is cached for a few seconds
+        for (const question of ["Who holds the key to rack Z1 e2e?", "Which machine was job 88106 on three weeks ago?"]) {
+          const r = await tool("bob", "request_access", { question });
+          check(!r.answer, `not answered from state: ${JSON.stringify(r).slice(0, 300)}`);
+          check(r.status === "asked" && r.still_open !== false, `the need stays open and reaches an owner: ${JSON.stringify(r).slice(0, 300)}`);
+        }
+        const yes = await tool("bob", "request_access", { question: "What machine is job 88106 on?" });
+        check(yes.answer?.value === "CNC 2", `the current value is answered: ${JSON.stringify(yes).slice(0, 300)}`);
+        check(yes.status === "answered", `and closed: ${yes.status}`);
+      });
     },
   },
 ];

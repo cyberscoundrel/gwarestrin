@@ -6,7 +6,8 @@ import { randomUUID } from "node:crypto";
 import { ancestors, effectiveHome, heldPositions } from "./positions.js";
 import { isExpired, liveClause } from "./extent.js";
 import { grantShows, isActive } from "./grants.js";
-import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needAsCommitment, needName, openUntil, ownersFor, ownerView, parseStateQuestion, pickPositions } from "./needs.js";
+import { askerView, asksOnly, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needAsCommitment, needName, openUntil, ownersFor, ownerView, parseStateQuestion, pickPositions } from "./needs.js";
+import { normalize } from "./things.js";
 import { GRADER_MODEL, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, FACETS, knownIndexes, PENDING_ID_RE, RID_RE } from "./db.js";
 import { embedBatch } from "./models.js";
@@ -14,7 +15,7 @@ import { entriesByUser, homeFilter, ownsHome, personOf, personScope, positionMap
 import { gradeBatch } from "./floor.js";
 import { grantAccess, grantCache, refreshGrants, storeGrant } from "./sharing.js";
 import { policy } from "./org-policy.js";
-import { claimView, stateOfAttribute, subjectRef } from "./state.js";
+import { claimView, seesSectionClaim, stateOfAttribute, subjectRef } from "./state.js";
 
 /** ---- needs: questions as entries (see needs.js) ---- */
 
@@ -154,6 +155,18 @@ async function matchHidden(vec, askerScope) {
     .slice(0, MATCH_MAX);
 }
 
+/**
+ * Can the asker see this claim: its section by the need's rule (personSees) and the claim by the
+ * per-claim rule. `claim` is the worker's shape (class, attribute, home, section = the section's rid).
+ * A need can't be closed for someone by a claim this says they can't see.
+ */
+export async function askerSeesClaim(asker, claim) {
+  const scope = personScope(asker);
+  if (!scope || !RID_RE.test(String(claim.section ?? ""))) return false;
+  const section = (await adbQuery(`SELECT @rid AS rid, name, _home, _origin, _written_by FROM ${claim.section}`).catch(() => []))[0];
+  return Boolean(section) && personSees(asker, section) && seesSectionClaim(scope, claim, section);
+}
+
 /** positions' description vectors (for posting unmatched needs); refreshed with the map */
 let positionVecs = { map: null, list: [] };
 async function describedPositions() {
@@ -188,11 +201,12 @@ async function claimWords() {
 }
 
 /**
- * Answer a need from state (needs.js, "commitments with the sign flipped"): when the question names
- * an attribute the graph's claims use and exactly one thing the asker sees holds a claim on it now,
- * that claim answers it. The need is marked met by the claim's section (a NEAR meeting the asker
- * sees), nobody is asked, no model is called. Null when it isn't a state question or no state
- * exists: then the embedding path runs as before.
+ * Answer a need from state (needs.js, "commitments with the sign flipped"): when the question asks
+ * for an attribute's current value (asksCurrentValue, asksOnly: an attribute word in a question about
+ * something else is not that) and exactly one thing the asker sees holds a claim on it now, that
+ * claim answers it. The need is marked met by the claim's section (a NEAR meeting the asker sees),
+ * nobody is asked, no model is called. Null when it isn't such a question or no state exists: then
+ * the embedding path runs as before and the need reaches an owner.
  */
 async function answerFromState(need, scope, identity) {
   const { attributes, classes } = await claimWords();
@@ -203,6 +217,7 @@ async function answerFromState(need, scope, identity) {
   // none, or several things with that state: not for a query to decide
   if (hits.length !== 1) return null;
   const { thing, claim } = hits[0];
+  if (!asksOnly(normalize(need.question.replace(/['’]s\b/g, "")), parsed.attribute, thing)) return null;
   const until = openUntil(Date.now(), policy.requestDays, null);
   await meet(need, claim.section.rid, 1, "visible");
   // (parameter names that aren't SQL words: ArcadeDB's parser reads `:by` as the keyword BY)

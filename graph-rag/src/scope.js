@@ -112,10 +112,12 @@ export function homeFilter(scope, { own = false } = {}) {
  * those whose authority covers its class): does the caller's authority cover this class and
  * attribute? By position alone (a queued writer sees what its position sees). Unscoped: yes.
  * Grants are not authority: what a caller was granted it sees whatever its authority (seesClaim).
+ * A scope with no held positions of its own (a worker reading as its entry's people, entryAudience)
+ * is judged by the homes it sees: covering a class is seeing the home of its authority position.
  */
 export function coversClass(scope, cls, attribute = null, rules = policy.authorityMap) {
   if (!SCOPED || !positionMap || scope.homes === null) return true;
-  return visible({ positions: scope.held ?? [] }, cls, attribute, rules, positionMap);
+  return visible({ positions: scope.held ?? [...scope.homes] }, cls, attribute, rules, positionMap);
 }
 
 /**

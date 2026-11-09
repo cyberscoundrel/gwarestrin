@@ -245,7 +245,7 @@ export async function authorityPolicy(db = realDb, { positions, ttlMs = 60_000, 
   let value = { classes: {}, attributes: {} };
   try {
     const row = (await db.adbQuery("SELECT json FROM OrgPolicy WHERE scope = 'authority' LIMIT 1"))[0];
-    if (row?.json && positions) value = validatePolicy(JSON.parse(row.json), positions);
+    if (row?.json && positions) value = validatePolicy(JSON.parse(row.json), positions, { stored: true });
   } catch (e) {
     log.warn(`authority policy not used: ${String(e).slice(0, 160)}`);
   }

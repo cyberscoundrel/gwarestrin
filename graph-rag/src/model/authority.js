@@ -24,12 +24,15 @@
 //   policy.classes[class].authority
 //   policy.default (optional)
 //   null: no rule, the writer's own position holds it (direct)
+// Attribute names are normalized as a claim's are (normalizeAttribute): a rule for "Pay Rate"
+// is a rule for pay_rate, so a differently spelled rule cannot silently never match.
 //
 // Pure functions over the parsed position map (positions.js) and a policy
 // object. An identity is { positions: [held ids], caps?: { write } } as
 // server.js resolves it; an identity whose writes are queued never gets
 // "direct" (its best is "propose"), which is today's queueWrite rule.
 import { ancestors, commonAncestor, EVERYONE, heldPositions } from "../positions.js";
+import { normalizeAttribute } from "./claims.js";
 
 export const DECISIONS = ["direct", "propose", "hidden"];
 
@@ -37,7 +40,7 @@ export const DECISIONS = ["direct", "propose", "hidden"];
 export function authorityOf(policy, cls, attribute) {
   if (!policy || typeof policy !== "object") return null;
   const c = cls ? policy.classes?.[cls] : undefined;
-  const a = attribute ?? null;
+  const a = normalizeAttribute(attribute) || null;
   const pick = (v) => (typeof v === "string" && v ? v : null);
   if (c && a) {
     const r = pick(c.attributes?.[a]);
@@ -93,25 +96,61 @@ export function claimHomes(claims, origin, policy, positions) {
   return claims.map((c) => claimHome(positions, origin, authorityOf(policy, c.class, c.attribute)));
 }
 
+/** every authority the policy names, with where: [{ field, position }] */
+function namedAuthorities(policy) {
+  const out = [];
+  const add = (field, v) => typeof v === "string" && v && out.push({ field, position: v });
+  add("default", policy?.default);
+  for (const [a, p] of Object.entries(policy?.attributes ?? {})) add(`attributes.${a}`, p);
+  for (const [c, r] of Object.entries(policy?.classes ?? {})) {
+    add(`classes.${c}.authority`, r?.authority);
+    for (const [a, p] of Object.entries(r?.attributes ?? {})) add(`classes.${c}.attributes.${a}`, p);
+  }
+  return out;
+}
+
+/** the entries naming a position the tree no longer has (each fails upward: decide, claimHome) */
+export const staleAuthorities = (policy, positions) => namedAuthorities(policy).filter((e) => !positions.positions[e.position]);
+
 /**
- * A policy as stored, checked against the position map: every authority is
- * a known position (never `everyone`), names are non-empty, nothing else is
+ * A policy, checked against the position map: every authority is a known position (never
+ * `everyone`), names are non-empty, attribute names normalized as a claim's are, nothing else is
  * in it. Throws naming the field. Returns a normalized copy.
+ *
+ * A stale position is not a malformed policy. `allowStale` (a Set of positions) lets an edit keep
+ * entries that were already stale, so changing one rule doesn't demand fixing another. `stored`
+ * reads a policy as saved earlier: every stale entry stays (the rule fails it upward; dropping it
+ * would fail open), two spellings of one attribute settle on the stricter position, and a key with
+ * no attribute name in it is skipped.
  */
-export function validatePolicy(policy, positions) {
+export function validatePolicy(policy, positions, { stored = false, allowStale = null } = {}) {
   if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new Error("policy: must be an object");
   const pos = (v, field) => {
     if (typeof v !== "string" || !v) throw new Error(`${field}: must name a position`);
     if (v === EVERYONE) throw new Error(`${field}: ${EVERYONE} holds no authority`);
-    if (!positions.positions[v]) throw new Error(`${field}: unknown position ${v}`);
+    if (!positions.positions[v] && !stored && !allowStale?.has(v)) throw new Error(`${field}: unknown position ${v}`);
     return v;
+  };
+  const stricter = (a, b) => (positions.positions[a] && positions.positions[b] ? commonAncestor(positions, [a, b]) : positions.root || a);
+  const putAttribute = (into, raw, p, field) => {
+    if (!stored && String(raw).length > 80) throw new Error(`${field}: a name longer than 80 characters`);
+    const a = normalizeAttribute(raw);
+    if (!a) {
+      if (stored) return;
+      throw new Error(`${field}: no attribute name in "${raw}"`);
+    }
+    const v = pos(p, field);
+    if (into[a] !== undefined && into[a] !== v) {
+      if (!stored) throw new Error(`${field}: "${raw}" is the same attribute as another rule, which names a different position`);
+      into[a] = stricter(into[a], v);
+    } else into[a] = v;
   };
   const out = { classes: {}, attributes: {} };
   for (const [k, v] of Object.entries(policy)) {
     if (k === "default") out.default = pos(v, "default");
     else if (k === "attributes") {
       if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("attributes: must map attribute names to positions");
-      for (const [a, p] of Object.entries(v)) out.attributes[a] = pos(p, `attributes.${a}`);
+      for (const [a, p] of Object.entries(v)) putAttribute(out.attributes, a, p, `attributes.${a}`);
     } else if (k === "classes") {
       if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("classes: must map class names to rules");
       for (const [c, rule] of Object.entries(v)) {
@@ -122,7 +161,7 @@ export function validatePolicy(policy, positions) {
           else if (rk === "attributes") {
             if (!rv || typeof rv !== "object" || Array.isArray(rv)) throw new Error(`classes.${c}.attributes: must map attribute names to positions`);
             r.attributes = {};
-            for (const [a, p] of Object.entries(rv)) r.attributes[a] = pos(p, `classes.${c}.attributes.${a}`);
+            for (const [a, p] of Object.entries(rv)) putAttribute(r.attributes, a, p, `classes.${c}.attributes.${a}`);
           } else throw new Error(`classes.${c}.${rk}: unknown field`);
         }
         out.classes[c] = r;

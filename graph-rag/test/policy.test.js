@@ -76,9 +76,10 @@ test("a stored policy is filled from the defaults; junk falls back to them", () 
   assert.deepEqual(normalizeStored({ maxGrantDays: 30, obsolete: 1 }, d), { ...d, maxGrantDays: 30 });
   assert.deepEqual(normalizeStored({ maxGrantDays: -5 }, d), d);
   assert.deepEqual(normalizeStored(null, d), d);
-  // a stored map naming a position the tree lost is dropped on its own; the rest of the policy stands
+  // a stored map naming a position the tree lost stays, entry and all (the rule fails it upward); the rest of the policy stands
   const stored = { maxGrantDays: 30, authorityMap: { classes: {}, attributes: { pay: "board" } } };
-  assert.deepEqual(normalizeStored(stored, d, tree), { ...d, maxGrantDays: 30 });
+  assert.deepEqual(normalizeStored(stored, d, tree).authorityMap, stored.authorityMap);
+  assert.equal(normalizeStored(stored, d, tree).maxGrantDays, 30);
   assert.deepEqual(normalizeStored(stored, d).authorityMap, { classes: {}, attributes: { pay: "board" } }, "with no tree yet it is kept as stored");
   assert.deepEqual(normalizeStored({ authorityMap: read("policy.json") }, d, tree).authorityMap, read("policy.json"));
 });

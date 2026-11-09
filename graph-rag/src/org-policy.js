@@ -30,10 +30,16 @@ export async function ensurePolicySchema() {
   for (const prop of ["changed_at", "changed_by", "prev_json", "next_json"]) await adbCommand(`CREATE PROPERTY PolicyChange.${prop} IF NOT EXISTS STRING`).catch(() => {});
 }
 
+/** what the last load warned about: the policy reloads every minute, a stale entry is logged once */
+let warned = "";
+
 export async function loadPolicy() {
   try {
     const row = (await adbQuery("SELECT FROM OrgPolicy WHERE scope = 'org' LIMIT 1"))[0];
-    policy = row ? normalizeStored(JSON.parse(row.json), policyDefaults, positionMap) : policyDefaults;
+    const warnings = [];
+    policy = row ? normalizeStored(JSON.parse(row.json), policyDefaults, positionMap, (m) => warnings.push(m)) : policyDefaults;
+    if (warnings.join("|") !== warned) for (const m of warnings) log.warn(m);
+    warned = warnings.join("|");
     policyMeta = { updated_by: row?.updated_by ?? null, updated_at: row?.updated_at ?? null };
   } catch (e) {
     log.warn(`policy load failed (keeping the current one): ${String(e).slice(0, 120)}`);

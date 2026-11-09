@@ -233,8 +233,8 @@ async function subjectThing(subject, home, cache) {
  * subject, carrying the primitive, class, attribute, value and interval, homed where the section is (a claim
  * is seen by whoever sees its section, decision 5) and raised to its class's authority position once the
  * policy names one, in which case the section is raised with it (no lower than its most restricted claim).
- * A new claim closes the open interval of the previous claim on the same attribute of the same subject
- * (decision 3); events are points and close nothing.
+ * The next claim on the same attribute closing an open one (decision 3) is a read: state.js closes
+ * intervals per reader over what that reader sees, so nothing here touches earlier claims.
  */
 async function recordClaims(p, sections) {
   const byIndex = new Map(sections.map((s) => [Number(s._section), { rid: String(s.rid), home: effectiveHome(positionMap, s._home) }]));
@@ -262,14 +262,8 @@ async function recordClaims(p, sections) {
         "sql",
         { c_id: id, c_kind: c.kind, c_class: c.class, c_attribute: c.attribute, c_value: c.value, c_num: c.value_num, c_from: c.valid_from, c_until: c.valid_until, c_at: c.recorded_at, c_by: c.recorded_by, c_home: home },
       );
-      if (c.kind !== "event") {
-        // the previous open claim on this attribute of this subject ends where this one starts
-        await adbCommand(
-          `UPDATE CLAIMS SET valid_until = :c_from, closed_by = :c_id WHERE @in = ${thing} AND class = :c_class AND attribute = :c_attribute AND kind <> 'event' AND valid_until IS NULL AND valid_from < :c_from AND id <> :c_id`,
-          "sql",
-          { c_from: c.valid_from, c_id: id, c_class: c.class, c_attribute: c.attribute },
-        ).catch((e) => log.warn(`closing earlier claims on ${c.class}/${c.attribute}: ${String(e).slice(0, 120)}`));
-      }
+      // no write closes an earlier claim: decision 3 is applied per reader at read time (state.js), over
+      // only the claims that reader sees, so a claim above someone can't end what they see
       n++;
     }
   }
