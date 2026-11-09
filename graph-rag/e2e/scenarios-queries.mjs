@@ -67,22 +67,14 @@ async function until(label, fn, timeoutMs = 120_000) {
   throw new Error(`timed out: ${label} (last: ${JSON.stringify(last)?.slice(0, 300)})`);
 }
 
-/** the model's types, as model/schema.js declares them (idempotent; the integrator runs the real statements at boot) */
-const DDL = [
-  "CREATE EDGE TYPE CLAIMS IF NOT EXISTS",
-  ...["id", "kind", "class", "attribute", "value", "valid_from", "valid_until", "recorded_at", "recorded_by", "closed_by", "_home"].map((p) => `CREATE PROPERTY CLAIMS.${p} IF NOT EXISTS STRING`),
-  "CREATE PROPERTY CLAIMS.value_num IF NOT EXISTS DOUBLE",
-  "CREATE VERTEX TYPE CommitmentClass IF NOT EXISTS",
-  ...["name", "record_table", "status"].map((p) => `CREATE PROPERTY CommitmentClass.${p} IF NOT EXISTS STRING`),
-  "CREATE PROPERTY Entity._class IF NOT EXISTS STRING",
-];
+/**
+ * The one confirmed class these scenarios need (jobs, recorded in mssql:dbo_Job), so a row number in
+ * a question reads as a job's key. The types themselves (CLAIMS, CommitmentClass, Entity._class) are
+ * model/schema.js statements(), which the server runs at boot.
+ */
 let schemaReady = false;
 async function schema() {
   if (schemaReady) return;
-  for (const command of DDL) {
-    const r = await tool("admin", "execute_graph", { language: "sql", command });
-    check(!r.error || /already exists/i.test(r.error), `${command}: ${r.error}`);
-  }
   if (!(await sql("SELECT name FROM CommitmentClass WHERE name = 'jobs'")).length) {
     const r = await tool("admin", "execute_graph", { language: "sql", command: "CREATE VERTEX CommitmentClass SET name = 'jobs', record_table = 'mssql:dbo_Job', status = 'confirmed', stages = ['planned', 'running', 'paused', 'done']" });
     check(!r.error, `the jobs class: ${r.error}`);
@@ -269,14 +261,18 @@ export const scenarios = [
       check(stateOf(mine, "shift")?.value === "late", `the floor's claim: ${JSON.stringify(mine).slice(0, 400)}`);
       check(stateOf(mine, "pay_rate") === undefined, `never the pay claim: ${JSON.stringify(mine).slice(0, 400)}`);
       check(mine.things?.[0]?.claims === 1, `one claim counted: ${mine.things?.[0]?.claims}`);
-      // a claim read bounds the worker's writes like any read: nothing beyond the floor was shown, so its write isn't held
-      const plain = await tool(w, "update_entry", { entry: String(e.rid), facets: { state: "Late shift, checked against state." } });
-      check(!plain.error && !plain.pendingId, `a scoped state read holds nothing: ${JSON.stringify(plain).slice(0, 300)}`);
+      // a claim read bounds the worker's writes like any read: nothing beyond the floor was shown, so its one write to
+      // the graph (resolve_subject: its judgement on a subject, minting a thing) isn't held, and is seen from the entry's home
+      const resolve = (name, type) => tool(w, "resolve_subject", { name, thing: { name, type }, reason: "e2e" });
+      const plain = await resolve("e2e-q4 late shift board", "place");
+      check(plain.thing && !plain.error, `a scoped state read holds nothing: ${JSON.stringify(plain).slice(0, 300)}`);
+      check(((await sql(`SELECT _homes FROM ${plain.thing}`))[0]?._homes ?? []).includes(POS.floor), "seen from the floor, where the entry lives");
       const all = await tool(w, "current_state", { subject: "mssql:dbo_Employee:NGUD", beyond: true });
       check(stateOf(all, "pay_rate")?.value === "21.50 per hour" && stateOf(all, "shift")?.value === "late", `beyond: both, by key too: ${JSON.stringify(all).slice(0, 400)}`);
-      // having read the pay claim's section at the top, the worker's next write is held
-      const held = await tool(w, "update_entry", { entry: String(e.rid), facets: { state: "Late shift; pay checked." } });
-      check(/Not written/.test(held.error ?? "") || held.pendingId, `a read beyond the floor holds the write: ${JSON.stringify(held).slice(0, 300)}`);
+      // having read the pay claim's section at the top, the worker's next judgement is held: nothing minted
+      const held = await resolve("e2e-q4 pay ledger", "other");
+      check(/Not written/.test(held.error ?? ""), `a read beyond the floor holds the write: ${JSON.stringify(held).slice(0, 300)}`);
+      check(!(await sql("SELECT @rid FROM Entity WHERE _kind = 'thing' AND _norm = 'e2e-q4 pay ledger'")).length, "nothing minted while held");
       // the same for the person on the floor, and for alice above the floor but below the top; the admin sees both
       for (const who of ["bob", "alice"]) {
         const r = await tool(who, "current_state", { subject: "Diep" });
