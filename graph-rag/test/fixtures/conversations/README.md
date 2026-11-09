@@ -62,7 +62,9 @@ as the admin before running the bar; the seeder leaves them in the queue.
 - `scripts/batch-bar.mjs <batch> --url URL --token T` reads the batch's
   documents, sections, `CLAIMS` edges and approved moves back from an instance
   and prints the clean-batch verdict: no operator rescue, no wrong placement,
-  no lost text, no hidden title in a lower section.
+  no lost text, no hidden title in a lower section, and every claim saying
+  what the batch says (subject, kind, class, attribute, value, dates, recorder).
 - `graph-rag/e2e/scenarios-harness.mjs` checks the file's shape, validates
-  every expected document, and runs one conversation batch through the fakes
-  (through the direct contract shape until the Condenser's ingest route lands).
+  every expected document, and records all sixty-two conversations through
+  `record_document`, each as its person's own agent, under
+  `policy-oracle.json` with the derived window live, then holds them to the bar.

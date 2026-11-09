@@ -5,12 +5,14 @@
 // instance, it reads the batch's documents, sections, CLAIMS edges and
 // approved moves and prints one verdict line:
 //
-//   CLEAN oracle-sixty: 62/62 documents, 100/100 claims; rescues 0, misplaced 0, lost 0, hidden titles 0
+//   CLEAN oracle-sixty: 62/62 documents, 100/100 claims; rescues 0, misplaced 0, lost 0, hidden titles 0, wrong content 0
 //
 // no operator rescue (nobody moved or approved a move of a batch entry), no
 // wrong placement (every claim and section seen from where the authority map
 // says), no lost text (every section's text stored), no hidden title in a
-// lower section (no section names an entry homed above it). Findings are
+// lower section (no section names an entry homed above it), and every landed
+// claim saying what the batch says it should (subject, kind, class, attribute,
+// value, dates, recorder, its section). Findings are
 // listed before the verdict; exit 0 when clean, 1 when not, 2 on usage.
 //
 //   node scripts/batch-bar.mjs <batch.json> --url http://host:8000 (--token T | --tokens tokens.json [--as admin])
