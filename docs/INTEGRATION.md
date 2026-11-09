@@ -8,10 +8,14 @@ in separate commits. Nothing here is merged into `main` or deployed: moving
 `main` is the user's decision after this report.
 
 An independent review of 9a84cd2 (`~/reviews/integration-9a84cd2.md`) found 25
-blocking findings, B1-B25. They are fixed on `integration`; see
-[The review's findings](#the-reviews-findings-b1-b25) at the end. The sections
-below describe the first integration and are corrected where the review showed
-them false.
+blocking findings, B1-B25. A re-review of 2a1a12f
+(`~/reviews/integration-2a1a12f.md`) found 10 of them fixed, 15 partly fixed
+and 5 new ones (NB1-NB5). A second round of fixes is merged here; nothing has
+reviewed this tree independently yet. See
+[The review's findings](#the-reviews-findings-b1-b25) and
+[Round two](#round-two-the-re-review-of-2a1a12f) at the end. The sections below
+describe the first integration and are corrected where the reviews showed them
+false.
 
 ## Merge order and the wiring commits
 
@@ -201,10 +205,11 @@ stream runs last so its notes reach no other scenario. The bar compares each
 landed claim's subject, kind, class, attribute, value, dates and recorder, the
 section it came from, and section, document and claim homes against the oracle.
 A row corrupted on any of those fails it, in the unit tests and on rows read
-back from a real ArcadeDB. `e2e.sh` now also tags its image per run, so
+back from a real ArcadeDB; the re-review found exceptions, closed in round two
+(below). `e2e.sh` now also tags its image per run, so
 sessions running side by side cannot swap builds.
 
-Results on this tree (`integration` as pushed):
+Results at 2a1a12f (round two's are below):
 
 | Check | Result |
 |---|---|
@@ -220,22 +225,95 @@ Against 9a84cd2 the same bar failed 7 of 62 notes: six refused outright for a
 null `valid_from` (ux-w05, ab06, ad03, ai06, am06, aq12; B21) and one on the
 wrong thing (ux-w14; B14). All seven pass now.
 
-Still open after this pass, none of them failing the bar:
+## Round two: the re-review of 2a1a12f
+
+Merged one at a time on `claude/fix-harness-merge-609120`, each with `npm test`
+and `e2e.sh`, and each conflict resolution read with `git show --cc`. The
+Discovery branch had nothing new. B22's second round is 9ccdd3a.
+
+| # | Branch (tip) | Merge | Findings | Conflicts | Wiring commit |
+|---|---|---|---|---|---|
+| 1 | `claude/fix-visibility-c135d1` (cd5d641) | 0985b21 | B4 B11 remainders, NB3, B6 re-homing on a tightened rule (the user's decision) | none | none |
+| 2 | `claude/fix-record-d1e7ea` (a4009b2) | d0074b3 | B1 remainder, NB1, B8 document title | `floor.js`, `write.js`, `ingest.js`: fix-record's title-after-sections order, with fix-visibility's claim text, regrade floor and claims following the entry. `e2e.sh`: the clock and `AFTER`. `conversations.mjs`, `harness-batch.test.js`, `scenarios-harness.mjs`: section origin with the untitled section, in the shared landing helper | c0b03ea: a regrade floors a section by the document's own grade (`_doc_base`). `settleDocument` had raised `_home` to the waiting section's, so nothing came down after an outage; shown failing on the bare merge. Scenarios find a section by its document |
+| 3 | `claude/fix-resolve-734b26` (218bf55) | 7a86f17 | B8 alias and key, B9 B14 B16 B17, NB2, NB4 | `ingest.js`: `ownSections`, with the per-section authority read. `scenarios-harness.mjs`: no connected source, the shared class list | aced4c1: the bar reads B9 and NB2 as they are (see below); a stream's fake source ends with its stream |
+| 4 | `claude/fix-entry-77694e` (b92bf55) | c6b91a9 | B2 B3 B18 B19 remainders, NB5 | `worker-tools.js` `keyOf`: fix-resolve's held keys and hidden label, with fix-entry's class lookup that fails closed and the claim's scope | 95d95ad: the bar's hand-seeded rows carry a vector, so the harness's sweep leaves their text alone |
+
+Two scenarios changed name and widened; none was dropped. "An off-record
+thread can reach no graph write tool" is now "can write nothing at any tool or
+route" (fix-record). "The authority decision covers every column written" is
+now "an entry writes only what the claim says" (fix-entry).
+
+**fix-record changed the oracle's expected answer in one way:** `document_home`
+for the 20 notes with a section above the writer's position is now the most
+restricted section's home, following the B8 rule. `conversationOf` computes it; no claim,
+section home or placement changed.
+
+**The bar (B22).** It no longer depends on today's date: the batch's absolute
+dates move to the run's day, and it passes with the server and runner clocks
+faked forward (`CLOCK_SHIFT_DAYS`, 30 and 200 days). It now also fails on a
+subject stated beside its thing, a null claim home, a duplicate thing, an
+appended tail, a failed document, document and section origin, a section's
+`_doc_id`, `closed_by`, an extra section, a claim from outside the batch, and
+a thing's `_homes`. It runs twice: under `policy-oracle.json` and under the
+shipped default map. A SKIP or an empty run now exits non-zero.
+Not checked: a thing's `_home`, because every writer sets it to the root and
+scoping reads `_homes`.
+
+Two of those checks were narrowed at aced4c1, because the fixes made the states
+they flagged legitimate, and unit tests pin both sides:
+a keyed subject may be seen only from above its claim (B9: a key links without
+bringing the thing down), while a keyless one must be seen from its claim; and
+a second keyless thing of the same name counts only when the two share a home
+(NB2: a name never binds to a thing its writer can't see). So the bar does not
+catch a keyless duplicate made across a parent and child home, which it cannot
+tell from that legitimate case in the rows alone.
+
+Results on this tree (`integration` as pushed):
+
+| Check | Result |
+|---|---|
+| `graph-rag` unit tests (`npm test`) | 318 passed, 0 failed |
+| Replay harness (`graph-rag/e2e/e2e.sh`, full suite) | 99 of 99 passed: 21 built-in, admission 14, authority 8, condenser 10, discovery 4, harness 5, queries 9, reconcile 13, visibility 15 |
+| The landing bar, under `policy-oracle.json` and under the shipped default map | both `CLEAN oracle-sixty: 62/62 documents, 100/100 claims; rescues 0, misplaced 0, lost 0, hidden titles 0, wrong content 0` |
+| The landing bar with the clock 30 days ahead | 5 of 5 harness scenarios passed, both bars CLEAN, first recording stamped 2026-12-09 |
+| `packages/server`: `tsc --noEmit` | clean |
+| `packages/server`: vitest | 27 files, 184 tests passed (see the EPIPE note below) |
+| `packages/web`: `svelte-check` | 0 errors, 0 warnings |
+| `packages/web`: `vite build` | built |
+
+Still open, none of them failing the bar:
 
 - **The first mention of a keyless name has no thing until a worker resolves
-  it.** 25 of the 100 batch claims land on no thing. A second mention earns
-  the thing (admission rule 2) but the first claim stays on its section, so
-  `state_history` for rack C1 shows only ad15 and not the ac13 it supersedes,
-  and the oracle's succession on one attribute reads as a single claim until
-  a worker resolves ac13. No worker runs in the harness. The bar checks the
-  subject as written; it does not check that such a claim is ever adopted.
-- **The harness clock.** The record path now stamps the recording, so the
-  oracle's relative dates read from the moment of the run while its absolute
-  dates stay in Nov 2026 to Mar 2027. ux-ab05 ends on 2026-12-01, so from then
-  on `record_document` will refuse it for ending before it starts, and the bar
-  will fail. It needs an injectable clock, or relative oracle dates.
+  it.** After NB4, 24 of the 100 batch claims land on no thing under the oracle
+  policy and 40 under the default map (the prefixed run, which earlier
+  scenarios have not seeded). A second mention earns a thing only for an
+  individual, and the first claim then moves onto it. The rest wait for a
+  worker, and `POOL_DEFAULTS.poolSize` is 0: **a default pool never adopts
+  them.** No worker runs in the harness. The bar checks the subject as
+  written, not that such a claim is ever adopted.
+- **The same name can now be two things across homes (NB2).** A floor note
+  naming something only known above the floor makes its own thing. In the
+  batch that is "CNC 2" and "Kayla". It is what NB2 asked for, and nothing
+  joins the two until a worker does.
+- **A tightened rule and a document's title disagree.** Decision 5 in
+  `ORGANIZATION-MODEL.md` says the document and its title stay while another
+  section is still seen there, and `tightening.js` does that. B8's rule says a
+  title is no lower than its most restricted section, and every other route
+  settles it so. So after a tightening the title stays at the old home until
+  the next move or regrade of any section of that document raises it.
+  `scenarios-visibility.mjs` asserts decision 5, and the merge leaves it. Which
+  rule holds is for the user.
 - **The oracle's classes are confirmed by raw SQL in the batch.** The confirm
-  route takes snake_case names and at least one stage; the oracle's classes
-  have neither (review B24).
-- Everything under "Not blocking" in the review (N1-N26) that a fix did not
-  touch, including N3 above.
+  route renames every class to plural snake_case, so 49 of the oracle's 50
+  names don't survive it, and the 50th, `equipment`, is a name Discovery
+  forbids. This stays open for the class-model change that follows this work
+  (an instance edge to a class and a class hierarchy); it has not been started.
+- **`packages/server` vitest intermittently exits 1 with every test passing:**
+  an EPIPE from `test/openshell-fs.test.ts` ("streams a download byte-exact").
+  3 of 7 runs here, and 1 of 8 at 2a1a12f, in a test and module these merges
+  don't touch.
+- Everything under "Not blocking" in the reviews that a fix did not touch,
+  including N3 above. Neither review covered a real model or deploying onto
+  existing data.
+
+The harness clock, an open item at 2a1a12f, is resolved above.
