@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { commonAncestor, effectiveHome, homeName } from "./positions.js";
 import { liveClause, parseValidUntil } from "./extent.js";
 import { createDocStore } from "./docstore.js";
-import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, parseRecordText, prepareRecord, preview, renderRecord, sectionChunks, sectionName } from "./documents.js";
+import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, parseRecordText, prepareRecord, preview, recordId, renderRecord, sectionChunks, sectionName, stableUuid } from "./documents.js";
 import { authorityOf, claimHome } from "./model/authority.js";
 import { statements, TYPES } from "./model/schema.js";
 import { DOC_STORE, EXTRACT_MODEL, GRADER_MODEL, log } from "./context.js";
@@ -59,10 +59,27 @@ async function edgeOnce(type, from, to) {
   await adbCommand(`CREATE EDGE ${type} FROM ${from} TO ${to}`);
 }
 
+/** a name of its own for a document whose title is taken: short enough that sectionName keeps the id, so its sections are distinct too */
+const distinctTitle = (base, docId) => `${String(base).slice(0, 68)} (${docId.slice(0, 8)})`;
+
+/**
+ * The name a record goes under at this origin: its title, unless another document or entry already holds that
+ * name or one of the section names it would use. A model picks titles by topic, so a reused title is usually a
+ * different record: it is written beside the earlier one, never over it (only a manual is replaced by a new text
+ * under its title).
+ */
+async function recordTitle(base, docId, origin, spans) {
+  const names = [base, ...spans.map((sp) => sectionName(base, sp.index, sp.heading))];
+  const taken = await adbQuery(`SELECT _doc_id FROM ${ENTITY_LABEL} WHERE name IN :names AND _origin = :origin AND (_doc_id IS NULL OR _doc_id <> :doc) LIMIT 1`, { names, origin, doc: docId });
+  return taken.length ? distinctTitle(base, docId) : base;
+}
+
 /**
  * Ingest a stored document: its entry, its sections (graded, never below
  * the entry), their links, and, only when the ingest said so, extracted
- * facts. Re-ingesting the same title replaces the sections.
+ * facts. Re-ingesting a manual's title replaces the manual's sections; a
+ * record is never replaced, and running one again (a retry, a failed ingest)
+ * finishes what is missing and adds nothing (recordClaims).
  */
 async function ingestDocument(p) {
   const writtenAt = Date.parse(p.written_at) || Date.now();
@@ -70,8 +87,15 @@ async function ingestDocument(p) {
   const chunks = p.record ? sectionChunks(text, meta?.sections ?? []) : chunk(text);
   chunkCache.set(p.doc_id, chunks);
   const vu = p.valid_until; // ISO, "lasting", or undefined: as resolved when it was written
-  const keyOf = (name, kind) => adbQuery(`SELECT @rid AS rid, _home, _doc_id FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin AND _kind = :kind LIMIT 1`, { name, origin: p.home, kind });
-  const before = (await keyOf(p.title, "document"))[0];
+  const keyOf = (name, kind) => adbQuery(`SELECT @rid AS rid, _home, _doc_id, _on_record FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin AND _kind = :kind LIMIT 1`, { name, origin: p.home, kind });
+  let title = p.record ? await recordTitle(p.title, p.doc_id, p.home, meta?.sections ?? []) : p.title;
+  let before = (await keyOf(title, "document"))[0];
+  // a manual never replaces a record: it goes beside it, under a name of its own
+  if (!p.record && before?._on_record === true && before._doc_id !== p.doc_id) {
+    title = distinctTitle(p.title, p.doc_id);
+    before = (await keyOf(title, "document"))[0];
+  }
+  p = { ...p, title };
   await upsertEntities({
     entities: [
       {
@@ -129,7 +153,7 @@ async function ingestDocument(p) {
     await edgeOnce("PART_OF", String(s.rid), String(doc.rid));
     if (sections[i + 1]) await edgeOnce("NEXT", String(s.rid), String(sections[i + 1].rid));
   }
-  // a re-ingest: sections past the new end, and the old text, go
+  // a manual re-ingested under its title: sections past the new end, and the old text, go (a record's name is its own)
   if (before?._doc_id && before._doc_id !== p.doc_id) {
     await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :old`, "sql", { old: before._doc_id }).catch(() => {});
     await docStore.remove(before._doc_id).catch(() => {});
@@ -238,13 +262,20 @@ async function subjectThing(subject, home, cache) {
  */
 async function recordClaims(p, sections) {
   const byIndex = new Map(sections.map((s) => [Number(s._section), { rid: String(s.rid), home: effectiveHome(positionMap, s._home) }]));
-  const things = new Map();
+  // the thing a claim is about is seen from where that claim is: one lookup per subject per home
+  const thingsAt = new Map();
+  const thingsFor = (home) => {
+    if (!thingsAt.has(home)) thingsAt.set(home, new Map());
+    return thingsAt.get(home);
+  };
   const authority = authorityPolicy();
   let n = 0;
   for (const section of p.record.sections) {
     const s = byIndex.get(section.index);
     if (!s) continue;
-    for (const c of section.claims ?? []) {
+    // a claim's id is the one it was given, else its place in this document: running the document again finds what is already written
+    const written = new Set((await adbQuery(`SELECT id FROM (SELECT expand(outE('CLAIMS')) FROM ${s.rid})`)).map((r) => r.id));
+    for (const [j, c] of (section.claims ?? []).entries()) {
       let home = s.home;
       if (authority && positionMap) {
         // the stricter of the section's home and the claim's authority home
@@ -255,9 +286,9 @@ async function recordClaims(p, sections) {
           s.home = raised;
         }
       }
-      const thing = await subjectThing(c.subject, p.home, things);
-      const id = c.id ?? randomUUID();
-      await adbCommand(
+      const thing = await subjectThing(c.subject, home, thingsFor(home));
+      const id = c.id ?? stableUuid("claim", p.doc_id, section.index, j);
+      if (!written.has(id)) await adbCommand(
         `CREATE EDGE CLAIMS FROM ${s.rid} TO ${thing} SET id = :c_id, kind = :c_kind, class = :c_class, attribute = :c_attribute, value = :c_value${c.value_num === null || c.value_num === undefined ? "" : ", value_num = :c_num"}, valid_from = :c_from${c.valid_until ? ", valid_until = :c_until" : ""}, recorded_at = :c_at, recorded_by = :c_by, _home = :c_home`,
         "sql",
         { c_id: id, c_kind: c.kind, c_class: c.class, c_attribute: c.attribute, c_value: c.value, c_num: c.value_num, c_from: c.valid_from, c_until: c.valid_until, c_at: c.recorded_at, c_by: c.recorded_by, c_home: home },
@@ -382,7 +413,7 @@ export function startIngest(p) {
 /**
  * A condensed document put on record (docs/ORGANIZATION-MODEL.md, "Inputs"): the contract's document shape
  * (model/claims.js), validated here before anything is stored, with its claims. The tool call's title and
- * description fill what the document left out; the recording person and position default to the identity's.
+ * description fill what the document left out; the recording person, position and time are the server's.
  * Stored and ingested like a manual (after approval for queued writers), with the on-record marker and a
  * CLAIMS edge per claim. Reachable today through ingest_document with the document as JSON in `text`
  * (the tool table in server.js isn't this module's); a dedicated tool can call this directly.
@@ -390,24 +421,30 @@ export function startIngest(p) {
 export async function recordDocument(raw, identity, scope, { title, description, home: requestedHome, valid_until } = {}) {
   if (!docStore) throw new Error("no document store is configured (DOC_STORE)");
   const home = resolveWriteHome(scope, requestedHome);
-  const now = Date.now();
+  let now = Date.now();
   const classes = await confirmedClasses();
-  // the record is under the authority of the token's person: an agent's record counts as the person it
-  // acts for (model/schema.js), whatever the document says; in open mode the condenser's word stands
-  const recordedBy = identity.open ? null : personOf(identity.user);
-  const document = prepareRecord(recordedBy ? { ...raw, recorded_by: recordedBy } : raw, {
-    title,
-    description,
-    recorded_by: recordedBy ?? undefined,
-    position: identity.positions?.[0] ?? home ?? "unscoped",
-    classes,
-    now,
-  });
+  // who recorded it, under which position and when are the server's: an agent's record counts as the person it
+  // acts for (model/schema.js), at the position its token holds, now, whatever the document or its claims say.
+  // Only in open mode (no identities, standalone development) does the condenser's word stand.
+  const person = identity.open ? null : personOf(identity.user);
+  const position = identity.positions?.includes(home) ? home : (identity.positions?.[0] ?? home ?? "unscoped");
+  const prepare = (at) => prepareRecord(raw, { title, description, recorded_by: person ?? undefined, position, classes, now: at, stamp: person ? { recorded_by: person, position, recorded_at: new Date(at).toISOString() } : undefined });
+  let document = prepare(now);
+  // a re-send is the same document: finished once it is not ingested again, and a failed run continues from its
+  // first recording, so the claims it already wrote stay as they are
+  const doc_id = recordId(raw, { person: document.recorded_by, home, title: document.title });
+  const existing = (await adbQuery(`SELECT name, _doc_status, _recorded_at, sections, claims FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: doc_id }))[0];
+  if (existing?._doc_status === "ready") {
+    return { already_on_record: true, doc_id, title: existing.name, sections: Number(existing.sections) || document.sections.length, claims: Number(existing.claims) || 0, note: "this document is already on record; nothing was added" };
+  }
+  if (existing?._recorded_at) {
+    now = Date.parse(existing._recorded_at) || now;
+    document = prepare(now);
+  }
   const { text, spans } = renderRecord(document);
   if (text.length > MAX_CHARS) throw new Error(`documents are limited to ${MAX_CHARS} characters`);
   if (spans.length > MAX_SECTIONS) throw new Error(`documents are limited to ${MAX_SECTIONS} sections (this one has ${spans.length})`);
   const v = parseValidUntil(valid_until, now);
-  const doc_id = randomUUID();
   const allClaims = document.sections.flatMap((s) => s.claims);
   const claims = allClaims.length;
   // the write-or-propose decision: the Authority stream's one rule over the claims' classes when it is
@@ -419,9 +456,11 @@ export async function recordDocument(raw, identity, scope, { title, description,
   // every section to the most restricted claim's home. Each section is homed by its own claims inside
   // upsertEntities (model/README.md: no lower than its most restricted claim and no lower than its document),
   // the free-text sections by the grader; the decision's home is where the proposal is reviewed.
+  // the name it goes under (checked again when the ingest runs: an earlier record keeps its title and its claims)
+  const recordName = await recordTitle(document.title, doc_id, home, spans);
   const payload = {
     doc_id,
-    title: document.title,
+    title: recordName,
     description: (document.description ?? `${document.title}, put on record by ${document.recorded_by}`).slice(0, 500),
     extract: false,
     home,
@@ -437,10 +476,13 @@ export async function recordDocument(raw, identity, scope, { title, description,
   await docStore.put(doc_id, text, { title: payload.title, by: identity.user, at: payload.written_at, on_record: true, sections: spans });
   const checked = classes ? { classes: `checked against ${classes.length} confirmed class${classes.length === 1 ? "" : "es"}` } : { classes: "no confirmed classes in the graph yet: class names unchecked" };
   if (queued) {
-    const q = await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home: decision?.home ?? home });
+    // a re-send while the first waits for approval is that same proposal
+    const waiting = (await adbQuery("SELECT id FROM PendingWrite WHERE kind = 'ingest' AND status = 'pending' AND payload LIKE :p LIMIT 1", { p: `%"doc_id":"${doc_id}"%` }))[0];
+    const q = waiting ? { queued: true, pendingId: waiting.id } : await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home: decision?.home ?? home });
     return {
       ...q,
       doc_id,
+      title: recordName,
       on_record: true,
       sections: spans.length,
       claims,
@@ -450,7 +492,7 @@ export async function recordDocument(raw, identity, scope, { title, description,
     };
   }
   void startIngest(payload);
-  return { ingesting: true, doc_id, on_record: true, sections: spans.length, claims, ...checked, note: "sections are being graded and embedded and the claims written; search finds them in a minute or two" };
+  return { ingesting: true, doc_id, title: recordName, on_record: true, sections: spans.length, claims, ...checked, note: "sections are being graded and embedded and the claims written; search finds them in a minute or two" };
 }
 
 /** an ingest from a tool call: stored now; ingested now, or after approval for queued writers */

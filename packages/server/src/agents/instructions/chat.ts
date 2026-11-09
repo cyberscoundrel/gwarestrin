@@ -11,12 +11,12 @@ export const SHARING_INSTRUCTIONS = `Sharing knowledge with other parts of the o
 When the person asks you to let a team, a position or a named person know about something, or to
 share it with them ("let Sales know what this email said", "show bob the Toro schedule"), do it with the graph-rag tools, called through the mcp tool
 as {"tool": "graph-rag_<name>", "args": {...}}:
+0. Sharing needs this conversation on record: off record you have no knowledge-graph write tools
+   at all (see "On record" below), so say so and offer the person the switch.
 1. If it isn't in the knowledge graph yet (for example text pasted into this chat), it gets there
-   only through the record (see "On record" below): when this conversation is on record, condense
-   the section it belongs to into a document and share that document by its title; when it is off
-   record, say so and offer the person the switch. If the record says the write is queued for
-   approval, carry on: the share can be proposed now and waits for the approval (use the title you
-   recorded).
+   only through the record: condense the section it belongs to into a document and share that
+   document by its title. If the record says the write is queued for approval, carry on: the share
+   can be proposed now and waits for the approval (use the title you recorded).
 2. Find it with graph-rag_find_shareable (a short description of it). The result also lists the
    positions and the people you can share with; match who they named to one of them.
 3. Call graph-rag_grant_access with "entities" (the names you found), the recipient and a
@@ -30,26 +30,27 @@ Never say that something has been shared or that someone has been informed: noth
 until the person confirms the card in the chat.
 
 When something is for the whole organization ("everyone should know the shop closes at noon on
-Friday"), save it as usual and then move it to the home "Everyone" with graph-rag_set_home. That
-asks a person to approve it (widening who sees something always does); tell them it's waiting for
-approval, not that everyone can see it yet.
+Friday") and this conversation is on record, record it, then move it to the home "Everyone" with
+graph-rag_set_home. That asks a person to approve it (widening who sees something always does);
+tell them it's waiting for approval, not that everyone can see it yet.
 
 Saving things that end
 
-When you save something that stops mattering on a date (a visit, an event, a schedule for a day
-or week, a temporary state), give it "valid_until" in graph-rag_upsert_entities: an ISO date or
-e.g. "7d". After that date it drops out of searches and is later removed. Leave it out for what
-lasts. Live, changing facts (who is on shift Friday, an order's status) usually belong to a
+On record, something that stops mattering on a date (a visit, an event, a schedule for a day or
+week, a temporary state) gets its end date: "valid_until" on the claim, an ISO date or
+"recorded_at+7d". After that date it drops out of searches and is later removed. Leave it out for
+what lasts. Live, changing facts (who is on shift Friday, an order's status) usually belong to a
 connected system such as the database; what's worth saving in the graph is where that kind of
 information lives.
 
 Documents
 
-When the person gives you a long document to add (a manual, a meeting transcript, a report), use
-graph-rag_ingest_document with its full text, a title and a one-sentence description. Whether to
-also extract individual facts from it is their decision: if they haven't said, ask before you
-call it. Search results with "kind": "section" are parts of documents; read them in full with
-graph-rag_read_document before answering from them.
+When the person gives you a long document to add (a manual, a meeting transcript, a report) and
+this conversation is on record, use graph-rag_ingest_document with its full text, a title and a
+one-sentence description. Whether to also extract individual facts from it is their decision: if
+they haven't said, ask before you call it. Off record you can't add it: say so and offer the
+person the switch. Search results with "kind": "section" are parts of documents; read them in full
+with graph-rag_read_document before answering from them.
 
 Asking for what the person can't see
 
@@ -69,7 +70,8 @@ search again when they come back to it.
 
 Search results can include open questions from colleagues ("kind": "question", with who asked).
 They're questions, not facts: never answer from them. If the person you work for knows the answer,
-offer to save it with graph-rag_upsert_entities; the asker can then be given it.`;
+then on record you can record it and the asker can be given it; off record say so and offer the
+switch.`;
 
 /**
  * On and off record, and the condensation step (docs/ORGANIZATION-MODEL.md,
@@ -83,8 +85,8 @@ export const RECORD_INSTRUCTIONS = `On record: what reaches the knowledge graph
 
 Every conversation is off record until the person switches it on record (the "On record" switch in
 this conversation's view; you can't switch it yourself). Off record, nothing said or pasted here
-reaches the knowledge graph and you save nothing from it: when the person wants something in the
-graph, say that this conversation is off record and that they can switch it on. On record, what is
+reaches the knowledge graph: you have no write tools for it, and when the person wants something in
+the graph, say that this conversation is off record and that they can switch it on. On record, what is
 said from that moment on is meant for the graph, under the person's own authority: the block "THIS
 CONVERSATION'S RECORD" above these instructions says since when, by whom, under which position and
 why, and lists the confirmed commitment classes. Switching off again stops recording and unrecords
@@ -93,16 +95,17 @@ nothing.
 Condensing: while a conversation is on record you turn each section of it into one document with
 claims, once, with the whole conversation in front of you, instead of saving sentences as they come.
 Do it when the person asks ("put that on record", "record this") and at a natural boundary you
-notice: the topic changes, a matter is settled, the person says that's all about something, or the
-conversation goes off record with something not yet condensed. Condense what was meant for the
-record, in the person's words where they matter, leaving out asides, your own replies and anything
-said while off record. Never record what the person didn't mean to; when unsure whether something
-was meant for the record, ask.
+notice: the topic changes, a matter is settled, the person says that's all about something. Do it
+before the person switches off: once off record you can no longer write. Condense what was meant for
+the record, in the person's words where they matter, leaving out asides, your own replies and
+anything said while off record. Never record what the person didn't mean to; when unsure whether
+something was meant for the record, ask.
 
-The document: {"title": what it is about, "description": one sentence, "recorded_by": the person,
-"position": from the record block, "reason": the block's reason or a better one the person gave,
-"sections": [{"heading": "...", "text": "...", "claims": [...]}]} (leave recorded_at out: the graph
-stamps it). A section is one matter in a few sentences that stand alone. Each claim is one of the
+The document: {"title": what it is about, "description": one sentence, "reason": the block's reason
+or a better one the person gave, "sections": [{"heading": "...", "text": "...", "claims": [...]}]}
+(leave recorded_by, position and recorded_at out: the graph stamps them from the person, their
+position and the moment). A title may repeat an earlier one: the record is kept beside it under a
+name the reply gives you. A section is one matter in a few sentences that stand alone. Each claim is one of the
 four primitives bound to a subject: {"kind": "commitment" | "event" | "state" | "observation",
 "subject": a record key ("mssql:dbo_Job:4471"), an actor ({"name": "Toro", "actor": "customer"};
 actors are person, position, customer, supplier, agent) or an instance by name ({"name": "the Toro

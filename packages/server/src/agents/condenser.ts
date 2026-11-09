@@ -98,7 +98,7 @@ export function recordContext(state: ThreadRecordState, classes: ConfirmedClass[
   } else {
     out.push(
       "",
-      `This conversation went OFF RECORD at ${when(state.until)}. It was on record from ${when(state.since)}: ${record}. What was said on record and not yet condensed is still to be condensed, once, at your next opportunity; nothing said after ${when(state.until)} goes on record, and you don't record anything new.`,
+      `This conversation went OFF RECORD at ${when(state.until)}. It was on record from ${when(state.since)}: ${record}. Nothing said after ${when(state.until)} goes on record, and you have no way to write to the graph from this conversation until the person switches it on again: what was on record and not yet condensed stays unrecorded, tell the person so if it matters.`,
     );
   }
   out.push("", state.documents ? `Documents recorded from this conversation so far: ${state.documents}${state.condensed_at ? ` (the last at ${when(state.condensed_at)})` : ""}.` : "Nothing has been recorded from this conversation yet.");

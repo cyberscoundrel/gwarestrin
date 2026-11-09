@@ -19,6 +19,7 @@ import { OpenShellProviders, OpenShellRuntime, connectOpenShell } from "../runti
 import { openShellIdentity } from "../runtime/openshell-identity.js";
 import { lastReply, lastTurn } from "./last-reply.js";
 import { condensedFromEvent, type ConfirmedClass, fetchConfirmedClasses, RECORD_FILE, recordContext, switchRecord, threadIdOf, writeRecordContext } from "./condenser.js";
+import { pushThreadRecord } from "./record-gate.js";
 import { AgentStore } from "./store.js";
 import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.js";
 
@@ -76,6 +77,8 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   private launcher: Promise<OpenShellAgentLauncher> | undefined;
   /** the confirmed commitment classes, as last read from the graph (a few minutes' cache) */
   private classes: { at: number; list: ConfirmedClass[] | null } = { at: 0, list: null };
+  /** agents whose record state is waiting for a retry to reach graph-rag */
+  private gateRetries = new Set<string>();
 
   constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore, profiles?: ProfileStore) {
     super();
@@ -225,8 +228,9 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
    * record: from now, under their position, for their reason; the agent sees
    * it in its context from its next turn (on-record.md, read by graph-context
    * every turn) with the confirmed classes in front of it. Off again: stops
-   * further recording; what was recorded stays, and the agent is told to
-   * condense what was on record and not yet condensed.
+   * further recording, and graph-rag gives the agent no write tool from then
+   * on; what was recorded stays. graph-rag is told first (record-gate.ts): a
+   * switch it didn't hear of fails, so the person isn't told it happened.
    */
   async setOnRecord(id: string, input: SetThreadRecordInput & { by: string; position?: string | null }): Promise<ThreadRecordState> {
     const record = this.store.get(id);
@@ -235,6 +239,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const thread = threadIdOf(record.sessionFile);
     if (!thread) throw new Error("this agent has no conversation yet");
     const next = switchRecord(this.store.threadRecord(id, thread), input);
+    await this.pushRecordGate(id, next);
     this.store.setThreadRecord(id, next);
     await this.syncRecordContext(id, next);
     this.emit("threadRecord", { agentId: id, record: next });
@@ -256,16 +261,44 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   /** the conversation changed (a new session, a fork, a start): its own record state applies */
   private async threadChanged(id: string): Promise<void> {
     const state = this.threadRecord(id);
+    this.syncRecordGate(id);
     await this.syncRecordContext(id, state).catch((err) => log.warn(`record state for ${id} not written: ${err instanceof Error ? err.message : String(err)}`));
     this.emit("threadRecord", { agentId: id, record: state });
+  }
+
+  /** the instance's graph URL and token (its own: the agents only hold delegated ones) */
+  private instanceGraph(): { url: string | undefined; token: string | undefined } {
+    const values = getInstanceMetadata()?.values as Record<string, { token?: unknown }> | undefined;
+    return { url: this.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL, token: typeof values?.graph?.token === "string" ? values.graph.token : undefined };
+  }
+
+  /** tell graph-rag this agent's current thread and whether it is on record; throws when it can't be told */
+  private async pushRecordGate(id: string, state: ThreadRecordState): Promise<void> {
+    const { url, token } = this.instanceGraph();
+    if (url) await pushThreadRecord(url, token, { agent: id, thread: state.thread, on: state.on });
+  }
+
+  /**
+   * The same for a thread change, which nothing waits on: a failed push is
+   * retried until it lands, always with the state as it then is, so a thread
+   * that went off record doesn't stay open behind a hiccup.
+   */
+  private syncRecordGate(id: string): void {
+    if (this.gateRetries.has(id)) return;
+    void this.pushRecordGate(id, this.threadRecord(id)).catch((err) => {
+      log.warn(`record gate for ${id} not updated, retrying: ${err instanceof Error ? err.message : String(err)}`);
+      this.gateRetries.add(id);
+      setTimeout(() => {
+        this.gateRetries.delete(id);
+        if (this.store.get(id)) this.syncRecordGate(id);
+      }, 15_000).unref();
+    });
   }
 
   /** the confirmed commitment classes (CommitmentClass rows), read through graph-rag as this instance; null when they can't be read */
   async confirmedClasses(): Promise<ConfirmedClass[] | null> {
     if (Date.now() - this.classes.at < 300_000) return this.classes.list;
-    const values = getInstanceMetadata()?.values as Record<string, { token?: unknown }> | undefined;
-    const token = typeof values?.graph?.token === "string" ? values.graph.token : undefined;
-    const url = this.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL;
+    const { url, token } = this.instanceGraph();
     const list = url ? await fetchConfirmedClasses(url, token) : null;
     this.classes = { at: Date.now(), list };
     return list;

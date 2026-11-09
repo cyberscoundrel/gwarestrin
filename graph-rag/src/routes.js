@@ -18,6 +18,7 @@ import { decideProposal, masterStatus } from "./master-tools.js";
 import { pruneExpired, prunePreview } from "./pruning.js";
 import { canEditPolicy, policy, policyDefaults, policyMeta, savePolicy } from "./org-policy.js";
 import { createServer } from "./server.js";
+import { isOffRecord, OFF_RECORD_REFUSAL } from "./record-state.js";
 import { registerDiscoveryRoutes } from "./routes-discovery.js";
 import { registerQueryRoutes } from "./tools-queries.js";
 
@@ -368,6 +369,11 @@ function httpScope(req, res) {
   }
   if (!SCOPED || !positionMap) {
     res.status(409).json({ error: "the knowledge graph isn't divided into positions" });
+    return null;
+  }
+  // the routes below reach the same writes as the tools: an off-record chat agent's token doesn't get them either
+  if (req.method !== "GET" && isOffRecord(identity)) {
+    res.status(403).json({ error: OFF_RECORD_REFUSAL });
     return null;
   }
   return { identity, scope: scopeOf(identity) };

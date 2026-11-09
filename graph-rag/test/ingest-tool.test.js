@@ -4,6 +4,41 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
 import { documentShape, RECORD_TOOL, registerRecordTools } from "../src/record-tools.js";
+import { prepareRecord, recordId } from "../src/documents.js";
+import { applyThreadRecord, isOffRecord } from "../src/record-state.js";
+
+test("the record stamp: who, where and when are the server's, whatever the document or a claim says", () => {
+  const raw = { title: "T", recorded_by: "admin", position: "org", recorded_at: "2020-01-01T00:00:00Z", reason: "r", sections: [{ text: "x", claims: [{ kind: "state", subject: { name: "a", class: "jobs" }, attribute: "stage", value: "planned", recorded_by: "admin", recorded_at: "2020-01-01T00:00:00Z" }] }] };
+  const stamped = prepareRecord(raw, { now: Date.parse("2026-11-09T10:00:00Z"), stamp: { recorded_by: "bob", position: "floor", recorded_at: "2026-11-09T10:00:00.000Z" } });
+  assert.equal(stamped.recorded_by, "bob");
+  assert.equal(stamped.position, "floor");
+  assert.equal(stamped.recorded_at, "2026-11-09T10:00:00.000Z");
+  assert.equal(stamped.sections[0].claims[0].recorded_by, "bob");
+  assert.equal(stamped.sections[0].claims[0].recorded_at, "2026-11-09T10:00:00.000Z");
+  // without a stamp (open mode, and what the oracle tests feed) the document's word stands
+  assert.equal(prepareRecord(raw, {}).position, "org");
+});
+
+test("a document's id: the same re-send is the same record, a different document or person isn't", () => {
+  const doc = { title: "T", recorded_at: "2026-11-09T10:00:00Z", sections: [{ text: "x", claims: [{ kind: "state", attribute: "a", value: 1 }] }] };
+  const same = { sections: [{ text: "x", claims: [{ value: 1, attribute: "a", kind: "state", recorded_by: "someone", recorded_at: "2099-01-01T00:00:00Z" }] }], title: "T", recorded_at: "2099-01-01T00:00:00Z" };
+  const at = { person: "bob", home: "floor", title: "T" };
+  assert.equal(recordId(doc, at), recordId(same, at), "key order and the server's stamps don't change it");
+  assert.notEqual(recordId(doc, at), recordId({ ...doc, sections: [{ text: "y", claims: [] }] }, at), "another text is another document");
+  assert.notEqual(recordId(doc, at), recordId(doc, { ...at, person: "alice" }), "another person's identical note is theirs");
+});
+
+test("off record: a chat agent has no write tool until its thread is on record; only chat agents are gated", () => {
+  const chat = { agent: "a1", key: "admin/agent:a1", caps: { write: "direct" } };
+  assert.equal(isOffRecord(chat), true, "never heard of: off record");
+  applyThreadRecord("admin", "a1", { on: true, thread: "t1" });
+  assert.equal(isOffRecord(chat), false);
+  applyThreadRecord("admin", "a1", { on: false, thread: "t1" });
+  assert.equal(isOffRecord(chat), true, "switched off: refused again");
+  assert.equal(isOffRecord({ agent: "w", key: "admin/agent:w", role: { kind: "worker" } }), false, "a worker isn't a conversation");
+  assert.equal(isOffRecord({ user: "bob", caps: {} }), false, "a person's own token isn't an agent's");
+  assert.equal(isOffRecord({ agent: "a1", key: "other/agent:a1", caps: {} }), true, "another tenant's state is another thread");
+});
 
 test("record_document registers with a name the harness recognizes and a document schema in the contract's shape", () => {
   const tools = [];
@@ -19,8 +54,16 @@ test("record_document registers with a name the harness recognizes and a documen
     sections: [{ heading: "Job 4471", text: "Job 4471 is running.", claims: [{ kind: "state", subject: "mssql:dbo_Job:4471", class: "jobs", attribute: "stage", value: "running" }] }],
   };
   assert.ok(schema.safeParse({ document: doc }).success);
-  assert.ok(schema.safeParse({ document: { ...doc, sections: [] } }).success === false, "needs a section");
-  assert.ok(schema.safeParse({ document: { ...doc, reason: undefined } }).success === false, "needs a reason");
+  assert.ok(schema.safeParse({ document: "a string isn't a document" }).success === false, "a document is an object");
   assert.ok(documentShape.safeParse({ ...doc, sections: [{ text: "free text, no claims" }] }).success, "a section may carry no claims");
-  assert.ok(documentShape.safeParse({ ...doc, sections: [{ text: "x", claims: [{ kind: "wish", subject: "a", attribute: "b", value: "c" }] }] }).success === false, "a claim is one of the four primitives");
+});
+
+test("record_document takes what the contract takes, null dates included, and the contract names what it refuses", () => {
+  const tools = [];
+  registerRecordTools({ tool: (name, description, shape, handler) => tools.push({ name, shape }) }, { identity: {}, scope: {}, need: () => {} });
+  const schema = z.object(tools[0].shape);
+  const withNulls = { title: "Note", reason: "r", sections: [{ text: "Press 3 is down.", claims: [{ kind: "state", subject: { name: "press 3", class: "jobs" }, attribute: "condition", value: "down", valid_from: null, valid_until: null, at: null, heading: null }] }] };
+  assert.ok(schema.safeParse({ document: withNulls }).success, "the schema does not refuse the oracle's null dates");
+  assert.equal(prepareRecord(withNulls, { recorded_by: "bob", position: "floor", now: Date.parse("2026-11-04T12:00:00Z") }).sections[0].claims[0].valid_from, "2026-11-04T12:00:00.000Z");
+  assert.throws(() => prepareRecord({ title: "T", reason: "r", recorded_by: "bob", position: "floor", sections: [{ text: "x", claims: [{ kind: "wish", subject: "a", attribute: "b", value: "c" }] }] }, {}), /sections\[0\]\.claims\[0\]\.kind/, "what the contract refuses names its field, at the tool as well as ingest_document");
 });
