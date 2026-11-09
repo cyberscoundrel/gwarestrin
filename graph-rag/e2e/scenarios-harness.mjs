@@ -60,6 +60,9 @@ async function approveIfProposed(ctx, r) {
  * raw SQL: rows for the bar's own scenario, which is about the bar and not
  * about the ingest path.
  */
+// a row with no vector is the embedding sweep's to fill, and it writes its own text over the row's: these rows are about the bar
+const SEEDED_VECTOR = JSON.stringify(Array.from({ length: 384 }, (_, i) => (i === 0 ? 1 : 0)));
+
 async function storeAsContract(ctx, c, prefix, wanted) {
   const d = c.expected.document;
   const x = c.expected;
@@ -69,11 +72,11 @@ async function storeAsContract(ctx, c, prefix, wanted) {
     return r;
   };
   const docId = `${prefix}-${c.id}`;
-  await exec(`CREATE VERTEX Entity SET name = '${q(d.title)}', _kind = 'document', _home = '${x.document_home}', _origin = '${c.position}', _written_by = '${q(d.recorded_by)}', _doc_id = '${docId}', _doc_status = 'ready', text_identity = '${q(`${d.title}: ${d.description}`)}', _on_record = true, _recorded_by = '${q(d.recorded_by)}', _recorded_at = '${d.recorded_at}', _record_position = '${d.position}', _record_reason = '${q(d.reason)}'`);
+  await exec(`CREATE VERTEX Entity SET embed_identity = ${SEEDED_VECTOR}, name = '${q(d.title)}', _kind = 'document', _home = '${x.document_home}', _origin = '${c.position}', _written_by = '${q(d.recorded_by)}', _doc_id = '${docId}', _doc_status = 'ready', text_identity = '${q(`${d.title}: ${d.description}`)}', _on_record = true, _recorded_by = '${q(d.recorded_by)}', _recorded_at = '${d.recorded_at}', _record_position = '${d.position}', _record_reason = '${q(d.reason)}'`);
   for (const [i, s] of d.sections.entries()) {
     const es = x.sections[i];
     const shown = es.home === x.document_home ? d.title : `Document ${docId.slice(0, 8)}`; // a section below its document's title shows none of it
-    await exec(`CREATE VERTEX Entity SET name = '${q(sectionName(shown, i, shown === d.title ? s.heading : s.heading.replace(`${d.title}: `, "")))}', _kind = 'section', _home = '${es.home}', _origin = '${c.position}', _written_by = '${q(d.recorded_by)}', _doc_id = '${docId}', _doc_title = '${q(shown)}', _section = ${i}, text_identity = '${q(s.text)}'`);
+    await exec(`CREATE VERTEX Entity SET name = '${q(sectionName(shown, i, shown === d.title ? s.heading : s.heading.replace(`${d.title}: `, "")))}', _kind = 'section', embed_identity = ${SEEDED_VECTOR}, _home = '${es.home}', _origin = '${c.position}', _written_by = '${q(d.recorded_by)}', _doc_id = '${docId}', _doc_title = '${q(shown)}', _section = ${i}, text_identity = '${q(s.text)}'`);
     await exec(`CREATE EDGE PART_OF FROM (SELECT FROM Entity WHERE _kind = 'section' AND _doc_id = '${docId}' AND _section = ${i}) TO (SELECT FROM Entity WHERE _kind = 'document' AND _doc_id = '${docId}')`);
     for (const cl of s.claims) {
       const pl = x.placements.find((p) => p.id === cl.id);
