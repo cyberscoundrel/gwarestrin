@@ -100,13 +100,14 @@ export function taskBrief({ sections, why }) {
       `Claims (${s.claims.length}):`,
       ...(s.claims.length ? s.claims.map(claimLine) : ["  (none extracted: nothing to reconcile here)"]),
       ...(s.subjects?.length ? ["Subjects:", ...s.subjects.map(subjectLine)] : []),
+      ...(s.unresolved_names?.length ? ["Names linking resolved to nothing (an instance, or content inside a claim; you decide):", ...s.unresolved_names.map((u) => `  - ${u.name}${u.type ? ` (${u.type})` : ""}${u.key ? `, key ${u.key}` : ""}`)] : []),
       ...(s.prior?.length ? ["Prior state (the latest claims on the same attributes, from other sections):", ...s.prior.map(priorLine)] : s.claims.length ? ["Prior state: nothing else is recorded on these attributes."] : []),
     );
   }
   lines.push(
     "----------",
     ...(why ? [`Why it's here: ${why}`] : []),
-    "Reconcile the claims against the source systems and the prior state: confirm each claim whose subject has a record key against its row (graph-rag_confirm_claim); resolve an UNRESOLVED subject to its instance when you can tell which (graph-rag_resolve_subject), or ask; record a conflict where a claim and a prior claim give different values for the same attribute over the same time (graph-rag_record_conflict); enter data into the source where the claim is right and the row is not (graph-rag_enter_data: it applies or is proposed by authority); mark a need met when a claim answers it (graph-rag_mark_need_met).",
+    "Reconcile the claims against the source systems and the prior state: confirm each claim whose subject has a record key against its row (graph-rag_confirm_claim); resolve an UNRESOLVED subject, or a name linking resolved to nothing, to its instance when you can tell which (graph-rag_resolve_subject), or ask; record a conflict where a claim and a prior claim give different values for the same attribute over the same time (graph-rag_record_conflict); enter data into the source where the claim is right and the row is not (graph-rag_enter_data: it applies or is proposed by authority); mark a need met when a claim answers it (graph-rag_mark_need_met).",
     "Finish with a short report: what you confirmed, resolved, recorded, entered or proposed, and what you asked.",
   );
   return lines.join("\n");

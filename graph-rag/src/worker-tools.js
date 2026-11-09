@@ -13,12 +13,12 @@
  */
 import { z } from "zod";
 import { effectiveHome } from "./positions.js";
-import { normalize, THING_TYPES, thingName } from "./things.js";
+import { normalize, THING_TYPES } from "./things.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
-import { embedBatch } from "./models.js";
+import { findThing, linkMentions } from "./linker.js";
 import { positionMap } from "./scope.js";
 import { liftRefusal, workerWriteFloor } from "./floor.js";
-import { actsForOf, assertNotWaiting, claimById, claimsOnAttribute, logChange, PROPOSED_NOTE, raiseQuestion, resolveSubjectStub } from "./worker-pool.js";
+import { actsForOf, assertNotWaiting, claimById, claimsOnAttribute, logChange, PROPOSED_NOTE, raiseQuestion, resolveSubjectStub, unresolvedNames } from "./worker-pool.js";
 import { ensureSourceRef, referTo } from "./audit.js";
 import { clientFor, columnFor, confirmAgainstRow, enterData } from "./data-entry.js";
 import { closeIntervals, overlaps } from "./model/claims.js";
@@ -125,20 +125,24 @@ async function workerRecordConflict(args, identity) {
 }
 
 /**
- * Resolve an unresolved subject to its instance, by the worker's explicit judgement: an existing thing
- * (by record key, or by name and type), or a new one minted here, with the claim's class and the key.
- * This is the one way a worker mints a thing; the resolver (worker-pool.js resolveSubjectStub, the
- * Admission stream's resolveSubject when it lands) only finds. The claim's edge is re-pointed at the
- * thing. A minted thing is seen from the section's home, floored by what the worker read.
+ * Resolve a subject to its instance, by the worker's explicit judgement: a claim's UNRESOLVED subject
+ * (claim_id), or a name linking resolved to nothing (name; the entry's `_unresolved`, linker.js). The
+ * instance is an existing thing (by record key, or by name and type) or a new one. Minting goes the one
+ * way a thing is minted on a worker's vouching: linker.js `linkMentions` with `create: true` (the
+ * Admission stream's admission rules apply there); the resolver (worker-pool.js resolveSubjectStub, or
+ * the Admission stream's resolveSubject) only finds. A claim's edge is re-pointed at the thing. What is
+ * minted is seen from the section's home, floored by what the worker read.
  */
 async function workerResolveSubject(args, identity) {
   await assertNotWaiting(identity);
-  const claim = await needClaim(args.claim_id);
-  if (claim.resolved) throw new Error(`claim ${claim.id}'s subject is already resolved (${claim.thing}); nothing to do`);
-  const want = { key: args.thing?.key ?? null, name: args.thing?.name ?? claim.subject?.name ?? null, type: args.thing?.type ?? null };
+  const claim = args.claim_id ? await needClaim(args.claim_id) : null;
+  if (claim?.resolved) throw new Error(`claim ${claim.id}'s subject is already resolved (${claim.thing}); nothing to do`);
+  if (!claim && !args.name) throw new Error("which subject: a claim_id from your brief, or an unresolved name");
+  const sectionRid = claim ? claim.section : identity.role.entry;
+  const want = { key: args.thing?.key ?? null, name: args.thing?.name ?? args.name ?? claim?.subject?.name ?? null, type: args.thing?.type ?? null };
   const key = want.key ? parseKey(want.key) : null;
   if (want.key && !key) throw new Error(`not a record key (system:table:row): ${want.key}`);
-  const home = await sectionHome(claim);
+  const home = claim ? await sectionHome(claim) : effectiveHome(positionMap, (await adbQuery(`SELECT _home FROM ${sectionRid}`).catch(() => []))[0]?._home);
   const { lift, floor } = workerWriteFloor(identity, home);
   let thing = await resolveSubjectStub({ key: key?.key ?? null, name: want.name });
   let minted = false;
@@ -153,14 +157,13 @@ async function workerResolveSubject(args, identity) {
     const type = String(want.type).toLowerCase();
     if (!THING_TYPES.includes(type)) throw new Error(`type must be one of ${THING_TYPES.join(", ")}`);
     if (lift) throw new Error(liftRefusal(want.name, lift));
-    const [vec] = await embedBatch([`${type}: ${want.name}`]);
-    await adbCommand(
-      `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :label, _kind = 'thing', _thing_type = :t, _norm = :n, _alias_norms = :aliases, _keys = :keys, _class = :cls, _homes = :homes, _home = :root, embed_thing = [${vec.join(",")}], updated_at = :now`,
-      "sql",
-      { name: thingName(type, want.name), label: want.name, t: type, n: normalize(want.name), aliases: [], keys: key ? [key.key] : [], cls: claim.class, homes: [floor], root: positionMap.root, now: new Date().toISOString() },
-    );
-    thing = (await adbQuery(`SELECT @rid AS rid, label, _thing_type FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND _norm = :n ORDER BY @rid DESC LIMIT 1`, { t: type, n: normalize(want.name) }))[0];
-    minted = true;
+    // the worker vouches for the name: the linker mints it (and links the section to it) under its admission rules
+    const [r] = await linkMentions(sectionRid, [{ name: want.name, type, role: "subject", ...(key ? { key: key.key } : {}) }], floor, { unsure: "skip", create: true, seen_by: identity.user });
+    if (!r || (!r.created && !r.linked)) throw new Error(`the linker made nothing of "${want.name}": ${r?.skipped ?? r?.unsure ?? "no reason given"}`);
+    thing = await findThing({ name: want.name, type, ...(key ? { key: key.key } : {}) });
+    if (!thing) throw new Error(`"${want.name}" was linked but can't be found as one thing: give its key`);
+    minted = Boolean(r.created);
+    if (claim && minted) await adbCommand(`UPDATE ${thing.rid} SET _class = :c`, "sql", { c: claim.class }).catch(() => {});
   } else {
     // an existing thing learns the key and the class it was resolved under, and is seen from here
     const cur = (await adbQuery(`SELECT _keys, _class, _homes FROM ${thing.rid}`).catch(() => []))[0] ?? {};
@@ -168,22 +171,29 @@ async function workerResolveSubject(args, identity) {
     const homes = Array.isArray(cur._homes) ? cur._homes : [];
     await adbCommand(`UPDATE ${thing.rid} SET _keys = :k, _class = :c, _homes = :h`, "sql", {
       k: key && !keys.includes(key.key) ? [...keys, key.key].slice(-10) : keys,
-      c: cur._class ?? claim.class,
+      c: cur._class ?? claim?.class ?? null,
       h: homes.includes(floor) ? homes : [...homes, floor],
     }).catch(() => {});
   }
   const rid = String(thing.rid);
-  // the claim now points at its instance: the same edge properties, a new end
-  const props = (await adbQuery(`SELECT id, kind, class, attribute, value, value_num, valid_from, valid_until, recorded_at, recorded_by, closed_by, _home, subject FROM ${claim.edge}`))[0];
-  if (!props) throw new Error("the claim's edge is gone");
-  await adbCommand(`DELETE FROM ${claim.edge}`);
-  await adbCommand(
-    `CREATE EDGE CLAIMS FROM ${claim.section} TO ${rid} SET id = :id, kind = :kind, class = :cls, attribute = :attr, value = :value, value_num = :num, valid_from = :vf, valid_until = :vu, recorded_at = :ra, recorded_by = :rb, closed_by = :cb, _home = :home, subject = :subject`,
-    "sql",
-    { id: props.id, kind: props.kind, cls: props.class, attr: props.attribute, value: props.value, num: props.value_num ?? null, vf: props.valid_from, vu: props.valid_until ?? null, ra: props.recorded_at, rb: props.recorded_by, cb: props.closed_by ?? null, home: props._home ?? null, subject: JSON.stringify({ ...(claim.subject ?? {}), key: key?.key ?? claim.subject?.key ?? null, name: want.name }) },
-  );
-  await logChange(identity, { kind: "resolve", claim: claim.id, thing: rid, label: thing.label, minted, ...(key ? { key: key.key } : {}), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
-  return { claim: claim.id, thing: rid, label: thing.label, type: thing._thing_type, minted, ...(key ? { key: key.key } : {}), note: minted ? `Made ${thing.label} (${thing._thing_type}) and resolved the claim to it.` : `Resolved the claim to the existing ${thing.label} (${thing._thing_type}).` };
+  if (claim) {
+    // the claim now points at its instance: the same edge properties, a new end
+    const props = (await adbQuery(`SELECT id, kind, class, attribute, value, value_num, valid_from, valid_until, recorded_at, recorded_by, closed_by, _home, subject FROM ${claim.edge}`))[0];
+    if (!props) throw new Error("the claim's edge is gone");
+    await adbCommand(`DELETE FROM ${claim.edge}`);
+    await adbCommand(
+      `CREATE EDGE CLAIMS FROM ${claim.section} TO ${rid} SET id = :id, kind = :kind, class = :cls, attribute = :attr, value = :value, value_num = :num, valid_from = :vf, valid_until = :vu, recorded_at = :ra, recorded_by = :rb, closed_by = :cb, _home = :home, subject = :subject`,
+      "sql",
+      { id: props.id, kind: props.kind, cls: props.class, attr: props.attribute, value: props.value, num: props.value_num ?? null, vf: props.valid_from, vu: props.valid_until ?? null, ra: props.recorded_at, rb: props.recorded_by, cb: props.closed_by ?? null, home: props._home ?? null, subject: JSON.stringify({ ...(claim.subject ?? {}), key: key?.key ?? claim.subject?.key ?? null, name: want.name }) },
+    );
+  } else {
+    // the name is settled: it leaves the entry's unresolved list
+    const row = (await adbQuery(`SELECT _unresolved FROM ${sectionRid}`).catch(() => []))[0];
+    const left = unresolvedNames(row?._unresolved).filter((u) => normalize(u.name) !== normalize(args.name));
+    await adbCommand(`UPDATE ${sectionRid} SET _unresolved = :u`, "sql", { u: left.length ? JSON.stringify(left) : null }).catch(() => {});
+  }
+  await logChange(identity, { kind: "resolve", ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, label: thing.label, minted, ...(key ? { key: key.key } : {}), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  return { ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, label: thing.label, type: thing._thing_type, minted, ...(key ? { key: key.key } : {}), note: minted ? `Made ${thing.label} (${thing._thing_type}) and resolved to it.` : `Resolved to the existing ${thing.label} (${thing._thing_type}).` };
 }
 
 /**
@@ -265,13 +275,15 @@ one is no conflict. Recorded once per pair, for a person to settle; you don't pi
   );
   server.tool(
     "resolve_subject",
-    `Resolve a claim whose subject is UNRESOLVED in your brief to its instance, when you can tell which:
-an existing thing by record key ("mssql:dbo_Customer:TORO") or by name and type; or a new one, made here
-with its name, type (${THING_TYPES.join(", ")}) and, when a source holds it, its key. The one way you
-make a thing. Can't tell? raise_question.`,
+    `Resolve a subject to its instance, when you can tell which: a claim whose subject is UNRESOLVED in
+your brief (claim_id), or a name linking resolved to nothing (name). An existing thing by record key
+("mssql:dbo_Customer:TORO") or by name and type; or a new one, made with its name, type
+(${THING_TYPES.join(", ")}) and, when a source holds it, its key. The one way you make a thing: only for
+an identity that outlives this section. Can't tell? raise_question.`,
     {
-      claim_id: z.string().min(8).max(80),
-      thing: z.object({ name: z.string().min(1).max(120).optional(), type: z.string().max(20).optional(), key: z.string().max(200).optional() }),
+      claim_id: z.string().min(8).max(80).optional(),
+      name: z.string().min(1).max(120).optional(),
+      thing: z.object({ name: z.string().min(1).max(120).optional(), type: z.string().max(20).optional(), key: z.string().max(200).optional() }).optional(),
       reason: z.string().max(300).optional(),
     },
     async (args) => {

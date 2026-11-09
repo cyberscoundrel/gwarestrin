@@ -8,11 +8,12 @@
  * attribute), and nothing outside the floor of the section's people. The brief is a read, recorded like any
  * other (floor.js `recordReads`), so it bounds the worker's writes.
  *
- * Claims are CLAIMS edges (model/schema.js) from the section to the subject thing. An unresolved subject
- * has no thing yet: the Condenser's ingest stores such a claim as a CLAIMS edge from the section to the
- * section itself, with the subject as written in a `subject` property (JSON). The contract has no shape
- * for an unresolved subject; this is the one used here until it does. resolve_subject (worker-tools.js)
- * re-points the edge at the thing.
+ * Claims are CLAIMS edges (model/schema.js) from the section to the subject thing. The Condenser's record
+ * path (ingest.js recordClaims) finds the subject by key or name and mints it when missing, so what it
+ * stores is always resolved. A claim stored any other way with no thing for its subject points back at
+ * its section, with the subject as written in a `subject` property (JSON): the contract has no shape for
+ * an unresolved subject, and this is the one read here. resolve_subject (worker-tools.js) re-points the
+ * edge at the thing.
  */
 import { randomUUID } from "node:crypto";
 import { effectiveHome, EVERYONE, homeName, moveKind, visibleHomes } from "./positions.js";
@@ -297,6 +298,8 @@ export async function sectionForBrief(rid) {
   return {
     rid: String(rid),
     kind: row._kind ?? "entry",
+    // names the linker could resolve to nothing (linker.js `_unresolved`): a worker or a person decides
+    unresolved_names: unresolvedNames(row._unresolved),
     name: row.name,
     heading: row.heading ?? null,
     text: String(row.text_identity ?? "").slice(0, 4000),
@@ -307,6 +310,24 @@ export async function sectionForBrief(rid) {
     subjects,
     prior,
   };
+}
+
+/** an entry's `_unresolved` (JSON the linker stores: a list of mentions, or of names) as [{ name, type, role }] */
+export function unresolvedNames(raw) {
+  if (raw === null || raw === undefined || raw === "") return [];
+  let list = raw;
+  if (typeof raw === "string") {
+    try {
+      list = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(list)) list = Array.isArray(list?.unresolved) ? list.unresolved : [];
+  return list
+    .map((m) => (typeof m === "string" ? { name: m, type: null, role: null } : m && typeof m === "object" && m.name ? { name: String(m.name), type: m.type ?? null, role: m.role ?? null, ...(m.key ? { key: m.key } : {}) } : null))
+    .filter(Boolean)
+    .slice(0, 25);
 }
 
 /** the root tenant's user (the admin whose workspace runs the threads), or null when it can't be told */
