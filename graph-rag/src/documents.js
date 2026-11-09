@@ -200,9 +200,12 @@ export function renderRecord(doc) {
   const spans = [];
   for (const s of doc.sections) {
     if (text) text += "\n\n";
+    // the heading line is in the document's text for a reader, but outside the
+    // section's span: a stored section's text is the section text alone, its
+    // heading in the heading property (a manual's chunks are shaped the same)
+    if (s.heading) text += `## ${s.heading}\n\n`;
     const start = text.length;
-    const heading = s.heading ? `## ${s.heading}\n\n` : "";
-    text += heading + s.text;
+    text += s.text;
     spans.push({ index: s.index, heading: s.heading ?? "", start, end: text.length });
   }
   return { text: `${text}\n`, spans };
@@ -219,9 +222,9 @@ export function sectionChunks(text, spans) {
       heading: sp.heading ?? "",
       start: sp.start,
       end: sp.end,
-      // the heading line is part of the text, so a reader sees it; it leads the embedding once only
+      // the section text alone; the heading leads the embedding, as a manual's does
       text: body,
-      embedText: `${prev ? `…${prev}\n` : ""}${body}`.slice(0, 6000),
+      embedText: `${sp.heading ? `${sp.heading}\n` : ""}${prev ? `…${prev}\n` : ""}${body}`.slice(0, 6000),
     };
   });
 }

@@ -87,6 +87,6 @@ test("every oracle note stores as one section whose text reads back whole", () =
     const { text, spans } = renderRecord(doc);
     const back = sectionChunks(text, spans);
     assert.equal(back.length, 1, note.id);
-    assert.ok(back[0].text.endsWith(note.text.trim()), `${note.id}: the note's text is the section's`);
+    assert.equal(back[0].text, doc.sections[0].text, `${note.id}: the note's text is the section's, nothing more`);
   }
 });
