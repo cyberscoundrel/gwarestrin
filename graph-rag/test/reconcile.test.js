@@ -8,7 +8,7 @@ import { test } from "node:test";
 import { claimsOf, closeIntervals, normalizeDocument, overlaps, subjectId } from "../src/model/claims.js";
 import { checkBriefFloor, taskBrief } from "../src/pool.js";
 import { parsePositionMap } from "../src/positions.js";
-import { labelFor, RECONCILE_CHANGES, shapeClaim } from "../src/worker-pool.js";
+import { confirmedClassesFor, labelFor, RECONCILE_CHANGES, shapeClaim } from "../src/worker-pool.js";
 import { linkResolvedThing, REMOVED_WORKER_TOOLS, resolvedRole, WORKER_TOOLS } from "../src/worker-tools.js";
 import { triageVerdict } from "../src/decisions.js";
 
@@ -127,4 +127,19 @@ test("a bare name resolved to an existing thing links the entry to it, once, in 
   await assert.rejects(() => linkResolvedThing("Toro (customer)", "#20:7", "subject", { about }), /two record ids/, "names never stand in for ids");
   await assert.rejects(() => linkResolvedThing("#12:3", null, "subject", { about }), /two record ids/);
   assert.equal(calls.length, 1, "a refused link makes no edge");
+});
+
+test("the classes a resolution runs against are the confirmed CommitmentClass rows: the linker's list first, the rows next, the stored list last", async () => {
+  const asked = [];
+  const db = (rows) => ({ adbQuery: async (sql) => { asked.push(sql); return rows[sql.includes("FROM CommitmentClass") ? "classes" : sql.includes("FROM OrgPolicy") ? "policy" : "none"] ?? []; } });
+  const linker = { confirmedClassList: async () => [{ name: "Job", description: "", stages: ["open", "done"], record_table: "mssql:dbo_Job", status: "confirmed" }] };
+  assert.deepEqual((await confirmedClassesFor({ db: db({}), linker })).map((c) => c.name), ["Job"], "the linker's cached list");
+  assert.equal(asked.length, 0, "and no query of our own then");
+  const rows = { classes: [{ name: "Order", description: null, stages: null, record_table: "mssql:dbo_Order", status: "confirmed", confirmed_by: "admin" }], policy: [{ json: JSON.stringify([{ name: "Stale" }]) }] };
+  const fromRows = await confirmedClassesFor({ db: db(rows), linker: { confirmedClassList: async () => [] } });
+  assert.deepEqual(fromRows, [{ name: "Order", description: "", stages: [], record_table: "mssql:dbo_Order", status: "confirmed", confirmed_by: "admin" }], "the rows, in the linker's shape, when its list is empty");
+  assert.ok(asked.some((s) => s.includes("FROM CommitmentClass WHERE status = 'confirmed'")));
+  assert.ok(!asked.some((s) => s.includes("OrgPolicy")), "the stored list is not read while rows exist");
+  assert.deepEqual((await confirmedClassesFor({ db: db({ policy: rows.policy }), linker: {} })).map((c) => c.name), ["Stale"], "the stored list only when nothing is confirmed");
+  assert.deepEqual(await confirmedClassesFor({ db: db({ policy: [{ json: "{not json" }] }), linker: {} }), [], "and nothing for a list that isn't one");
 });

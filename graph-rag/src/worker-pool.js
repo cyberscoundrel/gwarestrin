@@ -209,17 +209,34 @@ export async function priorState(claim, floor, { limit = 5 } = {}) {
  * purpose. Without it: by record key, else by name (one thing of that name, whatever its type). Null
  * when there is none, or several. Nothing is minted here.
  */
+/**
+ * The confirmed classes a resolution runs against (the Discovery stream's confirm flow writes them as
+ * CommitmentClass rows, status 'confirmed'): the linker's `confirmedClassList` when it exports one (the
+ * Admission stream's, cached a minute), else the rows themselves; the organization's stored list
+ * (OrgPolicy, scope 'classes') only where neither has any. `db` and `linker` are injectable for tests.
+ */
+export async function confirmedClassesFor({ db = { adbQuery }, linker } = {}) {
+  const mod = linker ?? (await import("./linker.js").catch(() => null));
+  if (typeof mod?.confirmedClassList === "function") {
+    const list = await mod.confirmedClassList().catch(() => []);
+    if (Array.isArray(list) && list.length) return list;
+  }
+  const rows = await db.adbQuery("SELECT name, description, stages, record_table, status, confirmed_by FROM CommitmentClass WHERE status = 'confirmed'").catch(() => []);
+  if (rows.length) return rows.map((r) => ({ name: r.name, description: r.description ?? "", stages: Array.isArray(r.stages) ? r.stages : [], record_table: r.record_table ?? null, status: "confirmed", ...(r.confirmed_by ? { confirmed_by: r.confirmed_by } : {}) }));
+  const row = (await db.adbQuery("SELECT json FROM OrgPolicy WHERE scope = 'classes' LIMIT 1").catch(() => []))[0];
+  try {
+    const stored = row?.json ? JSON.parse(row.json) : [];
+    return Array.isArray(stored) ? stored : Array.isArray(stored?.classes) ? stored.classes : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function resolveSubjectStub(subject) {
   if (!subject) return null;
   const theirs = await import("./resolve.js").catch(() => null);
   if (typeof theirs?.resolveSubject === "function") {
-    const row = (await adbQuery("SELECT json FROM OrgPolicy WHERE scope = 'classes' LIMIT 1").catch(() => []))[0];
-    let classes = [];
-    try {
-      classes = row?.json ? JSON.parse(row.json) : [];
-    } catch {
-      classes = [];
-    }
+    const classes = await confirmedClassesFor();
     const thingSql = `SELECT @rid AS rid, label, name, _norm, _alias_norms, _keys, _class, _thing_type FROM ${ENTITY_LABEL} WHERE _kind = 'thing'`;
     const lookup = {
       byKey: async (key) => (await adbQuery(`${thingSql} AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => []))[0] ?? null,
