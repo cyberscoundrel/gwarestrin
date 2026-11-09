@@ -30,6 +30,7 @@ import { ensureAuditSchema } from "./audit.js";
 import { describeEntry } from "./data-entry.js";
 import { statements, TYPES } from "./model/schema.js";
 import { normalizeKey } from "./things.js";
+import { draftFromSurvey } from "./routes-discovery.js";
 
 /** ---- the graph worker: a job queue and loop (things and their links; see things.js) ---- */
 
@@ -552,6 +553,8 @@ export async function finishThread(jobId, { status, summary, outage }) {
   }
   // a task's report stays on its task entry (what the survey found, for the admin and later tasks)
   if (payload.task && RID_RE.test(String(payload.rid)) && summary) await adbCommand(`UPDATE ${payload.rid} SET text_state = :sum`, "sql", { sum: String(summary).slice(0, 6000) }).catch(() => {});
+  // a finished survey's report is the first discovery pass: its table lines and class tags become drafts for a person
+  if (payload.task && next === "done") await draftFromSurvey(payload.task.title, summary).catch((e) => log.warn(`survey drafts: ${String(e?.message ?? e).slice(0, 200)}`));
   return { status: next };
 }
 

@@ -108,6 +108,10 @@ export function recordContext(state: ThreadRecordState, classes: ConfirmedClass[
   return out.join("\n");
 }
 
+/** decision 2: what the agent does about a matter no confirmed class covers, once its section is on record */
+const PROPOSE_CLASS =
+  'When it is a pattern of commitments you expect to recur, propose a class for a person with graph-rag_propose_class (name, its stages, why, and document: the doc_id the record reply named), and tell the person. Nothing maps onto it until an admin confirms it in Organization settings, and a class is never made from one occurrence: a draft from one section waits for a second, so propose it again when the pattern comes up again.';
+
 /** the confirmed classes as a list the agent can copy class names from, or what to do when there are none or they couldn't be read */
 export function classesBlock(classes: ConfirmedClass[] | null): string[] {
   if (classes === null) {
@@ -116,7 +120,7 @@ export function classesBlock(classes: ConfirmedClass[] | null): string[] {
     ];
   }
   if (classes.length === 0) {
-    return ["The graph has no confirmed commitment classes yet: put sections on record with no claims (claims: []) and tell the person which classes the sections would need, so an admin can confirm them."];
+    return [`The graph has no confirmed commitment classes yet, so no claim can name one: put each section on record with no claims (claims: []). It is stored and searchable, and the grader judges who sees it. ${PROPOSE_CLASS}`];
   }
   return [
     "Confirmed commitment classes (a claim's class, and an instance subject's, must be one of these, written exactly so):",
@@ -127,6 +131,8 @@ export function classesBlock(classes: ConfirmedClass[] | null): string[] {
       if (c.attributes?.length) parts.push(`; attributes ${c.attributes.join(", ")}`);
       return `- ${c.name}${parts.join("")}`;
     }),
+    "",
+    `A matter that fits none of these stays in its section's text with no claim. The section is stored and the grader judges who sees it. ${PROPOSE_CLASS}`,
   ];
 }
 

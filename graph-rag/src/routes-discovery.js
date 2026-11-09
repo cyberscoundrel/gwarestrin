@@ -1,10 +1,13 @@
 /**
- * HTTP: discovered commitment classes (docs/ORGANIZATION-MODEL.md, "Classes
- * and instances"; the Discovery stream). Drafts come from the survey (a
- * thread files CommitmentClass vertices, pool.js surveyBrief), from the
- * digest loader here, or from a discovery event (a new table, a class a
- * worker filed); a person with the admin capability confirms, renames or
- * retires them; confirmed classes are what every later mapping uses.
+ * HTTP and MCP: discovered commitment classes (docs/ORGANIZATION-MODEL.md,
+ * "Classes and instances"; the Discovery stream). Drafts reach a person three
+ * ways, all ending in the panel in Organization settings: a finished survey's
+ * report (its table lines and [class: ...] tags: draftFromSurvey, called from
+ * worker-pool.js finishThread), the digest loader (POST /api/discovery/draft,
+ * proxied by knowledge.ts), and a discovery event (fileEvent: the admin's route,
+ * or the propose_class tool for a worker or a person's chat agent). A person with
+ * the admin capability confirms, renames or retires them; confirmed classes are
+ * what every later mapping uses.
  *
  * The integrator wires `registerDiscoveryRoutes(app)` into routes.js and
  * `ensureDiscoverySchema()` into boot (the routes also ensure it lazily, so
@@ -20,12 +23,13 @@
  * "admin" is the same gate as policy edits: `canEditPolicy` (org-policy.js),
  * a person at the root, never an agent.
  */
+import { z } from "zod";
 import { log } from "./context.js";
-import { adbCommand, adbQuery } from "./db.js";
+import { adbCommand, adbQuery, PENDING_ID_RE, RID_RE } from "./db.js";
 import { canEditPolicy } from "./org-policy.js";
-import { resolveIdentity, scopeOf } from "./scope.js";
+import { personOf, resolveIdentity, scopeOf } from "./scope.js";
 import { CLASS_STATUSES, parseTable, statements, TYPES } from "./model/schema.js";
-import { classFor, className, classList, discoverIncremental, draftClasses, EXTRA_CLASS_PROPERTIES, fileDraftSql, parseDigest, sqlLiteral, stageName } from "./discovery.js";
+import { classFor, className, classList, discoverIncremental, draftClasses, EXTRA_CLASS_PROPERTIES, fileDraftSql, parseDigest, patternClasses, reportDigest, sqlLiteral, stageName } from "./discovery.js";
 
 const NAME_RE = /^[a-z][a-z0-9_]{0,59}$/;
 const COLUMNS = [...Object.keys(TYPES.CommitmentClass.properties), ...Object.keys(EXTRA_CLASS_PROPERTIES)];
@@ -55,6 +59,7 @@ function shape(r) {
     confirmed_at: r.confirmed_at ?? null,
     attributes: list(r.attributes),
     reasons: list(r.reasons),
+    occurrences: list(r.occurrences),
   };
 }
 
@@ -98,22 +103,80 @@ export async function fileDrafts(drafts) {
 }
 
 /** the loader: a connection's digest (text, or parsed tables) and the survey's pattern entries -> drafts filed */
-export async function draftFromDigest({ system, digest, patterns = [], by }) {
+export async function draftFromDigest({ system, digest, patterns = [], by, proposed_by }) {
   if (!/^[a-z0-9][a-z0-9_-]{0,62}$/i.test(String(system ?? ""))) throw Object.assign(new Error("which connection (its name, the first part of every key)"), { status: 400 });
   const parsed = typeof digest === "string" ? parseDigest(digest, system) : { system, tables: Array.isArray(digest?.tables) ? digest.tables : [] };
-  if (!parsed.tables.length) throw Object.assign(new Error("the digest names no tables"), { status: 400 });
-  const { drafts, skipped } = draftClasses(parsed, patterns, { proposed_by: by ? `discovery:${by}` : undefined });
+  if (!parsed.tables.length && !patternClasses(patterns, system).length) throw Object.assign(new Error("the digest names no tables"), { status: 400 });
+  const { drafts, skipped } = draftClasses(parsed, patterns, { proposed_by: proposed_by ?? (by ? `discovery:${by}` : undefined) });
   const r = await fileDrafts(drafts);
   return { drafted: r.filed, not_drafted: r.skipped, tables_skipped: skipped };
 }
 
-/** one discovery event: a new table, or a class a worker filed */
+/** a finished survey (a task thread titled "Survey: <connection>"): its report's table lines and [class: ...] tags are the first discovery pass, filed as drafts */
+export async function draftFromSurvey(title, report) {
+  const system = /^Survey: ([a-z0-9][a-z0-9_-]{0,62})$/i.exec(String(title ?? "").trim())?.[1];
+  if (!system || !report) return null;
+  const digest = reportDigest(report);
+  const patterns = [{ name: String(title), text: String(report) }];
+  if (!digest && !patternClasses(patterns, system).length) return null;
+  const r = await draftFromDigest({ system, digest, patterns, proposed_by: `survey:${system}` });
+  log.info(`survey of ${system}: ${r.drafted.length} class draft(s) filed for a person, ${r.not_drafted.length} already known`);
+  return r;
+}
+
+/**
+ * One discovery event: a new table, or a class a worker or a person's agent
+ * filed. A filing that names the section it came from (`occurrence`) counts
+ * it: the same section twice is one occurrence, and a draft that exists takes
+ * the new one rather than being refused. That count is what confirmClass reads.
+ */
 export async function fileEvent(event) {
   const existing = await listClasses();
   const r = discoverIncremental(existing, event);
-  if (!r.draft) return { draft: null, reason: r.reason, ...(r.existing ? { existing: r.existing } : {}), ...(r.skipped ? { skipped: r.skipped } : {}) };
-  await adbCommand(fileDraftSql(r.draft), "sql");
-  return { draft: r.draft };
+  const occurrence = event?.occurrence ? String(event.occurrence) : null;
+  if (!r.draft) {
+    const proposed = occurrence && r.existing?.status === "proposed" ? existing.find((c) => c.name === r.existing.name) : null;
+    if (proposed) return countOccurrence(proposed, occurrence, event.filed?.reason);
+    return { draft: null, reason: r.reason, ...(r.existing ? { existing: r.existing } : {}), ...(r.skipped ? { skipped: r.skipped } : {}) };
+  }
+  const draft = occurrence ? { ...r.draft, occurrences: [occurrence], reasons: [...r.draft.reasons, oneSoFar] } : r.draft;
+  await adbCommand(fileDraftSql(draft), "sql");
+  return { draft };
+}
+
+const oneSoFar = "seen in one section so far: a second is needed before it can be confirmed";
+
+/** another section names a draft: counted once per section, and the draft says how many */
+async function countOccurrence(cur, occurrence, why) {
+  const existing = { name: cur.name, status: cur.status };
+  if (cur.occurrences.includes(occurrence)) return { draft: null, reason: `"${cur.name}" is already proposed, and this section is already counted`, existing, occurrences: cur.occurrences.length };
+  const occurrences = [...cur.occurrences, occurrence].slice(-50);
+  const reasons = [...cur.reasons.filter((x) => x !== oneSoFar), ...(why ? [String(why).slice(0, 600)] : []), `seen in ${occurrences.length} sections`].slice(-12);
+  await adbCommand(`UPDATE CommitmentClass SET occurrences = ${sqlLiteral(occurrences)}, reasons = ${sqlLiteral(reasons)} WHERE name = ${sqlLiteral(cur.name)}`, "sql");
+  return { draft: null, reason: `"${cur.name}" is already proposed: this section is counted (${occurrences.length} so far)`, existing, occurrences: occurrences.length, counted: true };
+}
+
+/**
+ * A worker or a person's chat agent proposes a class for a person (decisions 1
+ * and 2): a draft, never a class. What it rests on is the server's to say: a
+ * reconciling worker's section, a chat agent's on-record document (checked in
+ * the store), or nothing for a survey, whose evidence is the table or the
+ * history it read.
+ */
+export async function proposeClass(args, identity) {
+  const filed = { name: args.name, description: args.description, stages: args.stages, attributes: args.attributes, record_table: args.record_table, reason: args.reason };
+  if (identity.role) {
+    const entry = String(identity.role.entry ?? "");
+    const row = RID_RE.test(entry) ? (await adbQuery(`SELECT _kind, name FROM ${entry}`).catch(() => []))[0] : null;
+    if (row?._kind === "task") return fileEvent({ filed, by: `survey:${String(row.name ?? "").replace(/^Survey: /, "")}` });
+    return fileEvent({ filed, by: `worker:${personOf(identity.user)}`, occurrence: `section:${entry}` });
+  }
+  const doc = String(args.document ?? "").trim();
+  if (!PENDING_ID_RE.test(doc)) throw new Error("which document: the doc_id your record_document call answered with. Put the section on record first");
+  const { docStore } = await import("./ingest.js"); // lazily: ingest.js reaches worker-pool.js, which calls draftFromSurvey here
+  const stored = await docStore?.get(doc).catch(() => null);
+  if (!stored?.meta?.on_record) throw new Error(`no on-record document ${doc}: put the section on record first, then give the doc_id the reply named`);
+  return fileEvent({ filed, by: `chat:${personOf(identity.user)}`, occurrence: `document:${doc}` });
 }
 
 const fail = (message, status = 400) => Object.assign(new Error(message), { status });
@@ -136,6 +199,7 @@ export async function confirmClass(name, input, identity) {
   next.stages = next.stages.filter((s, i, a) => a.indexOf(s) === i).slice(0, 20);
   if (!next.stages.length) throw fail("a class has at least one stage (stage is the attribute every class has)");
   if (next.record_table !== null && !parseTable(next.record_table)) throw fail("a record table is system:table (mssql:dbo_Order), or empty when no source system records the class");
+  if (cur.occurrences.length === 1 && next.record_table === null) throw fail(`"${cur.name}" has been seen in one section so far, and a class is a pattern that recurs: it stays a draft until a second section names it, or you give it the record table its rows live in`, 409);
   const others = (await listClasses()).filter((c) => c.name !== cur.name);
   if (others.some((c) => c.name === next.name)) throw fail(`a class called "${next.name}" exists already`, 409);
   if (next.record_table && others.some((c) => c.record_table === next.record_table && c.status !== "retired")) throw fail(`${next.record_table} is already the record table of "${others.find((c) => c.record_table === next.record_table).name}"`, 409);
@@ -182,6 +246,38 @@ const nameParam = (req, res) => {
   if (!NAME_RE.test(name)) return void res.status(400).json({ error: "a class name is snake_case" });
   return name;
 };
+
+/**
+ * The tool that files a draft: for a worker (decision 1) and a person's chat
+ * agent (decision 2). Registered by server.js; it writes a proposal, never a
+ * class, so a person's confirmation stays the only way anything maps onto one.
+ */
+export function registerDiscoveryTools(server, { identity, need }) {
+  server.tool(
+    "propose_class",
+    `Propose a commitment class for a person to confirm in Organization settings: a pattern of commitments that
+recurs (hires, shift swaps) and that no confirmed class covers. It files a draft and nothing maps onto it until a
+person confirms. A class is never made from one occurrence: a draft from one section can't be confirmed until a
+second section names it, so propose again, with the new section, when the pattern comes up again. Actors and
+resources (customers, vendors, employees, machines, parts) are things, not classes.
+name: plural (hires, shift_swaps). stages: the steps it goes through, in order. record_table: "system:table" when a
+source system records it. reason: why this is a recurring commitment, without names or figures from the section.
+document: the doc_id of the on-record document this came from (a chat agent gives it; a worker's section is its own).`,
+    {
+      name: z.string().min(2).max(60),
+      description: z.string().max(400).optional(),
+      stages: z.array(z.string().min(1).max(40)).max(20).optional(),
+      attributes: z.array(z.string().min(1).max(60)).max(40).optional(),
+      record_table: z.string().max(200).optional(),
+      reason: z.string().min(3).max(600),
+      document: z.string().max(80).optional(),
+    },
+    async (args) => {
+      need("write");
+      return { content: [{ type: "text", text: JSON.stringify(await proposeClass(args, identity)) }] };
+    },
+  );
+}
 
 export function registerDiscoveryRoutes(app) {
   app.get("/api/discovery/classes", (req, res) => {

@@ -1,25 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { surveyBrief } from "../src/pool.js";
-import { draftClasses, fileDraftSql, patternClasses } from "../src/discovery.js";
-import { TYPES } from "../src/model/schema.js";
-import { UX_DIGEST } from "./discovery-digest.js";
+import { draftClasses, fileDraftSql, parseDigest, patternClasses, reportDigest } from "../src/discovery.js";
 
-test("the survey brief drafts classes as proposed CommitmentClass vertices through execute_graph, and never confirms one", () => {
+test("the survey brief drafts classes through its report and never confirms one", () => {
   const b = surveyBrief("mssql", "production");
   assert.match(b, /5\. Draft the commitment classes/);
-  assert.match(b, /graph-rag_execute_graph/);
-  assert.match(b, /INSERT INTO CommitmentClass SET /);
-  assert.match(b, /status = 'proposed'/);
-  assert.match(b, /record_table = 'mssql:<table>'/);
-  assert.match(b, /proposed_by = 'survey:mssql'/);
-  assert.match(b, /Never write status = 'confirmed', never set confirmed_by or confirmed_at/);
-  assert.match(b, /master-data tables \(customers, employees, vendors, work centers, materials\) are actors or resources/);
-  assert.match(b, /a person confirms, renames or retires classes in Organization settings/);
-  // the brief's statement names every property the contract gives the class vertex
-  const tmpl = /INSERT INTO CommitmentClass SET ([^\n]+)/.exec(b)[1];
-  for (const p of Object.keys(TYPES.CommitmentClass.properties)) assert.match(tmpl, new RegExp(`\\b${p} = `), `the brief sets ${p}`);
-  // the survey's earlier steps are untouched
+  assert.match(b, /dbo_Job columns: <its columns, comma-separated>/);
+  assert.match(b, /dbo_Job rows: <the count>/);
+  assert.match(b, /dbo_Job <its status column> values: /);
+  assert.match(b, /graph-rag_propose_class[^\n]*record_table "mssql:<table>"/);
+  assert.match(b, /You only draft\. A person confirms, renames or retires classes in Organization settings/);
+  assert.match(b, /master-data tables|Master-data tables \(customers, employees, vendors, work centers, materials\) are actors or resources/i);
+  // the survey's other steps
   assert.match(b, /mssql: dbo_Customer \(customers\)/);
   assert.match(b, /Stay within roughly 150 tool calls/);
 });
@@ -35,10 +28,23 @@ test("the tag the brief asks for in a pattern entry is the one discovery reads",
   assert.equal(got[0].description, "a hire: a commitment of a position to a person");
 });
 
-test("what the brief asks a thread to write is what discovery's own filing writes", () => {
-  const b = surveyBrief("mssql");
-  const tmpl = /INSERT INTO CommitmentClass SET ([^\n]+)/.exec(b)[1];
-  const keys = (s) => [...s.matchAll(/(?:^|, )([a-z_]+) = /g)].map((m) => m[1]).sort();
-  const { drafts } = draftClasses(UX_DIGEST);
-  assert.deepEqual(keys(fileDraftSql(drafts[0]).replace(/^INSERT INTO CommitmentClass SET /, "")), keys(tmpl));
+test("the lines the brief asks a report for are the digest grammar, and nothing else in a report reads as a table", () => {
+  const report = [
+    "mssql: dbo_Job (jobs): one row is a production job, key JobID, 31,400 rows. Its rows are commitments (a class).",
+    "- Jobs: 31k open, most on CNC",
+    "Seeded: dbo_Vendor (61 of 61).",
+    "dbo_Job columns: JobID, Status, MachineID, DueDate",
+    "- dbo_Job rows: 31,400",
+    "`dbo_Job Status values: Planned, Running, Paused, Done`",
+  ].join("\n");
+  assert.equal(reportDigest(report), "dbo_Job columns: JobID, Status, MachineID, DueDate\ndbo_Job rows: 31,400\ndbo_Job Status values: Planned, Running, Paused, Done");
+  const { tables } = parseDigest(reportDigest(report), "mssql");
+  assert.deepEqual(tables.map((x) => x.name), ["dbo_Job"]);
+  const { drafts } = draftClasses({ system: "mssql", tables });
+  assert.equal(drafts[0].name, "jobs");
+  assert.deepEqual(drafts[0].stages, ["planned", "running", "paused", "done"]);
+  assert.equal(drafts[0].record_table, "mssql:dbo_Job");
+  assert.equal(drafts[0].status, "proposed");
+  // the filing carries what its row holds, and a filing counted by section starts at that section
+  assert.match(fileDraftSql({ ...drafts[0], occurrences: ["document:x"] }), /occurrences = \['document:x'\]/);
 });

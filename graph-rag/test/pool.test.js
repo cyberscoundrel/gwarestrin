@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { checkBriefFloor, firstJob, handlerBrief, POOL_DEFAULTS, poolSettings, resumeBrief, signalsMessage, surveyBrief, taskBrief, taskThreadBrief } from "../src/pool.js";
 import { parsePositionMap } from "../src/positions.js";
+import { REMOVED_WORKER_TOOLS, WORKER_TOOLS } from "../src/worker-tools.js";
 
 const map = parsePositionMap(JSON.parse(readFileSync(new URL("./fixtures/positions.json", import.meta.url), "utf8")));
 
@@ -79,14 +80,23 @@ test("the brief's floor: sections seen from one position, prior claims visible f
   assert.doesNotMatch(refused, /secret/, "the refusal never quotes what lies above");
 });
 
-test("task threads: a survey's brief asks for a map, keyed things, relationships and follow-ups", () => {
+test("task threads: a survey's brief asks for a map, keyed things and drafts, with only the tools a worker has", () => {
   const b = surveyBrief("mssql", "production and suppliers");
   assert.match(b, /mssql: dbo_Customer \(customers\)/);
-  assert.match(b, /mssql:<table>:<key value>/);
-  assert.match(b, /relate_things/);
-  assert.match(b, /queue_followup/);
+  assert.match(b, /graph-rag_resolve_subject[\s\S]*mssql:<table>:<key value>/);
   assert.match(b, /Focus \(from the admin\): production and suppliers/);
   assert.match(taskThreadBrief({ title: "Survey: mssql", brief: b }), /^A task for you: Survey: mssql/);
+  // what the thread can really call: a worker's own tools, and propose_class (e2e checks these against a real tools/list)
+  const has = new Set([...WORKER_TOOLS, "propose_class"]);
+  const named = [...b.matchAll(/graph-rag_([a-z_]+)/g)].map((m) => m[1]);
+  assert.ok(named.length >= 2, "the brief names the tools it wants used");
+  for (const t of named) assert.ok(has.has(t), `the brief names ${t}, which a worker doesn't have`);
+  for (const t of [...REMOVED_WORKER_TOOLS, "upsert_entities", "execute_graph"]) assert.doesNotMatch(b, new RegExp(t), `${t} is gone from a worker, or refuses it`);
+  // what the brief says is seeded is what its own step seeds: step 2's tables, the rest by key when a record names them
+  assert.match(b, /those of step 2 seeded already and the rest when a record names them/);
+  assert.doesNotMatch(b, /, already seeded as things/);
+  // the brief is stored and sent cut at 6,000 characters (worker-pool.js createTask): the last step must fit, the admin's longest focus included
+  assert.ok(surveyBrief("mssql", "f".repeat(1000)).length <= 6000);
 });
 
 test("master mode: the inbox names sections by id and the shape of their claims, never a title or text; the handler brief", () => {
