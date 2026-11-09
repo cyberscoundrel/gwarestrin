@@ -9,7 +9,8 @@
 // the organization's stored `sources` (an OrgPolicy row, data-entry.js), and
 // the authority rule through the stored policy (the fixture policy.json, as
 // `authorityMap` through /api/policy once the Authority stream lands, else the
-// stub's OrgPolicy "authority" row).
+// stub's OrgPolicy "authority" row). graph-rag caches the stored sources for a minute, so a loader that
+// reruns this file against one stack within that minute sees the previous run's fake address.
 import { createServer } from "node:http";
 import { networkInterfaces, hostname } from "node:os";
 
@@ -39,6 +40,7 @@ async function startFakeDab() {
     if (body.method !== "tools/call") return reply({});
     const { name, arguments: args } = body.params ?? {};
     fake.calls.push({ url: req.url, name, args });
+    if (process.env.FAKE_DAB_LOG) console.log(`fake DAB: ${name} ${req.url}`);
     if (name === "describe_entities") return reply(text({ entities: Object.keys(fake.rows).map((n) => ({ name: n, fields: [{ name: "Job", isPrimaryKey: true }, { name: "Status" }, { name: "Quantity" }] })) }));
     const table = fake.rows[args?.entity] ?? [];
     if (name === "read_records") {
@@ -55,9 +57,10 @@ async function startFakeDab() {
     }
     reply({ isError: true, content: [{ type: "text", text: `no tool ${name}` }] });
   });
-  await new Promise((r) => fake.server.listen(4190, "0.0.0.0", r));
+  await new Promise((r) => fake.server.listen(4290, "0.0.0.0", r));
   fake.server.unref();
-  fake.url = `http://${runnerAddress()}:4190`;
+  fake.url = `http://${runnerAddress()}:4290`;
+  console.log(`fake DAB at ${fake.url}`);
   return fake.url;
 }
 
