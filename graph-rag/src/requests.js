@@ -6,14 +6,15 @@ import { randomUUID } from "node:crypto";
 import { ancestors, effectiveHome, heldPositions } from "./positions.js";
 import { isExpired, liveClause } from "./extent.js";
 import { grantShows, isActive } from "./grants.js";
-import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
+import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needAsCommitment, needName, openUntil, ownersFor, ownerView, parseStateQuestion, pickPositions } from "./needs.js";
 import { GRADER_MODEL, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, FACETS, knownIndexes, PENDING_ID_RE, RID_RE } from "./db.js";
 import { embedBatch } from "./models.js";
-import { entriesByUser, ownsHome, personOf, personScope, positionMap, positionName, SCOPED } from "./scope.js";
+import { entriesByUser, homeFilter, ownsHome, personOf, personScope, positionMap, positionName, SCOPED } from "./scope.js";
 import { gradeBatch } from "./floor.js";
 import { grantAccess, grantCache, refreshGrants, storeGrant } from "./sharing.js";
 import { policy } from "./org-policy.js";
+import { claimView, stateOfAttribute, subjectRef } from "./state.js";
 
 /** ---- needs: questions as entries (see needs.js) ---- */
 
@@ -25,7 +26,7 @@ export const ASSERTIONS = " AND (_kind IS NULL OR _kind IN ['document', 'section
 export const openNeedsClause = (now = Date.now()) => ` AND (_kind IS NULL OR _kind IN ['document', 'section'] OR (_kind = 'need' AND _status = 'open' AND _open_until > '${new Date(now).toISOString()}'))`;
 
 export async function ensureNeedSchema() {
-  for (const prop of ["_kind", "_qid", "_asker", "_asked_by", "_status", "_open_until", "_joined_into", "_questions", "_dismissed"]) {
+  for (const prop of ["_kind", "_qid", "_asker", "_asked_by", "_status", "_open_until", "_joined_into", "_questions", "_dismissed", "_met_by"]) {
     await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   }
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._asked IF NOT EXISTS INTEGER`).catch(() => {});
@@ -52,6 +53,7 @@ const needOf = (r) => ({
   asked: Number(r._asked ?? 1),
   questions: JSON.parse(r._questions || "[]"),
   dismissed: JSON.parse(r._dismissed || "[]"),
+  met_by: r._met_by ?? null,
 });
 
 async function loadNeed(qid) {
@@ -165,6 +167,63 @@ async function describedPositions() {
 async function needVec(rid) {
   const row = (await adbQuery(`SELECT embed_identity FROM ${rid}`))[0];
   return Array.isArray(row?.embed_identity) ? row.embed_identity : null;
+}
+
+/** ---- a question on an attribute is a state query when the state exists ---- */
+
+let claimVocabulary = { at: 0, attributes: [], classes: [] };
+/** the attributes the graph's claims use and the confirmed classes' record tables (briefly cached; empty until the first claim lands) */
+async function claimWords() {
+  if (Date.now() - claimVocabulary.at < 5_000) return claimVocabulary;
+  const [attrs, classes] = await Promise.all([
+    adbQuery("SELECT attribute, count(*) AS n FROM CLAIMS GROUP BY attribute LIMIT 500").catch(() => []),
+    adbQuery("SELECT name, record_table FROM CommitmentClass WHERE status = 'confirmed' LIMIT 200").catch(() => []),
+  ]);
+  claimVocabulary = {
+    at: Date.now(),
+    attributes: attrs.map((r) => r.attribute).filter((a) => typeof a === "string" && a),
+    classes: classes.filter((c) => typeof c.record_table === "string" && c.record_table),
+  };
+  return claimVocabulary;
+}
+
+/**
+ * Answer a need from state (needs.js, "commitments with the sign flipped"): when the question names
+ * an attribute the graph's claims use and exactly one thing the asker sees holds a claim on it now,
+ * that claim answers it. The need is marked met by the claim's section (a NEAR meeting the asker
+ * sees), nobody is asked, no model is called. Null when it isn't a state question or no state
+ * exists: then the embedding path runs as before.
+ */
+async function answerFromState(need, scope, identity) {
+  const { attributes, classes } = await claimWords();
+  if (!attributes.length) return null;
+  const parsed = parseStateQuestion(need.question, { attributes, classes });
+  if (!parsed) return null;
+  const hits = await stateOfAttribute(parsed.subjects.map((s) => subjectRef(s)), parsed.attribute, { scope, identity });
+  // none, or several things with that state: not for a query to decide
+  if (hits.length !== 1) return null;
+  const { thing, claim } = hits[0];
+  const until = openUntil(Date.now(), policy.requestDays, null);
+  await meet(need, claim.section.rid, 1, "visible");
+  // (parameter names that aren't SQL words: ArcadeDB's parser reads `:by` as the keyword BY)
+  await adbCommand(`UPDATE ${need.rid} SET _status = 'met', _open_until = :until, _valid_until = :until, _valid_by = 'question', _met_by = :claim`, "sql", { until, claim: claim.id });
+  log.info(`question ${need.qid} by ${need.asker}: answered from state (${thing.name}: ${parsed.attribute} = ${claim.value.slice(0, 60)}), no model call`);
+  return { subject: { name: thing.name, ...(thing.keys.length ? { keys: thing.keys } : {}) }, ...claimView(claim) };
+}
+
+export const ANSWERED_NOTE = "Answered from the knowledge graph's current state (the claim and its section are in answer): nothing was sent to anyone.";
+
+/**
+ * Open needs in the caller's view as commitments with the sign flipped (needs.js needAsCommitment):
+ * the same shape as an open commitment claim, so the two list together. A need is visible like any
+ * entry: at the asker's position, or shown to the caller through a share of the question.
+ */
+export async function openNeeds(scope, { now = Date.now() } = {}) {
+  const rows = await adbQuery(
+    `SELECT @rid AS rid, _qid, name, text_identity, _asker, _asked_by, _status, _home, _origin, _open_until, _valid_until, _joined_into, _asked, _questions, _dismissed, _met_by FROM ${ENTITY_LABEL} WHERE _kind = 'need' AND _status = 'open' AND _open_until > :now${homeFilter(scope)} ORDER BY _open_until LIMIT 200`,
+    { now: new Date(now).toISOString() },
+  );
+  return rows.map((r) => needAsCommitment(needOf(r)));
 }
 
 /**
@@ -293,6 +352,11 @@ export async function requestAccess({ question }, identity, scope) {
     { name, qid, asker: personOf(identity.user), asked_by: identity.user, home, questions: JSON.stringify([{ text, at: now }]), text, now },
   );
   const need = await loadNeed(qid);
+  // a question on an attribute of a thing the asker sees is a state query when the state exists:
+  // answered at once from the claims, before any model is called, for an agent's ask too (the
+  // asker already sees the claim, so nothing leaks and nothing needs confirming)
+  const answer = await answerFromState(need, scope, identity);
+  if (answer) return { ...(await askerRequest(qid, identity)), answer, note: ANSWERED_NOTE };
   try {
     const [vec] = await embedBatch([text]);
     await adbCommand(`UPDATE ${need.rid} SET embed_identity = [${vec.join(",")}]`);
@@ -338,6 +402,9 @@ export async function confirmRequest(qid, identity, scope) {
   // claim it: a second confirm finds nothing to do
   const claimed = await adbCommand(`UPDATE ${ENTITY_LABEL} SET _status = 'opening' WHERE _kind = 'need' AND _qid = :qid AND _status = 'proposed'`, "sql", { qid });
   if (Number(claimed?.[0]?.count ?? 0) !== 1) throw new Error("this request was already handled");
+  // state may answer it now (a claim landed since the draft): then nobody is asked
+  const answer = await answerFromState(need, scope, identity);
+  if (answer) return { ...(await askerRequest(qid, identity)), answer, note: ANSWERED_NOTE };
   await openNeed(need, scope);
   return askerRequest(qid, identity);
 }

@@ -15,8 +15,14 @@
 //
 // NEAR edges (need -> assertion, { score, state }) record the meetings; they
 // show in traversal only to those who see both ends, like every edge.
+// A need is a commitment with the sign flipped (docs/ORGANIZATION-MODEL.md): a request for an
+// information-delivery event nobody has promised yet. So a question that names a thing and an
+// attribute is a state query first (parseStateQuestion; requests.js answers it from state.js when a
+// claim exists, with no model call), and the embedding meeting above is for every other question.
 // Pure functions; the server stores needs and edges and runs the searches.
 import { ancestors } from "./positions.js";
+import { normalize } from "./things.js";
+import { parseKey, recordKey } from "./model/schema.js";
 
 /** how close an assertion must be to a need to count as a meeting */
 export const MATCH_MIN = 0.55;
@@ -90,11 +96,13 @@ export function askerView(need, edges, now = Date.now()) {
   const status =
     need.status === "proposed" || need.status === "joined" || need.status === "withdrawn"
       ? need.status
-      : ended
-        ? "expired"
-        : shared.length
-          ? "shared"
-          : "asked";
+      : need.status === "met"
+        ? "answered" // met by a claim the asker sees (a state query): nobody was asked
+        : ended
+          ? "expired"
+          : shared.length
+            ? "shared"
+            : "asked";
   return {
     id: need.qid,
     question: need.question,
@@ -172,5 +180,97 @@ export function groupView(views) {
     entries: list,
     posted: list.length === 0,
     expires_at: views.map((v) => v.expires_at).filter(Boolean).sort().at(-1) ?? null,
+  };
+}
+
+/** ---- needs as commitments with the sign flipped ---- */
+
+/** words that never name a thing on their own */
+const STOP = new Set(
+  "what whats which who whose when where why how is are was were be been being do does did has have had can could will would should the a an of at on in for to by from with about into as and or but not no if then than so its it this that these those there here any some all each every my our your their his her them they we you i me us s still yet now currently current latest right please tell know show give me find out whats".split(
+    " ",
+  ),
+);
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const KEY_IN_TEXT = /[a-z0-9_-]{1,40}:[^\s:]{1,120}:[^\s]{1,160}/gi;
+
+/**
+ * A question read as a state query: the attribute it names (one the graph's claims use, the longest
+ * match winning: "pay rate" before "pay") and the things it may be about, as subject references for
+ * state.js (`{ key }` or `{ name }`): record keys written out, "job 4471"-style row numbers turned
+ * into the record key of every class with a record table (`classes`: [{ name, record_table }]) and
+ * kept as names too, and every run of one to three words that does not start or end on a stop word.
+ * Null when no known attribute is named: then the question is for the embedding path.
+ */
+export function parseStateQuestion(question, { attributes = [], classes = [] } = {}) {
+  const text = String(question ?? "").replace(/['’]s\b/g, "");
+  const norm = normalize(text);
+  if (!norm) return null;
+  let attribute = null;
+  for (const a of attributes) {
+    const words = String(a ?? "").split("_").filter(Boolean);
+    if (!words.length) continue;
+    if (!new RegExp(`(^| )${words.map(escapeRe).join(" ")}(s|es)?( |$)`).test(norm)) continue;
+    const prev = attribute ? attribute.split("_").length : 0;
+    if (!attribute || words.length > prev || (words.length === prev && a.length > attribute.length)) attribute = a;
+  }
+  if (!attribute) return null;
+  const attrWords = new Set(attribute.split("_"));
+  const subjects = [];
+  const seen = new Set();
+  const push = (s) => {
+    const k = s.key ? `key|${s.key}` : `name|${s.name}`;
+    if (seen.has(k) || subjects.length >= 40) return;
+    seen.add(k);
+    subjects.push(s);
+  };
+  for (const m of text.match(KEY_IN_TEXT) ?? []) if (parseKey(m)) push({ key: m });
+  const tokens = norm.split(" ").filter(Boolean);
+  tokens.forEach((t, i) => {
+    if (!/^\d{2,}$/.test(t)) return;
+    // a row number: that row in every class's record table, and the words around it as names
+    for (const cls of classes) {
+      const k = recordKey(cls, t);
+      if (k) push({ key: k });
+    }
+    if (i > 0 && !STOP.has(tokens[i - 1]) && !attrWords.has(tokens[i - 1])) push({ name: `${tokens[i - 1]} ${t}` });
+    push({ name: t });
+  });
+  for (let i = 0; i < tokens.length; i++) {
+    for (let n = 1; n <= 3 && i + n <= tokens.length; n++) {
+      const gram = tokens.slice(i, i + n);
+      if (STOP.has(gram[0]) || STOP.has(gram.at(-1)) || gram.every((w) => attrWords.has(w))) continue;
+      if (gram.some((w) => attrWords.has(w)) && n > 1) continue;
+      push({ name: gram.join(" ") });
+    }
+  }
+  return { attribute, subjects };
+}
+
+/**
+ * A need in the shape of a commitment claim (model/README.md), so open needs and open commitments
+ * list together: the asker is the party owed, nobody owes yet, the question is what is owed, the
+ * interval runs from the asking to when the need closes. `need` as requests.js loads it.
+ */
+export function needAsCommitment(need) {
+  const asked = need.questions?.[0]?.at ?? null;
+  return {
+    id: need.qid,
+    kind: "commitment",
+    class: "need",
+    attribute: "answer",
+    value: need.question,
+    value_num: null,
+    subject: { key: null, name: need.asker, class: null, actor: "person", scope: null },
+    owed_to: need.asker,
+    owed_by: null,
+    valid_from: asked,
+    valid_until: need.open_until ?? null,
+    recorded_at: asked,
+    recorded_by: need.asker,
+    section: null,
+    status: need.status,
+    asked: need.asked ?? 1,
+    ...(need.home ? { home: need.home } : {}),
   };
 }
