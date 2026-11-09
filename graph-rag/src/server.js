@@ -31,6 +31,7 @@ import { registerWorkerTools, workerUpsert } from "./worker-tools.js";
 import { registerRecordTools } from "./record-tools.js";
 import { statements as modelStatements } from "./model/schema.js";
 import { ensureDiscoverySchema } from "./routes-discovery.js";
+import { registerQueryTools } from "./tools-queries.js";
 import { ensureTriageSchema } from "./triage.js";
 import { batchTick, ensureMasterSchema, registerHandlerTools, registerLiaisonTools, registerMasterTools } from "./master-tools.js";
 import { ensurePruneSchema, pruneExpired, pruneSink } from "./pruning.js";
@@ -103,6 +104,8 @@ write may be held for an admin (you read what they can't see): use it only when 
       include_expired: z.boolean().optional(),
       facets: z.array(z.string()).optional(),
       k: z.number().int().min(1).max(32).optional(),
+      // as of a date: a hit bearing claims is kept only while one of its claims was in force then (state.js)
+      as_of: z.string().optional(),
       temporal_filter: z
         .object({
           property: z.string(),
@@ -287,6 +290,9 @@ a search.${role === "worker" ? " Like search_graph, it shows what your entry's p
       return { content: [{ type: "text", text: JSON.stringify(await aboutThing(args, identity, await readScope(args))) }] };
     },
   );
+
+  // ---- the Queries stream's tools: current state, state as of a date, conflicts, history, open needs (tools-queries.js) ----
+  if (SCOPED) registerQueryTools(server, { identity, need, readScope, role });
 
   // ---- a graph worker thread's own tools (one queue entry: its entry) ----
   if (SCOPED && role === "worker") registerWorkerTools(server, { identity, scope, need });
