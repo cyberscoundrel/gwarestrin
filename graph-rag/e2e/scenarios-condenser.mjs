@@ -10,8 +10,9 @@
 // ({ tool, sql, api, until, check, POS }); when the loader passes none, the
 // helpers below are built from GRAPH_URL. Run on its own too:
 //   node scenarios-condenser.mjs   (inside the harness network)
+import { createHmac, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { CLASSES, condense, ingestArgs, OFF_RECORD_MARKER, seedClasses, THREADS } from "./fake-condenser.mjs";
+import { CLASSES, documentFor, ingestArgs, OFF_RECORD_MARKER, seedClasses, THREADS } from "./fake-condenser.mjs";
 
 export function helpers(env = process.env) {
   const GRAPH = env.GRAPH_URL ?? "http://graph-rag:8000";
@@ -52,7 +53,12 @@ export function helpers(env = process.env) {
   const check = (cond, msg) => {
     if (!cond) throw new Error(msg);
   };
-  return { tool, sql, api, until, check, POS: { org: "org", ops: "ops", floor: "floor" } };
+  // a delegated token as the admin's workspace signs one (run.mjs; graph-rag/src/delegation.js)
+  const delegated = (claims) => {
+    const body = Buffer.from(JSON.stringify({ u: "admin", a: randomUUID(), iat: Math.floor(Date.now() / 1000), ...claims })).toString("base64url");
+    return `gwa1.${body}.${createHmac("sha256", "e2e-delegation-key-0123456789abcdef").update(`gwa1.${body}`).digest("base64url")}`;
+  };
+  return { tool, sql, api, until, check, delegated, POS: { org: "org", ops: "ops", floor: "floor" } };
 }
 
 const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
@@ -65,7 +71,7 @@ export const scenarios = [
       const before = Number((await sql("SELECT count(*) AS n FROM Entity WHERE _kind = 'document' AND _on_record = true"))[0]?.n ?? 0);
       const thread = THREADS["off-record quality chat"];
       check(thread.on === false, "the thread is off record");
-      check(condense(thread) === null, "the condenser emits nothing for an off-record thread");
+      check(documentFor(thread) === null, "the condenser emits nothing for an off-record thread");
       // nothing was sent, so nothing of the conversation is in the graph: not as a document, not as a note
       const after = Number((await sql("SELECT count(*) AS n FROM Entity WHERE _kind = 'document' AND _on_record = true"))[0]?.n ?? 0);
       check(after === before, `no document appeared (${before} -> ${after})`);
@@ -76,9 +82,12 @@ export const scenarios = [
     },
   },
   {
-    name: "condenser: an on-record section becomes one document, three sections, claims at three sensitivities each seen by the right people",
+    name: "condenser: an on-record section becomes one document, three sections at three sensitivities, its claims seen by the right people",
     async run(ctx) {
       const { tool, sql, api, until, check, POS } = ctx;
+      // the recorder: a chat agent of the admin's positioned at Operations (a fresh identity, so nothing a person
+      // read earlier in the run lifts this write's floor; a graph token carries its profile's positions the same way)
+      const opsAgent = ctx.delegated({ p: [POS.ops] });
       // the confirmed classes (the Discovery stream's confirm flow, stood in for by the fixture)
       for (const cmd of seedClasses()) {
         const r = await tool("admin", "execute_graph", { language: "sql", command: cmd });
@@ -87,11 +96,11 @@ export const scenarios = [
       const confirmed = await sql("SELECT name FROM CommitmentClass WHERE status = 'confirmed'");
       check(CLASSES.every((c) => confirmed.some((r) => r.name === c.name)), `classes confirmed: ${JSON.stringify(confirmed)}`);
 
-      const doc = condense("alice handover");
+      const doc = documentFor("operations handover");
       check(doc && doc.sections.length === 3, "the fake condenser's document has three sections");
-      const sent = await tool("alice", "ingest_document", ingestArgs(doc));
+      const sent = await tool(opsAgent, "ingest_document", ingestArgs(doc));
       check(sent.doc_id && sent.on_record === true, `recorded: ${JSON.stringify(sent).slice(0, 300)}`);
-      check(sent.sections === 3 && sent.claims === 5, `three sections and five claims announced: ${JSON.stringify(sent).slice(0, 200)}`);
+      check(sent.sections === 3 && sent.claims === 4, `three sections and four claims announced: ${JSON.stringify(sent).slice(0, 200)}`);
       check(/3 confirmed classes/.test(sent.classes ?? ""), `checked against the confirmed classes: ${sent.classes}`);
 
       const entry = await until("the document is ready", async () => {
@@ -99,19 +108,22 @@ export const scenarios = [
         return d?._doc_status === "ready" ? d : false;
       });
       check(entry._on_record === true, "the document carries the on-record marker");
-      check(entry._recorded_by === "alice" && entry._record_position === "ops" && entry._record_reason === "Thursday handover", `who, where, why: ${JSON.stringify(entry)}`);
-      check(Number(entry.claims) === 5, `five claims written: ${entry.claims}`);
+      check(entry._recorded_by === "admin" && entry._record_position === "ops" && entry._record_reason === "Thursday handover", `who (the token's person, not the document's word), where, why: ${JSON.stringify(entry)}`);
+      check(Number(entry.claims) === 4, `four claims written: ${entry.claims}`);
       check(entry._home === POS.ops, `the document is seen from Operations: ${entry._home}`);
 
       const sections = await sql(`SELECT @rid AS rid, name, _home, _section FROM Entity WHERE _kind = 'section' AND _doc_id = '${sent.doc_id}' ORDER BY _section`);
       check(sections.length === 3, `three sections stored: ${sections.length}`);
       const parts = await sql(`SELECT count(*) AS n FROM PART_OF WHERE @in = ${entry.rid}`);
       check(Number(parts[0]?.n) === 3, `each section PART_OF the document: ${JSON.stringify(parts)}`);
-      // sensitivities: the routine section where alice writes (ops); the pay section graded to the top
-      check(sections[0]._home === POS.ops, `the Toro section is at Operations: ${sections[0]._home}`);
-      check(sections[1]._home === POS.org, `the pay section is at the top: ${sections[1]._home}`);
+      // sensitivities: a section with claims is homed by them (the recorder's position; the grader is not asked);
+      // the free-text residue is graded as before, here to the top; nothing sits below where the recorder writes
+      check(sections[0]._home === POS.ops, `the Toro section (claims) is at Operations: ${sections[0]._home}`);
+      check(sections[1]._home === POS.org, `the pricing section (free text, graded) is at the top: ${sections[1]._home}`);
+      const grades = await sql(`SELECT _section, _grade FROM Entity WHERE _kind = 'section' AND _doc_id = '${sent.doc_id}' ORDER BY _section`);
+      check(/claims/.test(grades[0]._grade ?? "") && /graded|admins/.test(grades[1]._grade ?? ""), `how each was placed: ${JSON.stringify(grades)}`);
       // ...and the shop-hours section released to everyone, which a person approves (the standing instructions' set_home step)
-      const moved = await tool("alice", "set_home", { entities: [{ name: sections[2].name }], to: "Everyone" });
+      const moved = await tool(opsAgent, "set_home", { entities: [{ name: sections[2].name }], to: "Everyone" });
       const pid = moved.results?.[0]?.pendingId ?? moved.results?.[0]?.id;
       check(pid, `the release to everyone is queued: ${JSON.stringify(moved).slice(0, 300)}`);
       const ok = await api(`/api/queue/${pid}/approve`, { method: "POST", body: "{}" });
@@ -120,17 +132,20 @@ export const scenarios = [
       check(homes[2]._home === "everyone", `the shop-hours section is for everyone: ${homes[2]._home}`);
 
       // the claims: one CLAIMS edge from each section to its subject, homed where the section is
-      const claims = await sql(`SELECT out._section AS section, in.name AS subject, in._class AS subject_class, in._keys AS keys, kind, class, attribute, value, value_num, valid_from, valid_until, recorded_by, _home FROM CLAIMS WHERE out._doc_id = '${sent.doc_id}' ORDER BY section, attribute`);
-      check(claims.length === 5, `five CLAIMS edges: ${JSON.stringify(claims).slice(0, 400)}`);
-      check(claims.every((c) => c.recorded_by === "alice"), "every claim is alice's record");
+      const claims = await sql(`SELECT @out._section AS section, @in.name AS subject, @in._class AS subject_class, @in._keys AS keys, kind, class, attribute, value, value_num, valid_from, valid_until, recorded_by, _home FROM CLAIMS WHERE @out._doc_id = '${sent.doc_id}' ORDER BY section, attribute`);
+      check(claims.length === 4, `four CLAIMS edges: ${JSON.stringify(claims).slice(0, 400)}`);
+      check(claims.every((c) => c.recorded_by === "admin"), "every claim is the recorder's");
       const job = claims.filter((c) => c.class === "jobs" && c.attribute === "stage")[0];
       check(job && job.value === "planned" && (job.keys ?? []).includes("mssql:dbo_Job:4471") && job.subject_class === "jobs", `job 4471 is the subject, keyed, of class jobs: ${JSON.stringify(job)}`);
-      const pay = claims.find((c) => c.attribute === "pay");
-      check(pay && Number(pay.value_num) === 26 && pay.valid_from === "2026-12-01T00:00:00.000Z" && pay.valid_until === null, `the pay claim's number and interval: ${JSON.stringify(pay)}`);
-      check(pay._home === POS.org, `the pay claim is seen only from the top: ${pay._home}`);
+      const machine = claims.find((c) => c.attribute === "machine");
+      check(machine && machine.value === "CNC 2" && machine.valid_from && machine.valid_until === null, `a state with no dates runs from the recording, open: ${JSON.stringify(machine)}`);
       const closure = claims.find((c) => c.attribute === "shop_closure");
       check(closure && closure.kind === "event" && closure.valid_from === closure.valid_until, `an event is a point in time: ${JSON.stringify(closure)}`);
       check(claims.filter((c) => Number(c.section) === 0).every((c) => c._home === POS.ops), "the Toro claims are seen from Operations");
+      // a claim is seen by whoever sees its section (decision 5): the shop-hours claim went to everyone with its section
+      const bySection = await sql(`SELECT @out._section AS section, @out._home AS section_home FROM CLAIMS WHERE @out._doc_id = '${sent.doc_id}'`);
+      check(bySection.filter((c) => Number(c.section) === 2).every((c) => c.section_home === "everyone"), `the shop-hours claim is for everyone with its section: ${JSON.stringify(bySection)}`);
+      check(bySection.filter((c) => Number(c.section) === 0).every((c) => c.section_home === POS.ops), "the Toro claims stay at Operations with theirs");
 
       // each seen by the right people: read_document shows each person only the sections they see
       const seen = async (who) => ((await tool(who, "read_document", { document: sent.doc_id })).contents ?? []).map((c) => c.section);
@@ -138,7 +153,7 @@ export const scenarios = [
       check(JSON.stringify(await seen("alice")) === "[1,3]", `alice sees hers and everyone's, not the pay: ${JSON.stringify(await seen("alice"))}`);
       check(JSON.stringify(await seen("bob")) === "[3]", `bob, on the floor, sees only what is for everyone: ${JSON.stringify(await seen("bob"))}`);
       const text = (await tool("bob", "read_document", { document: sent.doc_id, section: 3 })).sections?.[0]?.text ?? "";
-      check(/closes at noon on Friday/.test(text) && !/26 an hour/.test(text), `bob reads the shop hours and nothing of the pay: ${text.slice(0, 200)}`);
+      check(/closes at noon on Friday/.test(text) && !/Aetrium/.test(text), `bob reads the shop hours and nothing of the pricing: ${text.slice(0, 200)}`);
       // and the subjects exist once: a thing for job 4471 with its key and class, minted by the record
       const things = await sql("SELECT name, _class, _keys FROM Entity WHERE _kind = 'thing' AND _keys CONTAINS 'mssql:dbo_Job:4471'");
       check(things.length === 1 && things[0]._class === "jobs", `one thing for job 4471, of class jobs: ${JSON.stringify(things)}`);
@@ -148,14 +163,15 @@ export const scenarios = [
     name: "condenser: a claim on a class nobody confirmed is refused with its field named, and nothing is stored",
     async run(ctx) {
       const { tool, sql, check } = ctx;
-      const doc = condense("unconfirmed class");
-      const r = await tool("alice", "ingest_document", ingestArgs(doc));
+      const doc = documentFor("unconfirmed class");
+      const count = async () => Number((await sql("SELECT count(*) AS n FROM Entity WHERE name = 'e2e-cond Aetrium quote'"))[0]?.n ?? 0);
+      const before = await count();
+      const r = await tool(ctx.delegated({ p: [ctx.POS.ops] }), "ingest_document", ingestArgs(doc));
       check(/sections\[0\]\.claims\[0\]\.(subject\.)?class: not a confirmed class: quotes/.test(r.error ?? JSON.stringify(r)), `refused by field: ${JSON.stringify(r).slice(0, 300)}`);
-      const rows = await sql("SELECT count(*) AS n FROM Entity WHERE name = 'e2e-cond Aetrium quote'");
-      check(Number(rows[0]?.n ?? 0) === 0, "nothing stored");
+      check((await count()) === before, "nothing stored");
       // without the claim the section still goes on record (decision 2: the text, no claim, graded as usual)
       doc.sections[0].claims = [];
-      const ok = await tool("alice", "ingest_document", ingestArgs(doc));
+      const ok = await tool(ctx.delegated({ p: [ctx.POS.ops] }), "ingest_document", ingestArgs(doc));
       check(ok.on_record === true && ok.claims === 0 && ok.sections === 1, `recorded without a claim: ${JSON.stringify(ok).slice(0, 200)}`);
     },
   },
@@ -174,10 +190,14 @@ export const scenarios = [
       check(entry._on_record !== true, "no on-record marker on a manual");
       check(entry.claims === undefined || entry.claims === null, "no claims on a manual");
       check(Number(entry.facts) === 0, "no extraction when not asked");
-      check(entry._home === POS.ops, `at the writer's position: ${entry._home}`);
+      // written from the writer's position; the derived floor may hold it higher when alice read above it
+      // earlier in the run (reading an entry released to everyone lifts it to the root), as for any write
+      const origin = (await sql(`SELECT _origin FROM Entity WHERE _kind = 'document' AND _doc_id = '${r.doc_id}'`))[0]?._origin;
+      check(origin === POS.ops, `written from the writer's position: ${origin}`);
+      check([POS.ops, POS.org].includes(entry._home), `seen from the writer's position, or held above it by what she read: ${entry._home}`);
       const sections = await sql(`SELECT @rid AS rid, _section FROM Entity WHERE _kind = 'section' AND _doc_id = '${r.doc_id}' ORDER BY _section`);
       check(sections.length === r.sections && sections.length >= 3, `its sections as chunked (${r.sections} announced, ${sections.length} stored)`);
-      const edges = await sql(`SELECT count(*) AS n FROM CLAIMS WHERE out._doc_id = '${r.doc_id}'`);
+      const edges = await sql(`SELECT count(*) AS n FROM CLAIMS WHERE @out._doc_id = '${r.doc_id}'`);
       check(Number(edges[0]?.n ?? 0) === 0, "no CLAIMS edges from a manual's sections");
       const read = await tool("alice", "read_document", { document: "e2e-cond Mill 1 manual", section: 1 });
       check(/spindle step 1/.test(read.sections?.[0]?.text ?? ""), `read back from the store: ${JSON.stringify(read).slice(0, 200)}`);

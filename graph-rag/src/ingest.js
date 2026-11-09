@@ -13,7 +13,7 @@ import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, pars
 import { authorityOf, claimHome } from "./model/authority.js";
 import { statements, TYPES } from "./model/schema.js";
 import { DOC_STORE, EXTRACT_MODEL, GRADER_MODEL, log } from "./context.js";
-import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.js";
+import { adbCommand, adbQuery, ensureIndex, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.js";
 import { chat, embedBatch } from "./models.js";
 import { homeFilter, personOf, positionMap, resolveWriteHome, writerOf } from "./scope.js";
 import { derivedFloor, recordReads } from "./floor.js";
@@ -94,9 +94,14 @@ async function ingestDocument(p) {
   if (p.record) await adbCommand(`UPDATE ${String(doc.rid)} SET _on_record = true`);
   // sections can be filed higher than the document (grading restricts), never lower
   const docHome = effectiveHome(positionMap, doc._home);
-  for (let i = 0; i < chunks.length; i += 32) {
+  // a condensed document's sections with claims are not the grader's to judge (the grader runs only on
+  // text that maps to no class): they are written where their claims put them; the rest go the usual way
+  const claimed = new Set(p.record ? p.record.sections.filter((sec) => (sec.claims ?? []).length > 0).map((sec) => sec.index) : []);
+  for (const c of chunks) if (claimed.has(c.index)) await writeClaimedSection(p, c, docHome, vu);
+  const graded = chunks.filter((c) => !claimed.has(c.index));
+  for (let i = 0; i < graded.length; i += 32) {
     await upsertEntities({
-      entities: chunks.slice(i, i + 32).map((c) => ({
+      entities: graded.slice(i, i + 32).map((c) => ({
         name: sectionName(p.title, c.index, c.heading),
         facets: { identity: preview(c.text) },
         _embed: { identity: c.embedText },
@@ -132,6 +137,39 @@ async function ingestDocument(p) {
   return { doc_id: p.doc_id, sections: sections.length, facts, ...(p.record ? { claims, on_record: true } : {}) };
 }
 
+/**
+ * A section with claims, written as upsertEntities writes a section but without grading and without the
+ * linker's queue (its subjects are its claims'): homed where the document is, and raised to a claim's
+ * authority position by recordClaims once the policy names one. Re-ingesting the same title updates it
+ * in place, like any section ((name, origin) is the key).
+ */
+async function writeClaimedSection(p, c, home, vu) {
+  const name = sectionName(p.title, c.index, c.heading);
+  await ensureIndex("identity");
+  await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.heading IF NOT EXISTS STRING`).catch(() => {});
+  const [vec] = await embedBatch([c.embedText.slice(0, 6000)]);
+  const validUntil = vu && vu !== "lasting" ? vu : null;
+  // (name, origin) is the key, as upsertEntities writes it: update in place, else a new vertex
+  const existing = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :s_name AND _origin = :s_origin LIMIT 1`, { s_name: name, s_origin: p.home }))[0];
+  const set = `updated_at = :s_now, _home = :s_home, _grade = :s_grade, _ungraded = null, _kind = 'section', _doc_id = :s_doc, _doc_title = :s_title, _section = :s_index${p.written_by ? ", _written_by = :s_writer" : ""}${c.heading ? ", heading = :s_heading" : ""}${validUntil ? ", _valid_until = :s_until, _valid_by = 'writer'" : ""}, text_identity = :s_text, embed_identity = [${vec.join(",")}]`;
+  const params = {
+    s_now: new Date().toISOString(),
+    s_home: home,
+    s_grade: "a section with claims: homed by them, no lower than the document (not graded)",
+    s_doc: p.doc_id,
+    s_title: p.title,
+    s_index: c.index,
+    s_writer: p.written_by,
+    s_heading: c.heading,
+    s_until: validUntil,
+    s_text: preview(c.text).slice(0, 4000),
+    s_name: name,
+    s_origin: p.home,
+  };
+  if (existing) await adbCommand(`UPDATE ${String(existing.rid)} SET ${set}`, "sql", params);
+  else await adbCommand(`CREATE VERTEX ${ENTITY_LABEL} SET name = :s_name, _origin = :s_origin, ${set}`, "sql", params);
+}
+
 /** the policy's authority map (classes and attributes to positions), once the Authority stream stores one; null until then */
 const authorityPolicy = () => (policy && (policy.classes || policy.attributes || policy.default) ? { classes: policy.classes ?? {}, attributes: policy.attributes ?? {}, default: policy.default } : null);
 
@@ -156,8 +194,8 @@ async function subjectThing(subject, home, cache) {
   if (rid && subject.key) {
     const cur = (await adbQuery(`SELECT _keys, _class FROM ${rid}`))[0] ?? {};
     const keys = cur._keys ?? [];
-    if (!keys.includes(subject.key)) await adbCommand(`UPDATE ${rid} SET _keys = :k`, "sql", { k: [...keys, subject.key].slice(-10) }).catch(() => {});
-    if (!cur._class && subject.class) await adbCommand(`UPDATE ${rid} SET _class = :c`, "sql", { c: subject.class }).catch(() => {});
+    if (!keys.includes(subject.key)) await adbCommand(`UPDATE ${rid} SET _keys = :t_keys`, "sql", { t_keys: [...keys, subject.key].slice(-10) }).catch(() => {});
+    if (!cur._class && subject.class) await adbCommand(`UPDATE ${rid} SET _class = :t_class`, "sql", { t_class: subject.class }).catch(() => {});
   }
   if (!rid) {
     const n = normalize(name);
@@ -171,7 +209,7 @@ async function subjectThing(subject, home, cache) {
   } else {
     // seen from this record's home too
     const homes = (await adbQuery(`SELECT _homes FROM ${rid}`))[0]?._homes ?? [];
-    if (!homes.includes(home)) await adbCommand(`UPDATE ${rid} SET _homes = :h`, "sql", { h: [...homes, home] }).catch(() => {});
+    if (!homes.includes(home)) await adbCommand(`UPDATE ${rid} SET _homes = :t_homes`, "sql", { t_homes: [...homes, home] }).catch(() => {});
   }
   if (!RID_RE.test(rid)) throw new Error(`no thing for the subject ${name}`);
   cache.set(id, rid);
@@ -208,16 +246,16 @@ async function recordClaims(p, sections) {
       const thing = await subjectThing(c.subject, p.home, things);
       const id = c.id ?? randomUUID();
       await adbCommand(
-        `CREATE EDGE CLAIMS FROM ${s.rid} TO ${thing} SET id = :id, kind = :kind, class = :cls, attribute = :attribute, value = :value${c.value_num === null || c.value_num === undefined ? "" : ", value_num = :num"}, valid_from = :vf${c.valid_until ? ", valid_until = :vu" : ""}, recorded_at = :ra, recorded_by = :rb, _home = :home`,
+        `CREATE EDGE CLAIMS FROM ${s.rid} TO ${thing} SET id = :c_id, kind = :c_kind, class = :c_class, attribute = :c_attribute, value = :c_value${c.value_num === null || c.value_num === undefined ? "" : ", value_num = :c_num"}, valid_from = :c_from${c.valid_until ? ", valid_until = :c_until" : ""}, recorded_at = :c_at, recorded_by = :c_by, _home = :c_home`,
         "sql",
-        { id, kind: c.kind, cls: c.class, attribute: c.attribute, value: c.value, num: c.value_num, vf: c.valid_from, vu: c.valid_until, ra: c.recorded_at, rb: c.recorded_by, home },
+        { c_id: id, c_kind: c.kind, c_class: c.class, c_attribute: c.attribute, c_value: c.value, c_num: c.value_num, c_from: c.valid_from, c_until: c.valid_until, c_at: c.recorded_at, c_by: c.recorded_by, c_home: home },
       );
       if (c.kind !== "event") {
         // the previous open claim on this attribute of this subject ends where this one starts
         await adbCommand(
-          `UPDATE CLAIMS SET valid_until = :vf, closed_by = :id WHERE @in = ${thing} AND class = :cls AND attribute = :attribute AND kind <> 'event' AND valid_until IS NULL AND valid_from < :vf AND id <> :id`,
+          `UPDATE CLAIMS SET valid_until = :c_from, closed_by = :c_id WHERE @in = ${thing} AND class = :c_class AND attribute = :c_attribute AND kind <> 'event' AND valid_until IS NULL AND valid_from < :c_from AND id <> :c_id`,
           "sql",
-          { vf: c.valid_from, id, cls: c.class, attribute: c.attribute },
+          { c_from: c.valid_from, c_id: id, c_class: c.class, c_attribute: c.attribute },
         ).catch((e) => log.warn(`closing earlier claims on ${c.class}/${c.attribute}: ${String(e).slice(0, 120)}`));
       }
       n++;
@@ -323,7 +361,7 @@ export function startIngest(p) {
   ingestQueue = ingestQueue
     .then(() => ingestDocument(p))
     .catch(async (e) => {
-      log.warn(`document "${p.title}" (${p.doc_id}) failed: ${String(e).slice(0, 200)}`);
+      log.warn(`document "${p.title}" (${p.doc_id}) failed: ${String(e).slice(0, 600)}`);
       await adbCommand(`UPDATE ${ENTITY_LABEL} SET _doc_status = 'failed' WHERE _kind = 'document' AND _doc_id = :d`, "sql", { d: p.doc_id }).catch(() => {});
     });
   return ingestQueue;
@@ -342,10 +380,13 @@ export async function recordDocument(raw, identity, scope, { title, description,
   const home = resolveWriteHome(scope, requestedHome);
   const now = Date.now();
   const classes = await confirmedClasses();
-  const document = prepareRecord(raw, {
+  // the record is under the authority of the token's person: an agent's record counts as the person it
+  // acts for (model/schema.js), whatever the document says; in open mode the condenser's word stands
+  const recordedBy = identity.open ? null : personOf(identity.user);
+  const document = prepareRecord(recordedBy ? { ...raw, recorded_by: recordedBy } : raw, {
     title,
     description,
-    recorded_by: personOf(identity.user),
+    recorded_by: recordedBy ?? undefined,
     position: identity.positions?.[0] ?? home ?? "unscoped",
     classes,
     now,
