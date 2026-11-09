@@ -94,6 +94,14 @@ export async function findThings(refs, { scope = { homes: null }, query = adbQue
     `SELECT @rid AS rid, label, name, _thing_type, _alias_norms, _keys, _class, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (${conds.join(" OR ")})${homeFilter(scope)} LIMIT ${Math.max(1, Math.min(limit, 50))}`,
   );
   const things = rows.filter((r) => RID_RE.test(String(r.rid))).map(thingOf);
+  // a key the caller named, held by a thing homed where it can't see: what it wrote about that row is still its
+  // own to read, as the row's key and nothing of the thing's name, aliases or other keys (linker.js thingSeenFrom)
+  const unseen = scope?.homes ? keys.filter((k) => !things.some((t) => t.keys.includes(k))) : [];
+  for (const k of unseen) {
+    const hit = (await query(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS '${esc(k)}' LIMIT 1`).catch(() => []))[0];
+    const shell = hit && RID_RE.test(String(hit.rid)) ? { rid: String(hit.rid), name: k, type: null, keys: [k] } : null;
+    if (shell && (await claimsOfThing(shell, { scope, query })).claims.length) things.push(shell);
+  }
   // a thing found by its key comes first: the key is the reference
   return things.sort((a, b) => Number(b.keys.some((k) => keys.includes(k))) - Number(a.keys.some((k) => keys.includes(k))));
 }

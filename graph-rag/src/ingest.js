@@ -214,10 +214,10 @@ const authorityPolicy = () => {
  * is, minted only when admission says the subject earned a node). Per record, once per subject: the same
  * name under two classes is two subjects.
  */
-async function subjectThing(subject, home, cache, { kind } = {}) {
+async function subjectThing(subject, home, cache, { kind } = {}, notFrom) {
   const id = subject.key ? `key|${subject.key.toLowerCase()}` : `${subject.scope === "class" ? "class|" : ""}${subject.class ?? ""}|${subject.actor ?? ""}|${normalize(subject.name ?? "")}`;
   if (cache.has(id)) return cache.get(id);
-  const rid = await recordSubject(subject, home, { kind });
+  const rid = await recordSubject(subject, home, { kind, notFrom });
   if (rid && !RID_RE.test(String(rid))) throw new Error(`no thing for the subject ${subject.name ?? subject.key}`);
   cache.set(id, rid);
   return rid;
@@ -240,6 +240,7 @@ async function recordClaims(p, sections) {
     return thingsAt.get(home);
   };
   const authority = authorityPolicy();
+  const ownSections = new Set([...byIndex.values()].map((s) => s.rid)); // one document is one place, however many times it runs
   let n = 0;
   for (const section of p.record.sections) {
     const s = byIndex.get(section.index);
@@ -258,7 +259,7 @@ async function recordClaims(p, sections) {
         }
       }
       // no thing: the claim points back at its section with its subject as written, the shape worker-pool.js reads as unresolved
-      const thing = await subjectThing(c.subject, home, thingsFor(home), c);
+      const thing = await subjectThing(c.subject, home, thingsFor(home), c, ownSections);
       const id = c.id ?? stableUuid("claim", p.doc_id, section.index, j);
       if (!written.has(id)) await adbCommand(
         `CREATE EDGE CLAIMS FROM ${s.rid} TO ${thing ?? s.rid} SET id = :c_id, kind = :c_kind, class = :c_class, attribute = :c_attribute, value = :c_value${c.value_num === null || c.value_num === undefined ? "" : ", value_num = :c_num"}, valid_from = :c_from${c.valid_until ? ", valid_until = :c_until" : ""}, recorded_at = :c_at, recorded_by = :c_by, _home = :c_home${thing ? "" : ", subject = :c_subject, subject_norm = :c_norm"}`,

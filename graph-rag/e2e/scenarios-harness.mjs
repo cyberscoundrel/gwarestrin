@@ -110,6 +110,8 @@ export default [
     run: async (ctx) => {
       const batch = loadBatch();
       ctx.check(batch.conversations.length === 62, `all sixty-two, no subset: ${batch.conversations.length}`);
+      // no connected source: ORACLE.md's keys stand for rows that may not exist ("the key is still the reference"), and another stream's fake DAB doesn't hold them
+      await ctx.tool("admin", "execute_graph", { language: "sql", command: "DELETE FROM OrgPolicy WHERE scope = 'sources'" });
       await confirmClasses(ctx, [...new Set(batch.conversations.flatMap((c) => c.expected.document.sections.flatMap((s) => (s.claims ?? []).map((cl) => cl.class))))]);
       // the organization's policy as a person wrote it (a file, not computed from the placements below); the derived window is left as shipped
       const before = (await ctx.api("/api/policy")).policy ?? {};

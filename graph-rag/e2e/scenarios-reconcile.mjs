@@ -345,9 +345,13 @@ export default [
       const u = await claim(ctx, s3, s3, { cls: "jobs", attribute: "status", value: "running", recorded_by: "admin", home: ctx.POS.org, subject: { name: `${PREFIX} job 9999` } });
       const w3 = ctx.workerToken(s3, ctx.randomUUID());
       const resolved = await ctx.tool(w3, "resolve_subject", { claim_id: u, thing: { key: "mssql:dbo_Job:9999", name: `${PREFIX} job 9999`, type: "order" }, reason: "e2e" });
-      ctx.check(resolved.thing && !resolved.error, `resolved: ${JSON.stringify(resolved).slice(0, 300)}`);
+      ctx.check(!resolved.thing && /no such row/.test(resolved.error ?? ""), `no instance is made of a row the source doesn't hold: ${JSON.stringify(resolved).slice(0, 300)}`);
+      // a thing already holding such a key (made before the check, or while no source could say): the entry is still refused at the row
+      await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${PREFIX} phantom 9999', label = '${PREFIX} phantom 9999', _kind = 'thing', _norm = 'phantom 9999', _keys = ['mssql:dbo_Job:9999'], _homes = ['org'], _home = 'org', _thing_type = 'order'` });
+      const phantom = String((await ctx.sql("SELECT @rid AS rid FROM Entity WHERE _kind = 'thing' AND _keys CONTAINS 'mssql:dbo_Job:9999'"))[0].rid);
+      const phantomClaim = await claim(ctx, s3, phantom, { cls: "jobs", attribute: "status", value: "running", recorded_by: "admin", home: ctx.POS.org, subject: { key: "mssql:dbo_Job:9999" } });
       const updates = fake.calls.filter((x) => x.name === "update_record").length;
-      const noRow = await ctx.tool(w3, "enter_data", { claim_id: u, fields: { Status: "x" }, reason: "e2e no row" });
+      const noRow = await ctx.tool(w3, "enter_data", { claim_id: phantomClaim, fields: { Status: "x" }, reason: "e2e no row" });
       ctx.check(/no such row/.test(noRow.error ?? ""), `an unverified key writes nothing: ${JSON.stringify(noRow).slice(0, 300)}`);
       ctx.check(fake.calls.filter((x) => x.name === "update_record").length === updates, "no update was sent");
       const row = (await ctx.sql(`SELECT _keys FROM ${job4471}`))[0];

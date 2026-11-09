@@ -339,7 +339,7 @@ export async function regradeTick() {
       await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null${validSql}`, "sql", { home: p.home, note: p.note, until });
       if (p.home !== r.w.held) {
         const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
-        for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), p.home).catch(() => {});
+        for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), p.home, { from: r.w.held }).catch(() => {});
       }
       await askAboutPlacement(rid, r.name, p);
       log.info(`graded ${r.name} after waiting: ${homeName(positionMap, p.home)} (${p.note})`);

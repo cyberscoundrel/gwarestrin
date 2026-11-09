@@ -226,7 +226,7 @@ export function assertWritable(fields, hit) {
 export async function clientFor(key, { db = realDb, fetch: f } = {}) {
   const k = parseKey(key);
   if (!k) throw new Error(`not a record key (system:table:row): ${key}`);
-  const sources = await sourcesConfig(db);
+  const sources = await sourcesConfig(db, { ttlMs: 0 }); // a row check reads the sources as they stand now
   const urls = sources[k.system];
   if (!urls) throw new Error(`no connected source called ${k.system}`);
   return { client: sourceClient(k.system, urls, f ? { fetch: f } : {}), key: k };

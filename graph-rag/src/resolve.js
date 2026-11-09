@@ -30,22 +30,69 @@ import { designatorsDiffer, MAYBE_MIN, normalize, normalizeKey, SAME_MIN, THING_
 /** how a subject was resolved */
 export const HOW = ["key", "class-name", "alias", "embedding", "none"];
 
+// What a name alone can't earn. The model's never-nodes ("A holiday schedule, a bench, a part number
+// inside a job, a topic": ORACLE.md lists the time clock, the front left tire and PO 78912 too) are
+// recognised by shape and head noun, in any case. These lists are a judgement, and they fail towards
+// "unresolved": a worker or a person can still make any of them a thing.
+const NEVER_HEADS = new Set(["schedule", "calendar", "roster", "payroll", "bench", "clock", "tire", "tyre"]);
+const TOPIC_HEADS = new Set([...NEVER_HEADS, "policy", "procedure", "process", "plan", "handbook", "manual", "memo", "notice", "report", "list", "log", "meeting", "party", "training", "review", "overtime", "shift", "pickup", "opening", "fridge", "maker", "mat", "floor", "room", "topic", "issue", "supply", "stock"]);
+const RECORD_WORDS = "p ?o|s ?o|w ?o|purchase order|sales order|work order|order|invoice|inv|quote|job|part|p ?n|rma|lot|bol|ticket|receipt";
+const RECORD_NUMBER = new RegExp(`^(?:${RECORD_WORDS})(?: no| num| number)? ?(?:[a-z]+ )?[a-z]*\\d[a-z0-9 ]*$`);
+const YEAR = /^(?:19|20)\d\d$/;
+const CONNECTIVES = new Set(["at", "of", "for", "on", "in", "to", "the", "and", "from", "with"]);
+/** a name's words with a trailing year off ("holiday party 2026" is a party) */
+const wordsOf = (name) => {
+  const w = normalize(name ?? "").split(" ").filter(Boolean);
+  return w.length > 1 && YEAR.test(w.at(-1)) ? w.slice(0, -1) : w;
+};
+const headOf = (words) => String(words.at(-1) ?? "").replace(/(?<!s)s$/, "");
+/** a row's number written as a name ("PO 78912", "job 4471", "78912"): it takes a key, however often it is named */
+export const isRecordNumber = (name) => {
+  const n = normalize(name ?? "");
+  return /^\d+$/.test(n) || RECORD_NUMBER.test(n);
+};
+/** a designated individual: words, then what tells it from its fellows ("rack C1", "CNC 2", "Line 4") */
+export const hasDesignator = (name) => {
+  const w = wordsOf(name);
+  return w.length >= 2 && /\d/.test(w.at(-1)) && !isRecordNumber(name) && w.slice(0, -1).every((x) => /^[a-z-]+$/.test(x) && !CONNECTIVES.has(x));
+};
+export const properName = (name) => {
+  const words = String(name ?? "").replace(/\([^)]*\)/g, " ").trim().split(/\s+/).filter(Boolean);
+  return words.length >= 1 && words.length <= 4 && !/^the$/i.test(words[0]) && words.every((w) => /^[A-Z][A-Za-z.'-]*$/.test(w)) && !TOPIC_HEADS.has(headOf(wordsOf(name)));
+};
+/** does this name pick out one individual (a designator, or a proper name), or is it a common phrase? */
+export const namesAnIndividual = (name) => !isRecordNumber(name) && (hasDesignator(name) || properName(name));
+/** content that is never a node on a name alone */
+const isContent = (name) => !hasDesignator(name) && NEVER_HEADS.has(headOf(wordsOf(name)));
+const CLASS_KINDS = [[/^(?:customer|prospect|client)$/, "customer"], [/^(?:supplier|vendor)$/, "supplier"], [/^(?:employee|employment|staff|person|people)$/, "person"], [/^(?:machine|equipment|asset|work center)$/, "machine"]];
+/** what a class's head noun says its subjects are ("customer", but not "customer order"); null when it doesn't */
+export function classKind(cls) {
+  const n = normalize(cls ?? "");
+  const head = n.endsWith("work center") ? "work center" : (n.split(" ").at(-1) ?? "");
+  return CLASS_KINDS.find(([re]) => re.test(head))?.[1] ?? null;
+}
+
 /**
  * The admission test. `candidate`: { name, key?, class?, actor?, kind? }.
  *   references   how many places refer to it (a number, or the list of them)
  *   hasKey       a source system holds a row for it (defaults to candidate.key)
  *   isCommitment a commitment, decision or judgement no source records
  *                (defaults to a candidate whose kind is commitment with no key)
+ *   identity     the caller knows it for an identity (a machine by name)
+ * A name that is a row's number or a never-node earns nothing but by key. A reference from more
+ * than one place counts only for a name that picks out an individual.
  * Returns { admitted, rule: 1 | 2 | 3 | null, why }.
  */
-export function admits(candidate = {}, { references = 0, hasKey, isCommitment } = {}) {
+export function admits(candidate = {}, { references = 0, hasKey, isCommitment, identity = false } = {}) {
   const refs = Array.isArray(references) ? references.length : Number(references) || 0;
   const keyed = hasKey ?? Boolean(normalizeKey(candidate.key));
   const actor = typeof candidate.actor === "string" && ACTOR_TYPES.includes(candidate.actor.toLowerCase());
   const commits = isCommitment ?? (candidate.kind === "commitment" && !keyed);
   if (keyed) return { admitted: true, rule: 1, why: "a source system holds its row: an identity that outlives the document" };
+  if (isRecordNumber(candidate.name) || isContent(candidate.name)) return { admitted: false, rule: null, why: "content inside a claim: a row's number or a thing no name makes a node" };
   if (actor) return { admitted: true, rule: 1, why: `${candidate.actor} is an actor: an identity that outlives the document` };
-  if (refs > 1) return { admitted: true, rule: 2, why: `referenced from ${refs} places` };
+  if (identity) return { admitted: true, rule: 1, why: "a machine: an identity that outlives the document" };
+  if (refs > 1 && namesAnIndividual(candidate.name)) return { admitted: true, rule: 2, why: `referenced from ${refs} places` };
   if (commits) return { admitted: true, rule: 3, why: "a commitment or judgement no source system records" };
   return { admitted: false, rule: null, why: "content inside a claim: no identity of its own, one reference, nothing owed" };
 }
@@ -114,6 +161,12 @@ const CONFIDENCE = { key: 1, "class-name": 0.97, alias: 0.93 };
 export const sameKey = (a, b) => String(a ?? "").toLowerCase() === String(b ?? "").toLowerCase();
 /** several people go by this name: only a key, a worker or a person settles it, never a model's pick */
 export const sameNamedPeople = (r) => r?.how === "none" && Boolean(r.ambiguous) && (r.candidates ?? []).filter((t) => t._thing_type === "person").length > 1;
+/** several people a reader can see go by this name: a route that found one of them hasn't said which */
+async function peopleNamed(n, lookup) {
+  if (!n || !lookup.byAlias) return [];
+  const rows = asList(await lookup.byAlias(n)).filter((t) => t._thing_type === "person" && (norm(t) === n || aliasesOf(t).includes(n)));
+  return rows.length > 1 ? rows : [];
+}
 const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 const ridOf = (t) => (t ? String(t.rid ?? t["@rid"] ?? "") : "");
 const nameOf = (t) => t?.label ?? t?.name ?? "";
@@ -153,7 +206,7 @@ export async function resolveSubject(raw, { classes = [], lookup = {} } = {}) {
     // a thing holding another key is another row, however alike the names ("Diep" NGDT is not NGUD)
     if (n && lookup.byAlias) {
       const hint = hintType({ type: subject.type, actor: subject.actor, key: k.key, class: cls });
-      const keyless = asList(await lookup.byAlias(n)).filter((t) => (norm(t) === n || aliasesOf(t).includes(n)) && keysOf(t).length === 0 && hintFits(t, hint) && (!cls || !t._class || t._class === cls));
+      const keyless = asList(await lookup.byAlias(n)).filter((t) => (norm(t) === n || aliasesOf(t).includes(n)) && keysOf(t).length === 0 && !t._held_key && hintFits(t, hint) && (!cls || !t._class || t._class === cls));
       if (keyless.length === 1) return hit("key", keyless[0], CONFIDENCE.alias, { subject, class: cls ?? keyless[0]._class ?? null, key: k.key });
     }
     const name = subject.name && normalize(subject.name) !== normalize(k.row_key) ? subject.name : subject.name ?? k.row_key;
@@ -171,7 +224,12 @@ export async function resolveSubject(raw, { classes = [], lookup = {} } = {}) {
   const cls = subject.class && confirmed.has(subject.class) ? subject.class : null;
   if ((cls || subject.actor) && lookup.byName) {
     const rows = asList(await lookup.byName({ class: cls, actor: subject.actor }, n)).filter((t) => norm(t) === n || aliasesOf(t).includes(n));
-    if (rows.length === 1) return hit("class-name", rows[0], CONFIDENCE["class-name"], { subject, class: cls ?? rows[0]._class ?? null, alias: norm(rows[0]) !== n && !aliasesOf(rows[0]).includes(n) ? subject.name : null });
+    if (rows.length === 1) {
+      // a class stamp is no identity: of two people named alike, the one a class was written on is no more this one
+      const people = !rows[0]._thing_type || rows[0]._thing_type === "person" ? await peopleNamed(n, lookup) : [];
+      if (people.length) return miss(people, { subject, class: cls, ambiguous: true });
+      return hit("class-name", rows[0], CONFIDENCE["class-name"], { subject, class: cls ?? rows[0]._class ?? null, alias: norm(rows[0]) !== n && !aliasesOf(rows[0]).includes(n) ? subject.name : null });
+    }
     if (rows.length > 1) return miss(rows, { subject, class: cls, ambiguous: true });
   }
   // 3. an exact name or alias, whatever the class
@@ -179,7 +237,11 @@ export async function resolveSubject(raw, { classes = [], lookup = {} } = {}) {
     const rows = asList(await lookup.byAlias(n)).filter((t) => norm(t) === n || aliasesOf(t).includes(n));
     // a thing keyed to a row of another class's table is not this subject
     const fit = rows.filter((t) => !subject.class || !t._class || t._class === subject.class).filter((t) => !subject.actor || !t._thing_type || !ACTOR_TYPES.includes(t._thing_type) || t._thing_type === subject.actor);
-    if (fit.length === 1) return hit("alias", fit[0], CONFIDENCE.alias, { subject, class: cls ?? fit[0]._class ?? null });
+    if (fit.length === 1) {
+      const people = !fit[0]._thing_type || fit[0]._thing_type === "person" ? await peopleNamed(n, lookup) : [];
+      if (people.length) return miss(people, { subject, class: cls, ambiguous: true });
+      return hit("alias", fit[0], CONFIDENCE.alias, { subject, class: cls ?? fit[0]._class ?? null });
+    }
     if (fit.length > 1) return miss(fit, { subject, class: cls, ambiguous: true });
   }
   // 4. the embedding, last: never for identifiers, and never a merge when unsure
@@ -189,6 +251,9 @@ export async function resolveSubject(raw, { classes = [], lookup = {} } = {}) {
     .filter((t) => Number.isFinite(t.score) && !designatorsDiffer(n, norm(t)))
     .sort((a, b) => b.score - a.score);
   const best = near[0];
+  // two people alike in the embedding are the same question as two people alike by name
+  const twins = best?._thing_type === "person" ? near.filter((t) => t._thing_type === "person" && norm(t) === norm(best)) : [];
+  if (twins.length > 1) return miss(twins, { subject, class: cls, ambiguous: true });
   if (best && best.score >= SAME_MIN) return hit("embedding", best, best.score, { subject, class: cls ?? best._class ?? null, alias: subject.name });
   if (best && best.score >= MAYBE_MIN) return miss([best], { subject, class: cls, maybe: ridOf(best) });
   return miss([], { subject, class: cls });
