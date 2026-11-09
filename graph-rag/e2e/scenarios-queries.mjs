@@ -100,6 +100,17 @@ async function thing({ label, type, aliases = [], keys = [], cls = null, homes }
     return have;
   }
   const norm = label.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  // a key is an identity: a thing already carrying it (the Condenser mints one, named after the key, for a claim whose
+  // subject is a key no thing holds) becomes this one, rather than a second thing answering the same key
+  const keyed = keys.length ? (await sql(`SELECT @rid AS rid, _homes, _keys FROM Entity WHERE _kind = 'thing' AND _keys CONTAINSANY ${list(keys)}`))[0] : null;
+  if (keyed) {
+    const r = await tool("admin", "execute_graph", {
+      language: "sql",
+      command: `UPDATE ${keyed.rid} SET name = '${esc(name)}', label = '${esc(label)}', _thing_type = '${type}', _norm = '${esc(norm)}', _alias_norms = ${list(aliases)}, _homes = ${list([...new Set([...(keyed._homes ?? []), ...homes])])}, _keys = ${list([...new Set([...(keyed._keys ?? []), ...keys])])}${cls ? `, _class = '${esc(cls)}'` : ""}`,
+    });
+    check(!r.error, `thing ${label} takes over the thing keyed ${keys.join(", ")}: ${r.error}`);
+    return keyed;
+  }
   const r = await tool("admin", "execute_graph", {
     language: "sql",
     command: `CREATE VERTEX Entity SET name = '${esc(name)}', label = '${esc(label)}', _kind = 'thing', _thing_type = '${type}', _norm = '${esc(norm)}', _alias_norms = ${list(aliases)}, _keys = ${list(keys)}, _homes = ${list(homes)}, _home = 'org', _origin = 'org'${cls ? `, _class = '${esc(cls)}'` : ""}, updated_at = '${iso(Date.now())}'`,
@@ -144,7 +155,8 @@ async function claim(entryName, thingRid, c) {
   return props.id;
 }
 
-const stateOf = (r, attr) => r?.things?.[0]?.state?.[attr];
+/** the state of one attribute across every thing the answer names (a name or key can mean more than one) */
+const stateOf = (r, attr) => (r?.things ?? []).map((t) => t?.state?.[attr]).find(Boolean);
 
 export const scenarios = [
   {
@@ -252,7 +264,8 @@ export const scenarios = [
       await save("admin", "e2e-q4 diep pay", "Diep's rate goes to 21.50 an hour. [admins]");
       await homed("e2e-q4 diep shift", "Production floor", POS.floor);
       check((await entry("e2e-q4 diep pay"))?._home === POS.org, "the pay note is graded to the top");
-      const d = await thing({ label: "Diep", type: "person", keys: ["mssql:dbo_Employee:NGUD"], homes: [POS.floor, POS.org] });
+      // a key of the scenario's own: the batch notes' Diep (mssql:dbo_Employee:NGUD) is minted by the Condenser when they run
+      const d = await thing({ label: "Diep", type: "person", keys: ["mssql:dbo_Employee:E2EQ4"], homes: [POS.floor, POS.org] });
       await claim("e2e-q4 diep shift", d.rid, { class: "work assignment", attribute: "shift", value: "late", valid_from: iso(Date.now() - 2 * DAY), recorded_by: "bob" });
       await claim("e2e-q4 diep pay", d.rid, { class: "employment", attribute: "pay_rate", value: "21.50 per hour", valid_from: iso(Date.now() - 2 * DAY), recorded_by: "admin" });
       const e = await entry("e2e-q4 diep shift");
@@ -260,14 +273,15 @@ export const scenarios = [
       const mine = await tool(w, "current_state", { subject: "Diep" });
       check(stateOf(mine, "shift")?.value === "late", `the floor's claim: ${JSON.stringify(mine).slice(0, 400)}`);
       check(stateOf(mine, "pay_rate") === undefined, `never the pay claim: ${JSON.stringify(mine).slice(0, 400)}`);
-      check(mine.things?.[0]?.claims === 1, `one claim counted: ${mine.things?.[0]?.claims}`);
+      const diep = (mine.things ?? []).find((t) => t.state?.shift);
+      check(diep?.claims === 1, `one claim counted on Diep: ${JSON.stringify((mine.things ?? []).map((t) => [t.name, t.claims]))}`);
       // a claim read bounds the worker's writes like any read: nothing beyond the floor was shown, so its one write to
       // the graph (resolve_subject: its judgement on a subject, minting a thing) isn't held, and is seen from the entry's home
       const resolve = (name, type) => tool(w, "resolve_subject", { name, thing: { name, type }, reason: "e2e" });
       const plain = await resolve("e2e-q4 late shift board", "place");
       check(plain.thing && !plain.error, `a scoped state read holds nothing: ${JSON.stringify(plain).slice(0, 300)}`);
       check(((await sql(`SELECT _homes FROM ${plain.thing}`))[0]?._homes ?? []).includes(POS.floor), "seen from the floor, where the entry lives");
-      const all = await tool(w, "current_state", { subject: "mssql:dbo_Employee:NGUD", beyond: true });
+      const all = await tool(w, "current_state", { subject: "mssql:dbo_Employee:E2EQ4", beyond: true });
       check(stateOf(all, "pay_rate")?.value === "21.50 per hour" && stateOf(all, "shift")?.value === "late", `beyond: both, by key too: ${JSON.stringify(all).slice(0, 400)}`);
       // having read the pay claim's section at the top, the worker's next judgement is held: nothing minted
       const held = await resolve("e2e-q4 pay ledger", "other");
@@ -282,7 +296,7 @@ export const scenarios = [
       check(stateOf(admin, "pay_rate") && stateOf(admin, "shift"), "the admin sees both");
       // history and the HTTP route keep the same line
       const h = await tool("bob", "state_history", { subject: "Diep", attribute: "pay_rate" });
-      check((h.things?.[0]?.history ?? []).length === 0, `no pay history for the floor: ${JSON.stringify(h).slice(0, 300)}`);
+      check((h.things ?? []).every((t) => (t.history ?? []).length === 0), `no pay history for the floor: ${JSON.stringify(h).slice(0, 300)}`);
       const http = await api("/api/state/current?subject=Diep", "bob");
       check(stateOf(http, "shift") && !stateOf(http, "pay_rate"), `the route scopes alike: ${JSON.stringify(http).slice(0, 300)}`);
     },
