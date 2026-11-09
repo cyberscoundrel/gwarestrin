@@ -15,7 +15,7 @@ import { z } from "zod";
 import { effectiveHome } from "./positions.js";
 import { normalize, THING_TYPES } from "./things.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
-import { findThing, linkMentions } from "./linker.js";
+import { aboutOnce, findThing, linkMentions, thingSeenFrom } from "./linker.js";
 import { positionMap } from "./scope.js";
 import { liftRefusal, workerWriteFloor } from "./floor.js";
 import { actsForOf, assertNotWaiting, claimById, claimsOnAttribute, logChange, PROPOSED_NOTE, raiseQuestion, resolveSubjectStub, unresolvedNames } from "./worker-pool.js";
@@ -131,7 +131,9 @@ async function workerRecordConflict(args, identity) {
  * way a thing is minted on a worker's vouching: linker.js `linkMentions` with `create: true` (the
  * Admission stream's admission rules apply there); the resolver (worker-pool.js resolveSubjectStub, or
  * the Admission stream's resolveSubject) only finds. A claim's edge is re-pointed at the thing. What is
- * minted is seen from the section's home, floored by what the worker read.
+ * minted is seen from the section's home, floored by what the worker read. A bare name resolved to an
+ * existing thing links the entry to it the way the minting path does (an ABOUT edge, the thing seen from
+ * here); a claim's subject is linked by its claim edge alone.
  */
 async function workerResolveSubject(args, identity) {
   await assertNotWaiting(identity);
@@ -166,14 +168,13 @@ async function workerResolveSubject(args, identity) {
     if (claim && minted) await adbCommand(`UPDATE ${thing.rid} SET _class = :c`, "sql", { c: claim.class }).catch(() => {});
   } else {
     // an existing thing learns the key and the class it was resolved under, and is seen from here
-    const cur = (await adbQuery(`SELECT _keys, _class, _homes FROM ${thing.rid}`).catch(() => []))[0] ?? {};
+    const cur = (await adbQuery(`SELECT _keys, _class FROM ${thing.rid}`).catch(() => []))[0] ?? {};
     const keys = Array.isArray(cur._keys) ? cur._keys : [];
-    const homes = Array.isArray(cur._homes) ? cur._homes : [];
-    await adbCommand(`UPDATE ${thing.rid} SET _keys = :k, _class = :c, _homes = :h`, "sql", {
+    await adbCommand(`UPDATE ${thing.rid} SET _keys = :k, _class = :c`, "sql", {
       k: key && !keys.includes(key.key) ? [...keys, key.key].slice(-10) : keys,
       c: cur._class ?? claim?.class ?? null,
-      h: homes.includes(floor) ? homes : [...homes, floor],
     }).catch(() => {});
+    await thingSeenFrom(String(thing.rid), floor).catch(() => {});
   }
   const rid = String(thing.rid);
   if (claim) {
@@ -187,13 +188,31 @@ async function workerResolveSubject(args, identity) {
       { id: props.id, kind: props.kind, cls: props.class, attr: props.attribute, value: props.value, num: props.value_num ?? null, vf: props.valid_from, vu: props.valid_until ?? null, ra: props.recorded_at, rb: props.recorded_by, cb: props.closed_by ?? null, home: props._home ?? null, subject: JSON.stringify({ ...(claim.subject ?? {}), key: key?.key ?? claim.subject?.key ?? null, name: want.name }) },
     );
   } else {
-    // the name is settled: it leaves the entry's unresolved list
+    // the name is settled: it leaves the entry's unresolved list, and the entry is about the thing (as when the linker mints)
     const row = (await adbQuery(`SELECT _unresolved FROM ${sectionRid}`).catch(() => []))[0];
-    const left = unresolvedNames(row?._unresolved).filter((u) => normalize(u.name) !== normalize(args.name));
+    const unresolved = unresolvedNames(row?._unresolved);
+    if (!minted) await linkResolvedThing(sectionRid, rid, resolvedRole(unresolved, args.name));
+    const left = unresolved.filter((u) => normalize(u.name) !== normalize(args.name));
     await adbCommand(`UPDATE ${sectionRid} SET _unresolved = :u`, "sql", { u: left.length ? JSON.stringify(left) : null }).catch(() => {});
   }
   await logChange(identity, { kind: "resolve", ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, label: thing.label, minted, ...(key ? { key: key.key } : {}), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return { ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, label: thing.label, type: thing._thing_type, minted, ...(key ? { key: key.key } : {}), note: minted ? `Made ${thing.label} (${thing._thing_type}) and resolved to it.` : `Resolved to the existing ${thing.label} (${thing._thing_type}).` };
+}
+
+/** the role an entry's unresolved name was mentioned in (linker.js), else the subject the worker resolved */
+export function resolvedRole(unresolved, name) {
+  const n = normalize(String(name ?? ""));
+  return unresolved.find((u) => normalize(u.name) === n)?.role || "subject";
+}
+
+/**
+ * A bare name resolved to an existing thing: the entry is about it, once (linker.js `aboutOnce`), as the
+ * minting path links what it makes. The claim path has no use for this: the claim's edge is re-pointed.
+ */
+export async function linkResolvedThing(sectionRid, thingRid, role, { about = aboutOnce } = {}) {
+  if (!RID_RE.test(String(sectionRid)) || !RID_RE.test(String(thingRid))) throw new Error("linking an entry to a thing takes two record ids");
+  await about(String(sectionRid), String(thingRid), role);
+  return { entry: String(sectionRid), thing: String(thingRid), role };
 }
 
 /**

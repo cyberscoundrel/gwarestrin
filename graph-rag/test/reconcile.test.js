@@ -9,7 +9,7 @@ import { claimsOf, closeIntervals, normalizeDocument, overlaps, subjectId } from
 import { checkBriefFloor, taskBrief } from "../src/pool.js";
 import { parsePositionMap } from "../src/positions.js";
 import { labelFor, RECONCILE_CHANGES, shapeClaim } from "../src/worker-pool.js";
-import { REMOVED_WORKER_TOOLS, WORKER_TOOLS } from "../src/worker-tools.js";
+import { linkResolvedThing, REMOVED_WORKER_TOOLS, resolvedRole, WORKER_TOOLS } from "../src/worker-tools.js";
 import { triageVerdict } from "../src/decisions.js";
 
 const read = (f) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8"));
@@ -107,4 +107,24 @@ test("a thread's label names classes and attributes, never a title; the tool set
   assert.deepEqual(WORKER_TOOLS, ["confirm_claim", "record_conflict", "resolve_subject", "mark_need_met", "enter_data", "raise_question"]);
   assert.deepEqual(REMOVED_WORKER_TOOLS, ["link_things", "relate_things", "queue_followup", "unlink_things", "delete_thing", "merge_things", "merge_entries", "unrelate_things", "delete_entry", "rename_thing", "update_entry"]);
   assert.deepEqual(RECONCILE_CHANGES, ["confirm", "conflict", "resolve", "need_met", "data_entry"]);
+});
+
+test("a bare name resolved to an existing thing links the entry to it, once, in the role it was mentioned in", async () => {
+  const unresolved = [
+    { name: "Toro", type: "customer", role: "mentions" },
+    { name: "Paint line", type: "resource", role: null },
+  ];
+  assert.equal(resolvedRole(unresolved, "toro"), "mentions", "the linker's role for the name");
+  assert.equal(resolvedRole(unresolved, "Paint Line"), "subject", "no role recorded: the worker resolved a subject");
+  assert.equal(resolvedRole(unresolved, "Nobody"), "subject", "a name not on the list is the worker's subject");
+  assert.equal(resolvedRole([], "Toro"), "subject");
+
+  const calls = [];
+  const about = async (statement, thing, role) => calls.push([statement, thing, role]);
+  const out = await linkResolvedThing("#12:3", "#20:7", "mentions", { about });
+  assert.deepEqual(calls, [["#12:3", "#20:7", "mentions"]], "the ABOUT edge the minting path would have added");
+  assert.deepEqual(out, { entry: "#12:3", thing: "#20:7", role: "mentions" });
+  await assert.rejects(() => linkResolvedThing("Toro (customer)", "#20:7", "subject", { about }), /two record ids/, "names never stand in for ids");
+  await assert.rejects(() => linkResolvedThing("#12:3", null, "subject", { about }), /two record ids/);
+  assert.equal(calls.length, 1, "a refused link makes no edge");
 });
