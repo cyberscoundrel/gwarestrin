@@ -192,6 +192,7 @@ export function parseExtraction(text, sections, writtenAt = Date.now()) {
 // are given, not chunked: renderRecord lays them out as one text with a span
 // per section, and sectionChunks turns the spans back into the chunk shape
 // everything else reads (readDocument, embeddings).
+import { createHash } from "node:crypto";
 import { ClaimError, normalizeDocument, validateDocument } from "./model/claims.js";
 
 /** what a condensed document's text looks like in the store: a heading line per section, a blank line between */
@@ -242,22 +243,68 @@ export function parseRecordText(text) {
   return parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.sections) ? parsed : null;
 }
 
+/** the same JSON however its keys were ordered: what "the same document" means, whichever turn sent it */
+export const canonical = (v) =>
+  Array.isArray(v) ? `[${v.map(canonical).join(",")}]` : v && typeof v === "object" ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}` : JSON.stringify(v ?? null);
+
+/** a uuid derived from what it names: the same parts always give the same id */
+export function stableUuid(...parts) {
+  const h = createHash("sha256").update(parts.join("\0")).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+}
+
+/** a claim without the fields only the server sets */
+const withoutStamps = (c) => {
+  if (!c || typeof c !== "object") return c;
+  const { recorded_at: _at, recorded_by: _by, ...rest } = c;
+  return rest;
+};
+
+/**
+ * A condensed document's identity: who sent which text and claims under which title to which home. A re-send
+ * (a timeout, a failed ingest) is the same document and takes the same id; the recording fields the server stamps
+ * don't count, so two sends of one document are the same however they differ there.
+ */
+export function recordId(raw, { person, home, title }) {
+  const sections = (Array.isArray(raw.sections) ? raw.sections : []).map((s) => ({
+    heading: s?.heading ?? null,
+    text: String(s?.text ?? "").replace(/\s+/g, " ").trim(),
+    claims: (Array.isArray(s?.claims) ? s.claims : []).map(withoutStamps),
+  }));
+  return stableUuid("record", person ?? "", home ?? "", title ?? "", canonical(sections));
+}
+
+/** what the server says about who recorded this, over whatever the document says (a claim can't name another recorder) */
+function stamped(raw, stamp) {
+  return {
+    ...raw,
+    recorded_by: stamp.recorded_by,
+    position: stamp.position,
+    recorded_at: stamp.recorded_at,
+    sections: Array.isArray(raw.sections) ? raw.sections.map((s) => (s && Array.isArray(s.claims) ? { ...s, claims: s.claims.map(withoutStamps) } : s)) : raw.sections,
+  };
+}
+
 /**
  * A condensed document made ready for the ingest: what the tool call gave
  * (title, description) fills what the document left out, the recording
  * person and position come from the identity when the condenser gave none
  * (an agent's record counts as the person it acts for), and the whole is
  * validated with the contract's normalizeDocument against `classes` (the
- * confirmed set, or undefined when the graph has none yet). Throws an Error
- * listing every problem by field, so a condenser can fix them all at once.
+ * confirmed set, or undefined when the graph has none yet). With `stamp`
+ * ({ recorded_by, recorded_at, position }, from the server's identity) those
+ * three are the server's, whatever the document or its claims say.
+ * Throws an Error listing every problem by field, so a condenser can fix
+ * them all at once.
  */
-export function prepareRecord(raw, { title, description, recorded_by, position, classes, now = Date.now() } = {}) {
+export function prepareRecord(raw, { title, description, recorded_by, position, classes, now = Date.now(), stamp } = {}) {
+  const src = stamp ? stamped(raw, stamp) : raw;
   const doc = {
-    ...raw,
-    title: typeof raw.title === "string" && raw.title.trim() ? raw.title : title,
-    description: typeof raw.description === "string" && raw.description.trim() ? raw.description : description,
-    recorded_by: typeof raw.recorded_by === "string" && raw.recorded_by.trim() ? raw.recorded_by : recorded_by,
-    position: typeof raw.position === "string" && raw.position.trim() ? raw.position : position,
+    ...src,
+    title: typeof src.title === "string" && src.title.trim() ? src.title : title,
+    description: typeof src.description === "string" && src.description.trim() ? src.description : description,
+    recorded_by: typeof src.recorded_by === "string" && src.recorded_by.trim() ? src.recorded_by : recorded_by,
+    position: typeof src.position === "string" && src.position.trim() ? src.position : position,
   };
   const { document, errors } = validateDocument(doc, { classes, now });
   if (!document) {

@@ -29,6 +29,7 @@ import { docStore, ensureDocumentSchema, readDocument, requestIngest, sweepOrpha
 import { ensureWorkerSchema, expireLeases, PROPOSED_NOTE, wakeIdleWaiting, worker, workerModel, workerTick } from "./worker-pool.js";
 import { registerWorkerTools, workerUpsert } from "./worker-tools.js";
 import { registerRecordTools } from "./record-tools.js";
+import { isOffRecord, loadThreadRecords, OFF_RECORD_REFUSAL, registerThreadRecordRoute } from "./record-state.js";
 import { statements as modelStatements } from "./model/schema.js";
 import { ensureDiscoverySchema } from "./routes-discovery.js";
 import { registerQueryTools } from "./tools-queries.js";
@@ -56,8 +57,12 @@ export function createServer(identity) {
     audience ??= entryAudience(identity.role);
     return (await audience) ?? scope;
   };
+  // a person's chat agent in a thread not on record: no write tool at all (record-state.js). Not listed, and the
+  // handlers refuse again below: off record is enforced here, not in the agent's instructions.
+  const writable = caps.write !== "deny" && !isOffRecord(identity);
   const need = (cap) => {
     requireCap(caps, cap);
+    if (cap === "write" && isOffRecord(identity)) throw new Error(OFF_RECORD_REFUSAL);
     // raw queries bypass the home filter: only for the root of the tree
     if (cap === "raw" && !scope.root) throw new Error("raw graph queries require the root position");
   };
@@ -133,7 +138,7 @@ write may be held for an admin (you read what they can't see): use it only when 
     },
   );
 
-  if (caps.write !== "deny") server.tool(
+  if (writable) server.tool(
     "upsert_entities",
     `Create or update graph entities with per-facet semantic indexes. For each entity provide
 facet texts — a concise natural-language sentence per facet capturing that aspect (facet
@@ -219,7 +224,7 @@ ${facetDoc}`,
     },
   );
 
-  if (caps.write !== "deny" && !role) server.tool(
+  if (writable && !role) server.tool(
     "embed_backfill",
     "Embed the identity facet for graph nodes written without embeddings. Requires write capability; queued-mode identities store it for approval.",
     { limit: z.number().int().min(1).max(256).optional() },
@@ -233,7 +238,7 @@ ${facetDoc}`,
     },
   );
 
-  if (SCOPED && caps.write !== "deny") server.tool(
+  if (SCOPED && writable) server.tool(
     "set_home",
     `Move entities to another home position. Moving one up (to a position above its home) restricts
 who sees it and applies directly; moving it anywhere else widens who sees it and is queued for a
@@ -252,7 +257,7 @@ homes you can see).`,
     },
   );
 
-  if (SCOPED && caps.write !== "deny" && !role) server.tool(
+  if (SCOPED && writable && !role) server.tool(
     "ingest_document",
     `Add a long document (a manual, a meeting transcript, a report) to the knowledge graph. Give
 its full text, a short title and a one-sentence description. The text is kept in the document
@@ -298,7 +303,7 @@ a search.${role === "worker" ? " Like search_graph, it shows what your entry's p
   if (SCOPED && role === "worker") registerWorkerTools(server, { identity, scope, need });
 
   // ---- a person's chat agent puts a condensed section of an on-record thread on record (record-tools.js) ----
-  if (SCOPED && caps.write !== "deny" && !role) registerRecordTools(server, { identity, scope, need });
+  if (SCOPED && writable && !role) registerRecordTools(server, { identity, scope, need });
 
   // ---- the master's tools: start workers, settle stops, hand the rest to the operator ----
   if (SCOPED && role === "master") registerMasterTools(server, { identity });
@@ -335,7 +340,8 @@ positions and the people things can be shared with.
 When the person asks you to let a position or a person know about something ("let Sales know what
 this email said", "share the line 2 plan with the floor", "show bob the Toro schedule"):
 1. Work out what "this" is from the conversation. If it isn't in the knowledge graph yet (e.g. text
-   pasted into the chat), save it first with upsert_entities, then use the name you saved.
+   pasted into the chat), it gets there only through the record: on record, record it and use its title;
+   off record you have no write tools, so say so and offer the person the switch.
 2. Otherwise call find_shareable with a short description and pick the matching entries; mention
    related entries only if the person seems to want them too.
 3. Match who they named: a team or role to one of the returned positions ("to"), one named person
@@ -352,7 +358,7 @@ this email said", "share the line 2 plan with the floor", "show bob the Toro sch
     },
   );
 
-  if (SCOPED && caps.write !== "deny" && !role) server.tool(
+  if (SCOPED && writable && !role) server.tool(
     "grant_access",
     `Show data you own to another position, or to one person, for a while: either named entities or
 a whole subtree (a position and everything below it). Name the recipient with "to" (a position:
@@ -406,7 +412,7 @@ the card), and you can search again.`,
     },
   );
 
-  if (SCOPED && caps.write !== "deny" && !role) server.tool(
+  if (SCOPED && writable && !role) server.tool(
     "revoke_grant",
     "Revoke a grant (takes effect at once). The person who granted it or any owner of the data may revoke.",
     { id: z.string().min(1) },
@@ -511,6 +517,9 @@ async function boot() {
     setInterval(() => void refreshGrants().then(expireRequests), 60_000);
   }
   await ensurePendingSchema();
+  // the on/off-record gate (record-state.js): before the first request, so a restart can't open a thread that was off
+  await loadThreadRecords();
+  registerThreadRecordRoute(app);
   console.log(`[graph-rag] indexes ready: ${[...knownIndexes].join(", ")}`);
   const sweep = () =>
     loops.run("sweep", async () => {

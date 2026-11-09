@@ -71,7 +71,7 @@ describe("what the agent reads at every turn", () => {
     const off = switchRecord({ ...on, documents: 1, condensed_at: T1.toISOString() }, { on: false, by: "bob" }, T2);
     const after = recordContext(off, classes);
     expect(after).toMatch(/went OFF RECORD at 2026-11-08 11:00 UTC/);
-    expect(after).toMatch(/not yet condensed is still to be condensed, once/);
+    expect(after).toMatch(/not yet condensed stays unrecorded/);
     expect(after).toMatch(/Documents recorded from this conversation so far: 1 \(the last at 2026-11-08 10:30 UTC\)/);
     expect(after).not.toMatch(/Confirmed commitment classes/);
   });
