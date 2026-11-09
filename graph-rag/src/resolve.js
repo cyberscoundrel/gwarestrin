@@ -8,10 +8,12 @@
 //
 // A claim's subject is resolved to a thing in a fixed order, cheapest and
 // surest first, and the embedding only when nothing else answered:
-//   key         an existing instance holding the record key in `_keys`, else
-//               a new instance to mint from the key, with its class (the
-//               confirmed class whose record table the key belongs to) and
-//               a SourceRef: a key is an identity, so it always resolves
+//   key         an existing instance holding the record key in `_keys` (the
+//               case of a key doesn't tell two rows apart), else the one
+//               keyless thing of that name (it learns the key), else a new
+//               instance to mint from the key, with its class (the confirmed
+//               class whose record table the key belongs to) and a
+//               SourceRef: a key is an identity, so it always resolves
 //   class-name  a confirmed class and a name: that class's instances by name
 //               (for an actor: things of that actor type by name)
 //   alias       an exact name or alias match without a class filter: machines
@@ -23,7 +25,7 @@
 // Pure where possible: the database is behind one injected `lookup`, so the
 // fixtures stand in for it in tests (test/resolve.test.js).
 import { ACTOR_TYPES, parseKey, parseTable } from "./model/schema.js";
-import { designatorsDiffer, MAYBE_MIN, normalize, normalizeKey, SAME_MIN } from "./things.js";
+import { designatorsDiffer, MAYBE_MIN, normalize, normalizeKey, SAME_MIN, THING_TYPES } from "./things.js";
 
 /** how a subject was resolved */
 export const HOW = ["key", "class-name", "alias", "embedding", "none"];
@@ -108,6 +110,10 @@ export function subjectOf(raw, claimClass = null) {
 }
 
 const CONFIDENCE = { key: 1, "class-name": 0.97, alias: 0.93 };
+/** two spellings of one key: a source's row keys don't differ by case */
+export const sameKey = (a, b) => String(a ?? "").toLowerCase() === String(b ?? "").toLowerCase();
+/** several people go by this name: only a key, a worker or a person settles it, never a model's pick */
+export const sameNamedPeople = (r) => r?.how === "none" && Boolean(r.ambiguous) && (r.candidates ?? []).filter((t) => t._thing_type === "person").length > 1;
 const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
 const ridOf = (t) => (t ? String(t.rid ?? t["@rid"] ?? "") : "");
 const nameOf = (t) => t?.label ?? t?.name ?? "";
@@ -116,6 +122,8 @@ const aliasesOf = (t) => asList(t?._alias_norms ?? t?.aliases).map((a) => normal
 const keysOf = (t) => asList(t?._keys ?? t?.keys);
 const hit = (how, thing, confidence, extra = {}) => ({ how, confidence, thing, rid: ridOf(thing), mint: null, alias: null, candidates: [], ...extra });
 const miss = (candidates = [], extra = {}) => ({ how: "none", confidence: 0, thing: null, rid: null, mint: null, alias: null, candidates, ...extra });
+/** the hint a keyed subject would mint with fits this thing's: an untyped thing fits anything; a thing of another hint is another thing */
+const hintFits = (t, hint) => !t._thing_type || !THING_TYPES.includes(t._thing_type) || !THING_TYPES.includes(hint) || t._thing_type === hint;
 
 /**
  * Resolve one claim subject. `classes`: the confirmed classes (fixture shape,
@@ -127,6 +135,7 @@ const miss = (candidates = [], extra = {}) => ({ how: "none", confidence: 0, thi
  * A thing: { rid, label | name, _norm?, _alias_norms? | aliases?, _keys? | keys?, _class?, _thing_type? }.
  * Returns { how, confidence, thing, rid, mint, alias, candidates, subject }:
  *   mint        when a key holds no instance yet: { key, system, table, row_key, class, name, type } to create
+ *   key         the key as the instance found holds it (a different spelling is not a second key)
  *   alias       the subject's name when it should be kept as an alias of the thing found
  *   candidates  what the residue (a closed model call, a worker, a person) chooses among when `none`
  */
@@ -139,7 +148,14 @@ export async function resolveSubject(raw, { classes = [], lookup = {} } = {}) {
     const found = lookup.byKey ? await lookup.byKey(subject.key) : null;
     const k = parseKey(subject.key);
     const cls = (subject.class && confirmed.has(subject.class) && classOfKey(subject.key, [confirmed.get(subject.class)]) ? confirmed.get(subject.class) : classOfKey(subject.key, confirmed))?.name ?? null;
-    if (found) return hit("key", found, CONFIDENCE.key, { subject, class: cls ?? found._class ?? null, alias: n && norm(found) !== n && !aliasesOf(found).includes(n) ? subject.name : null });
+    if (found) return hit("key", found, CONFIDENCE.key, { subject, class: cls ?? found._class ?? null, key: keysOf(found).find((x) => sameKey(x, subject.key)) ?? subject.key, alias: n && norm(found) !== n && !aliasesOf(found).includes(n) ? subject.name : null });
+    // nobody holds the key. A thing of that name with no key at all is this row, as long as exactly one fits;
+    // a thing holding another key is another row, however alike the names ("Diep" NGDT is not NGUD)
+    if (n && lookup.byAlias) {
+      const hint = hintType({ type: subject.type, actor: subject.actor, key: k.key, class: cls });
+      const keyless = asList(await lookup.byAlias(n)).filter((t) => (norm(t) === n || aliasesOf(t).includes(n)) && keysOf(t).length === 0 && hintFits(t, hint) && (!cls || !t._class || t._class === cls));
+      if (keyless.length === 1) return hit("key", keyless[0], CONFIDENCE.alias, { subject, class: cls ?? keyless[0]._class ?? null, key: k.key });
+    }
     const name = subject.name && normalize(subject.name) !== normalize(k.row_key) ? subject.name : subject.name ?? k.row_key;
     return {
       ...miss([], { subject, class: cls }),
@@ -162,7 +178,7 @@ export async function resolveSubject(raw, { classes = [], lookup = {} } = {}) {
   if (lookup.byAlias) {
     const rows = asList(await lookup.byAlias(n)).filter((t) => norm(t) === n || aliasesOf(t).includes(n));
     // a thing keyed to a row of another class's table is not this subject
-    const fit = rows.filter((t) => !cls || !t._class || t._class === cls).filter((t) => !subject.actor || !t._thing_type || !ACTOR_TYPES.includes(t._thing_type) || t._thing_type === subject.actor);
+    const fit = rows.filter((t) => !subject.class || !t._class || t._class === subject.class).filter((t) => !subject.actor || !t._thing_type || !ACTOR_TYPES.includes(t._thing_type) || t._thing_type === subject.actor);
     if (fit.length === 1) return hit("alias", fit[0], CONFIDENCE.alias, { subject, class: cls ?? fit[0]._class ?? null });
     if (fit.length > 1) return miss(fit, { subject, class: cls, ambiguous: true });
   }
@@ -194,7 +210,7 @@ export function pickCandidate(resolution, rid) {
 export function memoryLookup(things, { embed } = {}) {
   const all = () => (typeof things === "function" ? things() : things);
   return {
-    byKey: (key) => all().find((t) => keysOf(t).includes(key)) ?? null,
+    byKey: (key) => all().find((t) => keysOf(t).some((x) => sameKey(x, key))) ?? null,
     byName: ({ class: cls, actor }, n) => all().filter((t) => (cls ? t._class === cls : t._thing_type === actor) && (norm(t) === n || aliasesOf(t).includes(n))),
     byAlias: (n) => all().filter((t) => norm(t) === n || aliasesOf(t).includes(n)),
     ...(embed ? { byEmbedding: ({ class: cls, actor, type }, text) => all().filter((t) => (cls ? t._class === cls : true) && (actor ? t._thing_type === actor : type ? t._thing_type === type : true)).map((t) => ({ ...t, score: embed(text, nameOf(t)) })) } : {}),

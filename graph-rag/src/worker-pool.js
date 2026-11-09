@@ -9,11 +9,11 @@
  * other (floor.js `recordReads`), so it bounds the worker's writes.
  *
  * Claims are CLAIMS edges (model/schema.js) from the section to the subject thing. The Condenser's record
- * path (ingest.js recordClaims) finds the subject by key or name and mints it when missing, so what it
- * stores is always resolved. A claim stored any other way with no thing for its subject points back at
- * its section, with the subject as written in a `subject` property (JSON): the contract has no shape for
- * an unresolved subject, and this is the one read here. resolve_subject (worker-tools.js) re-points the
- * edge at the thing.
+ * path (ingest.js recordClaims) resolves the subject as any mention is (linker.js recordSubject) and mints
+ * only what admission allows. A claim with no thing for its subject (several things it could be, or
+ * content inside the claim) points back at its section, with the subject as written in a `subject`
+ * property (JSON): the contract has no shape for an unresolved subject, and this is the one read here.
+ * resolve_subject (worker-tools.js) re-points the edge at the thing.
  */
 import { randomUUID } from "node:crypto";
 import { effectiveHome, EVERYONE, homeName, moveKind, visibleHomes } from "./positions.js";
@@ -23,13 +23,13 @@ import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.
 import { chat } from "./models.js";
 import { recordReads } from "./floor.js";
 import { entriesByUser, positionMap, SCOPED } from "./scope.js";
-import { findThing, jobMentions } from "./linker.js";
+import { jobMentions, thingLookup } from "./linker.js";
+import { resolveSubject } from "./resolve.js";
 import { recordTriageOutcome, triageStats } from "./triage.js";
 import { emitSignal, MASTER, masterStatus, openItems } from "./master-tools.js";
 import { ensureAuditSchema } from "./audit.js";
 import { describeEntry } from "./data-entry.js";
 import { statements, TYPES } from "./model/schema.js";
-import { normalizeKey } from "./things.js";
 
 /** ---- the graph worker: a job queue and loop (things and their links; see things.js) ---- */
 
@@ -232,28 +232,12 @@ export async function confirmedClassesFor({ db = { adbQuery }, linker } = {}) {
   }
 }
 
-export async function resolveSubjectStub(subject) {
+export async function resolveSubjectStub(subject, home) {
   if (!subject) return null;
-  const theirs = await import("./resolve.js").catch(() => null);
-  if (typeof theirs?.resolveSubject === "function") {
-    const classes = await confirmedClassesFor();
-    const thingSql = `SELECT @rid AS rid, label, name, _norm, _alias_norms, _keys, _class, _thing_type FROM ${ENTITY_LABEL} WHERE _kind = 'thing'`;
-    const lookup = {
-      byKey: async (key) => (await adbQuery(`${thingSql} AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => []))[0] ?? null,
-      byName: async ({ class: cls, actor }, n) => adbQuery(`${thingSql} AND (_norm = :n OR _alias_norms CONTAINS :n)${cls ? " AND _class = :c" : actor ? " AND _thing_type = :a" : ""} LIMIT 5`, { n, c: cls, a: actor }).catch(() => []),
-      byAlias: async (n) => adbQuery(`${thingSql} AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 5`, { n }).catch(() => []),
-    };
-    const r = await theirs.resolveSubject(subject, { classes, lookup }).catch(() => null);
-    if (r?.rid && r.how !== "none") return { rid: String(r.rid), label: r.thing?.label ?? r.thing?.name ?? subject.name ?? null, _thing_type: r.thing?._thing_type ?? null, _homes: r.thing?._homes ?? [] };
-    if (r?.mint) return { mint: r.mint };
-    return null;
-  }
-  const key = normalizeKey(subject.key);
-  if (key) {
-    const t = await findThing({ key, name: subject.name ?? "" }).catch(() => null);
-    if (t) return t;
-  }
-  if (subject.name) return findThing({ name: subject.name }).catch(() => null);
+  const classes = await confirmedClassesFor();
+  const r = await resolveSubject(subject, { classes, lookup: thingLookup(home) }).catch(() => null);
+  if (r?.rid && r.how !== "none") return { rid: String(r.rid), label: r.thing?.label ?? r.thing?.name ?? subject.name ?? null, _thing_type: r.thing?._thing_type ?? null, _homes: r.thing?._homes ?? [] };
+  if (r?.mint) return { mint: r.mint };
   return null;
 }
 

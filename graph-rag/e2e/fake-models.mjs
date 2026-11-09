@@ -8,7 +8,9 @@
 //   POST /v1/chat/completions    the grader (writer's position, sure; "[admins]" in a note = the top;
 //                                an item marked [claimed] is a section with claims: the grader is not
 //                                its judge, it stays at the writer's position and the call is counted),
-//                                the linker (mentions from the statement's [things: Name/type, ...] tag),
+//                                the linker (mentions from the statement's [things: Name/type/option..., ...] tag;
+//                                an option is a number (the model picks that listed candidate), key=sys,table,row or class=C),
+//                                the residue's pick ([pick: Name=PICK] picks the candidate whose line contains PICK),
 //                                the condenser (a request whose model or system prompt says "condens":
 //                                fake-condenser.mjs next to this file when present, else the built-in
 //                                one: sections from the text, claims from [claim: kind|subject|class|attribute|value] tags)
@@ -27,6 +29,7 @@
 //   POST /__reset                clears every override above (run.mjs calls it after each scenario)
 //   GET  /__calls                calls per model, plus grader:claimed (claimed items the grader was asked about)
 //   GET  /__condenser            whether fake-condenser.mjs was loaded
+//   POST /__prompts              the last system prompts the linker's model was sent, newest last
 // Imported by test/harness-fakes.test.js for its pure parts; listens only when run as a program.
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
@@ -87,11 +90,31 @@ export function mentions(messages) {
         .map((s) => s.trim())
         .filter(Boolean)
         .map((s) => {
-          const [name, type = "other"] = s.split("/");
-          return { name: name.trim(), type: type.trim(), role: "mentions" };
+          const [name, type = "other", ...options] = s.split("/").map((x) => x.trim());
+          const thing = { name, type, role: "mentions" };
+          for (const o of options) {
+            if (/^\d+$/.test(o)) thing.candidate = Number(o);
+            else if (o.startsWith("key=")) thing.key = o.slice(4).replaceAll(",", ":"); // key=mssql,dbo_Order,78912: commas, so the tag in the statement's text is not itself a key written in it
+            else if (o.startsWith("class=")) thing.class = o.slice(6);
+          }
+          return thing;
         })
     : [];
   return JSON.stringify({ things, review: false, why: "" });
+}
+
+/** the residue's closed call: [pick: Name=PICK] in the statement picks the listed candidate whose line contains PICK */
+export function residue(messages) {
+  const user = userText(messages);
+  const picks = [];
+  for (const m of user.matchAll(/\[pick:\s*([^=\]]+)=([^\]]+)\]/g)) {
+    const name = m[1].trim();
+    const block = new RegExp(`^"${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"[^\\n]*could be:\\n((?:  .*\\n?)*)`, "m").exec(user)?.[1] ?? "";
+    const line = block.split("\n").find((l) => l.includes(m[2].trim()));
+    const rid = /^\s*(#\d+:\d+):/.exec(line ?? "")?.[1];
+    if (rid) picks.push({ name, candidate: rid });
+  }
+  return JSON.stringify({ picks });
 }
 
 // ---- the decision model: triage's score, and the closed questions from a lookup ----
@@ -232,6 +255,7 @@ export function createFakeModels({ condenser = null } = {}) {
   let slow = []; // {model, match, ms}
   let resolve = {}; // name -> pick (the decision model's lookup)
   let condenseLookups = []; // {match, document}
+  let prompts = []; // the linker's system prompts, for a scenario to read what its model was offered
   const calls = {};
   const counts = {};
   const server = createServer(async (req, res) => {
@@ -249,6 +273,7 @@ export function createFakeModels({ condenser = null } = {}) {
     if (path === "/__condense") return (condenseLookups = body.match ? [...condenseLookups, body] : []), send(200, { condense: condenseLookups.map((l) => l.match) });
     if (path === "/__reset") return failing.clear(), (slow = []), (resolve = {}), (condenseLookups = []), send(200, { reset: true });
     if (path === "/__condenser") return send(200, { loaded: Boolean(condenser), file: condenser?.file ?? null });
+    if (path === "/__prompts") return send(200, { prompts });
     const model = path === "/decisions" ? "decisions" : body.model;
     calls[model] = (calls[model] ?? 0) + 1;
     const wait = slow.find((x) => x.model === model && JSON.stringify(body).includes(x.match));
@@ -264,7 +289,10 @@ export function createFakeModels({ condenser = null } = {}) {
         const out = await condenser.condense(messages, body);
         content = typeof out === "string" ? out : JSON.stringify(out);
       } else if (system.includes("who in an organization may see")) content = grade(messages, counts);
-      else if (system.includes("You find the things a statement")) content = mentions(messages);
+      else if (system.includes("You find the things a statement")) {
+        prompts = [...prompts.slice(-39), system];
+        content = mentions(messages);
+      } else if (system.includes("names things that may be ones already known")) content = residue(messages);
       else if (isCondenseRequest(body)) content = condense(messages, condenseLookups);
       else content = "{}";
       return send(200, { choices: [{ message: { role: "assistant", content } }] });

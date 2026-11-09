@@ -7,15 +7,15 @@
  * Running on its own (jobMentions) it mints nothing but by key: a subject it can't resolve comes back
  * unresolved, on the entry (`_unresolved`) and to triage, for a worker or a person to decide.
  */
-import { effectiveHome, homeName } from "./positions.js";
+import { effectiveHome, homeName, visibleHomes } from "./positions.js";
 import { duplicateEntries, entryId, keysInText, MAX_MENTIONS, mentionsPrompt, ngrams, normalize, splitThingName, normalizeKey, parseMentions, parseResidue, parseSort, partialPerson, personCandidates, residuePrompt, thingName } from "./things.js";
-import { hintType, pickCandidate, resolveSubject, subjectOf } from "./resolve.js";
+import { admits, confirmedClasses, hintType, pickCandidate, resolveSubject, sameKey, sameNamedPeople, subjectOf } from "./resolve.js";
 import { referTo } from "./sourceref.js";
-import { statements, TYPES } from "./model/schema.js";
+import { parseTable, statements, TYPES } from "./model/schema.js";
 import { DECISION_API_KEY, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, FACETS, RID_RE } from "./db.js";
 import { embedBatch } from "./models.js";
-import { positionMap } from "./scope.js";
+import { homeFilter, positionMap } from "./scope.js";
 import { enqueue, worker, workerCall } from "./worker-pool.js";
 import { intakeWithTriage } from "./triage.js";
 
@@ -65,22 +65,54 @@ export async function confirmedClassList({ fresh = false } = {}) {
 }
 
 /** a thing row as resolve.js reads it */
-const asThing = (c) => ({ rid: String(c.rid), label: c.label, _norm: c._norm, _alias_norms: c._alias_norms ?? [], _thing_type: c._thing_type ?? null, _keys: c._keys ?? [], _class: c._class ?? null, ...(c.score === undefined ? {} : { score: Number(c.score) }) });
+const asThing = (c) => ({ rid: String(c.rid), label: c.label, _norm: c._norm, _alias_norms: c._alias_norms ?? [], _thing_type: c._thing_type ?? null, _keys: c._keys ?? [], _class: c._class ?? null, _homes: c._homes ?? [], ...(c.score === undefined ? {} : { score: Number(c.score) }) });
 
-/** the database as resolve.js's lookup; `vec` is the mention's name embedding for the last step */
-function dbLookup(vec) {
+/**
+ * The clause limiting a name lookup to what a statement homed at `home` may name: the same reading
+ * about_thing applies for a reader there (scope.js `homeFilter`). A thing homed where that reader can't
+ * see is, to the statement, no thing at all: linking to it would add this home and show its name here.
+ */
+function seenFromHome(home) {
+  if (!positionMap || !home) return "";
+  return homeFilter({ homes: visibleHomes(positionMap, [home]) });
+}
+
+/** can a reader at `home` see this thing already? */
+function seenThing(t, home) {
+  if (!positionMap || !home) return true;
+  const homes = visibleHomes(positionMap, [home]);
+  return homes === null || (t._homes ?? []).some((h) => homes.has(h));
+}
+
+/** the thing holding a record key, however the key is cased (a source's row keys don't differ by case): the exact spelling first, then a scan of the lists as text, compared exactly here */
+async function thingByKey(key) {
+  const exact = (await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => []))[0];
+  if (exact) return exact;
+  const rows = await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys.asString().toLowerCase() LIKE :k LIMIT 20`, { k: `%${String(key).toLowerCase()}%` }).catch(() => []);
+  return rows.find((r) => (r._keys ?? []).some((k) => sameKey(k, key))) ?? null;
+}
+
+/**
+ * The database as resolve.js's lookup, as a statement homed at `home` may see it; `vec` is the mention's
+ * name embedding for the last step. A key is exempt: it names one row exactly, and nothing was guessed.
+ */
+export function thingLookup(home, vec) {
+  const seen = seenFromHome(home);
   return {
-    byKey: async (key) => (await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => [])).map(asThing)[0] ?? null,
+    byKey: async (key) => {
+      const t = await thingByKey(key);
+      return t ? asThing(t) : null;
+    },
     byName: async ({ class: cls, actor }, n) =>
       (
-        await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND ${cls ? "_class = :c" : "_thing_type = :t"} AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 5`, { c: cls, t: actor, n }).catch(() => [])
+        await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND ${cls ? "_class = :c" : "_thing_type = :t"} AND (_norm = :n OR _alias_norms CONTAINS :n)${seen} LIMIT 5`, { c: cls, t: actor, n }).catch(() => [])
       ).map(asThing),
-    byAlias: async (n) => (await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 5`, { n }).catch(() => [])).map(asThing),
+    byAlias: async (n) => (await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n)${seen} LIMIT 5`, { n }).catch(() => [])).map(asThing),
     byEmbedding: async ({ class: cls, actor, type }) => {
       if (!Array.isArray(vec)) return [];
       const filter = cls ? " AND _class = :c" : actor || type ? " AND _thing_type = :t" : "";
       return (
-        await adbQuery(`SELECT ${THING_COLS}, vectorCosineSimilarity(embed_thing, [${vec.join(",")}]) AS score FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND embed_thing IS NOT NULL${filter} ORDER BY score DESC LIMIT 3`, { c: cls, t: actor ?? type }).catch(
+        await adbQuery(`SELECT ${THING_COLS}, vectorCosineSimilarity(embed_thing, [${vec.join(",")}]) AS score FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND embed_thing IS NOT NULL${filter}${seen} ORDER BY score DESC LIMIT 3`, { c: cls, t: actor ?? type }).catch(
           () => [],
         )
       ).map(asThing);
@@ -109,6 +141,35 @@ async function mintThing({ name, type, cls, key, home, vec, seen_by }) {
   return rid;
 }
 
+/** what a resolution does to the graph: mints what it says to mint, or teaches the thing it found the alias and key it was found under, and refers to the row */
+async function settle(r, { key, home, vec, seen_by }) {
+  if (r.mint) return { thing: await mintThing({ name: r.mint.name, type: r.mint.type, cls: r.mint.class, key: r.mint.key, home, vec, seen_by }), created: true };
+  const thing = r.rid;
+  if (r.alias) {
+    const cur = (await adbQuery(`SELECT _alias_norms FROM ${thing}`))[0]?._alias_norms ?? [];
+    await adbCommand(`UPDATE ${thing} SET _alias_norms = :a`, "sql", { a: [...new Set([...cur, normalize(r.alias)])] }).catch(() => {});
+  }
+  if (key && RID_RE.test(String(thing))) {
+    // a thing found by name learns its record key, and refers to the row; a different spelling of a key it holds is the key it holds
+    const cur = (await adbQuery(`SELECT _keys FROM ${thing}`))[0]?._keys ?? [];
+    if (!cur.some((k) => sameKey(k, key))) await adbCommand(`UPDATE ${thing} SET _keys = :k`, "sql", { k: [...cur, key].slice(-10) }).catch(() => {});
+    await referTo(thing, cur.find((k) => sameKey(k, key)) ?? key, { seen_by }).catch((e) => log.warn(`source ref ${key}: ${String(e?.message ?? e).slice(0, 120)}`));
+  }
+  return { thing, created: false };
+}
+
+/**
+ * A key a model wrote that the statement itself doesn't carry (Admission: a name mints nothing, and a
+ * number made into a key is a name): it can find a row already admitted, nothing more. It mints nothing;
+ * it reaches only what this statement's reader can see; it teaches nothing to a keyless thing; and
+ * where the name it came with fits several people, it hasn't said which.
+ */
+async function keyHint(r, subject, { classes, lookup, home }) {
+  const byName = await resolveSubject({ ...subject, key: null }, { classes, lookup });
+  const heldKey = r.how === "key" && r.confidence === 1 && r.thing;
+  return heldKey && seenThing(r.thing, home) && !sameNamedPeople(byName) ? r : byName;
+}
+
 /** the unresolved shape jobMentions stores and returns: what was named, how it was described, what it could be */
 const unresolvedOf = (l) => ({ name: l.name, role: l.role, ...(l.type ? { type: l.type } : {}), ...(l.class ? { class: l.class } : {}), ...(l.actor ? { actor: l.actor } : {}), ...(l.key ? { key: l.key } : {}), ...(l.candidates?.length ? { candidates: l.candidates, unsure: l.unsure } : {}) });
 
@@ -122,9 +183,13 @@ const unresolvedOf = (l) => ({ name: l.name, role: l.role, ...(l.type ? { type: 
  * the default: a worker's link_things, a person) and it isn't a record key
  * mention; otherwise it comes back `skipped: UNRESOLVED` and `unresolved: true`.
  * `unsure` ("ask" | "skip") is kept for callers; nothing is created either
- * way for an unsure match. Returns what happened, one item per mention.
+ * way for an unsure match. Names resolve only to things a reader at `home`
+ * can see. `vouchedKeys` (a set of lowercase keys) is the keys the statement
+ * itself carries: any other key on a mention came from a model and is only a
+ * hint (`keyHint`); without it every key is taken as given (a worker, a
+ * person). Returns what happened, one item per mention.
  */
-export async function linkMentions(rid, mentions, home, { unsure = "ask", create = true, seen_by = "graph-rag linker", classes } = {}) {
+export async function linkMentions(rid, mentions, home, { unsure = "ask", create = true, seen_by = "graph-rag linker", classes, vouchedKeys } = {}) {
   void unsure;
   const confirmed = classes ?? (await confirmedClassList());
   const vecs = mentions.length ? await embedBatch(mentions.map((m) => `${m.actor ?? m.type ?? m.class ?? "thing"}: ${m.name}`)) : [];
@@ -132,13 +197,19 @@ export async function linkMentions(rid, mentions, home, { unsure = "ask", create
   for (const [i, m] of mentions.entries()) {
     const subject = subjectOf({ key: m.key, name: m.name, class: m.class, actor: m.actor, type: m.type });
     const base = { name: m.name, type: m.type ?? subject.actor ?? null, role: m.role, ...(m.key ? { key: m.key } : {}), ...(subject.class ? { class: subject.class } : {}), ...(subject.actor ? { actor: subject.actor } : {}) };
-    let r = await resolveSubject(subject, { classes: confirmed, lookup: dbLookup(vecs[i]) });
-    // the residue's choice (the closed model call, or a worker naming a candidate): one of the candidates found
-    if (r.how === "none" && m.candidate && r.candidates.length) r = pickCandidate(r, m.candidate);
+    const lookup = thingLookup(home, vecs[i]);
+    let r = await resolveSubject(subject, { classes: confirmed, lookup });
+    const hintOnly = Boolean(m.key && vouchedKeys && !vouchedKeys.has(String(m.key).toLowerCase()));
+    if (hintOnly) r = await keyHint(r, subject, { classes: confirmed, lookup, home });
+    // a model that picked a known thing under a looser name ("the Exatron guys"): the thing's own name resolves it, or doesn't
+    if (r.how === "none" && !r.candidates.length && m.picked_name) r = await resolveSubject({ ...subject, key: null, name: m.picked_name }, { classes: confirmed, lookup });
+    // the residue's choice (the closed model call, or a worker naming a candidate): one of the candidates found.
+    // Not among same-named people: the design opens with this failure, and a model's pick there is a guess
+    if (r.how === "none" && m.candidate && r.candidates.length && !sameNamedPeople(r)) r = pickCandidate(r, m.candidate);
     // a person written partially ("John F.") that nothing resolved: known people it could mean are candidates
     if (r.how === "none" && !r.candidates.length && subject.actor === "person" && !m.key && partialPerson(m.name)) {
       const part = partialPerson(m.name);
-      const people = (await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = 'person' AND _norm LIKE :p LIMIT 40`, { p: `${part.first} %` }).catch(() => [])).map(asThing);
+      const people = (await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = 'person' AND _norm LIKE :p${seenFromHome(home)} LIMIT 40`, { p: `${part.first} %` }).catch(() => [])).map(asThing);
       const found = personCandidates(part, people).slice(0, 6);
       if (found.length) r = { ...r, candidates: found, ambiguous: true };
     }
@@ -156,15 +227,14 @@ export async function linkMentions(rid, mentions, home, { unsure = "ask", create
     if (r.how === "none" && r.candidates.length) {
       // several things it could be: nothing is linked and nothing is made; a thread, triage or a person picks
       const names = r.candidates.map((x) => `${x.label}${(x._keys ?? [])[0] ? ` [${x._keys[0]}]` : ""}`);
-      out.push({ ...base, candidates: r.candidates.map((x) => x.rid), unsure: names.join(" or "), ...(r.maybe ? { maybe: r.maybe } : {}) });
+      out.push({ ...base, candidates: r.candidates.map((x) => x.rid), unsure: names.join(" or "), ...(r.maybe ? { maybe: r.maybe } : {}), ...(sameNamedPeople(r) ? { same_named: true } : {}) });
       continue;
     }
     let thing = r.rid;
     let created = false;
     if (r.mint) {
       // a record key nobody holds yet: the instance, with its class and its SourceRef (the row stays in the source system)
-      thing = await mintThing({ name: r.mint.name, type: r.mint.type, cls: r.mint.class, key: r.mint.key, home, vec: vecs[i], seen_by });
-      created = true;
+      ({ thing, created } = await settle(r, { home, vec: vecs[i], seen_by }));
     } else if (r.how === "none") {
       if (!create) {
         // the linker on its own mints nothing: the name goes back for a worker or a person
@@ -175,16 +245,8 @@ export async function linkMentions(rid, mentions, home, { unsure = "ask", create
       thing = await mintThing({ name: m.name, type: hintType({ type: m.type, actor: subject.actor, class: r.class }), cls: r.class, key: null, home, vec: vecs[i], seen_by });
       created = true;
     } else {
-      if (r.alias) {
-        const cur = (await adbQuery(`SELECT _alias_norms FROM ${thing}`))[0]?._alias_norms ?? [];
-        await adbCommand(`UPDATE ${thing} SET _alias_norms = :a`, "sql", { a: [...new Set([...cur, normalize(r.alias)])] }).catch(() => {});
-      }
-      if (m.key && RID_RE.test(String(thing))) {
-        // a thing found by name learns its record key, and refers to the row
-        const cur = (await adbQuery(`SELECT _keys FROM ${thing}`))[0]?._keys ?? [];
-        if (!cur.includes(m.key)) await adbCommand(`UPDATE ${thing} SET _keys = :k`, "sql", { k: [...cur, m.key].slice(-10) }).catch(() => {});
-        await referTo(thing, m.key, { seen_by }).catch((e) => log.warn(`source ref ${m.key}: ${String(e?.message ?? e).slice(0, 120)}`));
-      }
+      // a hint teaches nothing unless the key really found the row
+      await settle(r, { key: hintOnly && r.how !== "key" ? null : (r.key ?? m.key), home, vec: vecs[i], seen_by });
     }
     if (!RID_RE.test(String(thing))) continue;
     await thingSeenFrom(thing, home);
@@ -194,13 +256,14 @@ export async function linkMentions(rid, mentions, home, { unsure = "ask", create
   return out;
 }
 
-/** the things already known that a text names, by exact name or alias: the candidates the closed call chooses from */
-export async function knownInText(text, limit = 12) {
+/** the things already known that a text names, by exact name or alias, as a reader at `home` sees them: the candidates the closed call chooses from */
+export async function knownInText(text, home, limit = 12) {
   const grams = ngrams(text);
   if (!grams.length) return [];
+  const visible = seenFromHome(home);
   const rows = [
-    ...(await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _norm IN :g LIMIT ${limit}`, { g: grams }).catch(() => [])),
-    ...(await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _alias_norms CONTAINSANY :g LIMIT ${limit}`, { g: grams }).catch(() => [])),
+    ...(await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _norm IN :g${visible} LIMIT ${limit}`, { g: grams }).catch(() => [])),
+    ...(await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _alias_norms CONTAINSANY :g${visible} LIMIT ${limit}`, { g: grams }).catch(() => [])),
   ];
   const seen = new Set();
   return rows
@@ -230,7 +293,7 @@ export async function jobMentions({ rid, from_worker, no_thread, intake }) {
   const home = effectiveHome(positionMap, row._home);
   const text = Object.values(facets).join("\n");
   // subjects the condenser already resolved: the entry's claims point at them
-  const claimed = (await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('CLAIMS')) FROM ${rid})`).catch(() => [])).map((e) => String(e.dst)).filter((d) => RID_RE.test(d));
+  const claimed = (await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('CLAIMS')) FROM ${rid})`).catch(() => [])).map((e) => String(e.dst)).filter((d) => RID_RE.test(d) && d !== String(rid)); // (an unresolved claim points back at its own section)
   for (const dst of new Set(claimed)) {
     await thingSeenFrom(dst, home).catch(() => {});
     await aboutOnce(rid, dst, "subject").catch(() => {});
@@ -239,14 +302,15 @@ export async function jobMentions({ rid, from_worker, no_thread, intake }) {
   const keyed = keysInText(text).map((k) => ({ name: k.split(":")[2], type: null, role: "subject", key: k }));
   const sort = worker.pool.poolSize > 0 && worker.pool.sortFirst && !worker.pool.master && !from_worker && !no_thread && !intake;
   const classes = await confirmedClassList();
-  const candidates = await knownInText(text);
+  const candidates = await knownInText(text, home);
   const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort, classes, candidates }));
-  const named = parseMentions(reply, MAX_MENTIONS, { candidates }).filter((m) => !keyed.some((k) => k.key === m.key));
+  const vouchedKeys = new Set(keyed.map((k) => k.key.toLowerCase()));
+  const named = parseMentions(reply, MAX_MENTIONS, { candidates }).filter((m) => !m.key || !vouchedKeys.has(m.key.toLowerCase()));
   const mentions = [...keyed, ...named];
-  // the linker on its own: by key, by class and name, by alias, by embedding; never a new name
-  let linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: false, classes });
-  // the residue: several known things a name could be; one closed call picks, unless a worker thread will look anyway
-  const residue = linked.filter((l) => l.unsure && l.candidates?.length && !l.key);
+  // the linker on its own: by key, by class and name, by alias, by embedding; never a new name, and never a number a model made into a key
+  let linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: false, classes, vouchedKeys });
+  // the residue: several known things a name could be; one closed call picks, unless a worker thread will look anyway (same-named people aren't a model's to settle: linkMentions would drop its pick)
+  const residue = linked.filter((l) => l.unsure && l.candidates?.length && !l.key && !l.same_named);
   if (residue.length && !sort && !(intake && DECISION_API_KEY)) {
     const cands = (await adbQuery(`SELECT ${THING_COLS} FROM [${[...new Set(residue.flatMap((r) => r.candidates))].join(",")}]`).catch(() => [])).map(asThing);
     const byRid = new Map(cands.map((c) => [c.rid, c]));
@@ -257,7 +321,7 @@ export async function jobMentions({ rid, from_worker, no_thread, intake }) {
         rid,
         residue.filter((r) => picks.has(r.name)).map((r) => ({ name: r.name, type: r.type, role: r.role, class: r.class, actor: r.actor, candidate: picks.get(r.name) })),
         home,
-        { unsure: "skip", create: false, classes },
+        { unsure: "skip", create: false, classes, vouchedKeys },
       );
       linked = linked.map((l) => settled.find((s) => s.name === l.name && (s.linked || s.created)) ?? l);
     }
@@ -309,14 +373,56 @@ export async function thingNamed(name) {
   return entry.length ? null : things[0];
 }
 
-/** one thing by key, or by name/alias and type (a hint, an actor type or a class); null when there's none (or several) */
+/**
+ * The subject of a claim on the record path, as the rid of its thing, or null when it has none: a thing
+ * resolved the way a mention is (key, class and name, alias, embedding; only what a reader at `home`
+ * sees), else minted when admission says it earned a node. Null is an unresolved subject: several things
+ * it could be (nobody picks here, and the next document must not mint another), or content inside the
+ * claim. The caller points such a claim back at its section, the shape worker-pool.js reads as
+ * unresolved. A class subject (`scope: "class"`) is that class's own thing, one per class and name.
+ */
+export async function recordSubject(subject, home, { kind = null, classes } = {}) {
+  const seen_by = "graph-rag record path";
+  const confirmed = classes ?? (await confirmedClassList());
+  const name = subject.scope === "class" ? (subject.name ? `${subject.class} (${subject.name})` : subject.class) : subject.name ?? subject.key;
+  const hint = hintType({ actor: subject.actor, key: subject.key, class: subject.class });
+  const vec = (await embedBatch([`${hint}: ${name}`]).catch(() => [null]))[0];
+  const lookup = thingLookup(home, vec);
+  if (subject.scope === "class") {
+    const own = (await lookup.byName({ class: subject.class }, normalize(name)))[0]?.rid;
+    const rid = own ?? (await mintThing({ name, type: "class", cls: subject.class, key: null, home, vec, seen_by }));
+    if (own) await thingSeenFrom(rid, home);
+    return rid;
+  }
+  const r = await resolveSubject(subject, { classes: confirmed, lookup });
+  if (r.how === "none") {
+    if (r.candidates.length) return null;
+    const recorded = parseTable(confirmedClasses(confirmed).get(subject.class)?.record_table);
+    const references = (await placesNaming(subject.name)) + 1;
+    if (!admits({ name: subject.name, actor: subject.actor }, { references, isCommitment: kind === "commitment" && !recorded }).admitted) return null;
+    return mintThing({ name: subject.name, type: hint, cls: subject.class, key: null, home, vec, seen_by });
+  }
+  // minted from a key: the class the record names when no confirmed class claims the table
+  const named = r.mint ? { ...r, mint: { ...r.mint, class: r.mint.class ?? subject.class ?? null } } : r;
+  const { thing, created } = await settle(named, { key: r.key ?? subject.key, home, vec, seen_by });
+  if (!created) {
+    if (subject.class && !r.thing?._class) await adbCommand(`UPDATE ${thing} SET _class = :c`, "sql", { c: subject.class }).catch(() => {});
+    await thingSeenFrom(thing, home);
+  }
+  return thing;
+}
+
+/** how many sections already hold an unresolved claim about this name (admission's second rule: a reference from more than one place earns a node) */
+async function placesNaming(name) {
+  const rows = await adbQuery("SELECT @out AS src FROM CLAIMS WHERE subject_norm = :n LIMIT 200", { n: normalize(name) }).catch(() => []);
+  return new Set(rows.map((r) => String(r.src))).size;
+}
+
+/** one thing by key, or by name/alias and type (a hint, an actor type or a class); null when there's none (or several). A key is an identity: a key nobody holds is no thing, whatever shares its name */
 export async function findThing(ref) {
   const t = bareThing(ref);
   const key = normalizeKey(t.key);
-  if (key) {
-    const k = (await adbQuery(`SELECT @rid AS rid, label, _thing_type, _class, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }))[0];
-    if (k) return k;
-  }
+  if (key) return thingByKey(key);
   const n = normalize(t.name);
   const rows = await adbQuery(
     `SELECT @rid AS rid, label, _thing_type, _class, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n)${t.type ? " AND (_thing_type = :t OR _class = :t)" : ""} LIMIT 2`,

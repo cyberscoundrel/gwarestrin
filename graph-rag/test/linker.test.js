@@ -50,7 +50,7 @@ test("mentions: a candidate by number, a class with its key, an actor; a type is
     ],
   });
   assert.deepEqual(parseMentions(`ok: ${text}`, 8, { candidates: CANDIDATES }), [
-    { name: "Diep", type: "person", role: "operator", key: "mssql:dbo_Employee:NGUD", candidate: "#1:1" },
+    { name: "Diep", type: "person", role: "operator", candidate: "#1:1", picked_name: "Diep Nguyen" }, // a pick is not a key
     { name: "CNC 5", type: "machine", role: "machine", candidate: "#1:2" },
     { name: "job 4471", type: null, role: "subject", key: "mssql:dbo_Job:4471", class: "jobs" },
     { name: "Corvane Medical", type: "customer", role: "customer", actor: "customer" },
@@ -63,6 +63,16 @@ test("mentions: a candidate by number, a class with its key, an actor; a type is
   assert.ok(!THING_TYPES.includes("other"));
   // a worker's link_things goes through the same parser: its type stays a hint, its key is kept
   assert.deepEqual(parseMentions(JSON.stringify({ things: [{ name: "Toro Plating Co", type: "customer", key: "mssql:dbo_Customer:TORO" }, { name: "Toro", type: "customer", key: "mssql:dbo_Customer:TORO" }] })), [{ name: "Toro Plating Co", type: "customer", role: "mentions", key: "mssql:dbo_Customer:TORO" }], "one key, one thing");
+});
+
+test("same-named people: the prompt tells the model to give no number, and a number it gives anyway carries no key", () => {
+  const [sys] = mentionsPrompt({ name: "x", facets: { identity: "Diep is running CNC 5." } }, "", { classes: CLASSES, candidates: CANDIDATES });
+  assert.match(sys.content, /several people share the name the statement uses, do not choose between them/, "the abstain rule (B16)");
+  assert.match(sys.content, /PO number[^.]*is content, not a thing/, "the PO rule (B17)");
+  assert.doesNotMatch(sys.content, /PO 4471/, "no invitation to make a PO a record");
+  const [picked] = parseMentions(JSON.stringify({ things: [{ name: "Diep", role: "operator", candidate: 1 }] }), 8, { candidates: CANDIDATES });
+  assert.equal(picked.candidate, "#1:1");
+  assert.equal(picked.key, undefined, "picking from the list hands over no key: a key would settle it (B16)");
 });
 
 test("record keys written in a text resolve without a model", () => {

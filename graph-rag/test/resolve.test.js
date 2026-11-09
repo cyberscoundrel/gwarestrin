@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { admits, classOfKey, confirmedClasses, hintType, memoryLookup, pickCandidate, resolveSubject, subjectOf } from "../src/resolve.js";
+import { admits, classOfKey, confirmedClasses, hintType, memoryLookup, pickCandidate, resolveSubject, sameNamedPeople, subjectOf } from "../src/resolve.js";
 import { referTo, sourceRefOf, sourceRefsOf, touchSourceRef, SOURCE_REF_FIELDS } from "../src/sourceref.js";
 import { normalize } from "../src/things.js";
 
@@ -192,7 +192,7 @@ const SEED = [
   thing("#2:20", "INSPECT-2", { type: "machine", keys: ["mssql:dbo_Work_Center:INSPECT-2"] }),
 ];
 
-test("every oracle note's subjects: keys by key, actors by class-name or alias, nothing else minted; PO 78912 is one instance", async (t) => {
+test("every oracle note's subjects: keys by key, actors by class-name or alias, nothing else minted; a job is one instance, its PO number no node", async (t) => {
   const notes = read("oracle-sixty.json");
   assert.ok(notes.length >= 62);
   const s = store(SEED);
@@ -231,27 +231,24 @@ test("every oracle note's subjects: keys by key, actors by class-name or alias, 
   assert.ok(minted.every((k) => !SEED.some((x) => x._keys.includes(k))), "seeded keys were found, not minted");
   assert.ok(how.none > 0 && how.key > 0 && how["class-name"] > 0 && how.alias > 0);
   t.diagnostic(`oracle: ${how.key} by key (${minted.length} minted, ${keyed.size} distinct keys), ${how["class-name"]} by class-name, ${how.alias} by alias (${byName.length} machines by name), ${how.none} none`);
-  // the two PO 78912 notes (ux-note 13 and 14) both name the PO a worker found in the ERP: one key, one instance, however often it comes up
-  const po = (name) => s.resolve({ key: "mssql:dbo_Order:78912", name, class: "orders" });
-  const first = await po("PO 78912");
-  const second = await po("customer PO 78912");
+  // one key, one instance, however often it comes up (ux-note 13's job): the job's own row is the instance
+  const job = (name) => s.resolve({ key: "mssql:dbo_Job:9100001", name, class: "jobs" });
+  const first = await job("job 9100001");
+  const second = await job("9100001");
   assert.equal(first.how, "key");
   assert.ok(first.minted, "the first mention mints the instance");
-  assert.equal(first.thing._class, "orders", "with its confirmed class, from the record table");
+  assert.equal(first.thing._class, "jobs", "with its confirmed class, from the record table");
   assert.equal(second.how, "key");
   assert.equal(second.rid, first.rid, "the second finds it");
   assert.equal(second.minted, undefined);
-  assert.equal(s.things.filter((x) => x._keys.includes("mssql:dbo_Order:78912")).length, 1, "one instance");
-  // without the key, the PO number in prose is content: nothing minted, not six keyless order things;
-  // the one spelling that is the instance's own name finds it (by class and name), the rest resolve to nothing
+  assert.equal(s.things.filter((x) => x._keys.includes("mssql:dbo_Job:9100001")).length, 1, "one instance");
+  // ORACLE.md: the PO is an attribute of the job rows, never a node. In prose, keyless, it is content: no thing mints (or is found)
   const n = s.things.length;
   for (const name of ["PO 78912", "customer PO 78912", "Exatron PO 78912", "PO 78912 for Exatron", "order 78912", "78912"]) {
     const r = await s.resolve({ name, class: "orders" });
     assert.equal(r.mint, null, `${name}: nothing minted`);
-    assert.ok(r.how === "none" || (r.how === "class-name" && r.rid === first.rid), `${name}: ${r.how}`);
+    assert.equal(r.how, "none", `${name}: ${r.how}`);
   }
-  assert.equal((await s.resolve({ name: "PO 78912", class: "orders" })).how, "class-name", "the instance's own name finds it");
-  assert.equal((await s.resolve({ name: "PO 78912" })).how, "alias", "even with no class: by exact name");
   assert.equal(s.things.length, n, "no keyless order things");
   // the same-named Diep (aq01): with the key the active employee; without it nobody guesses
   const aq01 = notes.find((x) => x.id === "ux-aq01");
@@ -259,6 +256,60 @@ test("every oracle note's subjects: keys by key, actors by class-name or alias, 
   const diep = await s.resolve({ name: "Diep", actor: "person" });
   assert.equal(diep.how, "none");
   assert.deepEqual(diep.candidates.map((c) => c.rid).sort(), ["#2:17", "#2:18"]);
+});
+
+test("a keyed mention finds the one keyless thing of its name; a thing holding another key, or of another kind, is another row (B14, B15)", async () => {
+  const lookup = memoryLookup([
+    thing("#1:1", "Exatron", { type: "customer" }),
+    thing("#1:2", "Diep", { type: "person", keys: ["mssql:dbo_Employee:NGDT"] }),
+    thing("#1:3", "Gridley", { type: "machine" }),
+    thing("#1:4", "Twin", { type: "customer" }),
+    thing("#1:5", "Twin", { type: "customer" }),
+  ]);
+  const run = (subject) => resolveSubject(subject, { classes: CLASSES, lookup });
+  const exatron = await run({ key: "mssql:dbo_Customer:EXATRON" });
+  assert.equal(exatron.how, "key", "the row is that keyless thing");
+  assert.equal(exatron.rid, "#1:1");
+  assert.equal(exatron.mint, null);
+  assert.equal(exatron.key, "mssql:dbo_Customer:EXATRON", "the key it learns");
+  const ngud = await run({ key: "mssql:dbo_Employee:NGUD", name: "Diep", actor: "person" });
+  assert.equal(ngud.rid, null, "a key miss never falls through to a thing holding another key");
+  assert.equal(ngud.mint?.key, "mssql:dbo_Employee:NGUD", "it mints its own instance");
+  assert.ok((await run({ key: "mssql:dbo_Customer:GRIDLEY" })).mint, "a machine by that name is not the customer");
+  assert.ok((await run({ key: "mssql:dbo_Customer:TWIN" })).mint, "two keyless candidates: nobody guesses, the key mints");
+});
+
+test("a key is the same key in any case: found, with the spelling the thing holds, and nothing minted (B15)", async () => {
+  const lookup = memoryLookup([thing("#1:1", "Toro", { type: "customer", keys: ["mssql:dbo_Customer:TORO"] })]);
+  const r = await resolveSubject({ key: "mssql:dbo_Customer:Toro" }, { classes: CLASSES, lookup });
+  assert.equal(r.how, "key");
+  assert.equal(r.rid, "#1:1");
+  assert.equal(r.mint, null);
+  assert.equal(r.key, "mssql:dbo_Customer:TORO", "the stored spelling: no second spelling is learned, no second SourceRef opened");
+});
+
+test("the same name under two classes: a thing of another class is not the subject, confirmed or not (B14)", async () => {
+  const lookup = memoryLookup([thing("#1:1", "Q-77", { cls: "quotes" }), thing("#1:2", "Bench 4", { type: "place" })]);
+  const r = await resolveSubject({ name: "Q-77", class: "orders" }, { classes: CLASSES, lookup });
+  assert.equal(r.how, "none", "the alias step keeps out a thing of another class");
+  assert.equal((await resolveSubject({ name: "Bench 4", class: "orders" }, { classes: CLASSES, lookup })).rid, "#1:2", "a thing with no class still fits");
+  assert.equal((await resolveSubject({ name: "Q-77", class: "unconfirmed class" }, { classes: CLASSES, lookup })).how, "none", "an unconfirmed class still names its class");
+});
+
+test("same-named people: found, ambiguous, and flagged so no model's pick settles them (B16)", async () => {
+  const lookup = memoryLookup([thing("#1:1", "Diep Nguyen", { type: "person", keys: ["k:a:1"], aliases: ["Diep"] }), thing("#1:2", "Diep Tran", { type: "person", keys: ["k:a:2"], aliases: ["Diep"] }), thing("#1:3", "Toro", { type: "customer" }), thing("#1:4", "Toro", { type: "supplier" })]);
+  const diep = await resolveSubject({ name: "Diep", actor: "person" }, { classes: CLASSES, lookup });
+  assert.equal(sameNamedPeople(diep), true);
+  assert.equal(sameNamedPeople(await resolveSubject({ name: "Toro" }, { classes: CLASSES, lookup })), false, "two records by one name aren't people");
+  assert.equal(sameNamedPeople(await resolveSubject({ key: "k:a:1" }, { classes: CLASSES, lookup })), false, "a key has said which");
+});
+
+test("admission: a commitment with no record table is rule 3; a state of a name is content; a second place is rule 2; an actor is rule 1", () => {
+  assert.equal(admits({ name: "holiday schedule" }, { references: 1, isCommitment: false }).admitted, false);
+  assert.equal(admits({ name: "payroll" }, { references: 1, isCommitment: false }).admitted, false);
+  assert.equal(admits({ name: "rack C1" }, { references: 2, isCommitment: false }).rule, 2);
+  assert.equal(admits({ name: "CNC 2 spindle bearing order" }, { references: 1, isCommitment: true }).rule, 3);
+  assert.equal(admits({ name: "Tomas Reyes", actor: "person" }, { references: 1 }).rule, 1);
 });
 
 /** a fake ArcadeDB that understands the SQL sourceref.js sends */
