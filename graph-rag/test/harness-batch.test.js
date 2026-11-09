@@ -483,7 +483,7 @@ test("the corruptions the re-review found unnoticed: each fails the bar on a rea
     ["a section's _doc_id", (r) => (r.sections[0]._doc_id = "elsewhere"), /_doc_id "elsewhere" is not its document's/],
     ["closed_by", (r) => (firstRow(r).closed_by = "x"), /closed_by "x": a write closed it/],
     ["an extra section with no claims", (r) => r.sections.push({ rid: "#2:9999", name: "extra", _doc_title: al04.expected.document.title, _doc_id: al04.id, _section: 9, _home: "ops", _origin: "ops", text: "x" }), /an unexpected section "extra"/],
-    ["the thing not seen from the claim's home", (r) => { r.things.find((x) => x.rid === firstRow(r).in_rid)._homes = ["org"]; }, /ux-m01#0: subject: its thing is not seen from ops/],
+    ["the thing not seen from the claim's home", (r) => { r.things.find((x) => x.rid === firstRow(r).in_rid)._homes = ["floor"]; }, /ux-m01#0: subject: its thing is not seen from ops/],
   ];
   for (const [what, corrupt, re] of cases) {
     const r = structuredClone(clean);
@@ -554,4 +554,24 @@ test("failingNotes groups findings by note", () => {
   const notes = failingNotes(b, bar(b, rows));
   assert.deepEqual([...notes.keys()], ["ux-al04"]);
   assert.match(notes.get("ux-al04")[0], /^content: conv-ux-al04 claim ux-al04#1: value "wrong"/);
+});
+
+test("the bar: a key may reach a thing above its claim, a name may not, and a same-named thing seen from elsewhere is someone else's", () => {
+  const b = small();
+  const rows = cleanRows(b);
+  const claim = (r, id) => r.claims.find((c) => c.id === id);
+  const thingOf = (r, id) => r.things.find((x) => x.rid === claim(r, id).in_rid);
+  const content = (r) => bar(b, r).findings.content.join("\n");
+  // ux-m01#0 is keyed: a thing seen only from above its claim is B9, one seen only from below is lost to it
+  const above = structuredClone(rows);
+  thingOf(above, "ux-m01#0")._homes = ["org"];
+  assert.doesNotMatch(content(above), /ux-m01#0: subject: its thing is not seen/);
+  // ux-m01#1 has no key: the same homes are a name bound to a thing its writer can't see (NB2)
+  const named = structuredClone(rows);
+  thingOf(named, "ux-m01#1")._homes = ["org"];
+  assert.match(content(named), /ux-m01#1: subject: its thing is not seen from ops/);
+  // a twin seen from another home is another writer's; seen from the same home it is a second piece
+  const twin = (r, homes) => { const t = thingOf(r, "ux-m01#1"); r.things.push({ rid: "#9:2", label: "twin", _keys: [], _norm: t._norm, _class: t._class, _homes: homes }); return r; };
+  assert.doesNotMatch(content(twin(structuredClone(rows), ["org"])), /a second keyless thing/);
+  assert.match(content(twin(structuredClone(rows), ["ops"])), /ux-m01#1: subject: a second keyless thing/);
 });

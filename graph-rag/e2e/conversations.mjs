@@ -430,7 +430,9 @@ function secondThing(want, thing, things, before) {
     return same.length ? `a second thing holds ${want.key}: ${same.map((t) => t.rid).join(", ")}` : null;
   }
   if ((thing._keys ?? []).length) return null;
-  const same = others.filter((t) => !(t._keys ?? []).length && t._norm && t._norm === thing._norm && (t._class ?? null) === (thing._class ?? null));
+  // a name never binds to a thing its writer can't see (NB2): one seen from none of the same homes is another's, not a second piece of this one
+  const sharesHome = (t) => (t._homes ?? []).some((h) => (thing._homes ?? []).includes(h));
+  const same = others.filter((t) => !(t._keys ?? []).length && t._norm && t._norm === thing._norm && (t._class ?? null) === (thing._class ?? null) && sharesHome(t));
   return same.length ? `a second keyless thing of this name and class: ${same.map((t) => t.rid).join(", ")}` : null;
 }
 
@@ -543,7 +545,9 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince =
       if (String(cl.in_rid) !== String(cl.out_rid)) {
         const thing = things.get(String(cl.in_rid));
         for (const problem of [statedBeside(want.subject, cl), secondThing(want.subject, thing, things, before)]) if (problem) findings.content.push(`${c.id} claim ${pl.id}: subject: ${problem}`);
-        if (thing && !(thing._homes ?? []).includes(pl.home)) findings.content.push(`${c.id} claim ${pl.id}: subject: its thing is not seen from ${pl.home} (${JSON.stringify(thing._homes ?? [])})`);
+        // a key reaches a thing above its claim without bringing it down (B9); a name only ever lands on one seen from its claim
+        const homes = thing?._homes ?? [];
+        if (thing && !homes.includes(pl.home) && !(want.subject.key && homes.some((h) => isAbove(h, pl.home)))) findings.content.push(`${c.id} claim ${pl.id}: subject: its thing is not seen from ${pl.home} (${JSON.stringify(thing._homes ?? [])})`);
       }
       if (cl.closed_by !== null && cl.closed_by !== undefined && cl.closed_by !== "") findings.content.push(`${c.id} claim ${pl.id}: closed_by ${JSON.stringify(cl.closed_by)}: a write closed it; closing is a read`);
       for (const field of ["kind", "class", "attribute", "value", "recorded_by"]) if (cl[field] !== want[field]) wrong(field, cl[field], want[field]);

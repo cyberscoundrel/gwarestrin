@@ -550,8 +550,12 @@ const files = discoverScenarioFiles(E2E_DIR);
 // the harness's own stream last: its 62-note batch would surface in every later search and raise what people have read
 const streams = (await loadScenarioFiles(files)).sort((a, b) => Number(a.stream === "harness") - Number(b.stream === "harness"));
 if (files.length) console.log(`\n${streams.length} scenario${streams.length === 1 ? "" : "s"} from ${files.length} stream file${files.length === 1 ? "" : "s"}: ${files.map((f) => f.split("/").pop()).join(", ")}`);
+let lastStream = null;
 for (const s of streams) {
   if (!selected(s)) continue;
+  // a stream's fake source ends with it: to the next stream's scenarios a key that source doesn't hold is no row (linker.js)
+  if (lastStream && s.stream !== lastStream) await context.tool("admin", "execute_graph", { language: "sql", command: "DELETE FROM OrgPolicy WHERE scope = 'sources'" });
+  lastStream = s.stream;
   const reason = await skipReason(s, context);
   if (reason) {
     results.push({ name: s.name, ok: true, skipped: true, reason });
