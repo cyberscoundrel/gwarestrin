@@ -15,7 +15,7 @@ import { adbCommand, adbQuery, ensureFullText, ensureIndex, ENTITY_LABEL, esc, k
 import { embedBatch } from "./models.js";
 import { homeFilter, isPerson, positionId, positionMap, SCOPED } from "./scope.js";
 import { identityText, publicProps } from "./search.js";
-import { askAboutPlacement, claimsOfEntry, derivedFloor, heldNote, placeEntities, workerWriteFloor } from "./floor.js";
+import { askAboutPlacement, claimsFollowEntry, claimsOfEntry, derivedFloor, heldNote, placeEntities, workerWriteFloor } from "./floor.js";
 import { policy } from "./org-policy.js";
 import { dropWaitingShares, refreshGrants, resolveWaitingShares, storeGrant } from "./sharing.js";
 import { ASSERTIONS, meetAssertion } from "./requests.js";
@@ -102,7 +102,7 @@ export function decideWrite(identity, { kind, cls = null, attribute = null, clai
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
-export async function upsertEntities({ entities, home, floor, written_at, from_worker, written_by }) {
+export async function upsertEntities({ entities, home, floor, regrade_floor, written_at, from_worker, written_by }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
   // dates in the content ("next Friday") mean the day it was written, not approved
@@ -140,7 +140,7 @@ export async function upsertEntities({ entities, home, floor, written_at, from_w
     const place = placements?.[idx];
     // awaiting grading: what it needs to be graded again (regradeTick); graded now: no longer awaiting
     const ungradedSql = place?.ungraded
-      ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString() }))}'`
+      ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: regrade_floor ?? floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString(), ...(typeof e._text === "string" ? { text: e._text.slice(0, 6000) } : {}) }))}'`
       : place?.graded || place?.claims // graded now, or settled by its claims: no longer awaiting
         ? ", n.`_ungraded` = null"
         : "";
@@ -156,8 +156,10 @@ export async function upsertEntities({ entities, home, floor, written_at, from_w
       .join("");
     // its end date: the writer's word, else the grader's, else unchanged
     const stored = (
-      await adbQuery(`SELECT _valid_until, _valid_by FROM ${ENTITY_LABEL} WHERE name = :name${home === undefined ? "" : " AND _origin = :origin"} LIMIT 1`, { name: e.name, origin: home })
+      await adbQuery(`SELECT @rid AS rid, _home, _valid_until, _valid_by FROM ${ENTITY_LABEL} WHERE name = :name${home === undefined ? "" : " AND _origin = :origin"} LIMIT 1`, { name: e.name, origin: home })
     )[0];
+    // an update that moves an entry takes its claims along
+    if (stored && place && stored._home !== place.home) await claimsFollowEntry(String(stored.rid), place.home);
     const validity = chooseValidity(
       parseValidUntil(e.valid_until, writtenAt),
       stored ? { valid_until: stored._valid_until ?? null, valid_by: stored._valid_by ?? null } : undefined,
@@ -389,6 +391,7 @@ async function applyRehome({ rid, name, from, to, placedBy }) {
   // a person's move is recorded: a worker can't move the entry again without asking (setHome)
   if (placedBy) await adbCommand(`UPDATE ${rid} SET _home = :to, _placed_by = :who, _placed_at = :at`, "sql", { to, who: placedBy, at: new Date().toISOString() });
   else await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
+  await claimsFollowEntry(rid, to);
   // seen from its new home: so are the things it's about
   const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
   for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to).catch(() => {});

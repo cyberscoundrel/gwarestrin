@@ -63,38 +63,68 @@ export function claimKeys(claims) {
 /** does this entity carry claims the authority rule can place (else it is residue: the grader's) */
 export const hasClaims = (entity) => claimKeys(entity?.claims).length > 0;
 
-/** lower-cased tokens for matching a claim to a sentence: 1,200 reads as 1200, 34.50 stays one token */
-const tokensOf = (s) => String(s).toLowerCase().replace(/(\d),(?=\d)/g, "$1").match(/[\p{L}\p{N}]+(?:\.\d+)?/gu) ?? [];
+/** lower-cased tokens for matching a claim to a sentence: 1,200 reads as 1200, 34.50 is 34.5 and one token */
+const tokensOf = (s) =>
+  (String(s).toLowerCase().replace(/(\d),(?=\d)/g, "$1").match(/[\p{L}\p{N}]+(?:\.\d+)?/gu) ?? []).map((t) => (/^\d+\.\d+$/.test(t) ? String(Number(t)) : t));
 const sentencesOf = (text) =>
   String(text ?? "")
     .split(/(?<=[.!?])\s+|\n+/)
     .map((s) => s.trim())
     .filter((s) => /[\p{L}\p{N}]/u.test(s));
 
-/** does the sentence state this claim: its value, or every word of its attribute, is in it */
-function stated(claim, words) {
-  const value = tokensOf(claim.value ?? "");
-  if (value.length && value.every((w) => words.has(w))) return true;
-  const attribute = normalizeAttribute(claim.attribute).split("_").filter(Boolean);
-  return attribute.length > 0 && attribute.every((w) => words.has(w));
+/**
+ * Words that carry nothing of their own, allowed around a claim. Any word not listed sends the
+ * sentence to the grader, so the list fails safe: too short costs a grader call, it can't let
+ * something through.
+ */
+const FILLER = new Set("a an the is are was were be been has have had of on in at to for from by with as and it its s this that now currently".split(" "));
+/** a value, attribute or name of more words than this is prose: it accounts for no words, or a claim could carry the restricted sentence as its own value */
+const MAX_CLAIM_WORDS = 4;
+const claimTokens = (s) => {
+  const t = tokensOf(s ?? "");
+  return t.length <= MAX_CLAIM_WORDS ? t : [];
+};
+const matches = (words, w) => words.has(w) || words.has(w.replace(/s$/, "")) || words.has(w.replace(/es$/, "")) || words.has(`${w}s`);
+
+/** what a claim says (`states`: its value and its attribute, either of which shows a sentence states it) and the words naming what it is about */
+function claimWordsOf(c) {
+  const subject = typeof c.subject === "string" ? { name: c.subject } : (c.subject ?? {});
+  const ref = (s) => claimTokens(String(s ?? "").split(":").pop());
+  return {
+    states: [claimTokens(c.value), claimTokens(normalizeAttribute(c.attribute).replace(/_/g, " "))].filter((l) => l.length),
+    about: [...claimTokens(c.class ?? subject.class), ...ref(subject.key), ...ref(subject.name)],
+  };
 }
+
+/** is this sentence nothing but claims: it states at least one, and every word in it is theirs or filler */
+function onlyClaims(sentence, claims) {
+  const words = tokensOf(sentence);
+  const present = new Set(words);
+  const stated = claims.filter((c) => c.states.some((l) => l.every((w) => matches(present, w))));
+  if (!stated.length) return false;
+  const known = new Set(stated.flatMap((c) => [...c.states.flat(), ...c.about]));
+  return words.every((w) => FILLER.has(w) || matches(known, w));
+}
+
+/** all the text an entity shows: its whole text when it was given (a section's facet is a preview), its properties, and the name a caller chose (a section's is built from its document's) */
+const textOf = (e) =>
+  [...(typeof e._text === "string" ? [e._text] : Object.values(e.facets ?? {})), ...Object.values(e.properties ?? {}), ...(e._system?._kind ? [] : [e.name])].filter((v) => typeof v === "string").join("\n");
 
 /**
  * Do this entity's claims settle where it is seen from, so the grader has nothing left to judge?
  * Only when every claim has a rule (decision 2: what maps to no rule is the grader's) and every
- * sentence of its text states one of them. A sentence no claim states is free text mapping to no
- * class, however many claims sit beside it, so a claim attached to unrelated text is no way around
- * the grader. Pure; judged on the text the grader itself would see.
+ * sentence of everything it shows is nothing but claims. A word no claim accounts for is free text
+ * mapping to no class, wherever it sits: in a sentence of its own, beside a claim in one sentence,
+ * past the preview, in a heading or in a caller's entry name. What this can't catch is a claim
+ * whose short value itself says what should be restricted: the condenser has then mapped it to a
+ * class, and the rule on that class decides. Pure.
  */
 export function claimsSettle(entity, policy) {
-  const claims = (Array.isArray(entity?.claims) ? entity.claims : []).filter((c) => c && typeof c === "object");
+  const claims = (Array.isArray(entity?.claims) ? entity.claims : []).filter((c) => c && typeof c === "object" && claimKeys([c]).length);
   const keys = claimKeys(claims);
   if (!keys.length || keys.some((k) => authorityOf(policy, k.class, k.attribute) === null)) return false;
-  const text = Object.values(entity.facets ?? {}).filter((v) => typeof v === "string").join("\n");
-  return sentencesOf(text).every((s) => {
-    const words = new Set(tokensOf(s));
-    return claims.some((c) => stated(c, words));
-  });
+  const words = claims.map(claimWordsOf);
+  return sentencesOf(textOf(entity)).every((s) => onlyClaims(s, words));
 }
 
 /**

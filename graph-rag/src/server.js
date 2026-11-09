@@ -38,6 +38,7 @@ import { ensureTriageSchema } from "./triage.js";
 import { batchTick, ensureMasterSchema, registerHandlerTools, registerLiaisonTools, registerMasterTools } from "./master-tools.js";
 import { ensurePruneSchema, pruneExpired, pruneSink } from "./pruning.js";
 import { ensurePolicySchema, loadPolicy, policy } from "./org-policy.js";
+import { settleTightening } from "./tightening.js";
 import { app } from "./routes.js";
 
 /** ---- MCP server (fresh instance per request: stateless) ---- */
@@ -512,6 +513,9 @@ async function boot() {
     setInterval(() => void loops.run("worker leases", () => expireLeases().then(wakeIdleWaiting)), 60_000);
     // entries written while the grader was out: graded once it's back
     setInterval(() => void loops.run("regrading", regradeTick), 60_000);
+    // a rule change still being worked through: at boot it is what a restart left
+    void loops.run("re-homing", settleTightening);
+    setInterval(() => void loops.run("re-homing", settleTightening), 10_000);
     await ensureMasterSchema();
     await ensureTriageSchema();
     setInterval(() => void loops.run("batches", batchTick), 30_000);

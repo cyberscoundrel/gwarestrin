@@ -5,7 +5,7 @@
 import { commonAncestor, effectiveHome, EVERYONE, homeName, visibleHomes } from "./positions.js";
 import { gradingPrompt, parseVerdicts } from "./grading.js";
 import { applyFloor, claimsSettle, floorLifts, hasClaims, place as placeOne, placeByClaims } from "./placement.js";
-import { claimHomes } from "./model/authority.js";
+import { authorityOf, claimHome, claimHomes } from "./model/authority.js";
 import { GRADER_MODEL, GRADER_TIMEOUT_MS, health, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { modelPost } from "./models.js";
@@ -130,6 +130,25 @@ export async function claimsOfEntry(rid) {
     return Array.isArray(list) ? list.filter((c) => c && typeof c === "object").map((c) => ({ class: c.class ?? null, attribute: c.attribute ?? null, _home: row?._home ?? undefined })) : [];
   } catch {
     return [];
+  }
+}
+
+/**
+ * An entry's home changed: every claim it carries follows, to the stricter of its new home and the
+ * claim's authority under today's rule, and the thing a claim is about is seen from where the claim
+ * now is. Every write of a section's home ends here (the regrade, a move, an update, an ingest
+ * finishing), so a claim is never stranded above or below the section it came from (decision 5).
+ * Idempotent. A database failure is thrown, so the caller doesn't record a move its claims missed.
+ */
+export async function claimsFollowEntry(rid, to) {
+  if (!positionMap || !RID_RE.test(String(rid))) return;
+  const edges = await adbQuery(`SELECT @rid AS rid, @in AS dst, class, attribute, _home FROM (SELECT expand(outE('CLAIMS')) FROM ${rid})`);
+  for (const e of edges) {
+    const home = claimHome(positionMap, to, authorityOf(policy.authorityMap, e.class ?? null, e.attribute ?? null));
+    if (e._home === home) continue;
+    await adbCommand(`UPDATE ${e.rid} SET _home = :home`, "sql", { home });
+    // an unresolved claim points back at its own section: no thing to show
+    if (RID_RE.test(String(e.dst)) && String(e.dst) !== String(rid)) await thingSeenFrom(String(e.dst), home);
   }
 }
 
@@ -295,7 +314,7 @@ export async function askAboutPlacement(rid, name, p) {
  */
 export async function regradeTick() {
   if (!SCOPED || !positionMap || !GRADER_MODEL || !policy.gradingEnabled || health.down(`model:${GRADER_MODEL}`)) return;
-  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _ungraded, _valid_by, _claim_classes FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL LIMIT 16`);
+  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _kind, _doc_id, _ungraded, _valid_by, _claim_classes FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL LIMIT 16`);
   const waiting = [];
   for (const r of rows) {
     let w = null;
@@ -310,11 +329,14 @@ export async function regradeTick() {
   }
   const byOrigin = Map.groupBy(waiting, (r) => `${r.w.origin}|${r.w.written_at}`);
   for (const group of byOrigin.values()) {
+    // a document before its sections: a section is homed no lower than its document, as the document now stands
+    group.sort((a, b) => Number(b._kind === "document") - Number(a._kind === "document"));
     const { origin, written_at } = group[0].w;
     const entities = [];
     for (const r of group) {
       const full = (await adbQuery(`SELECT FROM ${r.rid}`))[0] ?? {};
-      entities.push({ name: r.name, facets: Object.fromEntries(Object.keys(full).filter((k) => k.startsWith("text_") && full[k]).map((k) => [k.slice(5), full[k]])) });
+      // a claim-bearing section's whole text was kept with what it waits on (its stored facet is a preview)
+      entities.push({ name: r.name, facets: Object.fromEntries(Object.keys(full).filter((k) => k.startsWith("text_") && full[k]).map((k) => [k.slice(5), full[k]])), ...(typeof r.w.text === "string" ? { _text: r.w.text } : {}) });
     }
     const verdicts = await gradeBatch(origin, entities, Date.parse(written_at) || Date.now());
     if (verdicts.some((v) => v === undefined)) return; // still unreachable: next time
@@ -325,6 +347,13 @@ export async function regradeTick() {
         await adbCommand(`UPDATE ${rid} SET _ungraded = null`);
         continue;
       }
+      // a section waits for its document, then stays no lower than where it settled
+      let docHome = [];
+      if (r._kind === "section" && r._doc_id) {
+        const doc = (await adbQuery(`SELECT _home, _ungraded FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: r._doc_id }))[0];
+        if (doc?._ungraded) continue;
+        if (doc) docHome = [effectiveHome(positionMap, doc._home)];
+      }
       // an entry that also carries claims stays no lower than their authority puts it
       let claimed = [];
       try {
@@ -332,11 +361,15 @@ export async function regradeTick() {
       } catch {
         /* unreadable: the recorded floor is all there is */
       }
-      const p = placeOne(positionMap, { origin, verdict: verdicts[i], floor: commonAncestor(positionMap, [r.w.floor ?? origin, ...claimed]), threshold: policy.gradingConfidence });
+      const p = placeOne(positionMap, { origin, verdict: verdicts[i], floor: commonAncestor(positionMap, [r.w.floor ?? origin, ...docHome, ...claimed]), threshold: policy.gradingConfidence });
       const until = graderUntil(verdicts[i]);
       // the grader's end date, unless its writer gave one
       const validSql = until !== undefined && r._valid_by !== "writer" ? ", _valid_until = :until, _valid_by = 'grader'" : "";
-      await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null${validSql}`, "sql", { home: p.home, note: p.note, until });
+      // the claims first: if this fails the section is still waiting and the next tick does both
+      await claimsFollowEntry(rid, p.home);
+      // raised by a tightened rule while it waited, and the grader adds nothing: the rule is still why it is here
+      const note = r.w.raised && p.home === r.w.held ? r.w.raised : p.note;
+      await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null${validSql}`, "sql", { home: p.home, note, until });
       if (p.home !== r.w.held) {
         const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
         for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), p.home).catch(() => {});

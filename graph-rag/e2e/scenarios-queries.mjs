@@ -390,7 +390,8 @@ export const scenarios = [
         try {
           const cur = await tool("bob", "current_state", { subject: key });
           check(stateOf(cur, "zz_rate") === undefined, `an admin moved zz_rate to the top: bob's state loses it: ${JSON.stringify(cur).slice(0, 400)}`);
-          check((cur.things ?? [])[0]?.claims === 0, `and doesn't count it: ${JSON.stringify(cur).slice(0, 300)}`);
+          // its only statement moved up, so the subject is no longer seen from the floor at all (decision 5)
+          check((cur.things ?? []).every((t) => t.claims === 0), `and doesn't count it: ${JSON.stringify(cur).slice(0, 300)}`);
           const hist = await tool("bob", "state_history", { subject: key, attribute: "zz_rate" });
           check((hist.things ?? []).every((t) => (t.history ?? []).length === 0), `nor in history: ${JSON.stringify(hist).slice(0, 300)}`);
           const search = await tool("bob", "search_graph", { query: "e2e-b6 88103 rate", k: 4, as_of: iso(Date.now()) });

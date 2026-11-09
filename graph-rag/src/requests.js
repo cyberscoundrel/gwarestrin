@@ -6,8 +6,7 @@ import { randomUUID } from "node:crypto";
 import { ancestors, effectiveHome, heldPositions } from "./positions.js";
 import { isExpired, liveClause } from "./extent.js";
 import { grantShows, isActive } from "./grants.js";
-import { askerView, asksOnly, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needAsCommitment, needName, openUntil, ownersFor, ownerView, parseStateQuestion, pickPositions } from "./needs.js";
-import { normalize } from "./things.js";
+import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, namesOnly, needAsCommitment, needName, openUntil, ownersFor, ownerView, parseStateQuestion, pickPositions } from "./needs.js";
 import { GRADER_MODEL, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, FACETS, knownIndexes, PENDING_ID_RE, RID_RE } from "./db.js";
 import { embedBatch } from "./models.js";
@@ -15,7 +14,7 @@ import { entriesByUser, homeFilter, ownsHome, personOf, personScope, positionMap
 import { gradeBatch } from "./floor.js";
 import { grantAccess, grantCache, refreshGrants, storeGrant } from "./sharing.js";
 import { policy } from "./org-policy.js";
-import { claimView, seesSectionClaim, stateOfAttribute, subjectRef } from "./state.js";
+import { claimView, conflictsOf, seesSectionClaim, stateOfAttribute, subjectRef } from "./state.js";
 
 /** ---- needs: questions as entries (see needs.js) ---- */
 
@@ -202,9 +201,9 @@ async function claimWords() {
 
 /**
  * Answer a need from state (needs.js, "commitments with the sign flipped"): when the question asks
- * for an attribute's current value (asksCurrentValue, asksOnly: an attribute word in a question about
- * something else is not that) and exactly one thing the asker sees holds a claim on it now, that
- * claim answers it. The need is marked met by the claim's section (a NEAR meeting the asker sees),
+ * for an attribute's current value (parseStateQuestion's shapes, namesOnly: an attribute word in a
+ * question about something else is not that), exactly one thing the asker sees holds a claim on it
+ * now, and that value isn't contradicted, that claim answers it. The need is marked met by the claim's section (a NEAR meeting the asker sees),
  * nobody is asked, no model is called. Null when it isn't such a question or no state exists: then
  * the embedding path runs as before and the need reaches an owner.
  */
@@ -216,8 +215,10 @@ async function answerFromState(need, scope, identity) {
   const hits = await stateOfAttribute(parsed.subjects.map((s) => subjectRef(s)), parsed.attribute, { scope, identity });
   // none, or several things with that state: not for a query to decide
   if (hits.length !== 1) return null;
-  const { thing, claim } = hits[0];
-  if (!asksOnly(normalize(need.question.replace(/['’]s\b/g, "")), parsed.attribute, thing)) return null;
+  const { thing, claim, claims } = hits[0];
+  if (!namesOnly(parsed.about, thing)) return null;
+  // two claims in force disagree: which is true is a person's to say
+  if (conflictsOf(claims).some((c) => c.attribute === claim.attribute)) return null;
   const until = openUntil(Date.now(), policy.requestDays, null);
   await meet(need, claim.section.rid, 1, "visible");
   // (parameter names that aren't SQL words: ArcadeDB's parser reads `:by` as the keyword BY)
