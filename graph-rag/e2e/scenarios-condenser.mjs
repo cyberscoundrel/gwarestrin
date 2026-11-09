@@ -111,7 +111,7 @@ export const scenarios = [
     async run(ctx) {
       const { tool, sql, check, POS } = ctx;
       const GRAPH = ctx.GRAPH ?? process.env.GRAPH_URL ?? "http://graph-rag:8000";
-      const WRITE_TOOLS = ["upsert_entities", "ingest_document", "record_document", "set_home", "grant_access", "revoke_grant", "embed_backfill", "execute_graph"];
+      const WRITE_TOOLS = ["propose_class", "upsert_entities", "ingest_document", "record_document", "set_home", "grant_access", "revoke_grant", "embed_backfill", "execute_graph"];
       const agent = randomUUID();
       const token = ctx.delegated({ a: agent, p: [POS.ops] });
       // a chat agent no one has switched on record: it reads, and it has no write tool to call

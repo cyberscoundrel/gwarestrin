@@ -307,7 +307,7 @@ a search.${role === "worker" ? " Like search_graph, it shows what your entry's p
   if (SCOPED && writable && !role) registerRecordTools(server, { identity, scope, need });
 
   // ---- a worker or a person's chat agent proposes a commitment class for a person to confirm (routes-discovery.js) ----
-  if (SCOPED && caps.write !== "deny" && (role === "worker" || !role)) registerDiscoveryTools(server, { identity, need });
+  if (SCOPED && writable && (role === "worker" || !role)) registerDiscoveryTools(server, { identity, need });
 
   // ---- the master's tools: start workers, settle stops, hand the rest to the operator ----
   if (SCOPED && role === "master") registerMasterTools(server, { identity });
