@@ -30,6 +30,7 @@ import { ensureWorkerSchema, expireLeases, PROPOSED_NOTE, wakeIdleWaiting, worke
 import { registerWorkerTools, workerUpsert } from "./worker-tools.js";
 import { registerRecordTools } from "./record-tools.js";
 import { isOffRecord, loadThreadRecords, OFF_RECORD_REFUSAL, registerThreadRecordRoute } from "./record-state.js";
+import { registerDiscoveryTools } from "./routes-discovery.js";
 import { statements as modelStatements } from "./model/schema.js";
 import { ensureDiscoverySchema } from "./routes-discovery.js";
 import { registerQueryTools } from "./tools-queries.js";
@@ -304,6 +305,9 @@ a search.${role === "worker" ? " Like search_graph, it shows what your entry's p
 
   // ---- a person's chat agent puts a condensed section of an on-record thread on record (record-tools.js) ----
   if (SCOPED && writable && !role) registerRecordTools(server, { identity, scope, need });
+
+  // ---- a worker or a person's chat agent proposes a commitment class for a person to confirm (routes-discovery.js) ----
+  if (SCOPED && caps.write !== "deny" && (role === "worker" || !role)) registerDiscoveryTools(server, { identity, need });
 
   // ---- the master's tools: start workers, settle stops, hand the rest to the operator ----
   if (SCOPED && role === "master") registerMasterTools(server, { identity });

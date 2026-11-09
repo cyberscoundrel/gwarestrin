@@ -78,3 +78,14 @@ test("the first pass then one event: the event's draft is exactly what a re-run 
     assert.equal(r.draft, null, `${t.name} again gives nothing`);
   }
 });
+
+test("a filed class that names master data is declined: actors and resources are things, never classes", () => {
+  for (const name of ["work centers", "customers", "customer contacts", "equipment"]) {
+    const r = discoverIncremental([], { filed: { name, reason: "kept coming up" }, by: "worker:admin" });
+    assert.equal(r.draft, null, name);
+    assert.match(r.reason, /master data is seeded as things by key/, name);
+  }
+  assert.equal(discoverIncremental([], { filed: { name: "customer orders", reason: "recurs" }, by: "worker:admin" }).draft.name, "customer_orders", "an order of a customer is still a commitment");
+  assert.equal(discoverIncremental([], { filed: { name: "shift swaps", reason: "recurs" }, by: "worker:admin" }).draft.name, "shift_swaps");
+});
+

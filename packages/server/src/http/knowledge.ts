@@ -141,6 +141,9 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
     if (action !== "confirm" && action !== "retire") return reply.code(404).send({ error: "unknown action" });
     return proxy(reply, `/api/discovery/classes/${encodeURIComponent(name)}/${action}`, { method: "POST", body: req.body ?? {} });
   });
+  // the digest loader and a discovery event (a new table, a filed class): graph-rag gates both to a person at the root
+  app.post("/api/discovery/draft", async (req, reply) => proxy(reply, "/api/discovery/draft", { method: "POST", body: req.body ?? {} }));
+  app.post("/api/discovery/event", async (req, reply) => proxy(reply, "/api/discovery/event", { method: "POST", body: req.body ?? {} }));
   // what pruning removed (graph-rag shows it only to the root), and pruning now
   app.get("/api/pruned", async (_req, reply) => proxy(reply, "/api/pruned"));
   app.post("/api/pruned/run", async (_req, reply) => proxy(reply, "/api/pruned/run", { method: "POST", body: {} }));

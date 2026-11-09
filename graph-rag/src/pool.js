@@ -154,30 +154,31 @@ export function taskThreadBrief(task) {
 }
 
 /**
- * What a survey of a connection asks for: a map, things with keys,
- * relationships, follow-ups, and the first discovery pass: draft commitment
- * classes for a person to confirm (docs/ORGANIZATION-MODEL.md, "Classes and
- * instances"; discovery.js). The thread files each draft as a CommitmentClass
- * vertex (model/schema.js) through execute_graph, status 'proposed', and
- * never confirms one: confirmation is a person's act in Organization settings.
+ * What a survey of a connection asks for, the first discovery pass
+ * (docs/ORGANIZATION-MODEL.md, "What each component becomes"): a map kept in
+ * the report, master data seeded as things by key, and commitment classes
+ * drafted for a person to confirm. A survey thread is a worker, so the brief
+ * names only what a worker has (server.js, worker-tools.js, routes-discovery.js
+ * registerDiscoveryTools): it writes no entries and relates nothing. The
+ * report's table lines and [class: ...] tags are filed as drafts when the
+ * thread finishes (routes-discovery.js draftFromSurvey). A person confirms.
  */
-export function surveyBrief(connection, focus = "", audience = "everyone") {
+export function surveyBrief(connection, focus = "") {
   return [
-    audience === "everyone"
-      ? 'Write what you build for everyone in the organization: give home "Everyone" to the table entries and pattern entries you write (things linked from them are then visible to everyone too). Never copy personal details (pay, social security numbers, home addresses, phone numbers) into anything.'
-      : "Write what you build for the admin only (your default home): the admin decides later what to share.",
-    `Survey the connected source "${connection}" and turn what it holds into connected knowledge: what the organization is, how its records relate, and the main records themselves as things, linked by relationships. Rows stay in the source; the graph gets the structure.`,
+    `Survey the connected source "${connection}": the first discovery pass. Work out what the organization does, seed its master data as things with record keys, and draft the commitment classes a person will confirm. Rows stay in the source. Never copy personal details (pay, social security numbers, home addresses, phone numbers) into anything.`,
     ...(focus ? [`Focus (from the admin): ${focus}`] : []),
     "",
-    "1. Map it. List the tables (describe_entities), count rows (aggregate_records count *), and read a few rows (read_records first 3) of the tables that look central. Work out what the organization does and its main kinds of records: customers, vendors, employees, work centers or machines, parts or materials, jobs or orders, quotes, invoices.",
-    `   For each main kind write one entry with graph-rag_upsert_entities, named like "${connection}: dbo_Customer (customers)": what a row is, its key column, how many rows, what it joins to (which column points at which table). Mark these lasting. Update your task entry's identity facet with the overall picture: what the organization does and how the parts fit.`,
-    "2. Seed the master data. For tables of a few hundred rows or fewer that hold real things (customers, vendors, employees, work centers, machines), page through with read_records and link each row as a thing to that table's entry: graph-rag_link_things with entry set to the table's entry name, up to 25 things a call, each with its type, its readable name, and key \"" + connection + ":<table>:<key value>\". Don't seed transaction tables (jobs, invoices, quotes, time entries): too many.",
-    "3. Relate. Record relationships between seeded things that the data establishes, with graph-rag_relate_things and the evidence (the table and columns, or the aggregate): an employee works in a work center, a vendor supplies a material class, a customer's most common parts. Use aggregate_records with groupby for patterns over the big tables (jobs per customer, open jobs per work center, top vendors by PO count) and write each pattern you find as a short entry linked to the things it's about; give patterns that will change a valid_until of a few months.",
-    "4. Fan out. When there is more than one conversation can do well, queue a follow-up per topic with graph-rag_queue_followup and a precise brief (which tables, what to seed, which relationships), e.g. \"Seed vendors and relate them to the material classes they supply\". Don't repeat what you've done.",
-    "5. Draft the commitment classes. Every transaction table (orders, jobs, quotes, operations, purchase orders, invoices, maintenance: one row = one commitment) is a class a person will confirm; master-data tables (customers, employees, vendors, work centers, materials) are actors or resources, already seeded as things, never classes. For each transaction table read the distinct values of its status-like column (aggregate_records, groupby that column) and file ONE draft with graph-rag_execute_graph (language sql, one statement, status always 'proposed'):",
-    `   INSERT INTO CommitmentClass SET name = '<plural snake_case: orders, purchase_orders>', description = '<what one row commits>', stages = ['<status values in order, snake_case>'], record_table = '${connection}:<table>', status = 'proposed', proposed_by = 'survey:${connection}', confirmed_by = null, confirmed_at = null, attributes = ['stage', '<the other columns as snake_case attributes>'], reasons = ['<why this table is a class: its noun, its status column, its row count>']`,
-    "   The statement is proposed, not applied: the admin applies it from the worker proposals, which files the draft. Never write status = 'confirmed', never set confirmed_by or confirmed_at, and never update a CommitmentClass that exists: a person confirms, renames or retires classes in Organization settings. Skip a table whose class already exists (query_graph: SELECT name, record_table, status FROM CommitmentClass).",
-    "   A commitment pattern no table records (hires, shift swaps: it recurs in notes or the admin's focus, with no row behind it) is drafted through its pattern entry instead: end that entry's text with a tag like [class: hires; stages: opened, interviewing, offered, hired, declined; table: none; description: a hire: a commitment of a position to a person]. Say in each table's entry whether its rows are commitments (a class) or actors or resources (things).",
+    `1. Map it. List the tables (describe_entities), count rows (aggregate_records count *), and read a few rows (read_records first 3) of the tables that look central. Work out what the organization does and its main kinds of records: customers, vendors, employees, work centers or machines, parts or materials, jobs or orders, quotes, invoices. You write no entries: the map lives in your final report, which is kept on your task entry. Give each main kind a line there, named like "${connection}: dbo_Customer (customers)": what a row is, its key column, how many rows, what it joins to, and whether its rows are commitments (a class) or actors or resources (things).`,
+    `2. Seed the master data. For tables that hold real things and have only a few dozen rows (work centers, machines, then vendors, employees and customers), page through with read_records and make each row a thing with graph-rag_resolve_subject: name set to its readable name, and thing set to its name, its type (one of the types the tool lists) and its key "${connection}:<table>:<key value>". That is one call per row, so seed about 100 rows at most, smallest tables first, and say in your report which tables you seeded and which you left. A row you leave is made from its key the first time a record names it. Don't seed transaction tables (jobs, invoices, quotes, time entries): too many.`,
+    "3. Find the patterns. Use aggregate_records with groupby over the big tables (jobs per customer, open jobs per work center, top vendors by PO count) and put each pattern in your report in a line or two, with the table and columns it rests on. Relationships between things come later, from what people record: you make none.",
+    "4. Say what's left. If there is more here than one conversation can do well, name it in your report with which tables and what to seed, for the admin to start another survey with a focus.",
+    "5. Draft the commitment classes. Every transaction table (orders, jobs, quotes, operations, purchase orders, invoices, maintenance: one row = one commitment) is a class a person will confirm. Master-data tables (customers, employees, vendors, work centers, materials) are actors or resources, never classes: things by key, those of step 2 seeded already and the rest when a record names them. For each transaction table read the distinct values of its status-like column (aggregate_records, groupby that column) and end your report with these lines for it, exactly so, using the table's real name:",
+    "   dbo_Job columns: <its columns, comma-separated>",
+    "   dbo_Job rows: <the count>",
+    "   dbo_Job <its status column> values: <the distinct values, comma-separated, in the order the work goes>",
+    "   When your turn ends these lines are filed as drafts for a person, one class per transaction table, each with its record table and stages. A class that already exists is not drafted again. A table whose name hides that its rows are commitments gets its own draft: graph-rag_propose_class, with name, stages, record_table " + `"${connection}:<table>"` + " and your reason.",
+    "   A commitment pattern no table records (hires, shift swaps: it recurs in notes or the admin's focus, with no row behind it) gets a tag in your report: [class: hires; stages: opened, interviewing, offered, hired, declined; table: none; description: a hire: a commitment of a position to a person].",
+    "   You only draft. A person confirms, renames or retires classes in Organization settings, and never from one row or one note.",
     "Stay within roughly 150 tool calls. Look things up with filters; never page through a big table.",
   ].join("\n");
 }

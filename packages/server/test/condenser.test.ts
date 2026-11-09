@@ -81,6 +81,17 @@ describe("what the agent reads at every turn", () => {
     expect(classesBlock([]).join("\n")).toMatch(/no confirmed commitment classes yet.*claims: \[\]/);
   });
 
+  it("with no class that fits, the section is stored and graded and a class is proposed for a person, never made from one occurrence (decision 2)", () => {
+    for (const block of [classesBlock([]), classesBlock(classes)]) {
+      const text = block.join("\n");
+      expect(text).toMatch(/stored/);
+      expect(text).toMatch(/the grader judges who sees it/);
+      expect(text).toMatch(/graph-rag_propose_class \(name, its stages, why, and document: the doc_id/);
+      expect(text).toMatch(/Nothing maps onto it until an admin confirms it/);
+      expect(text).toMatch(/never made from one occurrence/);
+    }
+  });
+
   it("is written beside the standing instructions and removed when there is nothing to say", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "gw-home-"));
     await writeRecordContext(home, "On record\n\nsomething");

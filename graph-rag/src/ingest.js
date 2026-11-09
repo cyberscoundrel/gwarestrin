@@ -273,10 +273,10 @@ async function recordClaims(p, sections) {
   return n;
 }
 
-/** the confirmed classes claims are checked against; undefined when the graph holds none yet (class names then pass unchecked) */
+/** the confirmed classes claims are checked against; none yet means no claim can name one (decision 2: the section is stored, with no claim) */
 async function confirmedClasses() {
   const rows = await adbQuery("SELECT name, stages, record_table FROM CommitmentClass WHERE status = 'confirmed' LIMIT 500").catch(() => []);
-  return rows.length ? rows.map((r) => ({ name: r.name, stages: Array.isArray(r.stages) ? r.stages : [], record_table: r.record_table ?? null })) : undefined;
+  return rows.map((r) => ({ name: r.name, stages: Array.isArray(r.stages) ? r.stages : [], record_table: r.record_table ?? null }));
 }
 
 /** extracted facts: ordinary entries, filed no lower than their section, linked to it */

@@ -19,9 +19,10 @@
 // What the drafts rest on: the digest's table names and column names (never
 // row values; a DAB digest declares none), the distinct values of a status-like
 // column when the survey read them (`status_values`), and the survey's
-// pattern entries, which name a class the tables do not record with a tag
-// in their text:  [class: hires; stages: opened, interviewing, offered;
-// table: none]  (the survey brief, pool.js, asks for exactly that).
+// report, which names a class the tables do not record with a tag in its
+// text:  [class: hires; stages: opened, interviewing, offered; table: none]
+// (the survey brief, pool.js, asks for exactly that; reportDigest takes its
+// table lines).
 import { CLASS_STATUSES, parseTable, TYPES } from "./model/schema.js";
 
 /** who files a draft: the survey (discovery), a worker, or a person */
@@ -275,12 +276,11 @@ export function parseDigest(text, system) {
 const TAG_RE = /\[class:\s*([^\];]+)(?:;\s*([^\]]*))?\]/gi;
 
 /**
- * The classes the survey's pattern entries name: a tag in an entry's text,
- * `[class: hires; stages: opened, interviewing, offered; table: none;
- * description: ...]`. Each becomes a draft the tables could not give (no
- * source system records it), or adds stages and a description to a table's
- * draft of the same name. `patterns` are entries as the survey wrote them:
- * `{ name, text }` (text being the identity facet).
+ * The classes a survey's report names: a tag in its text, `[class: hires;
+ * stages: opened, interviewing, offered; table: none; description: ...]`.
+ * Each becomes a draft the tables could not give (no source system records
+ * it), or adds stages and a description to a table's draft of the same name.
+ * `patterns` are `{ name, text }`: the report, or entries that carry a tag.
  */
 export function patternClasses(patterns, system = "") {
   const out = [];
@@ -472,6 +472,8 @@ export function discoverIncremental(existing, event) {
     const f = event.filed;
     const name = className(f.name ?? "");
     if (!name) return { draft: null, reason: "a filed class needs a name" };
+    const shape = classifyTable({ name: name.replace(/_/g, " ") });
+    if (shape.kind === "master") return { draft: null, reason: `"${name}" names ${shape.role}s: master data is seeded as things by key, never a class` };
     const same = byName(name);
     if (same) return decline(same.status === "retired" ? `a person retired "${name}"; a worker filing it again changes nothing` : `"${name}" is already ${same.status ?? "confirmed"}`, same);
     const record_table = f.record_table && parseTable(f.record_table) ? f.record_table : null;
@@ -507,6 +509,7 @@ export function classRow(draft) {
   for (const p of props) row[p] = draft[p] === undefined ? null : draft[p];
   row.attributes = Array.isArray(draft.attributes) ? draft.attributes : ["stage"];
   row.reasons = Array.isArray(draft.reasons) ? draft.reasons : [];
+  row.occurrences = Array.isArray(draft.occurrences) ? draft.occurrences : [];
   return row;
 }
 
@@ -526,5 +529,19 @@ export function fileDraftSql(draft) {
 /** a value as an ArcadeDB SQL literal: null, a quoted string, or a list of them */
 export const sqlLiteral = (v) => (v === null || v === undefined ? "null" : Array.isArray(v) ? `[${v.map(sqlLiteral).join(", ")}]` : `'${String(v).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`);
 
-/** the properties this stream adds to the class vertex beyond the contract's: the draft's attributes and its reasons */
-export const EXTRA_CLASS_PROPERTIES = { attributes: "LIST", reasons: "LIST" };
+/** the properties this stream adds to the class vertex beyond the contract's: the draft's attributes, its reasons, and the sections that named it (when it came from one at a time) */
+export const EXTRA_CLASS_PROPERTIES = { attributes: "LIST", reasons: "LIST", occurrences: "LIST" };
+
+/**
+ * The lines of a survey's report that describe a table in the digest's own
+ * grammar (parseDigest): columns, row count, a status column's values. Only
+ * those: a report's free bullets ("- Jobs: 31k open") would read as tables.
+ */
+const REPORT_TABLE_LINE = /^[A-Za-z0-9_.]+ (?:columns: .+|rows: [\d,]+|[A-Za-z0-9_]+ values: .+)$/;
+export function reportDigest(report) {
+  return String(report ?? "")
+    .split("\n")
+    .map((l) => l.trim().replace(/^[-*]\s+/, "").replace(/`/g, "").trim())
+    .filter((l) => REPORT_TABLE_LINE.test(l))
+    .join("\n");
+}
