@@ -289,10 +289,11 @@ export const PREVIEW_CHARS = 380;
  * expected document as the contract normalizes it (relative dates resolved
  * against the recording). A stored claim keeps its own interval: decision 3
  * closes intervals at read time, per reader (state.js), and no write touches
- * an earlier claim.
+ * an earlier claim. `recordedAt(title)` is when a document was really
+ * recorded, the server's stamp: the claims' relative dates resolve against it.
  */
-export function expectedClaims(batch) {
-  const all = batch.conversations.flatMap((c) => claimsOf(normalizeDocument(c.expected.document, { now: c.recorded_at })));
+export function expectedClaims(batch, recordedAt = () => null) {
+  const all = batch.conversations.flatMap((c) => claimsOf(normalizeDocument({ ...c.expected.document, recorded_at: recordedAt(c.expected.document.title) ?? c.expected.document.recorded_at }, { now: c.recorded_at })));
   return new Map(all.map((cl) => [cl.id, cl]));
 }
 
@@ -338,8 +339,12 @@ function subjectProblem(want, thing, batchKeys) {
  *   content:    a landed claim that does not say what the oracle says (subject, kind, class, attribute, value, dates,
  *               recorder, the section it came from), a claim on a batch section the oracle does not have, or a
  *               document whose on-record marker is wrong
+ * The recording time is the server's (a condenser's word for it is ignored): a document must carry one no earlier
+ * than the batch says, or no earlier than `recordedSince` (ms) when given, which a run that started just now
+ * passes so a time merely copied from the document fails; its claims must carry the same time, and their relative
+ * dates are read against it.
  */
-export function bar(batch, rows, treeDoc = batch.tree ?? TREE) {
+export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince = null } = {}) {
   const tree = parsePositionMap(treeDoc);
   const isAbove = (home, than) => home !== than && ancestors(tree, than).includes(home);
   const findings = { rescues: [], misplaced: [], lost: [], hidden: [], content: [] };
@@ -348,7 +353,11 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE) {
   const claims = new Map((rows.claims ?? []).map((c) => [c.id, c]));
   const things = new Map((rows.things ?? []).map((t) => [String(t.rid), t]));
   const sectionByRid = new Map(sections.map((s) => [String(s.rid), s]));
-  const wanted = expectedClaims(batch);
+  const landedAt = (title) => {
+    const at = docs.get(title)?._recorded_at;
+    return at && !Number.isNaN(Date.parse(String(at).replace(" ", "T"))) ? at : null;
+  };
+  const wanted = expectedClaims(batch, landedAt);
   const batchKeys = new Set([...wanted.values()].map((c) => c.subject.key).filter(Boolean));
   // every batch entry's name and home, for the hidden-title check
   const named = [];
@@ -365,7 +374,9 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE) {
       if (doc._on_record !== true) findings.content.push(`${c.id}: the document is not marked on record`);
       if (doc._recorded_by !== x.document.recorded_by) findings.content.push(`${c.id}: the document recorded by ${JSON.stringify(doc._recorded_by)}, expected ${JSON.stringify(x.document.recorded_by)}`);
       if (doc._record_position !== x.document.position) findings.content.push(`${c.id}: the document recorded under ${JSON.stringify(doc._record_position)}, expected ${JSON.stringify(x.document.position)}`);
-      if (!sameDate(doc._recorded_at, x.document.recorded_at)) findings.content.push(`${c.id}: the document recorded at ${JSON.stringify(doc._recorded_at)}, expected ${JSON.stringify(x.document.recorded_at)}`);
+      const earliest = recordedSince ?? Date.parse(x.document.recorded_at);
+      const at = Date.parse(String(doc._recorded_at ?? "").replace(" ", "T"));
+      if (Number.isNaN(at) || at < earliest) findings.content.push(`${c.id}: the document recorded at ${JSON.stringify(doc._recorded_at ?? null)}, expected ${new Date(earliest).toISOString()} or later`);
     }
     const own = sections.filter((s) => s._doc_title === x.document.title || (doc && s._doc_id && s._doc_id === doc._doc_id));
     for (const es of x.sections) {

@@ -375,6 +375,7 @@ test("the bar compares the section and document a claim landed in, and both home
     ["_recorded_by", "mallory", /recorded by "mallory"/],
     ["_record_position", "org", /recorded under "org"/],
     ["_recorded_at", "2001-01-01T00:00:00.000Z", /recorded at "2001/],
+    ["_recorded_at", null, /recorded at null/],
   ]) {
     const r = structuredClone(rows);
     r.documents[0][field] = bad;
@@ -410,6 +411,29 @@ test("the review's case: all sixty-two with every subject, class, value and date
   assert.ok(v.findings.content.length >= 400, `${v.findings.content.length} findings`);
   assert.ok(v.findings.misplaced.length >= 40, "every document not expected at the root");
   assert.equal(failingNotes(fixture, v).size, 62);
+});
+
+test("the server stamps the recording: a later stamp is right, the claims must carry it, relative dates read against it, and a copied time fails a run that says when it began", () => {
+  const b = small();
+  const stamp = "2026-11-09T10:00:00.000Z";
+  const rows = cleanRows(b);
+  for (const d of rows.documents) d._recorded_at = stamp;
+  const rel = (c) => ({ ...c, recorded_at: stamp });
+  // a claim whose interval is relative moves with the stamp
+  const moved = new Map([...expectedClaims(b, () => stamp)]);
+  rows.claims = rows.claims.map((c) => ({ ...rel(c), valid_from: moved.get(c.id).valid_from, valid_until: moved.get(c.id).valid_until }));
+  assert.equal(bar(b, rows).ok, true, JSON.stringify(bar(b, rows).findings));
+  assert.equal(moved.get("ux-m01#0").valid_from, stamp);
+  // a claim left at the document's own time is wrong now
+  const r1 = structuredClone(rows);
+  r1.claims[0].recorded_at = b.conversations[0].recorded_at;
+  assert.ok(bar(b, r1).findings.content.some((f) => /: recorded_at /.test(f)));
+  // a document whose time is the copied one: fine by the batch alone, not for a run that started after it
+  const copied = cleanRows(b);
+  assert.equal(bar(b, copied).ok, true);
+  const strict = bar(b, copied, b.tree, { recordedSince: Date.parse(stamp) });
+  assert.equal(strict.ok, false);
+  assert.ok(strict.findings.content.every((f) => /recorded at/.test(f) || /: recorded_at |: valid_/.test(f)), JSON.stringify(strict.findings.content));
 });
 
 test("failingNotes groups findings by note", () => {
