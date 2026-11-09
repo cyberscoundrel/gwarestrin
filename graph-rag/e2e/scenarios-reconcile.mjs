@@ -14,6 +14,7 @@
 import { createServer } from "node:http";
 import { networkInterfaces, hostname } from "node:os";
 import { dabTool } from "./fake-dab-core.mjs";
+import { triageRequest } from "../src/decisions.js";
 
 const PREFIX = "e2e-reconcile";
 const q = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
@@ -165,8 +166,11 @@ export default [
       const c = await claim(ctx, sC, job4472, { cls: "jobs", attribute: "stage", value: "done", valid_from: "2026-11-09T10:00:00.000Z", recorded_by: "bob", home: ctx.POS.floor, subject: { key: "mssql:dbo_Job:4472" } });
       const no = await ctx.tool(ctx.workerToken(sC, ctx.randomUUID()), "record_conflict", { claim_ids: [a, c] });
       ctx.check(/not a conflict/.test(no.error ?? ""), `a succession is refused: ${JSON.stringify(no).slice(0, 300)}`);
-      // no decision model verdict is involved: the contradiction question is gone from triage
-      ctx.check(!(await ctx.sql("SELECT id FROM Triage WHERE reason = 'contradiction' LIMIT 1")).length, "no contradiction verdict anywhere");
+      // no decision model verdict is involved: triage asks no contradiction question, in what it builds and in every request the model has seen
+      const built = triageRequest({ name: "e2e", text: "e2e" }, {}).questions;
+      ctx.check(!("contradiction" in built) && !Object.keys(built.reason.criteria).some((k) => /contradiction/i.test(k)), `triage builds no contradiction question: ${Object.keys(built)} ${Object.keys(built.reason.criteria)}`);
+      const seen = (await (await fetch(`${ctx.MODELS}/__decisions`)).json()).decisions;
+      for (const d of seen) ctx.check(!d.questions.includes("contradiction") && !d.reasons.some((k) => /contradiction/i.test(k)), `a decision request asked about a contradiction: ${JSON.stringify(d)}`);
       ctx.check(!(await ctx.sql(`SELECT id FROM PendingWrite WHERE payload LIKE '%${a}%'`)).length, "nothing proposed for a conflict");
     },
   },

@@ -16,6 +16,13 @@ ADB_IMAGE="${ADB_IMAGE:-arcadedata/arcadedb:latest}"
 NODE="node:22-alpine"
 # per run: sessions running the harness side by side must not run each other's build
 GR_IMAGE="graph-rag:e2e-$$"
+# CLOCK_SHIFT_DAYS=30: graph-rag and the scenarios run with their clock that many days ahead (shift-clock.mjs)
+CLOCK_ENV=()
+CLOCK_MOUNT=()
+if [ -n "${CLOCK_SHIFT_DAYS:-}" ]; then
+  CLOCK_ENV=(-e "CLOCK_SHIFT_DAYS=$CLOCK_SHIFT_DAYS")
+  CLOCK_MOUNT=(-v "$PWD/e2e:/e2e:ro" -e "NODE_OPTIONS=--import /e2e/shift-clock.mjs")
+fi
 
 cleanup() {
   if [ "${KEEP:-}" != "1" ]; then
@@ -65,7 +72,7 @@ docker run --rm --network "$NET" "$NODE" node -e '
     process.exit(1);
   })();'
 
-docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$CFG:/cfg:ro" \
+docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$CFG:/cfg:ro" "${CLOCK_ENV[@]}" "${CLOCK_MOUNT[@]}" \
   -e ARCADEDB_URL=http://arcadedb:2480 -e ARCADEDB_DB=gwarestrin -e ARCADEDB_USER=root -e ARCADEDB_PASSWORD=e2e-password \
   -e LITELLM_BASE_URL=http://models:4000/v1 -e LITELLM_API_KEY=e2e \
   -e EMBED_MODEL=embed -e GRADER_MODEL=grader -e WORKER_MODEL=ds-flash \
@@ -76,7 +83,7 @@ docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$C
 
 status=0
 # the whole checkout, read-only: scenario files reach test/fixtures and src/model through run.mjs
-docker run --rm --network "$NET" -v "$PWD:/gr:ro" -e ONLY="${ONLY:-}" "$NODE" node /gr/e2e/run.mjs || status=$?
+docker run --rm --network "$NET" -v "$PWD:/gr:ro" "${CLOCK_ENV[@]}" ${CLOCK_SHIFT_DAYS:+-e NODE_OPTIONS="--import /gr/e2e/shift-clock.mjs"} -e ONLY="${ONLY:-}" "$NODE" node /gr/e2e/run.mjs || status=$?
 if [ "$status" -ne 0 ]; then
   echo "--- graph-rag log (last 60 lines) ---"
   docker logs "$NET-gr" 2>&1 | grep -v LSMVector | tail -60

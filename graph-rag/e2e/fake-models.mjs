@@ -28,6 +28,7 @@
 //                                the conversation contains match ({} clears them)
 //   POST /__reset                clears every override above (run.mjs calls it after each scenario)
 //   GET  /__calls                calls per model, plus grader:claimed (claimed items the grader was asked about)
+//   GET  /__decisions            every decision request: its question names and the reason question's criteria (kept across /__reset)
 //   GET  /__graded               the name of every item the grader was asked about, in order (kept across /__reset)
 //   GET  /__condenser            whether fake-condenser.mjs was loaded
 //   POST /__prompts              the last system prompts the linker's model was sent, newest last
@@ -271,12 +272,14 @@ export function createFakeModels({ condenser = null } = {}) {
     if (path === "/__ok") return failing.delete(body.model), send(200, { failing: Object.fromEntries(failing) });
     if (path === "/__calls") return send(200, { ...calls, "grader:claimed": counts.claimed ?? 0 });
     if (path === "/__graded") return send(200, { graded: counts.graded ?? [] });
+    if (path === "/__decisions") return send(200, { decisions: counts.decisions ?? [] });
     if (path === "/__slow") return (slow = body.model ? [...slow, body] : []), send(200, { slow });
     if (path === "/__resolve") return (resolve = body.name ? { ...resolve, [body.name]: String(body.pick) } : {}), send(200, { resolve });
     if (path === "/__condense") return (condenseLookups = body.match ? [...condenseLookups, body] : []), send(200, { condense: condenseLookups.map((l) => l.match) });
     if (path === "/__reset") return failing.clear(), (slow = []), (resolve = {}), (condenseLookups = []), send(200, { reset: true });
     if (path === "/__condenser") return send(200, { loaded: Boolean(condenser), file: condenser?.file ?? null });
     if (path === "/__prompts") return send(200, { prompts });
+    if (path === "/decisions") (counts.decisions ??= []).push({ questions: Object.keys(body.questions ?? {}), reasons: Object.keys(body.questions?.reason?.criteria ?? {}) });
     const model = path === "/decisions" ? "decisions" : body.model;
     calls[model] = (calls[model] ?? 0) + 1;
     const wait = slow.find((x) => x.model === model && JSON.stringify(body).includes(x.match));

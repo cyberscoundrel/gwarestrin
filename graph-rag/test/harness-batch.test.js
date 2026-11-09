@@ -8,10 +8,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { claimHome } from "../src/model/authority.js";
-import { claimsOf, normalizeDocument, subjectId } from "../src/model/claims.js";
+import { claimsOf, normalizeDocument, normalizeName, subjectId } from "../src/model/claims.js";
 import { parsePositionMap } from "../src/positions.js";
 import { sectionName } from "../src/documents.js";
-import { adaptClaim, bar, checkBatch, collectRows, conversationOf, expectedClaims, failingNotes, generateBatch, POSITION, prefixed, TREE, verdictLine } from "../e2e/conversations.mjs";
+import { adaptClaim, bar, checkBatch, collectRows, conversationOf, expectedClaims, failingNotes, generateBatch, POSITION, prefixed, rebaseBatch, TREE, underDefaultMap, verdictLine } from "../e2e/conversations.mjs";
 
 const read = (f) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8"));
 const oracle = read("oracle-sixty.json");
@@ -135,23 +135,27 @@ function cleanRows(b) {
     const id = subjectId(subject);
     if (!things.has(id)) {
       const label = subject.scope === "class" ? (subject.name ? `${subject.class} (${subject.name})` : subject.class) : (subject.name ?? subject.key);
-      things.set(id, { rid: `#3:${rid++}`, name: label, label, _keys: subject.key ? [subject.key] : [] });
+      things.set(id, { rid: `#3:${rid++}`, name: label, label, _keys: subject.key ? [subject.key] : [], _norm: normalizeName(label), _class: subject.class ?? null, _homes: [] });
     }
     return things.get(id).rid;
   };
   for (const c of b.conversations) {
     const d = c.expected.document;
-    documents.push({ rid: `#1:${rid++}`, name: d.title, _home: c.expected.document_home, _origin: c.position, _placed_by: null, _doc_id: c.id, _on_record: true, _recorded_by: d.recorded_by, _recorded_at: d.recorded_at, _record_position: d.position });
+    documents.push({ rid: `#1:${rid++}`, name: d.title, _home: c.expected.document_home, _origin: c.position, _placed_by: null, _doc_id: c.id, _doc_status: "ready", _on_record: true, _recorded_by: d.recorded_by, _recorded_at: d.recorded_at, _record_position: d.position });
     d.sections.forEach((s, i) => {
       const srid = `#2:${rid++}`;
-      sections.push({ rid: srid, name: sectionName(d.title, i, s.heading), _doc_title: d.title, _doc_id: c.id, _section: i, _home: c.expected.sections[i].home, _placed_by: null, text: s.text });
+      sections.push({ rid: srid, name: sectionName(d.title, i, s.heading), _doc_title: d.title, _doc_id: c.id, _section: i, _home: c.expected.sections[i].home, _origin: c.position, _placed_by: null, text: s.text });
       for (const cl of s.claims) {
         const w = wanted.get(cl.id);
-        claims.push({ id: cl.id, kind: w.kind, class: w.class, attribute: w.attribute, value: w.value, valid_from: w.valid_from, valid_until: w.valid_until, recorded_at: w.recorded_at, recorded_by: w.recorded_by, _home: c.expected.placements.find((p) => p.id === cl.id).home, out_rid: srid, in_rid: thingOf(w.subject) });
+        const home = c.expected.placements.find((p) => p.id === cl.id).home;
+        const rid_ = thingOf(w.subject);
+        const t = [...things.values()].find((x) => x.rid === rid_);
+        if (!t._homes.includes(home)) t._homes.push(home);
+        claims.push({ id: cl.id, kind: w.kind, class: w.class, attribute: w.attribute, value: w.value, valid_from: w.valid_from, valid_until: w.valid_until, recorded_at: w.recorded_at, recorded_by: w.recorded_by, _home: home, out_rid: srid, in_rid: rid_ });
       }
     });
   }
-  return { documents, sections, claims, things: [...things.values()], rescues: [] };
+  return { documents, sections, claims, things: [...things.values()], allClaims: claims.map((c) => ({ id: c.id, out_rid: c.out_rid })), rescues: [] };
 }
 
 test("the bar: a batch stored as expected is clean; each of the four failures is found and counted", () => {
@@ -174,10 +178,10 @@ test("the bar: a batch stored as expected is clean; each of the four failures is
   assert.equal(f2.misplaced.length, 2, JSON.stringify(f2.misplaced));
   assert.match(f2.misplaced[0], /seen from org, expected ops/);
   assert.match(f2.misplaced[1], /not in the graph/);
-  // a claim with no home of its own takes its section's
+  // a claim with no home of its own is misplaced: the writer always gives it one
   const r2b = structuredClone(rows);
   r2b.claims[0]._home = null;
-  assert.equal(bar(small, r2b).ok, true);
+  assert.match(bar(small, r2b).findings.misplaced[0], /seen from null, expected ops/);
   // lost text: a section missing, a section's text replaced (the field dump of 2026-10-30), a document gone
   const r3 = structuredClone(rows);
   r3.sections.splice(1, 1);
@@ -214,7 +218,7 @@ test("collectRows asks for the batch's titles and claim ids and survives a missi
     if (/FROM CLAIMS/.test(sql)) throw new Error("Type 'CLAIMS' was not found");
     return [];
   });
-  assert.deepEqual(rows, { documents: [], sections: [], claims: [], things: [], rescues: [] });
+  assert.deepEqual(rows, { documents: [], sections: [], claims: [], things: [], allClaims: [], rescues: [] });
   assert.ok(asked[0].includes(`'${small.conversations[0].expected.document.title}'`));
   assert.ok(asked.some((s) => /FROM CLAIMS WHERE id IN \['ux-m01#0'/.test(s)));
   assert.ok(asked.some((s) => /FROM PendingWrite WHERE kind = 'rehome' AND status = 'approved'/.test(s)));
@@ -456,6 +460,89 @@ test("a claim left with no thing is compared by the subject written on it; a row
   const keyed = cleanRows(b);
   point(keyed, "ux-m01#0", JSON.stringify(wanted.get("ux-m01#0").subject));
   assert.match(bar(b, keyed).findings.content.join("\n"), /left without a thing, expected the row mssql:dbo_Work_Center:INSPECT-2/);
+});
+
+test("the corruptions the re-review found unnoticed: each fails the bar on a real row shape", () => {
+  const b = small();
+  const clean = cleanRows(b);
+  assert.equal(bar(b, clean).ok, true, JSON.stringify(bar(b, clean).findings));
+  const al04 = b.conversations.find((c) => c.note === "ux-al04");
+  const firstRow = (r) => r.claims.find((c) => c.id === "ux-m01#0");
+  const all = (rows, opts) => Object.values(bar(b, rows, b.tree, opts).findings).flat().join("\n");
+  const cases = [
+    ["a subject written beside a claim's thing", (r) => (firstRow(r).subject = JSON.stringify({ name: "someone else" })), /ux-m01#0: subject: has the row/],
+    ["a claim with a wrong subject written beside a name subject", (r) => (r.claims.find((c) => c.id === "ux-m01#1").subject = JSON.stringify({ name: "someone else" })), /ux-m01#1: subject: has its thing, and/],
+    ["a second thing holding the same row", (r) => r.things.push({ rid: "#9:1", label: "twin", _keys: [firstRow(r) && "mssql:dbo_Work_Center:INSPECT-2"], _homes: ["ops"] }), /ux-m01#0: subject: a second thing holds/],
+    ["a second keyless thing of the same name and class", (r) => { const t = r.things.find((x) => x.rid === r.claims.find((c) => c.id === "ux-m01#1").in_rid); r.things.push({ rid: "#9:2", label: "twin", _keys: [], _norm: t._norm, _class: t._class, _homes: ["ops"] }); }, /ux-m01#1: subject: a second keyless thing/],
+    ["the text with a tail appended", (r) => (r.sections[0].text += " and a tail nobody wrote"), /stored text differs/],
+    ["a failed document", (r) => (r.documents[0]._doc_status = "failed"), /status is "failed"/],
+    ["a document's origin", (r) => (r.documents[0]._origin = "org"), /document's origin is "org"/],
+    ["a section's origin", (r) => (r.sections[0]._origin = "org"), /origin "org", expected/],
+    ["a section's _doc_id", (r) => (r.sections[0]._doc_id = "elsewhere"), /_doc_id "elsewhere" is not its document's/],
+    ["closed_by", (r) => (firstRow(r).closed_by = "x"), /closed_by "x": a write closed it/],
+    ["an extra section with no claims", (r) => r.sections.push({ rid: "#2:9999", name: "extra", _doc_title: al04.expected.document.title, _doc_id: al04.id, _section: 9, _home: "ops", _origin: "ops", text: "x" }), /an unexpected section "extra"/],
+    ["the thing not seen from the claim's home", (r) => { r.things.find((x) => x.rid === firstRow(r).in_rid)._homes = ["org"]; }, /ux-m01#0: subject: its thing is not seen from ops/],
+  ];
+  for (const [what, corrupt, re] of cases) {
+    const r = structuredClone(clean);
+    corrupt(r);
+    assert.equal(bar(b, r).ok, false, `${what} and still clean`);
+    assert.match(all(r), re, what);
+  }
+  // given what was there before a run: a claim the batch did not write, and a thing it minted seen from a home none of its claims is at
+  const before = { claims: new Set(), things: new Set() };
+  const r1 = structuredClone(clean);
+  r1.allClaims.push({ id: "stray", out_rid: "#9:9" });
+  assert.match(all(r1, { before }), /a claim from outside the batch: stray/);
+  assert.equal(bar(b, r1, b.tree, { before: { claims: new Set(["stray"]), things: new Set() } }).ok, true, "it was there before the run");
+  // two things already there before the run are not this run's duplicate; a new one beside an old one is
+  const r3 = structuredClone(clean);
+  const landed = r3.things.find((x) => x.rid === firstRow(r3).in_rid);
+  r3.things.push({ rid: "#9:3", label: "twin", _keys: [...landed._keys], _homes: ["ops"] });
+  assert.equal(bar(b, r3, b.tree, { before: { claims: new Set(r3.allClaims.map((c) => c.id)), things: new Set(r3.things.map((t) => t.rid)) } }).findings.content.some((f) => /a second thing/.test(f)), false);
+  assert.match(all(r3, { before: { claims: new Set(r3.allClaims.map((c) => c.id)), things: new Set(["#9:3"]) } }), /a second thing holds/);
+  const r2 = structuredClone(clean);
+  const minted = r2.things.find((x) => x.rid === firstRow(r2).in_rid);
+  minted._homes.push("org");
+  assert.match(all(r2, { before }), /seen from org, where none of its claims is/);
+  assert.equal(bar(b, r2, b.tree, { before: { claims: new Set(), things: new Set([minted.rid]) } }).ok, true, "a thing that was there before is not this run's");
+});
+
+test("rebaseBatch moves the batch to today: no date goes bad at a later run date, and day counts are unchanged", () => {
+  for (const when of ["2026-12-01T00:00:00.000Z", "2027-04-02T12:00:00.000Z", "2031-06-15T23:30:00.000Z"]) {
+    const now = Date.parse(when);
+    const moved = rebaseBatch(fixture, now);
+    for (const c of moved.conversations) normalizeDocument({ ...c.expected.document, recorded_at: new Date(now).toISOString() }, { now });
+    const rows = cleanRows(moved);
+    assert.equal(bar(moved, rows).ok, true, `${when}: ${JSON.stringify(bar(moved, rows).findings).slice(0, 400)}`);
+  }
+  const days = Math.floor((Date.parse("2027-04-02T12:00:00.000Z") - Date.parse(fixture.conversations[0].recorded_at)) / 86_400_000);
+  const moved = rebaseBatch(fixture, Date.parse("2027-04-02T12:00:00.000Z"));
+  const claimOf = (b, id) => b.conversations.flatMap((c) => c.expected.document.sections.flatMap((s) => s.claims)).find((x) => x.id === id);
+  const before = claimOf(fixture, "ux-ab05#1").valid_until;
+  const after = claimOf(moved, "ux-ab05#1").valid_until;
+  assert.equal(after.length, before.length, "a date stays a date");
+  assert.equal((Date.parse(after) - Date.parse(before)) / 86_400_000, days);
+  assert.equal(claimOf(moved, "ux-m01#0").valid_from, "recorded_at", "a relative date stays relative");
+  assert.equal(moved.conversations[0].expected.document.title, fixture.conversations[0].expected.document.title, "titles are the batch's");
+});
+
+test("underDefaultMap: with no rule, everything stays at the writer's position", () => {
+  const under = underDefaultMap(small());
+  for (const c of under.conversations) {
+    assert.ok(c.expected.placements.every((p) => p.home === c.position));
+    assert.ok(c.expected.sections.every((s) => s.home === c.position));
+    assert.equal(c.expected.document_home, c.position);
+  }
+  assert.equal(bar(under, cleanRows(under)).ok, true);
+});
+
+test("prefixed also prefixes subjects, so a prefixed batch lands on no other batch's things", () => {
+  const p = prefixed(small(), "e2e-x-1");
+  const wanted = expectedClaims(p);
+  assert.equal(wanted.get("e2e-x-1:ux-m01#0").subject.key, "mssql:dbo_Work_Center:e2e-x-1-INSPECT-2");
+  assert.equal(wanted.get("e2e-x-1:ux-m01#1").subject.name, "e2e-x-1 Exatron EPP-D98 parts (job not named)");
+  assert.deepEqual(checkBatch(p), []);
 });
 
 test("failingNotes groups findings by note", () => {

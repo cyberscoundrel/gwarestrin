@@ -562,4 +562,8 @@ for (const s of streams) {
 
 const failed = results.filter((r) => !r.skipped && !r.ok);
 console.log(`\n${summaryLine(results)}`);
-process.exit(failed.length ? 1 : 0);
+// a SKIP or a run that selected nothing proves nothing: neither is a pass
+const nothing = results.length === 0;
+const skipped = results.filter((r) => r.skipped);
+if (nothing) console.log("no scenario ran (an ONLY= that matches nothing?)");
+process.exit(failed.length || skipped.length || nothing ? 1 : 0);
