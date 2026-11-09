@@ -193,11 +193,11 @@ export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of
       const edges = [...new Map(raw.map((e) => [String(e.rid), e])).values()];
       const ends = [...new Set(edges.flatMap((e) => [String(e.src), String(e.dst)]).filter((r) => RID_RE.test(r)))];
       const nodes = ends.length
-        ? await adbQuery(`SELECT @rid AS rid, name, _home, _kind FROM [${ends.join(",")}] WHERE name IS NOT NULL${neighbours}`)
+        ? await adbQuery(`SELECT @rid AS rid, name, _home, _kind, _written_by FROM [${ends.join(",")}] WHERE name IS NOT NULL${neighbours}`)
         : [];
       const nameOf = new Map(nodes.map((n) => [String(n.rid), n.name]));
       // reading a question gives no knowledge: it doesn't bound where later writes land
-      for (const n of nodes) if (!n._kind || n._kind === "section") neighbourHomes.push(n._home);
+      for (const n of nodes) if ((!n._kind || n._kind === "section") && !(n._kind === "section" && scope.person && n._written_by === scope.person)) neighbourHomes.push(n._home);
       relationships = edges
         .filter((e) => nameOf.has(String(e.src)) && nameOf.has(String(e.dst)))
         .map((e) => ({ from: nameOf.get(String(e.src)), rel: e.rel, to: nameOf.get(String(e.dst)) }));
@@ -223,7 +223,8 @@ export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of
   const shown = results.slice(0, k).filter((r) => r.kind !== "question");
   const rids = shown.map((r) => String(r.rid)).filter((x) => RID_RE.test(x));
   const skip = new Set(
-    rids.length ? (await adbQuery(`SELECT @rid AS rid FROM [${rids.join(",")}] WHERE _kind = 'thing'`).catch(() => [])).map((r) => String(r.rid)) : [],
+    // nor does a person's own document or section, however high it was filed: they wrote it, reading it tells them nothing
+    rids.length ? (await adbQuery(`SELECT @rid AS rid FROM [${rids.join(",")}] WHERE _kind = 'thing'${scope.person ? " OR (_kind IN ['document', 'section'] AND _written_by = :rd_me)" : ""}`, { rd_me: scope.person }).catch(() => [])).map((r) => String(r.rid)) : [],
   );
   if (ownEntry) skip.add(String(ownEntry));
   readHomes.push(...shown.filter((r) => !skip.has(String(r.rid))).map((r) => r.home?.id), ...neighbourHomes.map((h) => (SCOPED && positionMap ? effectiveHome(positionMap, h) : h)));

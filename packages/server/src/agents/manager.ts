@@ -79,6 +79,8 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   private classes: { at: number; list: ConfirmedClass[] | null } = { at: 0, list: null };
   /** agents whose record state is waiting for a retry to reach graph-rag */
   private gateRetries = new Set<string>();
+  /** per agent: the latest thread-change push, and whether it failed */
+  private gatePush = new Map<string, Promise<boolean>>();
 
   constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore, profiles?: ProfileStore) {
     super();
@@ -228,7 +230,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
    * record: from now, under their position, for their reason; the agent sees
    * it in its context from its next turn (on-record.md, read by graph-context
    * every turn) with the confirmed classes in front of it. Off again: stops
-   * further recording, and graph-rag gives the agent no write tool from then
+   * further recording, and graph-rag refuses the agent's writes from then
    * on; what was recorded stays. graph-rag is told first (record-gate.ts): a
    * switch it didn't hear of fails, so the person isn't told it happened.
    */
@@ -285,14 +287,30 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
    */
   private syncRecordGate(id: string): void {
     if (this.gateRetries.has(id)) return;
-    void this.pushRecordGate(id, this.threadRecord(id)).catch((err) => {
-      log.warn(`record gate for ${id} not updated, retrying: ${err instanceof Error ? err.message : String(err)}`);
-      this.gateRetries.add(id);
-      setTimeout(() => {
-        this.gateRetries.delete(id);
-        if (this.store.get(id)) this.syncRecordGate(id);
-      }, 15_000).unref();
-    });
+    const push = this.pushRecordGate(id, this.threadRecord(id)).then(
+      () => true,
+      (err) => {
+        log.warn(`record gate for ${id} not updated, retrying: ${err instanceof Error ? err.message : String(err)}`);
+        this.gateRetries.add(id);
+        setTimeout(() => {
+          this.gateRetries.delete(id);
+          if (this.store.get(id)) this.syncRecordGate(id);
+        }, 15_000).unref();
+        return false;
+      },
+    );
+    this.gatePush.set(id, push);
+  }
+
+  /**
+   * Why a turn can't start yet, or null. A new thread starts off record while graph-rag may still hold the last
+   * thread's "on": a turn waits for the push, and is refused when graph-rag couldn't be told, since until it is the
+   * off-record thread's writes would be let through. An on-record thread is not held up (its failure only refuses).
+   */
+  async recordGateRefusal(id: string): Promise<string | null> {
+    const pushed = await this.gatePush.get(id);
+    if (pushed === false && !this.threadRecord(id).on) return "the knowledge graph couldn't be told this conversation is off record yet, so nothing can be sent for now; try again in a moment";
+    return null;
   }
 
   /** the confirmed commitment classes (CommitmentClass rows), read through graph-rag as this instance; null when they can't be read */

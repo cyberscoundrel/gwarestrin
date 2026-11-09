@@ -21,6 +21,7 @@ import { dropWaitingShares, refreshGrants, resolveWaitingShares, storeGrant } fr
 import { ASSERTIONS, meetAssertion } from "./requests.js";
 import { docStore, startIngest } from "./ingest.js";
 import { aboutOnce, ENTRY_KINDS, thingSeenFrom } from "./linker.js";
+import { settleDocument } from "./document-home.js";
 import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, worker, workerModel } from "./worker-pool.js";
 
 /**
@@ -102,13 +103,14 @@ export function decideWrite(identity, { kind, cls = null, attribute = null, clai
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
-export async function upsertEntities({ entities, home, floor, written_at, from_worker, written_by }) {
+export async function upsertEntities({ entities, home, floor, written_at, from_worker, written_by, decided }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
   // dates in the content ("next Friday") mean the day it was written, not approved
   const writtenAt = Number.isFinite(Date.parse(written_at)) ? Date.parse(written_at) : Date.now();
   // scoped: `home` is the origin; grading decides where each entity is seen from
-  const graded = home === undefined || !positionMap ? null : await placeEntities(entities, home, floor ?? home, writtenAt);
+  // `decided`: placed already by the caller (a document's entry, ingest.js), not graded twice
+  const graded = decided ?? (home === undefined || !positionMap ? null : await placeEntities(entities, home, floor ?? home, writtenAt));
   // a worker's update (direct, or a proposal someone approved) never hides an entry from the people
   // who see it: its text is mostly the worker's own reading. Hiding it is a set_home, said on purpose
   const placements = graded?.map((p) => (from_worker && p?.restricted ? { ...p, home: p.restricted.from, note: heldNote(p.restricted.from, p.restricted.reason), restricted: undefined } : p));
@@ -382,13 +384,16 @@ export async function setHome({ entities, to, reason, propose }, identity, scope
 
 async function applyRehome({ rid, name, from, to, placedBy }) {
   if (!RID_RE.test(rid)) throw new Error("invalid record id");
-  const rows = await adbQuery(`SELECT _home, name FROM ${rid}`);
+  const rows = await adbQuery(`SELECT _home, name, _kind, _doc_id FROM ${rid}`);
   // a record id can be handed to another record once its own is gone: check it's still this entry
   if (!rows.length || (name && rows[0].name !== name)) throw new Error(`entity ${name} no longer exists`);
   if (effectiveHome(positionMap, rows[0]._home) !== from) throw new Error(`entity ${name} moved since the request`);
   // a person's move is recorded: a worker can't move the entry again without asking (setHome)
   if (placedBy) await adbCommand(`UPDATE ${rid} SET _home = :to, _placed_by = :who, _placed_at = :at`, "sql", { to, who: placedBy, at: new Date().toISOString() });
   else await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
+  // a document's title goes with its most restricted section (document-home.js); moving the entry itself is where it now belongs
+  if (rows[0]._kind === "document") await adbCommand(`UPDATE ${rid} SET _doc_base = :to`, "sql", { to });
+  if (rows[0]._doc_id) await settleDocument(rows[0]._doc_id).catch((e) => log.warn(`document ${rows[0]._doc_id} not settled after a move: ${String(e).slice(0, 160)}`));
   // seen from its new home: so are the things it's about
   const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
   for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to).catch(() => {});

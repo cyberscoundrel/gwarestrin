@@ -77,6 +77,10 @@ docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$C
 status=0
 # the whole checkout, read-only: scenario files reach test/fixtures and src/model through run.mjs
 docker run --rm --network "$NET" -v "$PWD:/gr:ro" -e ONLY="${ONLY:-}" "$NODE" node /gr/e2e/run.mjs || status=$?
+# AFTER: a command run on this host against the live stack (e2e/adapter-check.mts, the agent's real MCP client, is the one that needs it)
+if [ -n "${AFTER:-}" ]; then
+  GR_URL="http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NET-gr"):8000" bash -c "$AFTER" || status=$?
+fi
 if [ "$status" -ne 0 ]; then
   echo "--- graph-rag log (last 60 lines) ---"
   docker logs "$NET-gr" 2>&1 | grep -v LSMVector | tail -60

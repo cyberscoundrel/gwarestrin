@@ -12,6 +12,7 @@ import { modelPost } from "./models.js";
 import { positionMap, SCOPED } from "./scope.js";
 import { decideWrite, queueWrite } from "./write.js";
 import { thingSeenFrom } from "./linker.js";
+import { settleDocument } from "./document-home.js";
 import { policy } from "./org-policy.js";
 
 /** ---- derived data: what an identity read bounds where its writes land ---- */
@@ -295,7 +296,7 @@ export async function askAboutPlacement(rid, name, p) {
  */
 export async function regradeTick() {
   if (!SCOPED || !positionMap || !GRADER_MODEL || !policy.gradingEnabled || health.down(`model:${GRADER_MODEL}`)) return;
-  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _ungraded, _valid_by, _claim_classes FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL LIMIT 16`);
+  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _ungraded, _valid_by, _claim_classes, _kind, _doc_id FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL LIMIT 16`);
   const waiting = [];
   for (const r of rows) {
     let w = null;
@@ -337,6 +338,9 @@ export async function regradeTick() {
       // the grader's end date, unless its writer gave one
       const validSql = until !== undefined && r._valid_by !== "writer" ? ", _valid_until = :until, _valid_by = 'grader'" : "";
       await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null${validSql}`, "sql", { home: p.home, note: p.note, until });
+      // a document's title goes with its most restricted section: its graded home or a section's has changed
+      if (r._kind === "document") await adbCommand(`UPDATE ${rid} SET _doc_base = :home`, "sql", { home: p.home });
+      if (r._doc_id) await settleDocument(r._doc_id).catch((e) => log.warn(`document ${r._doc_id} not settled after grading: ${String(e).slice(0, 160)}`));
       if (p.home !== r.w.held) {
         const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
         for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), p.home).catch(() => {});

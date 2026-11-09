@@ -259,7 +259,7 @@ async function documentOf(rid, row) {
   const recordedBy = doc?._recorded_by ?? row._recorded_by ?? row._written_by ?? doc?._written_by ?? null;
   const position = doc?._record_position ?? row._record_position ?? null;
   return {
-    title: doc?.name ?? row._doc_title ?? null,
+    title: row._doc_title ?? doc?.name ?? null, // what this section shows: the document's title may be above it
     recorded_by: recordedBy,
     recorded_at: doc?._recorded_at ?? row._recorded_at ?? null,
     position: position ? effectiveHome(positionMap, position) : effectiveHome(positionMap, row._home),
