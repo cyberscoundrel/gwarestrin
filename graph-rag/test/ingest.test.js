@@ -45,10 +45,14 @@ test("a condensed document renders to one text with a span per section, and the 
   assert.deepEqual(spans.map((s) => s.index), [0, 1, 2]);
   const back = sectionChunks(text, spans);
   assert.equal(back.length, 3);
-  assert.match(back[0].text, /^## Job 4471\n\nJob 4471 for Toro/);
+  assert.equal(back[0].heading, "Job 4471");
+  assert.match(back[0].text, /^Job 4471 for Toro/, "a section's stored text is the section text alone, as a manual's is: the heading is its own property");
+  assert.equal(back[0].text, doc.sections[0].text);
+  assert.match(back[0].embedText, /^Job 4471\nJob 4471 for Toro/, "the heading leads the embedding");
+  assert.match(text, /^## Job 4471\n\nJob 4471 for Toro/, "the document's own text keeps the heading line for a reader");
   assert.equal(back[2].heading, "");
   assert.match(back[2].text, /^Tomas was late/);
-  assert.match(back[1].embedText, /^…/, "a section's embedding carries the tail of the one before");
+  assert.match(back[1].embedText, /^Toro quote\n…Job 4471 for Toro/, "a section's embedding leads with its heading, then the tail of the one before");
   for (let i = 1; i < back.length; i++) assert.ok(back[i].start >= back[i - 1].end, "spans don't overlap");
   // the chunker would not have kept three short sections apart: the spans are what makes a section a section
   assert.notEqual(chunk(text).length, 3);
