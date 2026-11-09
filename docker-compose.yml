@@ -106,6 +106,37 @@ services:
       - backend
     restart: unless-stopped
 
+  # The write-capable DAB instance (docs/DATA-SCOPING.md: one DAB instance per
+  # access level, the SQL login is the boundary; docs/ORGANIZATION-MODEL.md,
+  # "Reference, never copy": writes into source systems go through the
+  # authority rule). Same image, its own config with its own SQL login whose
+  # grants a DBA scopes to the tables agents may enter data into (create and
+  # update, never delete; dab-config.example/dab-config-write.json). Only
+  # graph-rag reaches it (DAB_WRITE_URL below), after decideWrite says the
+  # person the agent acts for may commit to it; every write is an AuditEvent
+  # in the graph. No gwarestrin.mcp.* labels: it is never discovered as an
+  # agent connection, so no agent's sandbox gets a path to it.
+  dab-write:
+    build:
+      context: ./dab
+      network: host
+    user: "1000:1000"
+    working_dir: /etc/dab
+    environment:
+      HOME: /tmp
+      DOTNET_CLI_HOME: /tmp
+      ASPNETCORE_HTTP_PORTS: 5000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # host-generated like ./dab-config, from the write login's credentials
+      - ./dab-config-write:/etc/dab:ro
+    labels:
+      gwarestrin.net: "true"
+    networks:
+      - backend
+    restart: unless-stopped
+
   # LiteLLM gateway — one OpenAI-compatible endpoint (chat + embeddings) in
   # front of the local llama.cpp box and hosted providers (OpenRouter).
   # Config is host-generated from litellm-config.example/ (gitignored).
@@ -171,6 +202,13 @@ services:
       DECISION_API_KEY: ${OPENROUTER_API_KEY:-}
       DECISION_MODEL: ${DECISION_MODEL:-~typesafe/jev-latest}
       DECISION_URL: ${DECISION_URL:-https://openrouter.ai/api/alpha/decisions}
+      # the source systems a reconciliation worker reads rows from and enters data into
+      # (graph-rag/src/data-entry.js): the read-only DAB agents already reach, and the
+      # write-capable one only graph-rag reaches (dab-write below). Empty DAB_WRITE_URL = every
+      # data entry is proposed, none applied. DAB_SYSTEM is the key prefix ("mssql:dbo_Job:4471").
+      DAB_SYSTEM: mssql
+      DAB_READ_URL: http://dab:5000/mcp
+      DAB_WRITE_URL: ${DAB_WRITE_URL:-http://dab-write:5000/mcp}
     # public resolvers past WARP's DNS interception (the decision model's host), as for litellm
     dns:
       - 1.1.1.1

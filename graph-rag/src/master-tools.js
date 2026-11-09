@@ -1,21 +1,28 @@
 /**
- * The master (pool.master), its handlers and the liaison: batches, signals, starting and settling workers, and
- * the MCP registration of their tools.
+ * The master (pool.master), its handlers and the liaison: batches of sections, signals, starting and
+ * settling workers, and the MCP registration of their tools.
+ *
+ * The master's job is dispatch (docs/ORGANIZATION-MODEL.md, "The worker's job"): it groups the sections of
+ * a batch into workers and gives each its level. It writes no brief: a worker's brief is composed from
+ * the graph at claim time (worker-pool.js), as the section's people see it. What the master is told of a
+ * section is its id, where it is seen from and the shape of its claims, never a title or a text (the
+ * ux-av leak: titles from a root brief copied into floor notes).
  */
 import { randomUUID } from "node:crypto";
-import { EVERYONE, homeName, moveKind } from "./positions.js";
+import { effectiveHome, homeName, moveKind } from "./positions.js";
 import { z } from "zod";
 import { log } from "./context.js";
 import { adbCommand, adbQuery, RID_RE } from "./db.js";
 import { positionMap } from "./scope.js";
 import { approvePending, rejectPending } from "./write.js";
-import { answerQuestions, createTask, JOB_ID_RE, listProposals, listQuestions, proposalLands, resumeThread, worker } from "./worker-pool.js";
+import { answerQuestions, enqueue, JOB_ID_RE, listProposals, listQuestions, proposalLands, resumeThread, worker } from "./worker-pool.js";
+import { sectionFacts } from "./triage.js";
 
 /**
- * ---- the master (pool.master): a long-running thread plans batches of saved
- * entries and starts workers; graph-rag keeps its inbox (Signal), the batches
- * (Batch) and the handlers (Job kind "handler": one stopped worker each, which
- * the operator settles). Workers started by the master have parent MASTER.
+ * ---- the master (pool.master): a long-running thread dispatches batches of
+ * sections to workers; graph-rag keeps its inbox (Signal), the batches
+ * (WorkBatch) and the handlers (Job kind "handler": one stopped worker each,
+ * which the operator settles). Workers started by the master have parent MASTER.
  */
 export const MASTER = "master";
 
@@ -58,7 +65,30 @@ export async function masterStatus() {
   return { on: !!worker.pool.master && worker.pool.poolSize > 0, handlers, maxHandlers: worker.pool.maxHandlers, halted: handlers >= worker.pool.maxHandlers, intake, signals };
 }
 
-/** a batch closes at batchSize entries or when its oldest has waited batchMinutes; not while halted */
+/**
+ * What the master is told of one section: its id, where it is seen from, and the shape of its claims
+ * (from the intake payload when triage computed it, else from the graph now). No title, no text.
+ */
+export async function sectionForMaster(rid, p = {}) {
+  const row = (await adbQuery(`SELECT _home, _kind FROM ${rid}`).catch(() => []))[0];
+  if (!row) return null;
+  const shape = p.claims !== undefined ? p : (await sectionFacts(rid).catch(() => null)) ?? {};
+  const facts = shape.facts ?? shape;
+  return {
+    rid: String(rid),
+    home: homeName(positionMap, row._home),
+    kind: row._kind ?? "entry",
+    claims: Number(facts.claims ?? 0),
+    unresolved: Number(facts.unresolved ?? 0),
+    conflicts: Number(facts.conflicts ?? 0),
+    keyed: Number(facts.keyed ?? 0),
+    classes: shape.classes ?? [],
+    attributes: shape.attributes ?? [],
+    ...(p.triage ? { triage: p.triage } : {}),
+  };
+}
+
+/** a batch closes at batchSize sections or when its oldest has waited batchMinutes; not while halted */
 export async function batchTick() {
   const st = await masterStatus();
   if (!st.on || st.halted || !st.intake) return;
@@ -66,55 +96,79 @@ export async function batchTick() {
   const oldest = Date.parse(rows[0]?.created_at ?? "");
   if (rows.length < worker.pool.batchSize && !(Date.now() - oldest >= worker.pool.batchMinutes * 60_000)) return;
   const batch = randomUUID();
-  const entries = [];
+  const sections = [];
   const taken = [];
   for (const r of rows) {
     const p = JSON.parse(r.payload || "{}");
-    const row = RID_RE.test(String(p.rid)) ? (await adbQuery(`SELECT name, _home FROM ${p.rid}`).catch(() => []))[0] : null;
     taken.push(r.id);
-    if (!row?.name) continue; // gone since it was saved
-    const edges = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${p.rid})`).catch(() => []);
-    const dsts = edges.map((e) => String(e.dst)).filter((x) => RID_RE.test(x));
-    const things = dsts.length ? await adbQuery(`SELECT label, _thing_type FROM [${dsts.join(",")}]`).catch(() => []) : [];
-    entries.push({ name: row.name, home: homeName(positionMap, row._home), links: things.map((t) => `${t.label} (${t._thing_type})`), unsure: p.unsure ?? [], fresh: p.fresh ?? [], ...(p.triage ? { triage: p.triage } : {}) });
+    const s = RID_RE.test(String(p.rid)) ? await sectionForMaster(p.rid, p) : null;
+    if (!s) continue; // gone since it was recorded
+    sections.push(s);
   }
-  // the batch and its signal first: entries leave the intake only once the master will hear of them
-  if (entries.length) {
-    await adbCommand("INSERT INTO WorkBatch SET id = :id, entries = :e, status = 'open', created_at = :now", "sql", { id: batch, e: JSON.stringify(entries.map((e) => e.name)), now: new Date().toISOString() });
-    await emitSignal("batch", { batch_id: batch, data: { entries } });
+  // the batch and its signal first: sections leave the intake only once the master will hear of them
+  if (sections.length) {
+    await adbCommand("INSERT INTO WorkBatch SET id = :id, entries = :e, status = 'open', created_at = :now", "sql", { id: batch, e: JSON.stringify(sections.map((s) => s.rid)), now: new Date().toISOString() });
+    await emitSignal("batch", { batch_id: batch, data: { sections } });
   }
   for (const id of taken) await adbCommand("UPDATE Job SET status = 'done', summary = :b, updated_at = :now WHERE id = :id AND status = 'pending'", "sql", { b: `batch ${batch}`, now: new Date().toISOString(), id });
-  if (!entries.length) return;
-  log.info(`batch ${batch.slice(0, 8)}: ${entries.length} entries for the master`);
+  if (!sections.length) return;
+  log.info(`batch ${batch.slice(0, 8)}: ${sections.length} sections for the master`);
 }
 
-/** the master starts a worker: a task (a brief, the entries it's about), run by the pool */
+/**
+ * The master starts a worker on sections (by id): a review job whose brief is composed at claim time.
+ * The sections must be seen from one position (one worker per position: its reads of one would hold
+ * its writes to another); the brief is checked again when claimed. Its level of work (which model runs
+ * it): the master's call, else the highest triage level among its sections, else an investigation.
+ */
 async function masterStartWorker(args, identity) {
-  const names = (args.entries ?? []).slice(0, 25);
-  const brief = [String(args.brief), ...(names.length ? ["", `The entries this is about: ${names.map((n) => `"${n}"`).join(", ")} (read them in the graph).`] : [])].join("\n");
-  // its level of work (which model runs it): the master's call, else the highest triage level among its entries, else an investigation
+  const rids = [...new Set((args.sections ?? []).map((s) => String(s).trim()))].slice(0, 25);
+  if (!rids.length) throw new Error("which sections (their ids)");
+  const bad = rids.filter((r) => !RID_RE.test(r));
+  if (bad.length) throw new Error(`not section ids: ${bad.join(", ")}`);
+  const homes = new Map();
+  for (const r of rids) {
+    const row = (await adbQuery(`SELECT _home, _kind FROM ${r}`).catch(() => []))[0];
+    if (!row) throw new Error(`no section ${r}`);
+    if (row._kind && !["section", "task"].includes(row._kind)) throw new Error(`${r} is a ${row._kind}, not a section`);
+    homes.set(r, effectiveHome(positionMap, row._home));
+  }
+  const distinct = [...new Set(homes.values())];
+  if (distinct.length > 1) throw new Error(`the sections are seen from different positions (${distinct.map((h) => homeName(positionMap, h)).join(", ")}): one worker per position`);
   let level = Number(args.level) || 0;
-  if (!level && names.length) {
-    for (const n of names) {
-      const t = (await adbQuery("SELECT level FROM Triage WHERE name = :n ORDER BY created_at DESC LIMIT 1", { n }).catch(() => []))[0];
+  if (!level) {
+    for (const r of rids) {
+      const t = (await adbQuery("SELECT level FROM Triage WHERE rid = :r ORDER BY created_at DESC LIMIT 1", { r }).catch(() => []))[0];
       level = Math.max(level, Number(t?.level ?? 0));
     }
   }
-  const r = await createTask({ title: args.title, brief, minutes: args.minutes, parent: MASTER, by: identity.user, audience: args.audience === "everyone" ? EVERYONE : undefined, entries: names, level: level || 2 });
-  return { ...r, note: "Started: you'll get a signal when it's done or stopped." };
+  const label = `${rids.length} section${rids.length === 1 ? "" : "s"} at ${homeName(positionMap, distinct[0])}`;
+  const job = await enqueue(
+    "review",
+    { rid: rids[0], sections: rids, parent: MASTER, by: identity.user, label, minutes: Math.max(5, Math.min(180, Number(args.minutes) || worker.pool.threadMinutes)), level: Math.max(1, Math.min(3, level || 2)) },
+    { key: `reconcile:${rids.join(",")}`, priority: 3 },
+  );
+  return { job, sections: rids, level: Math.max(1, Math.min(3, level || 2)), note: "Started: you'll get a signal when it's done or stopped. Its brief is composed from the graph as its sections' people see it." };
 }
 
-/** one worker's situation, for the master or its handler */
+/** one worker's situation, for the master or its handler: no brief text, the sections by id */
 async function workerSituation(jobId) {
   if (!JOB_ID_RE.test(String(jobId))) throw new Error("which worker (its job id)");
   const job = (await adbQuery("SELECT status, payload, summary, changes, agent_id, updated_at FROM Job WHERE id = :id AND kind = 'review'", { id: jobId }))[0];
   if (!job) throw new Error(`no worker ${jobId}`);
   const p = JSON.parse(job.payload || "{}");
+  const rids = [...new Set([p.rid, ...(Array.isArray(p.sections) ? p.sections : [])].filter((r) => RID_RE.test(String(r))))];
+  const sections = [];
+  for (const r of rids) {
+    const s = await sectionForMaster(r);
+    if (s) sections.push(s);
+  }
   return {
     job: jobId,
-    title: p.task?.title ?? null,
+    title: p.label ?? p.task?.title ?? null,
     status: job.status,
-    brief: String(p.task?.brief ?? "").slice(0, 3000),
+    level: p.level ?? null,
+    sections,
     report: String(job.summary ?? "").slice(0, 3000),
     changes: JSON.parse(job.changes || "[]").slice(-30),
     ...(await openItems(jobId)),
@@ -129,11 +183,12 @@ async function answerWorker(jobId, answer, by) {
   return { resumed: true, answered: items.questions.length };
 }
 
-/** raw commands and widening who sees something are the operator's, whatever the master thinks */
+/** raw commands, widening who sees something, and writes into a source system are the operator's, whatever the master thinks */
 async function needsOperator(id) {
   const rec = (await adbQuery("SELECT kind, payload FROM PendingWrite WHERE id = :id", { id }))[0];
   if (!rec) return null;
   if (rec.kind === "command") return "a raw command";
+  if (rec.kind === "data_entry") return "a write into a source system";
   if (rec.kind === "rehome") {
     const m = JSON.parse(rec.payload);
     if (moveKind(positionMap, m.from, m.to) === "widen") return "widening who sees something";
@@ -217,25 +272,22 @@ export async function decideProposal(id, approve, reason, identity) {
 export function registerMasterTools(server, { identity }) {
   server.tool(
     "start_worker",
-    `Start a worker on a piece of work: a title, a precise brief (what to do, which entries, what a good
-result is) and the entries it's about (by name: the worker reads them). Group entries that belong
-together into one worker. audience "everyone" lets it write for Everyone (only for organization-wide
-knowledge). level picks the model it runs on: 1 a quick check, 2 an investigation, 3 a broad or
-structural matter (default: the highest triage level among its entries). You get a signal when it's
-done or stopped. The brief names no entry its entries' people can't see: the worker writes for them.`,
+    `Start a worker on sections of a batch (by id). Group sections seen from the same position that share
+a subject, an instance or a class; sections seen from different positions never share a worker. The
+worker's brief is composed from the graph as its sections' people see it: you write none. level picks
+the model it runs on: 1 a quick check (one claim against one row), 2 an investigation (several claims,
+an unresolved subject, a conflict), 3 a broad matter (default: the highest triage level among its
+sections). You get a signal when it's done or stopped.`,
     {
-      title: z.string().min(4).max(120),
-      brief: z.string().min(20).max(6000),
-      entries: z.array(z.string().max(200)).max(25).optional(),
+      sections: z.array(z.string().max(40)).min(1).max(25),
       minutes: z.number().int().min(5).max(180).optional(),
-      audience: z.enum(["everyone", "default"]).optional(),
       level: z.number().int().min(1).max(3).optional(),
     },
     async (args) => ({ content: [{ type: "text", text: JSON.stringify(await masterStartWorker(args, identity)) }] }),
   );
   server.tool(
     "worker_status",
-    "A worker's situation: its status, brief, report, changes, and the questions and proposals it's waiting on.",
+    "A worker's situation: its status, sections (by id, with the shape of their claims), report, changes, and the questions and proposals it's waiting on.",
     { job: z.string() },
     async (args) => ({ content: [{ type: "text", text: JSON.stringify(await workerSituation(args.job)) }] }),
   );
@@ -248,9 +300,9 @@ resumes in its own conversation.`,
   );
   server.tool(
     "decide_proposal",
-    `Apply or reject a worker's proposal yourself (its worker resumes with your decision). Raw commands and
-widening who sees something are the operator's: hand those to a handler, once they're queued (the
-handler applies them on the operator's word; asking first means a second handler to apply them).`,
+    `Apply or reject a worker's proposal yourself (its worker resumes with your decision). Raw commands,
+widening who sees something, and writes into a source system (data entries) are the operator's: hand
+those to a handler, once they're queued (the handler applies them on the operator's word).`,
     { id: z.string(), approve: z.boolean(), reason: z.string().max(1000).optional() },
     async (args) => {
       const why = await needsOperator(args.id);
@@ -273,7 +325,7 @@ records their decision. Describe what's going on and what needs deciding, plainl
   );
   server.tool(
     "pool_status",
-    "How the pool stands: workers by status, handlers waiting on the operator (and whether that halts new batches), entries waiting for the next batch.",
+    "How the pool stands: workers by status, handlers waiting on the operator (and whether that halts new batches), sections waiting for the next batch.",
     {},
     async () => {
       const counts = await adbQuery("SELECT status, count(*) AS n FROM Job WHERE kind = 'review' GROUP BY status").catch(() => []);
@@ -286,7 +338,7 @@ records their decision. Describe what's going on and what needs deciding, plainl
 export function registerHandlerTools(server, { identity }) {
   server.tool(
     "worker_status",
-    "The stopped worker you handle: its brief, report, changes, and the questions and proposals it waits on.",
+    "The stopped worker you handle: its sections, report, changes, and the questions and proposals it waits on.",
     {},
     async () => {
       const h = (await adbQuery("SELECT payload FROM Job WHERE id = :id AND kind = 'handler'", { id: identity.role.job }))[0];
@@ -297,7 +349,7 @@ export function registerHandlerTools(server, { identity }) {
     "decide_for_worker",
     `Record the operator's decision, only on their word: their answer to the worker's questions, which
 proposals to apply, which to reject (with their reason). Proposals are this worker's, or any other pending
-one the operator's decision covers (by id: the grader's moves, another worker's duplicate), so one decision
+one the operator's decision covers (by id: the grader's moves, another worker's data entry), so one decision
 settles it. The worker resumes and the master is told.`,
     {
       answer: z.string().max(3000).optional(),
@@ -312,7 +364,7 @@ settles it. The worker resumes and the master is told.`,
 export function registerLiaisonTools(server, { identity }) {
   server.tool(
     "list_worker_questions",
-    "The questions graph worker threads are waiting on, oldest first: which entry, the question, its options, and why the thread asks.",
+    "The questions graph worker threads are waiting on, oldest first: which section, the question, its options, and why the thread asks.",
     {},
     async () => ({ content: [{ type: "text", text: JSON.stringify({ questions: await listQuestions("open") }) }] }),
   );
@@ -329,7 +381,7 @@ dismiss: true closes the questions without an answer (the threads finish as they
   );
   server.tool(
     "list_worker_proposals",
-    "Changes graph worker threads proposed (to entries that aren't theirs, merges, raw commands), with each thread's reason.",
+    "Changes graph worker threads proposed (data entries into a source system they lack authority for, and the like), with each thread's reason and what each would do.",
     {},
     async () => ({ content: [{ type: "text", text: JSON.stringify({ proposals: await listProposals() }) }] }),
   );

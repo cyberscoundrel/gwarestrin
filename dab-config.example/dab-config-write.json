@@ -1,0 +1,32 @@
+{
+  "$schema": "https://github.com/Azure/data-api-builder/releases/latest/download/dab.draft.schema.json",
+  "data-source": {
+    "database-type": "mssql",
+    "connection-string": "Server=host.docker.internal,1433;Database=mydb;User Id=gw_writer;Password=CHANGEME;TrustServerCertificate=True"
+  },
+  "autoentities": {
+    "writable-mydb": {
+      "patterns": {
+        "include": ["dbo.Job", "dbo.Order", "dbo.Maintenance"],
+        "name": "{schema}_{object}"
+      },
+      "template": {
+        "mcp": { "dml-tools": true },
+        "rest": { "enabled": false },
+        "graphql": { "enabled": false }
+      },
+      "permissions": [{ "role": "anonymous", "actions": [{ "action": "read" }, { "action": "create" }, { "action": "update" }] }]
+    }
+  },
+  "runtime": {
+    "rest": { "enabled": false },
+    "graphql": { "enabled": false },
+    "host": {
+      "mode": "development",
+      "authentication": { "provider": "Simulator" }
+    },
+    "mcp": {
+      "description": "The write-capable Data API builder instance for data entry by graph-rag's reconciliation workers (graph-rag/src/data-entry.js). Its SQL login (gw_writer) is granted INSERT and UPDATE on the tables listed here and nothing else; DAB never deletes. Only graph-rag reaches this endpoint, after the authority rule says the person the worker acts for may commit to the class and attribute; every write is recorded as an AuditEvent in the graph."
+    }
+  }
+}

@@ -27,7 +27,7 @@ export function buildGraphRoleInstructions({
   if (graph) {
     src.push(
       graphRole === "worker"
-        ? "- The knowledge graph (graph-rag): as the people who see your entry see it. beyond: true on search_graph, about_thing or read_document shows everything, after which what you write may be held for an admin."
+        ? "- The knowledge graph (graph-rag): as the people who see your section see it. beyond: true on search_graph, about_thing or read_document shows everything, after which what you write may be held for an admin."
         : "- The knowledge graph (graph-rag): the whole organization's, in full.",
     );
   }
