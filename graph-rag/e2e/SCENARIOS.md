@@ -55,6 +55,7 @@ Everything `run.mjs` has, by name, on one object:
 | `entry(name)` | `{ rid, name, _home, _grade, _ungraded, _mentions_at }` of an entry, or undefined |
 | `thing(label)` | `{ rid, name }` of a thing by its label |
 | `job(rid, kind = "mentions")` | the latest Job row whose payload names the rid |
+| `unresolved(name)` | what the linker left unresolved on an entry (`_unresolved`, parsed; `[]` when nothing) |
 | `until(label, fn, timeoutMs = 240000)` | polls `fn` every 3 s until it returns truthy; throws with `label` |
 | `check(cond, message)` | throws `message` when `cond` is falsy |
 | `save(who, name, text)` | `upsert_entities` of one note with that identity text |

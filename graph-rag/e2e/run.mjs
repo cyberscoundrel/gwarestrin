@@ -44,6 +44,8 @@ const api = async (path, opts = {}) => (await fetch(`${GRAPH}${path}`, { ...opts
 const models = (path, body) => fetch(`${MODELS}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
 const entry = async (name) => (await sql(`SELECT @rid AS rid, name, _home, _grade, _ungraded, _mentions_at FROM Entity WHERE name = '${name}'`))[0];
 const thing = async (label) => (await sql(`SELECT @rid AS rid, name FROM Entity WHERE _kind = 'thing' AND label = '${label}'`))[0];
+/** what the linker left unresolved on an entry (the Admission stream: a bare name is a worker's or a person's to settle, never minted) */
+const unresolved = async (name) => JSON.parse((await sql(`SELECT _unresolved FROM Entity WHERE name = '${name}'`))[0]?._unresolved ?? "[]");
 const job = async (rid, kind = "mentions") => (await sql(`SELECT status, attempts, error, payload FROM Job WHERE kind = '${kind}' AND payload LIKE '%${rid}%' ORDER BY created_at DESC LIMIT 1`))[0];
 
 async function until(label, fn, timeoutMs = 240_000) {
@@ -113,7 +115,7 @@ await scenario("the grader out: held one level up, no proposal, graded on its ow
   check(/graded/.test(back._grade), `grade note: ${back._grade}`);
 });
 
-await scenario("the linking model out of credit: the job waits without spending retries, then runs", async () => {
+await scenario("the linking model out of credit: the job waits without spending retries, then runs; a bare name is left unresolved, not minted", async () => {
   await models("/__fail", { model: "ds-flash", status: 402 });
   await save("alice", "e2e-a3 hill pins", "HILL shipped the gage pins. [things: HILL/supplier]");
   const e = await entry("e2e-a3 hill pins");
@@ -126,15 +128,21 @@ await scenario("the linking model out of credit: the job waits without spending 
   check(st.dependencies?.["model:ds-flash"]?.ok === false, "the model route shown out");
   await models("/__ok", { model: "ds-flash" });
   await until("job done", async () => ((await job(String(e.rid)))?.status === "done" ? true : false));
-  check(await thing("HILL"), "HILL linked");
+  // admission (docs/ORGANIZATION-MODEL.md): the linker on its own mints nothing from a name; it comes back on the entry for a worker or a person
+  check(!(await thing("HILL")), "HILL is not minted from a bare name");
+  const left = await unresolved("e2e-a3 hill pins");
+  check(left.some((u) => u.name === "HILL"), `HILL is left unresolved on the entry: ${JSON.stringify(left)}`);
 });
 
-await scenario("an entry's code is never a placeholder thing", async () => {
+await scenario("an entry's code is never a placeholder thing, and a bare machine name is left unresolved rather than minted", async () => {
   await save("alice", "e2e-z04 inspect-2 new pins", "The old pin gauges on INSPECT-2 are retired. [things: e2e-z04/part, INSPECT-2/machine]");
   const e = await entry("e2e-z04 inspect-2 new pins");
   await until("linked", async () => ((await job(String(e.rid)))?.status === "done" ? true : false));
-  check(await thing("INSPECT-2"), "INSPECT-2 made a thing");
+  check(!(await thing("INSPECT-2")), "no thing minted from the bare name INSPECT-2 (a key, a person or a worker mints)");
   check(!(await thing("e2e-z04")), "no placeholder for the entry's code");
+  const left = await unresolved("e2e-z04 inspect-2 new pins");
+  check(left.some((u) => u.name === "INSPECT-2"), `INSPECT-2 waits on the entry for a worker or a person: ${JSON.stringify(left)}`);
+  check(!left.some((u) => u.name === "e2e-z04"), "the entry's own code is a cross-reference, not an unresolved name");
 });
 
 await scenario("the sweep embeds rows whose text the old inline SQL couldn't parse", async () => {
@@ -160,16 +168,21 @@ await scenario("the sweep never writes over the text a save stored while it ran"
   }
 });
 
-await scenario("with triage ahead, a new name becomes a thing only after triage: now for no work, else for a worker", async () => {
+await scenario("with triage ahead, a bare name becomes a thing for nobody: triage mints nothing for a plain note, and the investigation reaches the master with the name still unminted", async () => {
   await api("/api/worker", { method: "PUT", body: JSON.stringify({ pool: { poolSize: 2, master: true, batchSize: 50, batchMinutes: 60 } }) });
   await save("alice", "e2e-t1 diep starts", "Diep starts on CNC 2 Monday. [things: Diep/person]");
   await save("alice", "e2e-t2 john henry quote [L2]", "Ask John Henry Foster for a quote. [L2] [things: John Henry Foster/supplier]");
   const t1 = await entry("e2e-t1 diep starts");
   const t2 = await entry("e2e-t2 john henry quote [L2]");
-  await until("plain one linked after triage", async () => ((await thing("Diep")) ? true : false), 120_000);
+  // before admission, triage made the plain note's new name a thing once it found no work; now nothing but a key, a person or a worker mints
+  const triaged = await until("the plain one triaged", async () => (await sql("SELECT level FROM Triage WHERE name = 'e2e-t1 diep starts'"))[0] ?? false, 120_000);
+  check(Number(triaged.level) === 0, `triaged as nothing to do: ${JSON.stringify(triaged)}`);
+  check(!(await thing("Diep")), "no Diep minted from a bare name, before or after triage");
+  check((await unresolved("e2e-t1 diep starts")).some((u) => u.name === "Diep"), "Diep stays unresolved on the entry for a worker or a person");
   const intake = await until("investigation queued for the master", async () => (await job(String(t2.rid), "intake")) ?? false, 120_000);
-  check(String(intake.payload).includes("John Henry Foster"), `the new name goes to the master: ${intake.payload}`);
+  check(String(intake.payload).includes(String(t2.rid)), `the investigation goes to the master: ${intake.payload}`);
   check(!(await thing("John Henry Foster")), "no thing made before a worker decides");
+  check((await unresolved("e2e-t2 john henry quote [L2]")).some((u) => u.name === "John Henry Foster"), "the name waits on the entry for the master's worker");
   check(!(await job(String(t1.rid), "intake")), "the plain one needs no worker");
 });
 
@@ -500,6 +513,7 @@ const context = {
   entry,
   thing,
   job,
+  unresolved,
   until,
   check,
   save,
