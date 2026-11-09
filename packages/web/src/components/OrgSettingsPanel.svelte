@@ -160,7 +160,7 @@
     rules[i] = { ...rules[i], ...patch } as Rule;
     if (draft) draft.authorityMap = mapOf(rules);
   }
-  /** as the server normalizes it (a claim's attributes are normalized the same way): "Pay Rate" -> pay_rate */
+  /** as the server normalizes a rule's class and attribute (a claim's are matched the same way): "Pay Rate" -> pay_rate */
   const attributeKey = (s: string) =>
     s
       .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
@@ -334,7 +334,7 @@
       {/if}
       {#each rules as r, i (i)}
         <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
-          <input class="input" placeholder="any class" aria-label="class" value={r.cls} oninput={(e) => setRule(i, { cls: e.currentTarget.value })} />
+          <input class="input" placeholder="any class" aria-label="class" value={r.cls} oninput={(e) => setRule(i, { cls: e.currentTarget.value })} onchange={(e) => setRule(i, { cls: attributeKey(e.currentTarget.value) })} />
           <input class="input" placeholder="whole class" aria-label="attribute" value={r.attribute} oninput={(e) => setRule(i, { attribute: e.currentTarget.value })} onchange={(e) => setRule(i, { attribute: attributeKey(e.currentTarget.value) })} />
           <select class="input" aria-label="position holding authority" value={r.position} onchange={(e) => setRule(i, { position: e.currentTarget.value })}>
             {#each positionOptions as o (o.value)}<option value={o.value}>{o.label}</option>{/each}

@@ -108,13 +108,16 @@ admin edits. `classes[name].authority`, `classes[name].attributes[attr]`,
   is homed no lower than its most restricted claim and no lower than its
   document (decision 5), the stricter winning (`positions.commonAncestor`).
   The grader runs on text no rule covers: a section with no claim, a claim
-  with no rule (decision 2), or a sentence no ruled claim states; its verdict
-  can only restrict further than the claims' placement (`placement.claimsSettle`).
-  A policy's attribute names are normalized as a claim's are. An authority
+  with no rule (decision 2), or any word of its text, heading or entry name
+  that isn't one of its claims' or filler; its verdict can only restrict
+  further than the claims' placement (`placement.claimsSettle`). A policy's
+  class and attribute names are normalized as a claim's attribute is. An authority
   a policy names that the tree no longer has stays in the map and counts as
   the root (`staleAuthorities` lists them; `policy.normalizeStored` logs them).
 - **Provenance sets the home; nothing widens it.** `claimHome` never returns
-  a position below the origin. Unknown anything fails upward.
+  a position below the origin. Unknown anything fails upward. A claim's stored
+  home follows its section whenever the section moves, no lower than the
+  claim's authority (`floor.claimsFollowEntry`).
 - **Errors name the field.** `ClaimError.field` is a path
   (`sections[1].claims[0].value`); `validateDocument` returns every claim's
   error at once; `validatePolicy` throws with the field.

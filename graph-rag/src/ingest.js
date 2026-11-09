@@ -16,7 +16,7 @@ import { DOC_STORE, EXTRACT_MODEL, GRADER_MODEL, log } from "./context.js";
 import { adbCommand, adbQuery, ensureIndex, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.js";
 import { chat, embedBatch } from "./models.js";
 import { homeFilter, personOf, positionMap, resolveWriteHome, writerOf } from "./scope.js";
-import { derivedFloor, recordReads } from "./floor.js";
+import { claimsFollowEntry, derivedFloor, recordReads } from "./floor.js";
 import { queueWrite, upsertEntities } from "./write.js";
 // the Authority stream's exports, once merged (docs/ORGANIZATION-MODEL.md; MAP.md): decideWrite in write.js
 // decides a record's write by its claims' authority, placeByClaims in placement.js homes an entity by the
@@ -139,12 +139,15 @@ async function ingestDocument(p) {
         _embed: { identity: c.embedText },
         ...(c.heading ? { properties: { heading: c.heading } } : {}),
         ...(vu ? { valid_until: vu } : {}),
-        ...(byClaims && claimsOfSection.has(c.index) ? { claims: claimsOfSection.get(c.index) } : {}),
+        // its whole text goes with its claims: the facet is a preview, and what they don't account for is the grader's
+        ...(byClaims && claimsOfSection.has(c.index) ? { claims: claimsOfSection.get(c.index), _text: c.text } : {}),
         _system: { _kind: "section", _doc_id: p.doc_id, _doc_title: p.title, _section: c.index },
       })),
       home: p.home,
       written_by: p.written_by,
       floor: docHome,
+      // docHome may be where the document waits out an outage: a regrade takes what its writer read, and the document as it then stands
+      regrade_floor: p.floor,
       written_at: p.written_at,
     });
   }
@@ -269,6 +272,10 @@ async function recordClaims(p, sections) {
       // only the claims that reader sees, so a claim above someone can't end what they see
       n++;
     }
+    // the section as it stands now: raised by a later claim here, moved by a regrade while this ran, or
+    // settled differently on a retry than when its earlier claims were written
+    const now = (await adbQuery(`SELECT _home FROM ${s.rid}`))[0];
+    if (now) await claimsFollowEntry(s.rid, effectiveHome(positionMap, now._home));
   }
   return n;
 }

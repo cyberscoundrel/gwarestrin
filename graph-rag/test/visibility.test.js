@@ -10,11 +10,11 @@ process.env.ARCADEDB_URL = "http://127.0.0.1:9"; // read marks persist in the ba
 const scope = await import("../src/scope.js");
 const { loadPositionMap, scopeOf } = scope;
 const { claimsSettle, hasClaims, placeByClaims } = await import("../src/placement.js");
-const { authorityOf, decide, staleAuthorities, validatePolicy } = await import("../src/model/authority.js");
+const { authorityOf, decide, staleAuthorities, validatePolicy, visible } = await import("../src/model/authority.js");
 const { applyPolicyUpdate, defaultPolicy, normalizeStored } = await import("../src/policy.js");
 const { authorityMapFor, authorityPolicy, decideWrite, forgetAuthorityPolicy } = await import("../src/data-entry.js");
 const { currentState, history, stateAsOf, stateOfAttribute, conflicts } = await import("../src/state.js");
-const { asksCurrentValue, asksOnly, parseStateQuestion } = await import("../src/needs.js");
+const { namesOnly, parseStateQuestion } = await import("../src/needs.js");
 loadPositionMap();
 const map = scope.positionMap;
 const read = (f) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8"));
@@ -26,9 +26,9 @@ const d = defaultPolicy({});
 /** ---- B4: a claim with no matching rule goes to the grader ---- */
 
 test("B4: a claim with no matching rule does not settle where its section is seen from", () => {
-  const entity = { name: "n", facets: { identity: "Bob's pay is rising to 34.50 an hour." }, claims: [{ kind: "state", class: "hires", attribute: "pay", value: 34.5 }] };
+  const entity = { facets: { identity: "Bob's pay is 34.50." }, claims: [{ kind: "state", class: "hires", attribute: "pay", value: 34.5, subject: { name: "Bob" } }] };
   assert.equal(claimsSettle(entity, EMPTY), false, "the default empty map: no rule, so the grader judges it");
-  assert.equal(claimsSettle(entity, oracle), true, "a rule for pay, stated in the sentence: settled, no grader");
+  assert.equal(claimsSettle(entity, oracle), true, "a rule for pay, and the sentence is nothing but the claim: settled, no grader");
 });
 
 test("B4: a dummy claim is no way around the grader, whatever rule it matches", () => {
@@ -46,9 +46,9 @@ test("B4: a dummy claim is no way around the grader, whatever rule it matches", 
 });
 
 test("B4: a settled section is still placed with no grader call", () => {
-  const entity = { name: "n", facets: { identity: "Exatron's repeat order is 1,200 pieces, due mid December." }, claims: [{ class: "orders", attribute: "quantity", value: 1200 }] };
+  const entity = { facets: { identity: "The quantity of Exatron's order is 1,200." }, claims: [{ class: "orders", attribute: "quantity", value: 1200, subject: { name: "Exatron order" } }] };
   assert.equal(claimsSettle(entity, oracle), true, "1,200 in the text is the claim's 1200");
-  assert.equal(claimsSettle({ name: "n", claims: [{ class: "orders", attribute: "quantity", value: 1200 }] }, oracle), true, "no text: nothing to judge");
+  assert.equal(claimsSettle({ claims: [{ class: "orders", attribute: "quantity", value: 1200 }] }, oracle), true, "no text: nothing to judge");
 });
 
 test("B4: attribute keys in the policy are normalized like a claim's, so a misnamed key still matches", () => {
@@ -57,8 +57,8 @@ test("B4: attribute keys in the policy are normalized like a claim's, so a misna
   assert.deepEqual(policy.classes.orders.attributes, { unit_price: "org" });
   assert.equal(authorityOf(policy, "hires", "pay_rate"), "org", "a claim's normalized attribute finds the rule");
   assert.equal(authorityOf(policy, "orders", "Unit Price"), "org", "and a raw attribute name normalizes on the way in");
-  assert.throws(() => validatePolicy({ attributes: { "Pay Rate": "org", pay_rate: "ops" } }, map), /same attribute/, "two spellings naming different positions are the admin's to settle");
-  assert.throws(() => validatePolicy({ attributes: { "!!": "org" } }, map), /no attribute name/);
+  assert.throws(() => validatePolicy({ attributes: { "Pay Rate": "org", pay_rate: "ops" } }, map), /same name/, "two spellings naming different positions are the admin's to settle");
+  assert.throws(() => validatePolicy({ attributes: { "!!": "org" } }, map), /no name/);
   // a policy stored before normalization: both spellings settle on the stricter position, never an error
   assert.deepEqual(validatePolicy({ attributes: { "Pay Rate": "floor", pay_rate: "org" } }, map, { stored: true }).attributes, { pay_rate: "org" });
   assert.deepEqual(normalizeStored({ authorityMap: { attributes: { "Pay Rate": "org" } } }, d, map).authorityMap.attributes, { pay_rate: "org" });
@@ -201,17 +201,92 @@ test("B11: a question only reads as a state query when it asks for the current v
   assert.equal(q("What machine is job 88006 on?").attribute, "machine");
   assert.equal(q("Current status of the Toro order").attribute, "status");
   assert.equal(q("Stage of job 2012").attribute, "stage", "a four-digit row number is not a year");
-  assert.equal(asksCurrentValue("what stage is job 2012 at"), true);
-  assert.equal(asksCurrentValue("what stage was job 4471 at in 2024"), false);
+  assert.equal(q("What stage was job 4471 at in 2024?"), null);
 });
 
-test("B11: every word must be the attribute's or the thing's: anything left over isn't this attribute's value", () => {
+test("B11: the words naming what's asked about must be only the thing's", () => {
   const job = { name: "Job 88006", keys: ["mssql:dbo_Job:88006"], class: "jobs" };
-  assert.equal(asksOnly("what machine is job 88006 on", "machine", job), true);
-  assert.equal(asksOnly("what machine is job 88006 on and who ran it", "machine", job), false, "a second question");
-  assert.equal(asksOnly("what stage is job 88006 at", "stage", { name: "88006", keys: ["mssql:dbo_Job:88006"], class: "jobs" }), true, "job from its key");
+  assert.equal(namesOnly("job 88006", job), true);
+  assert.equal(namesOnly("job 88006 and who ran it", job), false, "a second question");
+  assert.equal(namesOnly("job 88006", { name: "88006", keys: ["mssql:dbo_Job:88006"], class: "jobs" }), true, "job from its key");
   const rack = { name: "rack Z1", keys: [], class: null };
-  assert.equal(asksOnly("what holds rack z1", "holds", rack), true);
-  assert.equal(asksOnly("what holds the key to rack z1", "holds", rack), false, "the key is what's asked about");
-  assert.equal(asksOnly("what are the stages of the toro order", "stage", { name: "Toro order", keys: [], class: "orders" }), true, "a plural of the attribute");
+  assert.equal(namesOnly("rack z1", rack), true);
+  assert.equal(namesOnly("key to rack z1", rack), false, "the key is what's asked about");
+});
+
+test("B11 remainder: only the shapes of a current-value question are read as one", () => {
+  const attributes = ["holds", "machine", "stage", "status", "pay_rate", "pay"];
+  const job = { name: "Job 90401", keys: ["mssql:dbo_Job:90401"], class: "jobs" };
+  const answered = (s) => {
+    const p = parseStateQuestion(s, { attributes });
+    return Boolean(p && namesOnly(p.about, job));
+  };
+  for (const s of [
+    "What machine is job 90401 on?",
+    "Which machine is job 90401 on right now?",
+    "What is the machine of job 90401?",
+    "What's the current machine for job 90401?",
+    "What is job 90401's machine?",
+    "Machine of job 90401",
+    "Latest machine of job 90401",
+    "What machine is job 90401 currently on?",
+  ]) assert.equal(answered(s), true, s);
+  // the reviewer's four, and the neighbours they stand for: tense, perfect, modal, plural, all, comparison, a second subject, another time
+  for (const s of [
+    "What machine has job 90401 been on?",
+    "Which machines has job 90401 been on?",
+    "What are all the machines of job 90401?",
+    "Which machine can job 90401 be on?",
+    "What machines is job 90401 on?",
+    "Which machine might job 90401 go on?",
+    "What machine does job 90401 need?",
+    "What machine is job 90401 supposed to be on?",
+    "What is the best machine of job 90401?",
+    "What is the usual machine of job 90401?",
+    "What is the expected machine of job 90401?",
+    "What is the machine of job 90401 or job 90402?",
+    "What machine is job 90401 on and who runs it?",
+    "What is the machine of job 90401 in 2024?",
+    "What is the machine of job 90401 as of Tuesday?",
+    "What machine is job 90401 not on?",
+    "What machine was job 90401 on?",
+    "Quelle machine pour le job 90401?",
+    "Tell me about the machine of job 90401",
+  ]) assert.equal(answered(s), false, s);
+  assert.equal(parseStateQuestion("What is the pay rate of Diep?", { attributes }).attribute, "pay_rate", "the longest attribute that fits");
+});
+
+test("B4 remainder: a sentence is settled only when every word in it is a claim's or filler", () => {
+  const gauge = { classes: {}, attributes: { gauge: "floor" } };
+  const claim = (over = {}) => ({ kind: "state", class: "jobs", attribute: "gauge", value: "set", ...over });
+  const settles = (text, c = claim(), more = {}) => claimsSettle({ facets: { identity: text }, claims: [c], ...more }, gauge);
+  assert.equal(settles("The gauge is set."), true, "nothing but the claim");
+  assert.equal(settles("The gauge is set and Bob's pay is rising to 34.50 an hour [admins]"), false, "the reviewer's sentence");
+  assert.equal(settles("gauge set; Bob's pay is rising to 34.50 an hour"), false, "no sentence break at all");
+  assert.equal(settles("the gauge was read and Bob's pay is rising", claim({ value: "ok" })), false, "stated by its attribute alone");
+  assert.equal(settles("Bob's pay is rising to 34.50 an hour", claim({ value: "is" })), false, "a value that is a common word");
+  assert.equal(settles("Bob's pay is rising to 34.50 an hour", claim({ value: "Bob's pay is rising to 34.50 an hour" })), false, "the sentence as the claim's own value");
+  assert.equal(settles("gauge of Bob pay rising fast now", claim({ subject: { name: "Bob pay rising fast now and more" } })), false, "the sentence as the claim's subject");
+  assert.equal(settles("The gauge is set, confidentiel.", claim()), false, "any other word, in any language");
+  assert.equal(claimsSettle({ name: "Bob's pay is rising", facets: { identity: "The gauge is set." }, claims: [claim()] }, gauge), false, "a caller's entry name");
+  assert.equal(claimsSettle({ facets: { identity: "The gauge is set." }, properties: { heading: "Bob's pay" }, claims: [claim()], _system: { _kind: "section" } }, gauge), false, "a heading");
+  assert.equal(claimsSettle({ name: "Doc §1", facets: { identity: "The gauge is set." }, claims: [claim()], _system: { _kind: "section" } }, gauge), true, "a section's built name is not judged");
+  assert.equal(claimsSettle({ facets: { identity: "The gauge is set." }, _text: "The gauge is set. Bob's pay is rising.", claims: [claim()], _system: { _kind: "section" } }, gauge), false, "past the preview");
+  const junk = { class: "", attribute: "", value: "Bob's pay is rising" };
+  assert.equal(claimsSettle({ facets: { identity: "Bob's pay is rising." }, claims: [claim(), junk] }, gauge), false, "a claim the rule can't read accounts for nothing");
+});
+
+test("B4 remainder: class keys are normalized as attribute keys are, and one lookup serves every reading", () => {
+  const p = validatePolicy({ classes: { Jobs: { authority: "ops", attributes: { "Pay Rate": "org" } }, "Work Center": { authority: "floor" } } }, map);
+  assert.deepEqual(Object.keys(p.classes).sort(), ["jobs", "work_center"]);
+  assert.equal(authorityOf(p, "jobs", "stage"), "ops");
+  assert.equal(authorityOf(p, "JOBS", "pay_rate"), "org", "any spelling of the claim's class");
+  assert.equal(authorityOf(p, "work center", "status"), "floor", "a class name with a space");
+  assert.equal(decide({ positions: ["floor"] }, "Jobs", "stage", p, map), "propose", "the proposal reading");
+  assert.equal(visible({ positions: ["floor"] }, "jobs", "stage", p, map), false, "the visibility reading");
+  assert.throws(() => validatePolicy({ classes: { Jobs: { authority: "org" }, jobs: { authority: "ops" } } }, map), /same name/, "two spellings naming different positions");
+  const stored = validatePolicy({ classes: { Jobs: { authority: "floor", attributes: { a: "floor" } }, jobs: { authority: "ops", attributes: { b: "ops" } } } }, map, { stored: true });
+  assert.deepEqual(stored.classes.jobs, { authority: "ops", attributes: { a: "floor", b: "ops" } }, "stored: the stricter position, every rule kept");
+  assert.equal(validatePolicy({ classes: { "!!": { authority: "ops" } } }, map, { stored: true }).classes["!!"], undefined);
+  assert.throws(() => validatePolicy({ classes: { "!!": { authority: "ops" } } }, map), /no name/);
 });
