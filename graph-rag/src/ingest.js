@@ -414,13 +414,18 @@ export async function recordDocument(raw, identity, scope, { title, description,
   // merged (a record whose claims lie with a higher authority is proposed there), today's site rule until then
   const decision = typeof writeRules.decideWrite === "function" ? writeRules.decideWrite(identity, { kind: "ingest", claims: allClaims }, { origin: home }) : null;
   const queued = decision ? decision.action !== "direct" : identity.caps.write === "queued";
+  // the document's floor is the writer's derived floor alone, as a manual's is: the decision's floor spans every
+  // claim in the record (the common ancestor of their authorities), and applying it to the document would lift
+  // every section to the most restricted claim's home. Each section is homed by its own claims inside
+  // upsertEntities (model/README.md: no lower than its most restricted claim and no lower than its document),
+  // the free-text sections by the grader; the decision's home is where the proposal is reviewed.
   const payload = {
     doc_id,
     title: document.title,
     description: (document.description ?? `${document.title}, put on record by ${document.recorded_by}`).slice(0, 500),
     extract: false,
     home,
-    floor: decision?.floor ?? derivedFloor(identity, home),
+    floor: derivedFloor(identity, home),
     written_at: document.recorded_at,
     ...(v ? { valid_until: v.valid_until ?? "lasting" } : {}),
     chars: text.length,
