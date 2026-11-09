@@ -97,7 +97,7 @@ it already: `executeGraph`, `setHome`, `typedUpdate` (`write.js`), `grantAccess`
   if (d.action !== "direct") return queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home: d.home });`
   and let claims through the tool's schema: on each entity
   `claims: z.array(z.object({ kind: z.string(), class: z.string().optional(), attribute: z.string(), value: z.unknown(), subject: z.unknown().optional(), valid_from: z.string().optional(), valid_until: z.string().optional() }).passthrough()).optional()`.
-  `upsertEntities` places an entity carrying `claims` by the rule (`placeByClaims`) and never grades it.
+  `upsertEntities` places an entity carrying `claims` by the rule (`placeByClaims`); the grader judges it too unless its claims settle it (`claimsSettle`), and the rule's home then holds under the verdict.
 - `server.js`, the `embed_backfill` tool:
   `if (decideWrite(identity, { kind: "backfill" }).action !== "direct") queueWrite({ kind: "backfill", ... })`.
 - `worker-tools.js`, `workerUpsert` (per home group; replaces `workerWriteFloor` + `args.propose`):
@@ -118,7 +118,7 @@ it already: `executeGraph`, `setHome`, `typedUpdate` (`write.js`), `grantAccess`
   `const d = decideWrite(identity, { kind: "ingest", claims: sections.flatMap((s) => s.claims ?? []) }, { origin: home });
   if (d.action !== "direct") queueWrite({ kind: "ingest", payload, user: identity.user, home: d.home })`,
   and a section's entity passed to `upsertEntities` carries its `claims` so it is placed by them (the
-  grader runs only on sections with none).
+  grader runs on what they don't settle).
 - `linker.js`, the unsure-match merge proposal: always a proposal (no person is acting);
   `decideWrite({ user: "graph-rag worker", caps: { write: "queued" }, positions: [] }, { kind: "merge", lives: positionMap.root })`
   returns `propose` and keeps the site honest to the one rule.
@@ -128,7 +128,7 @@ it already: `executeGraph`, `setHome`, `typedUpdate` (`write.js`), `grantAccess`
 `workerWriteFloor(identity, livesOrClaim)` likewise; `claimWriteFloor(identity, origin, claims)` is
 the floor of a claim-bearing write. `scope.js` has the visibility reading as a question:
 `coversClass(scope, cls, attribute)` and `seesClaim(scope, claim, origin)`; `sharing.js`
-`recipientCovers(recipient, claims)`. Queries that list claims should filter with `seesClaim`.
+`recipientCovers(recipient, claims)`. `state.js claimsOfThing` is where reads apply `seesClaim` (current_state, as_of, history, conflicts, about_thing, search as_of, a question answered from state), and where intervals close per reader.
 
 **Functions two areas both need**, kept where the map puts them and imported by the other:
 

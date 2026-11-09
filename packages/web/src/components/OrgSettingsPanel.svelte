@@ -160,6 +160,14 @@
     rules[i] = { ...rules[i], ...patch } as Rule;
     if (draft) draft.authorityMap = mapOf(rules);
   }
+  /** as the server normalizes it (a claim's attributes are normalized the same way): "Pay Rate" -> pay_rate */
+  const attributeKey = (s: string) =>
+    s
+      .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 60);
   function addRule() {
     rules.push({ cls: "", attribute: "", position: tree?.root ?? "" });
     if (draft) draft.authorityMap = mapOf(rules);
@@ -327,7 +335,7 @@
       {#each rules as r, i (i)}
         <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
           <input class="input" placeholder="any class" aria-label="class" value={r.cls} oninput={(e) => setRule(i, { cls: e.currentTarget.value })} />
-          <input class="input" placeholder="whole class" aria-label="attribute" value={r.attribute} oninput={(e) => setRule(i, { attribute: e.currentTarget.value })} />
+          <input class="input" placeholder="whole class" aria-label="attribute" value={r.attribute} oninput={(e) => setRule(i, { attribute: e.currentTarget.value })} onchange={(e) => setRule(i, { attribute: attributeKey(e.currentTarget.value) })} />
           <select class="input" aria-label="position holding authority" value={r.position} onchange={(e) => setRule(i, { position: e.currentTarget.value })}>
             {#each positionOptions as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
             {#if r.position && !positionOptions.some((o) => o.value === r.position)}<option value={r.position}>{r.position} (no longer a position)</option>{/if}
@@ -340,8 +348,9 @@
       </div>
       <span class="field-hint">
         A rule names the position that may commit the organization to a class of commitment (orders, hires, maintenance), or to one attribute of it (price, pay, dismissal); an attribute rule with no class applies to that attribute in every class.
-        The position named and those above it see such claims and enter them directly; people below it propose, and what they write of it is filed where the authority sees it. Anything with no rule stays with whoever wrote it.
-        Only sections no claim was extracted from go to the grader, with the restricted topics above.
+        The position named and those above it see such claims and enter them directly; people below it propose, and what they write of it is filed where the authority sees it.
+        Attribute names are saved the way claims spell them ("Pay Rate" becomes pay_rate).
+        A section goes to the grader, with the restricted topics above, unless every claim in it has a rule and every sentence of it states one of them; the rule's position still holds under the grader's verdict.
       </span>
     </div>
   {/if}

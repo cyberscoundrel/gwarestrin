@@ -12,7 +12,7 @@ import { homeFilter, homeLabel, positionMap, SCOPED, viaOf } from "./scope.js";
 import { recordReads } from "./floor.js";
 import { ASSERTIONS, openNeedsClause } from "./requests.js";
 import { enqueue } from "./worker-pool.js";
-import { asOfDate, claimsOfThing, claimView, inForceAt, rawClaims, stateAt, stateView, toClaim } from "./state.js";
+import { asOfDate, claimsOfThing, claimView, inForceAt, stateAt, stateView } from "./state.js";
 
 /** a question in results: who asked, until when; it's a request, not a fact */
 const questionOf = (row) =>
@@ -179,7 +179,7 @@ export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of
   // as_of: a hit that bears claims says something about a date only while one of its claims was in
   // force then (decision 3 closes an open claim at the next one on the same attribute, so the
   // siblings on the same subjects are read too); a hit bearing none passes as it is
-  if (asOf && results.length) results = await coveringAsOf(results, asOf);
+  if (asOf && results.length) results = await coveringAsOf(results, asOf, scope);
 
   // 1-hop relationships for the top results: by record id, and only to
   // neighbours the caller may see (an edge must not reveal a hidden node)
@@ -238,10 +238,11 @@ export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of
 
 /**
  * The results that bear claims, filtered to those with a claim in force at `asOf` (each then carries
- * `claims`: what it said that held then); results bearing no claim pass unchanged. Visibility is the
- * hit's own: a claim's section is the hit, which the caller already sees.
+ * `claims`: what it said that held then); results bearing no claim pass unchanged. Claims are the
+ * ones the caller sees (claimsOfThing, the per-claim rule): a claim it can't see neither shows here
+ * nor ends a claim it can, and a hit whose claims it can't see at all passes as one bearing none.
  */
-async function coveringAsOf(results, asOf) {
+async function coveringAsOf(results, asOf, scope) {
   const rids = results.map((r) => String(r.rid)).filter((x) => RID_RE.test(x));
   if (!rids.length) return results;
   const edges = await adbQuery(`SELECT @rid AS rid, @out AS src, @in AS dst FROM (SELECT expand(outE('CLAIMS')) FROM [${rids.join(",")}]) LIMIT 500`).catch(() => []);
@@ -253,9 +254,9 @@ async function coveringAsOf(results, asOf) {
   for (const s of subjects) {
     const t = labels.get(s);
     const thing = { rid: s, name: t?.label ?? s, keys: Array.isArray(t?._keys) ? t._keys : [], class: null };
-    claims.push(...(await rawClaims(s)).map((row) => toClaim(row, thing)).filter(Boolean));
+    claims.push(...(await claimsOfThing(thing, { scope })).claims);
   }
-  // closed over every claim of the subject, then what held at the date, by the hit it came from
+  // closed over the caller's claims of the subject, then what held at the date, by the hit it came from
   const bearing = new Set(claims.map((c) => c.source));
   const held = Map.groupBy(inForceAt(claims, asOf), (c) => c.source);
   const out = [];
@@ -267,7 +268,8 @@ async function coveringAsOf(results, asOf) {
     }
     const mine = held.get(rid);
     if (!mine) continue;
-    out.push({ ...r, claims: mine.map((c) => ({ subject: c.subject.name, ...claimView(c) })) });
+    // (the hit is the section: no need to name it again on each claim)
+    out.push({ ...r, claims: mine.map(({ section: _section, ...c }) => ({ subject: c.subject.name, ...claimView(c) })) });
   }
   return out;
 }

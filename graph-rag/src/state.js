@@ -11,9 +11,13 @@
  * contradiction, not a succession.
  *
  * Every read is scoped like about_thing: the subject thing must be visible to the caller, and a claim
- * counts only when the caller sees the section it came from (and the claim's own `_home`, when the
- * ingest path raised it to an authority position). What the caller was shown is recorded through
- * `recordReads` (floor.js), so state reads bound later writes like every other read.
+ * counts only when the caller sees the section it came from and the per-claim rule lets it (seesClaim:
+ * the claim's own `_home`, and the caller's authority over its class under today's policy, so a later
+ * policy change takes effect on claims already written). Intervals are closed here, per reader, over
+ * only the claims that reader sees: a claim the reader can't see neither ends a claim it can see nor
+ * shows that a change happened, and the result doesn't depend on the order claims arrived in. Nothing
+ * stamps a close on the stored edge. What the caller was shown is recorded through `recordReads`
+ * (floor.js), so state reads bound later writes like every other read.
  *
  * The database is reached through an injected `query` (an adbQuery-like `(sql, params) => rows`), so
  * the unit tests run the same code over the oracle fixture's claims with no database.
@@ -21,7 +25,8 @@
 import { effectiveHome } from "./positions.js";
 import { normalize } from "./things.js";
 import { adbQuery, ENTITY_LABEL, esc, RID_RE } from "./db.js";
-import { homeFilter, homeLabel, positionMap } from "./scope.js";
+import { homeFilter, homeLabel, positionMap, seesClaim } from "./scope.js";
+import { grantShows } from "./grants.js";
 import { recordReads } from "./floor.js";
 import { closeIntervals, inForce, isoDate, normalizeAttribute, overlaps, stateOf } from "./model/claims.js";
 import { parseKey } from "./model/schema.js";
@@ -39,6 +44,17 @@ export function seesHome(scope, home) {
   if (!scope || scope.homes === null || scope.homes === undefined) return true;
   const h = eff(home);
   return scope.homes.has(h) || Boolean(scope.granted?.homes?.has(h));
+}
+
+/**
+ * Does the caller see this claim of a section it can read: the per-claim rule (seesClaim), or the
+ * section was granted to it as an entity. Without a loaded map (a library caller) only the claim's
+ * own home is checked. `section` is the row { rid, name, _home, _origin }; `rules` overrides the policy's map.
+ */
+export function seesSectionClaim(scope, claim, section, rules) {
+  if (grantShows(scope?.granted, { rid: String(section.rid), name: section.name, origin: section._origin ?? null })) return true;
+  if (!positionMap) return !claim.home || seesHome(scope, claim.home);
+  return seesClaim(scope, { class: claim.class, attribute: claim.attribute, _home: claim.home ?? section._home }, undefined, rules);
 }
 
 /**
@@ -110,7 +126,9 @@ export function toClaim(row, thing) {
   const recorded = isoDate(row.recorded_at) ?? null;
   const from = isoDate(row.valid_from) ?? recorded;
   if (!from) return null;
-  let until = row.valid_until === undefined || row.valid_until === null || row.valid_until === "" ? null : (isoDate(row.valid_until) ?? null);
+  // a stored close with closed_by is a write-time stamp from an earlier build, made over claims this
+  // reader may not see: read it as open, and let closeIntervals close it over what the reader sees
+  let until = row.closed_by || row.valid_until === undefined || row.valid_until === null || row.valid_until === "" ? null : (isoDate(row.valid_until) ?? null);
   if (kind === "event" && until === null) until = from;
   const num = row.value_num === undefined || row.value_num === null ? null : Number(row.value_num);
   return {
@@ -125,7 +143,6 @@ export function toClaim(row, thing) {
     valid_until: until,
     recorded_at: recorded ?? from,
     recorded_by: row.recorded_by ?? null,
-    ...(row.closed_by ? { closed_by: row.closed_by } : {}),
     home: row._home ?? null,
     subject: subjectOfThing(thing),
     source: String(row.src ?? ""),
@@ -134,22 +151,22 @@ export function toClaim(row, thing) {
 
 /**
  * The claims about one thing the caller may see, each with the section (or entry) it came from, and
- * the homes the caller was thereby shown (for recordReads). A claim is seen when its source is and,
- * when the claim carries its own `_home`, that home too.
+ * the homes the caller was thereby shown (for recordReads). A claim is seen when its source is and
+ * the per-claim rule lets the caller see it (seesSectionClaim).
  */
-export async function claimsOfThing(thing, { scope = { homes: null }, query = adbQuery } = {}) {
+export async function claimsOfThing(thing, { scope = { homes: null }, query = adbQuery, rules } = {}) {
   const rows = await rawClaims(thing.rid, query);
   const claims = rows.map((r) => toClaim(r, thing)).filter(Boolean);
   const srcs = [...new Set(claims.map((c) => c.source).filter((s) => RID_RE.test(s)))];
   const sources = srcs.length
-    ? await query(`SELECT @rid AS rid, name, _home, _kind, _doc_title, _doc_id, _section FROM [${srcs.join(",")}] WHERE name IS NOT NULL${homeFilter(scope)}`).catch(() => [])
+    ? await query(`SELECT @rid AS rid, name, _home, _origin, _kind, _doc_title, _doc_id, _section FROM [${srcs.join(",")}] WHERE name IS NOT NULL${homeFilter(scope)}`).catch(() => [])
     : [];
   const byRid = new Map(sources.map((s) => [String(s.rid), s]));
   const read = [];
   const out = [];
   for (const c of claims) {
     const s = byRid.get(c.source);
-    if (!s || (c.home && !seesHome(scope, c.home))) continue;
+    if (!s || !seesSectionClaim(scope, c, s, rules)) continue;
     read.push(eff(s._home));
     out.push({
       ...c,
@@ -230,13 +247,13 @@ export function asOfDate(date, now = Date.now()) {
  * The subject's things the caller sees, each with its visible claims. `identity` given: what was shown
  * is recorded as read. Returns { things: [{ thing, claims }], read }.
  */
-async function load(subject, { scope = { homes: null }, identity = null, query = adbQuery, reads = recordReads } = {}) {
+async function load(subject, { scope = { homes: null }, identity = null, query = adbQuery, reads = recordReads, rules } = {}) {
   const ref = subjectRef(subject);
   const things = await findThings([ref], { scope, query });
   const read = [];
   const out = [];
   for (const t of things) {
-    const r = await claimsOfThing(t, { scope, query });
+    const r = await claimsOfThing(t, { scope, query, rules });
     read.push(...r.read);
     out.push({ thing: t, claims: r.claims });
   }
@@ -300,14 +317,14 @@ export async function history(subject, attribute, opts = {}) {
  * For answering a question from state (requests.js): among the things any of `refs` names, the ones
  * with a claim on `attribute` in force now. Returns [{ thing, claim, claims }]; reads are recorded.
  */
-export async function stateOfAttribute(refs, attribute, { scope = { homes: null }, identity = null, query = adbQuery, reads = recordReads, now = Date.now() } = {}) {
+export async function stateOfAttribute(refs, attribute, { scope = { homes: null }, identity = null, query = adbQuery, reads = recordReads, now = Date.now(), rules } = {}) {
   const a = normalizeAttr(attribute);
   const things = await findThings(refs, { scope, query, limit: 10 });
   const asOf = new Date(now).toISOString();
   const read = [];
   const out = [];
   for (const t of things) {
-    const { claims, read: r } = await claimsOfThing(t, { scope, query });
+    const { claims, read: r } = await claimsOfThing(t, { scope, query, rules });
     read.push(...r);
     const claim = stateAt(claims, asOf)[a];
     if (claim) out.push({ thing: t, claim, claims });

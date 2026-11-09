@@ -163,7 +163,8 @@ export const scenarios = [
         ]);
         h.check(!ak06.error && !ak06.pendingId, `written directly: ${JSON.stringify(ak06).slice(0, 300)}`);
         h.check((await h.entry(nm("e2e-ak06 payroll biweekly")))?._home === POS.ops, "ak06 stays at Operations");
-        h.check((await graderCalls(h)) === before, "neither was graded: the rule placed them");
+        // no rule names these classes or attributes, so they are the grader's (decision 2); it leaves them at Operations
+        h.check((await graderCalls(h)) === before + 2, `a claim with no rule goes to the grader, got ${(await graderCalls(h)) - before} calls`);
         // aj10: a person's review result is admins-only whoever writes it: alice proposes it to the top
         const aj10 = await saveClaims(h, "alice", nm("e2e-aj10 tomas review passed"), "Tomas passed his 90-day review early.", [
           { kind: "event", subject: { name: "Tomas Reyes", actor: "person" }, class: "review", attribute: "result", value: "passed 90-day review, early" },
@@ -175,6 +176,81 @@ export const scenarios = [
         const ok = await h.api(`/api/queue/${aj10.pendingId}/approve`, { method: "POST", body: "{}" });
         h.check(ok.result?.approved, `the admin approves it: ${JSON.stringify(ok).slice(0, 300)}`);
         h.check((await h.entry(nm("e2e-aj10 tomas review passed")))?._home === POS.org, "and it lands at the top, where the oracle has it");
+      });
+    },
+  },
+  {
+    name: "B4: a claim with no matching rule goes to the grader: floor pay text with one pay claim, on an empty map",
+    async run(given) {
+      const h = helpers(given);
+      await withPolicy(h, EMPTY, async () => {
+        const before = await graderCalls(h);
+        const name = nm("e2e-b4 bob raise");
+        const r = await saveClaims(h, "bob", name, "Bob's pay is rising to 34.50 an hour. [admins]", [{ kind: "state", subject: { name: "Bob", actor: "person" }, class: "hires", attribute: "pay", value: 34.5 }]);
+        h.check(!r.error && !r.pendingId, `no rule: bob's write isn't proposed: ${JSON.stringify(r).slice(0, 300)}`);
+        const e = await h.entry(name);
+        h.check(e?._home === POS.org, `the grader restricts it, as with claims: []; got ${e?._home} (${e?._grade})`);
+        h.check((await graderCalls(h)) === before + 1, `one grader call, got ${(await graderCalls(h)) - before}`);
+      });
+    },
+  },
+  {
+    name: "B4: a dummy claim is no way around the grader: pay text with an unrelated ruled claim",
+    async run(given) {
+      const h = helpers(given);
+      await withPolicy(h, MAP, async () => {
+        const name = nm("e2e-b4 dummy gauge");
+        const r = await saveClaims(h, "bob", name, "Tomas's pay is rising to 34.50 an hour. [admins]", [{ kind: "state", subject: { name: "job 4471", class: "jobs" }, attribute: "gauge", value: "set" }]);
+        h.check(!r.error && !r.pendingId, `jobs lies with the floor: written directly: ${JSON.stringify(r).slice(0, 300)}`);
+        const e = await h.entry(name);
+        h.check(e?._home === POS.org, `graded like the same text with claims: []; got ${e?._home} (${e?._grade})`);
+        // a ruled claim the writer is below is still proposed by the rule, not placed by the grader
+        const lifted = nm("e2e-b4 quantity floor");
+        const p = await saveClaims(h, "bob", lifted, "Job 4471 was quiet today, nothing to report.", [{ kind: "state", subject: { name: "job 4471", class: "orders" }, attribute: "quantity", value: 40 }]);
+        h.check(p.pendingId, `a quantity from the floor is still proposed by the rule: ${JSON.stringify(p).slice(0, 300)}`);
+        await h.api(`/api/queue/${p.pendingId}/reject`, { method: "POST", body: "{}" });
+      });
+    },
+  },
+  {
+    name: "B4: a misnamed attribute key in the policy is normalized and matches claims",
+    async run(given) {
+      const h = helpers(given);
+      await withPolicy(h, { classes: {}, attributes: { "Pay Rate": POS.org } }, async () => {
+        const stored = (await h.api("/api/policy")).policy?.authorityMap?.attributes ?? {};
+        h.check(stored.pay_rate === POS.org && !stored["Pay Rate"], `stored as pay_rate: ${JSON.stringify(stored)}`);
+        const r = await saveClaims(h, "bob", nm("e2e-b4 pay rate"), "Tomas's pay rate goes to 24.", [{ kind: "state", subject: { name: "Tomas", actor: "person" }, class: "hires", attribute: "pay_rate", value: 24 }]);
+        h.check(r.pendingId, `the rule matches: bob proposes: ${JSON.stringify(r).slice(0, 300)}`);
+        await h.api(`/api/queue/${r.pendingId}/reject`, { method: "POST", body: "{}" });
+      });
+    },
+  },
+  {
+    name: "B5: a stale position in the stored map fails upward for that entry and never erases the map",
+    async run(given) {
+      const h = helpers(given);
+      const q = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+      await withPolicy(h, MAP, async () => {
+        const row = (await h.sql("SELECT json FROM OrgPolicy WHERE scope = 'org' LIMIT 1"))[0];
+        const stored = JSON.parse(row.json);
+        stored.authorityMap.attributes.price = "hr"; // a position the tree no longer has
+        const r = await h.tool("admin", "execute_graph", { language: "sql", command: `UPDATE OrgPolicy SET json = '${q(JSON.stringify(stored))}' WHERE scope = 'org'` });
+        h.check(!r.error, `the stored row: ${JSON.stringify(r).slice(0, 200)}`);
+        // the policy reloads every minute: the stale entry shows, and the rest of the map with it
+        const view = await h.until("the stale entry shows in the policy", async () => {
+          const p = (await h.api("/api/policy")).policy;
+          return p?.authorityMap?.attributes?.price === "hr" && p.authorityMap.attributes.pay === POS.org ? p : null;
+        }, 90_000);
+        h.check(view.authorityMap.classes.jobs?.authority === POS.floor, `the rest of the map stands: ${JSON.stringify(view.authorityMap).slice(0, 300)}`);
+        // the entry fails upward: bob proposes a price, homed at the top
+        const price = await saveClaims(h, "bob", nm("e2e-b5 bracket price"), "The bracket price is 12.50.", [{ kind: "state", subject: { name: "bracket", class: "orders" }, attribute: "price", value: 12.5 }]);
+        h.check(price.pendingId, `a price from the floor is proposed: ${JSON.stringify(price).slice(0, 300)}`);
+        h.check((await pending(h, price.pendingId))?.home === POS.org, "the stale authority counts as the root");
+        await h.api(`/api/queue/${price.pendingId}/reject`, { method: "POST", body: "{}" });
+        // editing any setting doesn't persist an erased map, and the map can still be edited around the stale row
+        const edited = await h.api("/api/policy", { method: "PUT", body: JSON.stringify({ maxGrantDays: 60 }) });
+        h.check(edited.policy?.authorityMap?.attributes?.price === "hr", `another setting's edit keeps the map: ${JSON.stringify(edited).slice(0, 300)}`);
+        await h.api("/api/policy", { method: "PUT", body: JSON.stringify({ maxGrantDays: 90 }) });
       });
     },
   },

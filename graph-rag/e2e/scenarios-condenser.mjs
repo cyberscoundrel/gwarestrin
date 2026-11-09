@@ -142,12 +142,13 @@ export const scenarios = [
       check(sections.length === 3, `three sections stored: ${sections.length}`);
       const parts = await sql(`SELECT count(*) AS n FROM PART_OF WHERE @in = ${entry.rid}`);
       check(Number(parts[0]?.n) === 3, `each section PART_OF the document: ${JSON.stringify(parts)}`);
-      // sensitivities: a section with claims is homed by them (the recorder's position; the grader is not asked);
-      // the free-text residue is graded as before, here to the top; nothing sits below where the recorder writes
+      // sensitivities: no authority map is set here, so a claim has no rule and its section goes to the grader
+      // (decision 2), which keeps the Toro section at the recorder's position; the free-text residue is graded
+      // as before, here to the top; nothing sits below where the recorder writes
       check(sections[0]._home === POS.ops, `the Toro section (claims) is at Operations: ${sections[0]._home}`);
       check(sections[1]._home === POS.org, `the pricing section (free text, graded) is at the top: ${sections[1]._home}`);
       const grades = await sql(`SELECT _section, _grade FROM Entity WHERE _kind = 'section' AND _doc_id = '${sent.doc_id}' ORDER BY _section`);
-      check(/claims/.test(grades[0]._grade ?? "") && /graded|admins/.test(grades[1]._grade ?? ""), `how each was placed: ${JSON.stringify(grades)}`);
+      check(/graded/.test(grades[0]._grade ?? "") && /graded|admins/.test(grades[1]._grade ?? ""), `how each was placed: ${JSON.stringify(grades)}`);
       // ...and the shop-hours section released to everyone, which a person approves (the standing instructions' set_home step)
       const moved = await tool(opsAgent, "set_home", { entities: [{ name: sections[2].name }], to: "Everyone" });
       const pid = moved.results?.[0]?.pendingId ?? moved.results?.[0]?.id;

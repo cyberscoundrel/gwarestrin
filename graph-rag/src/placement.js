@@ -63,9 +63,44 @@ export function claimKeys(claims) {
 /** does this entity carry claims the authority rule can place (else it is residue: the grader's) */
 export const hasClaims = (entity) => claimKeys(entity?.claims).length > 0;
 
+/** lower-cased tokens for matching a claim to a sentence: 1,200 reads as 1200, 34.50 stays one token */
+const tokensOf = (s) => String(s).toLowerCase().replace(/(\d),(?=\d)/g, "$1").match(/[\p{L}\p{N}]+(?:\.\d+)?/gu) ?? [];
+const sentencesOf = (text) =>
+  String(text ?? "")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((s) => s.trim())
+    .filter((s) => /[\p{L}\p{N}]/u.test(s));
+
+/** does the sentence state this claim: its value, or every word of its attribute, is in it */
+function stated(claim, words) {
+  const value = tokensOf(claim.value ?? "");
+  if (value.length && value.every((w) => words.has(w))) return true;
+  const attribute = normalizeAttribute(claim.attribute).split("_").filter(Boolean);
+  return attribute.length > 0 && attribute.every((w) => words.has(w));
+}
+
 /**
- * Place a claim-bearing entity from its claims' authority: the grading reading of the rule, and
- * no grader call. Each claim is homed at claimHome(origin, authority), never below the origin
+ * Do this entity's claims settle where it is seen from, so the grader has nothing left to judge?
+ * Only when every claim has a rule (decision 2: what maps to no rule is the grader's) and every
+ * sentence of its text states one of them. A sentence no claim states is free text mapping to no
+ * class, however many claims sit beside it, so a claim attached to unrelated text is no way around
+ * the grader. Pure; judged on the text the grader itself would see.
+ */
+export function claimsSettle(entity, policy) {
+  const claims = (Array.isArray(entity?.claims) ? entity.claims : []).filter((c) => c && typeof c === "object");
+  const keys = claimKeys(claims);
+  if (!keys.length || keys.some((k) => authorityOf(policy, k.class, k.attribute) === null)) return false;
+  const text = Object.values(entity.facets ?? {}).filter((v) => typeof v === "string").join("\n");
+  return sentencesOf(text).every((s) => {
+    const words = new Set(tokensOf(s));
+    return claims.some((c) => stated(c, words));
+  });
+}
+
+/**
+ * Place a claim-bearing entity from its claims' authority: the grading reading of the rule. The
+ * grader is not asked here; floor.js asks it as well when the claims don't settle the text
+ * (claimsSettle), and this placement then holds as the floor under its verdict. Each claim is homed at claimHome(origin, authority), never below the origin
  * (provenance); the section carrying them is homed no lower than its most restricted claim
  * (decision 5: a claim is seen by whoever sees its section), and an existing entry never widens.
  * `policy` is the authority map. Returns { home, note, authority, claims: [{ class, attribute,

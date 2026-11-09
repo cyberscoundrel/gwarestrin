@@ -81,7 +81,9 @@ admin edits. `classes[name].authority`, `classes[name].attributes[attr]`,
   cached column.
 - **Interval rule (decision 3).** No dates: `valid_from = recorded_at`, open,
   closed by the next claim on the same attribute of the same subject at that
-  claim's `valid_from` (`claims.closeIntervals`). Two claims starting at the
+  claim's `valid_from` (`claims.closeIntervals`, applied per reader at read
+  time over the claims that reader sees: a claim above someone never ends
+  what they see, and nothing stamps a close on the stored edge). Two claims starting at the
   same instant both stay open; with different values they are a
   contradiction (`claims.overlaps`), never a succession. An event is a point
   (`valid_from = valid_until = at`) unless the text gives it an end (a
@@ -105,7 +107,12 @@ admin edits. `classes[name].authority`, `classes[name].attributes[attr]`,
   lowest position at or above both its origin and its authority; a section
   is homed no lower than its most restricted claim and no lower than its
   document (decision 5), the stricter winning (`positions.commonAncestor`).
-  The grader runs only on text that maps to no class.
+  The grader runs on text no rule covers: a section with no claim, a claim
+  with no rule (decision 2), or a sentence no ruled claim states; its verdict
+  can only restrict further than the claims' placement (`placement.claimsSettle`).
+  A policy's attribute names are normalized as a claim's are. An authority
+  a policy names that the tree no longer has stays in the map and counts as
+  the root (`staleAuthorities` lists them; `policy.normalizeStored` logs them).
 - **Provenance sets the home; nothing widens it.** `claimHome` never returns
   a position below the origin. Unknown anything fails upward.
 - **Errors name the field.** `ClaimError.field` is a path

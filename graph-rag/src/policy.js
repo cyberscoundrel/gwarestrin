@@ -2,7 +2,7 @@
 // (Organization settings in the app). Stored in ArcadeDB by graph-rag, which
 // enforces it; environment variables only provide the defaults.
 import { DEFAULT_TOPICS } from "./grading.js";
-import { validatePolicy as validateAuthorityMap } from "./model/authority.js";
+import { staleAuthorities, validatePolicy as validateAuthorityMap } from "./model/authority.js";
 
 /** @typedef {{
  *   maxGrantDays: number,          // longest a share may last (non-standing)
@@ -54,7 +54,7 @@ function topicList(v) {
   return out;
 }
 
-/** no rule for any class: every write is the writer's own, and the grader judges every section */
+/** no rule for any class: the grader judges every section (a claim with no rule settles nothing) */
 export const EMPTY_AUTHORITY_MAP = Object.freeze({ classes: {}, attributes: {} });
 
 /**
@@ -62,12 +62,13 @@ export const EMPTY_AUTHORITY_MAP = Object.freeze({ classes: {}, attributes: {} }
  * `{ classes: { [class]: { authority?, attributes?: { [attribute]: position } } }, attributes: { [attribute]: position }, default? }`.
  * Checked against the position tree when one is given (model/authority.js validatePolicy: every
  * authority a known position, never everyone); by shape alone when not (the defaults load before
- * the tree does). Throws naming the field. Returns a normalized copy, keys sorted so two maps that
- * say the same thing compare equal.
+ * the tree does). `options` as validatePolicy's: `stored` reads a saved map (stale entries stay),
+ * `allowStale` lets an edit keep the entries already stale. Throws naming the field. Returns a
+ * normalized copy, keys sorted so two maps that say the same thing compare equal.
  */
-export function authorityMap(v, positions = null) {
+export function authorityMap(v, positions = null, options = {}) {
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("authorityMap must be an object with classes and attributes");
-  const out = validateAuthorityMap(v, positions ?? anyPosition);
+  const out = validateAuthorityMap(v, positions ?? anyPosition, options);
   const sortKeys = (o) => Object.fromEntries(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
   const classes = sortKeys(
     Object.fromEntries(
@@ -103,7 +104,8 @@ export function applyPolicyUpdate(current, input, positions = null) {
     } else if (k === "restrictedTopics") {
       next[k] = topicList(v);
     } else if (k === "authorityMap") {
-      next[k] = authorityMap(v, positions);
+      // an edit may keep entries that are already stale; a new one must name a real position
+      next[k] = authorityMap(v, positions, { allowStale: positions ? new Set(staleAuthorities(current.authorityMap ?? {}, positions).map((e) => e.position)) : null });
     } else if (k === "standingGrants") {
       if (v !== "root" && v !== "nobody") throw new Error('standingGrants must be "root" or "nobody"');
       next[k] = v;
@@ -117,20 +119,26 @@ export function applyPolicyUpdate(current, input, positions = null) {
 }
 
 /**
- * A stored policy may predate a setting: fill it from the defaults, drop what's invalid. With a
- * position tree, an authority map naming a position the tree no longer has is dropped on its own
- * (the rest of the policy stands; an unknown authority would otherwise fail upward to the root).
+ * A stored policy may predate a setting: fill it from the defaults, drop what's invalid, and say so
+ * through `warn`. An authority entry naming a position the tree no longer has stays: the rule fails
+ * it upward (model/authority.js), where dropping it, let alone the whole map, would fail open and
+ * be persisted by the next save. `warn(message)` hears about each stale entry and each dropped part.
  */
-export function normalizeStored(stored, defaults, positions = null) {
-  const known = Object.fromEntries(Object.entries(stored ?? {}).filter(([k]) => k in defaults));
+export function normalizeStored(stored, defaults, positions = null, warn = () => {}) {
+  const { authorityMap: storedMap, ...rest } = Object.fromEntries(Object.entries(stored ?? {}).filter(([k]) => k in defaults));
+  let out = defaults;
   try {
-    return applyPolicyUpdate(defaults, known, positions);
-  } catch {
-    try {
-      const { authorityMap: _dropped, ...rest } = known;
-      return applyPolicyUpdate(defaults, rest, positions);
-    } catch {
-      return defaults;
-    }
+    out = applyPolicyUpdate(defaults, rest, positions);
+  } catch (e) {
+    warn(`stored organization settings dropped, defaults used: ${String(e?.message ?? e)}`);
   }
+  if (storedMap === undefined) return out;
+  try {
+    out = { ...out, authorityMap: authorityMap(storedMap, positions, { stored: true }) };
+  } catch (e) {
+    warn(`stored authority map dropped: ${String(e?.message ?? e)}`);
+    return out;
+  }
+  if (positions) for (const e of staleAuthorities(out.authorityMap, positions)) warn(`authority map: ${e.field} names ${e.position}, no longer a position; it fails upward to the root until an admin changes it`);
+  return out;
 }

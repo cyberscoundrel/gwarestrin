@@ -21,6 +21,7 @@ import { liftRefusal, workerWriteFloor } from "./floor.js";
 import { actsForOf, assertNotWaiting, claimById, claimsOnAttribute, logChange, PROPOSED_NOTE, raiseQuestion, resolveSubjectStub, unresolvedNames } from "./worker-pool.js";
 import { ensureSourceRef, referTo } from "./audit.js";
 import { clientFor, columnFor, confirmAgainstRow, enterData } from "./data-entry.js";
+import { askerSeesClaim } from "./requests.js";
 import { closeIntervals, overlaps } from "./model/claims.js";
 import { parseKey } from "./model/schema.js";
 import { randomUUID } from "node:crypto";
@@ -218,7 +219,8 @@ export async function linkResolvedThing(sectionRid, thingRid, role, { about = ab
 /**
  * Mark a need (a question on record; requests.js) met by a claim: the need meets the claim's section
  * (a NEAR edge, state "met") and closes. A question on an attribute is a state query when the state
- * exists; this is the worker saying it does.
+ * exists; this is the worker saying it does. A claim the asker can't see can't close their need: it
+ * stays open for an owner, and the asker learns nothing of what the worker found.
  */
 async function workerMarkNeedMet(args, identity) {
   await assertNotWaiting(identity);
@@ -226,15 +228,17 @@ async function workerMarkNeedMet(args, identity) {
   if (!claim.resolved) throw new Error(`claim ${claim.id}'s subject is unresolved: resolve it first`);
   const ref = String(args.need ?? "").trim();
   const need = RID_RE.test(ref)
-    ? (await adbQuery(`SELECT @rid AS rid, name, _status FROM ${ref} WHERE _kind = 'need'`).catch(() => []))[0]
-    : (await adbQuery(`SELECT @rid AS rid, name, _status FROM ${ENTITY_LABEL} WHERE _kind = 'need' AND (_qid = :r OR name = :r) LIMIT 2`, { r: ref }).catch(() => []))[0];
+    ? (await adbQuery(`SELECT @rid AS rid, name, _status, _asker FROM ${ref} WHERE _kind = 'need'`).catch(() => []))[0]
+    : (await adbQuery(`SELECT @rid AS rid, name, _status, _asker FROM ${ENTITY_LABEL} WHERE _kind = 'need' AND (_qid = :r OR name = :r) LIMIT 2`, { r: ref }).catch(() => []))[0];
   if (!need) throw new Error(`no need ${ref}: give its id, its question id or its exact name`);
   if (need._status !== "open") throw new Error(`that need isn't open (${need._status})`);
+  if (!(await askerSeesClaim(need._asker, claim))) throw new Error(`claim ${claim.id} can't close this need: the person who asked can't see it. Leave the need open; someone with authority over it answers or shares it.`);
   const rid = String(need.rid);
   const edges = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('NEAR')) FROM ${rid})`).catch(() => []);
-  if (!edges.some((e) => String(e.dst) === claim.section)) {
-    await adbCommand(`CREATE EDGE NEAR FROM ${rid} TO ${claim.section} SET score = 1, state = 'met', at = :now, claim = :claim`, "sql", { now: new Date().toISOString(), claim: claim.id });
-  }
+  // the asker sees this claim: a meeting they're told about (needs.js askerView), as answering from state records it
+  const met = edges.find((e) => String(e.dst) === claim.section);
+  if (!met) await adbCommand(`CREATE EDGE NEAR FROM ${rid} TO ${claim.section} SET score = 1, state = 'visible', at = :now, claim = :claim`, "sql", { now: new Date().toISOString(), claim: claim.id });
+  else await adbCommand(`UPDATE (SELECT expand(outE('NEAR')) FROM ${rid}) SET state = 'visible', claim = :claim WHERE @in = ${claim.section}`, "sql", { claim: claim.id }).catch(() => {});
   await adbCommand(`UPDATE ${rid} SET _status = 'met', _met_by = :claim`, "sql", { claim: claim.id });
   await logChange(identity, { kind: "need_met", need: rid, claim: claim.id, ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return { need: rid, claim: claim.id, met: true, note: "The need is met by this claim's section and closed." };
