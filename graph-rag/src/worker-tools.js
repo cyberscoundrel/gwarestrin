@@ -184,7 +184,7 @@ async function workerResolveSubject(args, identity) {
     // an existing thing learns the key and the class it was resolved under, and is seen from here
     const cur = (await adbQuery(`SELECT _keys, _class FROM ${thing.rid}`).catch(() => []))[0] ?? {};
     const keys = Array.isArray(cur._keys) ? cur._keys : [];
-    if (key && !keys.includes(key.key)) await assertRowExists(key);
+    if (key && !keys.some((x) => sameKey(x, key.key))) await assertRowExists(key);
     await adbCommand(`UPDATE ${thing.rid} SET _keys = :k, _class = :c`, "sql", {
       k: key && !keys.some((x) => sameKey(x, key.key)) ? [...keys, key.key].slice(-10) : keys,
       c: cur._class ?? claim?.class ?? null,

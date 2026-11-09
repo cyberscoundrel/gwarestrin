@@ -13,6 +13,9 @@
 // looked up, resolved through resolve.js and minted by linkMentions) or written in the text, and only keys
 // mint instances.
 import { createHmac, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
+import { hostname, networkInterfaces } from "node:os";
+import { dabTool } from "./fake-dab-core.mjs";
 
 const GRAPH = process.env.GRAPH_URL ?? "http://graph-rag:8000";
 const TOKENS = { admin: "e2e-admin", alice: "e2e-alice", bob: "e2e-bob" };
@@ -87,6 +90,39 @@ const plainLinker = (h) => h.api("/api/worker", { method: "PUT", body: JSON.stri
  * One resolve_subject call per thing; returns { thing: rid, minted, key, label, type } or { error }.
  */
 const workerResolves = (h, e, { name, type, key }) => h.tool(h.workerToken(String(e.rid)), "resolve_subject", { name, thing: { name, type, ...(key ? { key } : {}) }, reason: "e2e: looked the row up" });
+
+/**
+ * A read-only fake DAB in this process (a resolve that teaches a thing a key checks the row: B19), pointed at by the
+ * organization's stored `sources` for one scenario. stop() puts the stored row back.
+ */
+async function startRowSource(h, tables) {
+  const server = createServer(async (req, res) => {
+    let s = "";
+    for await (const c of req) s += c;
+    const body = s ? JSON.parse(s) : {};
+    const reply = (result) => {
+      res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "fake-rows" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
+    };
+    if (body.method === "initialize") return reply({ protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "fake-rows" } });
+    if (body.method !== "tools/call") return reply({});
+    reply(dabTool(tables, body.params?.name, body.params?.arguments ?? {}, { write: false }));
+  });
+  await new Promise((r) => server.listen(4291, "0.0.0.0", r));
+  server.unref();
+  const address = Object.values(networkInterfaces()).flat().find((i) => i?.family === "IPv4" && !i.internal)?.address ?? hostname();
+  const before = (await h.sql("SELECT json FROM OrgPolicy WHERE scope = 'sources'"))[0]?.json ?? null;
+  const set = (command) => h.tool("admin", "execute_graph", { language: "sql", command });
+  const json = JSON.stringify({ mssql: { read: `http://${address}:4291/read/mcp` } }).replace(/'/g, "\\'");
+  const r = await set(before === null ? `INSERT INTO OrgPolicy SET scope = 'sources', json = '${json}'` : `UPDATE OrgPolicy SET json = '${json}' WHERE scope = 'sources'`);
+  h.check(!r.error, `sources stored: ${JSON.stringify(r).slice(0, 200)}`);
+  return {
+    stop: async () => {
+      server.close();
+      await set(before === null ? "DELETE FROM OrgPolicy WHERE scope = 'sources'" : `UPDATE OrgPolicy SET json = '${before.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}' WHERE scope = 'sources'`);
+    },
+  };
+}
 
 /** a thing as the graph would hold it: the seed a scenario needs, written directly so the scenario controls its homes and keys */
 const seedThing = async (h, label, { homes, aliases = [], keys = [], type = null, cls = null }) => {
@@ -339,11 +375,18 @@ const SCENARIOS = [
     async run(ctx) {
       const h = harness(ctx);
       await plainLinker(h);
+      // B19: a key an existing thing learns must be a row the source holds, so this needs a source that holds them
+      const source = await startRowSource(h, { dbo_Customer: { primaryKey: ["Customer"], rows: [{ Customer: "ACMEZ" }, { Customer: "EXATRONZ" }, { Customer: "TOROZ" }] } });
+      try {
       await h.save("bob", "e2e-adm18 keyless", "Called Exatronz about the next batch.");
       const note = await h.entry("e2e-adm18 keyless");
       // keyless: the worker's key finds it, and it learns the key
       const keyless = await seedThing(h, "Exatronz", { homes: ["floor"], type: "customer" });
-      const a = await workerResolves(h, note, { name: "Exatronz", type: "customer", key: "mssql:dbo_Customer:EXATRONZ" });
+      // the stored sources are cached for a minute: until it picks these up the resolve is refused with a connection error
+      const a = await h.until("the source is picked up", async () => {
+        const r = await workerResolves(h, note, { name: "Exatronz", type: "customer", key: "mssql:dbo_Customer:EXATRONZ" });
+        return /fetch failed|no connected source/.test(r.error ?? "") ? false : r;
+      }, 90_000);
       h.check(a.minted === false && a.thing === keyless, `found, not minted: ${JSON.stringify(a).slice(0, 300)}`);
       h.check((await things(h, "Exatronz")).length === 1, "one Exatronz");
       h.check(((await h.sql(`SELECT _keys FROM ${keyless}`))[0]._keys ?? []).includes("mssql:dbo_Customer:EXATRONZ"), "it learned the key");
@@ -362,6 +405,9 @@ const SCENARIOS = [
       await linkedUp(h, n);
       h.check((await about(h, String(n.rid))).some((l) => l.dst === toro), "a key in the text finds it too");
       h.check((await sourceRefs(h, "mssql:dbo_Customer:toroz")).length === 0, "the SourceRef keeps the row's own spelling");
+      } finally {
+        await source.stop();
+      }
     },
   },
   {
