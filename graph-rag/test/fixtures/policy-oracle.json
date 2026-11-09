@@ -1,0 +1,56 @@
+{
+  "classes": {
+    "customer order": {
+      "attributes": {
+        "status": "floor"
+      }
+    },
+    "gauge set": {
+      "authority": "floor"
+    },
+    "need": {
+      "attributes": {
+        "question": "ops"
+      }
+    },
+    "review": {
+      "authority": "org"
+    },
+    "temp assignment": {
+      "attributes": {
+        "status": "org"
+      }
+    },
+    "work center": {
+      "attributes": {
+        "status": "floor"
+      }
+    }
+  },
+  "attributes": {
+    "accepted": "org",
+    "contingent_plan": "org",
+    "cycle_time": "ops",
+    "doctor_note": "org",
+    "ended": "org",
+    "floater_unit_price": "org",
+    "in_use_at": "floor",
+    "intention": "org",
+    "late_this_quarter": "ops",
+    "margin": "org",
+    "margin_on_bearing_jobs": "org",
+    "opened": "org",
+    "pay_rate": "org",
+    "posted": "ops",
+    "priced_at": "ops",
+    "quote_floor": "org",
+    "quoted_amount": "ops",
+    "reported_by": "floor",
+    "result": "org",
+    "schedule": "floor",
+    "socket_margin": "org",
+    "strained_back": "org",
+    "unit_price": "org",
+    "unit_price_held": "org"
+  }
+}

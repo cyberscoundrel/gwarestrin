@@ -62,14 +62,73 @@ route, so the HTTP table stays in one file.
 
 ## What the integrator should know
 
-**The write-or-propose decision** (the Authority stream's `decideWrite`) is still made at
-its sites, now in six modules. Every call of `queueWrite` outside its own module:
-`server.js` (the `upsert_entities` and `embed_backfill` tools, for queued writers),
-`write.js` (`executeGraph`, `setHome` twice, `typedUpdate`), `worker-tools.js`
-(`workerUpsert`, `workerMerge`, `workerFoldEntries`, `workerDeleteEntry`, `workerUpdateEntry`),
-`sharing.js` (`grantAccess`, twice), `ingest.js` (`requestIngest`), `floor.js`
-(`askAboutPlacement`), `linker.js` (the unsure-match merge proposal). Replacing them with one
-rule touches all six.
+**The write-or-propose decision** is one rule, the Authority stream's `decideWrite` in
+`write.js`, built on the contract's `authority.decide` over the policy's authority map
+(`policy.authorityMap`, edited in Organization settings) and the position tree:
+
+```js
+decideWrite(identity, { kind, cls, attribute, claims, lives }, ctx)
+  // kind: upsert | rehome | grant | merge | fold | delete_entry | typed_update | command | ingest | backfill
+  // cls, attribute: the commitment class and attribute the write bears on (null: residue, no class)
+  // claims: instead of one class, the claims the write carries (the strictest decides); lives: the entry's home for a write to an existing entry
+  // ctx: { origin, propose, to, placedBy, reason, policy?, positions? }
+  -> { action: "direct" | "propose" | "hidden", floor, home, reason, authority, lift }
+```
+
+`direct`: write it. `propose`: `queueWrite({ ..., home: d.home })`, the proposal homed at the
+authority position when a class rule put it there (whoever holds it reviews it), else where the entry
+lives. `hidden`: the writer is on another branch than the authority: queue it the same way, held
+at `d.home`, the common ancestor. `floor` is the lowest home the data may get (the derived floor
+raised to the claims' authority); `lift` is set when the derived floor would hold a content write
+above where the entry lives (the worker tools phrase `liftRefusal` from it). Queued writers, a
+worker's raw command, widening, an entry a person placed and `ctx.propose` all come out as
+`propose`, so a site keeps no test of its own. A kind the rule has no site rule for (the
+Reconciliation stream's `data_entry`, a write to a source system) is decided by authority over its
+class, queuing and `ctx.propose` alone, which is intended: it writes no graph content, so the
+derived-floor lift (upsert, typed_update, ingest) does not apply to it. An approved `data_entry`
+proposal runs through `executePending` by `data-entry.js`'s `applyProposedEntry(payload, pendingId,
+approver)`, a rejected one through `refusePending` by `refuseProposedEntry(pendingId)`; the module is
+loaded when first needed (`useDataEntry(mod)` stubs it), so `write.js` loads without it. The sites inside the Authority stream's modules use
+it already: `executeGraph`, `setHome`, `typedUpdate` (`write.js`), `grantAccess` (`sharing.js`),
+`askAboutPlacement` (`floor.js`). The sites outside them, and the call that replaces each:
+
+- `server.js`, the `upsert_entities` tool (`if (caps.write === "queued") queueWrite(...)`):
+  `const d = decideWrite(identity, { kind: "upsert", claims: entities.flatMap((e) => e.claims ?? []) }, { origin: home });
+  if (d.action !== "direct") return queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home: d.home });`
+  and let claims through the tool's schema: on each entity
+  `claims: z.array(z.object({ kind: z.string(), class: z.string().optional(), attribute: z.string(), value: z.unknown(), subject: z.unknown().optional(), valid_from: z.string().optional(), valid_until: z.string().optional() }).passthrough()).optional()`.
+  `upsertEntities` places an entity carrying `claims` by the rule (`placeByClaims`) and never grades it.
+- `server.js`, the `embed_backfill` tool:
+  `if (decideWrite(identity, { kind: "backfill" }).action !== "direct") queueWrite({ kind: "backfill", ... })`.
+- `worker-tools.js`, `workerUpsert` (per home group; replaces `workerWriteFloor` + `args.propose`):
+  `const d = decideWrite(identity, { kind: "upsert", lives, claims: list.flatMap((e) => e.claims ?? []) }, { origin: home, propose: args.propose, reason: args.reason });
+  if (d.lift && !args.propose) throw new Error(liftRefusal(names, d.lift));
+  if (d.action !== "direct") { queueWrite({ kind: "upsert", payload: JSON.stringify({ ...write, floor: d.floor }), user: identity.user, home: d.home, ...proposalFields(identity, args.reason) }); continue; }`
+  (`floor` of the write is `d.floor`).
+- `worker-tools.js`, `workerUpdateEntry`: the same as `workerUpsert` with `lives: row._home ?? origin` and
+  `claims: await claimsOfEntry(String(row.rid))` (`floor.js`: the entry's CLAIMS edges, else the summary
+  a claim-bearing write stored on it).
+- `worker-tools.js`, `workerMerge` (`if (args.propose)`):
+  `if (decideWrite(identity, { kind: "merge", lives: positionMap.root }, { propose: args.propose, reason: args.reason }).action !== "direct")`.
+- `worker-tools.js`, `workerFoldEntries` (`if (args.propose || !sameHome)`):
+  `if (decideWrite(identity, { kind: "fold", lives: keep._home, claims: await claimsOfEntry(String(drop.rid)) }, { propose: args.propose || !sameHome, reason: why }).action !== "direct")`.
+- `worker-tools.js`, `workerDeleteEntry` (`if (args.propose || edges > 0)`):
+  `if (decideWrite(identity, { kind: "delete_entry", lives: row._home, claims: await claimsOfEntry(rid) }, { propose: args.propose || edges > 0, reason: args.reason }).action !== "direct")`.
+- `ingest.js`, `requestIngest` (`if (identity.caps.write === "queued")`):
+  `const d = decideWrite(identity, { kind: "ingest", claims: sections.flatMap((s) => s.claims ?? []) }, { origin: home });
+  if (d.action !== "direct") queueWrite({ kind: "ingest", payload, user: identity.user, home: d.home })`,
+  and a section's entity passed to `upsertEntities` carries its `claims` so it is placed by them (the
+  grader runs only on sections with none).
+- `linker.js`, the unsure-match merge proposal: always a proposal (no person is acting);
+  `decideWrite({ user: "graph-rag worker", caps: { write: "queued" }, positions: [] }, { kind: "merge", lives: positionMap.root })`
+  returns `propose` and keeps the site honest to the one rule.
+
+**Reading claims** (`floor.js`): `recordReads(identity, items)` takes claims (anything with a
+`_home`) as well as home ids, so a read of a claim bounds a write as a read of an entry does;
+`workerWriteFloor(identity, livesOrClaim)` likewise; `claimWriteFloor(identity, origin, claims)` is
+the floor of a claim-bearing write. `scope.js` has the visibility reading as a question:
+`coversClass(scope, cls, attribute)` and `seesClaim(scope, claim, origin)`; `sharing.js`
+`recipientCovers(recipient, claims)`. Queries that list claims should filter with `seesClaim`.
 
 **Functions two areas both need**, kept where the map puts them and imported by the other:
 

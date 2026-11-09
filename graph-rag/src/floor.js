@@ -4,12 +4,13 @@
  */
 import { commonAncestor, effectiveHome, EVERYONE, homeName, visibleHomes } from "./positions.js";
 import { gradingPrompt, parseVerdicts } from "./grading.js";
-import { applyFloor, floorLifts, place as placeOne } from "./placement.js";
+import { applyFloor, floorLifts, hasClaims, place as placeOne, placeByClaims } from "./placement.js";
+import { claimHomes } from "./model/authority.js";
 import { GRADER_MODEL, GRADER_TIMEOUT_MS, health, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { modelPost } from "./models.js";
 import { positionMap, SCOPED } from "./scope.js";
-import { queueWrite } from "./write.js";
+import { decideWrite, queueWrite } from "./write.js";
 import { thingSeenFrom } from "./linker.js";
 import { policy } from "./org-policy.js";
 
@@ -35,14 +36,21 @@ export async function ensureReadMarkSchema() {
 /** whose reads these are: each agent on its own (full id), people by name */
 const markKey = (identity) => identity.key ?? identity.user;
 
-/** remember the homes an identity was shown (persisted, so a restart forgets nothing) */
+/** the home a read item is seen from: a home id, or a claim/entry read (its `_home`, else its section's) */
+const readHome = (x) => (typeof x === "string" ? x : x && typeof x === "object" ? (x._home ?? x.home ?? x.section_home ?? undefined) : undefined);
+
+/**
+ * Remember the homes an identity was shown (persisted, so a restart forgets nothing). Each item
+ * is a home id, or a claim (or entry row) that was read: a read of a claim marks the home it is
+ * seen from, exactly as a read of an entry does.
+ */
 export function recordReads(identity, homes) {
   if (!SCOPED || !positionMap || identity.open) return;
   const now = Date.now();
   const who = markKey(identity);
   if (!readMarks.has(who)) readMarks.set(who, new Map());
   const mine = readMarks.get(who);
-  for (const h of new Set(homes.filter((x) => typeof x === "string"))) {
+  for (const h of new Set(homes.map(readHome).filter((x) => typeof x === "string"))) {
     const last = mine.get(h) ?? 0;
     mine.set(h, now);
     if (now - last < 10 * 60_000) continue; // persisted recently enough
@@ -86,12 +94,43 @@ function workerLift(identity, home) {
 /**
  * Where a worker's write to an entry that lives at `lives` lands, judged the one way for every
  * worker write tool: lifted (refused or proposed) when what it read is hidden from people there,
- * else floored by what it read.
+ * else floored by what it read. `lives` may be a claim (or entry row) instead of a home: the
+ * write is then judged against the home that claim is seen from.
  */
 export function workerWriteFloor(identity, lives) {
-  const home = lives === undefined || !positionMap ? lives : effectiveHome(positionMap, lives);
+  const at = readHome(lives);
+  const home = at === undefined || !positionMap ? at : effectiveHome(positionMap, at);
   const lift = workerLift(identity, home);
   return { lift, home, floor: lift ? lift.home : derivedFloor(identity, home) };
+}
+
+/**
+ * The derived-data floor restated on claims: the lowest home a write of these claims from
+ * `origin` may get is where both what the writer read and every claim's authority are visible
+ * (claimHome never goes below the origin). Without claims it is derivedFloor.
+ */
+export function claimWriteFloor(identity, origin, claims, rules = policy.authorityMap) {
+  if (!SCOPED || !positionMap || origin === undefined) return origin;
+  const keys = (Array.isArray(claims) ? claims : []).map((c) => ({ class: c?.class ?? c?.subject?.class ?? null, attribute: c?.attribute ?? null }));
+  return commonAncestor(positionMap, [derivedFloor(identity, origin), ...claimHomes(keys, origin, rules, positionMap)]);
+}
+
+/**
+ * The claims an entry carries, for the authority rule: its CLAIMS edges (class, attribute, the
+ * home each is seen from) when the model's schema is in place, else the summary a claim-bearing
+ * write stored on it (`_claim_classes`). Empty for residue: an entry no claim was extracted from.
+ */
+export async function claimsOfEntry(rid) {
+  if (!RID_RE.test(String(rid ?? ""))) return [];
+  const edges = await adbQuery(`SELECT class, attribute, _home FROM (SELECT expand(outE('CLAIMS')) FROM ${rid})`).catch(() => []);
+  if (edges.length) return edges.map((e) => ({ class: e.class ?? null, attribute: e.attribute ?? null, _home: e._home ?? undefined }));
+  const row = (await adbQuery(`SELECT _claim_classes, _home FROM ${rid}`).catch(() => []))[0];
+  try {
+    const list = JSON.parse(row?._claim_classes || "[]");
+    return Array.isArray(list) ? list.filter((c) => c && typeof c === "object").map((c) => ({ class: c.class ?? null, attribute: c.attribute ?? null, _home: row?._home ?? undefined })) : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -154,8 +193,10 @@ const graderUntil = (v) => (v ? (v.confidence >= policy.gradingConfidence ? v.un
 /**
  * Where each entity of a scoped write lands (placement.js decides). `origin`
  * is the writer's resolved position (provenance); an existing entity is
- * (name, origin). Without a grader: new entities at the origin, existing
- * ones where they are.
+ * (name, origin). An entity carrying claims (`claims`, the contract's shape)
+ * is placed by its claims' authority and never graded; the grader runs only
+ * on the residue, entities with no claims. Without a grader: new residue at
+ * the origin, existing ones where they are.
  */
 export async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
   const existing = await Promise.all(
@@ -166,43 +207,69 @@ export async function placeEntities(entities, origin, floor, writtenAt = Date.no
     ),
   );
   const at = (i) => existing[i]?.home;
+  // the claim-bearing entities: placed by the rule, no model call
+  const byClaims = new Map();
+  for (const [i, e] of entities.entries()) {
+    if (!hasClaims(e)) continue;
+    byClaims.set(i, placeByClaims(positionMap, { origin, claims: e.claims, policy: policy.authorityMap, existing: at(i), awaiting: existing[i]?.awaiting, floor }));
+  }
+  const residue = entities.map((e, i) => (byClaims.has(i) ? null : e));
+  const merge = (placed) => entities.map((_, i) => byClaims.get(i) ?? placed[i]);
   const grading = Boolean(GRADER_MODEL) && policy.gradingEnabled;
-  if (!grading) return entities.map((_, i) => applyFloor(positionMap, { home: at(i) ?? origin, note: "not graded (grading off)" }, origin, floor));
+  if (!grading) return merge(entities.map((_, i) => applyFloor(positionMap, { home: at(i) ?? origin, note: "not graded (grading off)" }, origin, floor)));
   // written for everyone: graded from the top for its end date only (everyone isn't a position to describe)
-  const verdicts = await gradeBatch(origin === EVERYONE ? positionMap.root : origin, entities, writtenAt);
+  const verdicts = await gradeResidue(origin === EVERYONE ? positionMap.root : origin, residue, writtenAt);
   if (origin === EVERYONE) {
     // written for everyone on purpose (the admin, or a survey for everyone): graded for its end date only
-    return entities.map((_, i) => ({ ...applyFloor(positionMap, { home: at(i) ?? origin, note: "for everyone" }, origin, floor), until: graderUntil(verdicts[i]) }));
+    return merge(entities.map((_, i) => ({ ...applyFloor(positionMap, { home: at(i) ?? origin, note: "for everyone" }, origin, floor), until: graderUntil(verdicts[i]) })));
   }
   if (origin === positionMap.root) {
     // nothing above the root to restrict to: graded for its end date only
-    return entities.map((_, i) => ({ ...applyFloor(positionMap, { home: at(i) ?? origin, note: "at the root" }, origin, floor), until: graderUntil(verdicts[i]) }));
+    return merge(entities.map((_, i) => ({ ...applyFloor(positionMap, { home: at(i) ?? origin, note: "at the root" }, origin, floor), until: graderUntil(verdicts[i]) })));
   }
-  return entities.map((_, i) => ({
-    ...placeOne(positionMap, {
-      origin,
-      verdict: verdicts[i],
+  return merge(
+    entities.map((_, i) => ({
+      ...placeOne(positionMap, {
+        origin,
+        verdict: verdicts[i],
+        graded: verdicts[i] !== undefined,
+        existing: at(i),
+        // still awaiting grading: this write's grading settles it like a new one
+        awaiting: existing[i]?.awaiting && verdicts[i] !== undefined,
+        floor,
+        threshold: policy.gradingConfidence,
+      }),
       graded: verdicts[i] !== undefined,
-      existing: at(i),
-      // still awaiting grading: this write's grading settles it like a new one
-      awaiting: existing[i]?.awaiting && verdicts[i] !== undefined,
-      floor,
-      threshold: policy.gradingConfidence,
-    }),
-    graded: verdicts[i] !== undefined,
-    until: graderUntil(verdicts[i]),
-  }));
+      until: graderUntil(verdicts[i]),
+    })),
+  );
 }
+
+/** grade the residue only (null slots are claim-bearing and skipped); verdicts come back by the original index */
+async function gradeResidue(origin, residue, writtenAt) {
+  const idx = residue.map((e, i) => (e ? i : -1)).filter((i) => i >= 0);
+  const out = new Array(residue.length).fill(undefined);
+  if (!idx.length) return out;
+  const verdicts = await gradeBatch(origin, idx.map((i) => residue[i]), writtenAt);
+  for (const [k, i] of idx.entries()) out[i] = verdicts[k];
+  return out;
+}
+
+/** the grader as an identity: an agent with no position, whose every write is a proposal */
+const GRADER_IDENTITY = { user: "graph-rag grader", caps: { write: "queued" }, positions: [], agent: true };
 
 /** grading's proposals go to a person: release lower, or review an unsure call */
 export async function askAboutPlacement(rid, name, p) {
   const ask = p.release ?? p.review;
   if (!ask) return;
+  // the grader never moves anything itself: the rule says propose (a queued identity, widening)
+  const d = decideWrite(GRADER_IDENTITY, { kind: "rehome", lives: p.home }, { to: ask.to, reason: ask.reason });
+  if (d.action === "direct") return log.warn(`grading proposal for ${name} not queued: the rule allowed it directly (never expected)`);
   await queueWrite({
     kind: "rehome",
     payload: JSON.stringify({ rid, name, from: p.home, to: ask.to, reason: ask.reason }),
-    user: "graph-rag grader",
-    home: p.home,
+    user: GRADER_IDENTITY.user,
+    home: d.home,
   }).catch((err) => log.warn(`grading proposal for ${name} not queued: ${String(err).slice(0, 120)}`));
 }
 

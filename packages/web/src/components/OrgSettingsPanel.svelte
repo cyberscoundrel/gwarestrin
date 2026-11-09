@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, type Snippet } from "svelte";
   import { History, ShieldCheck, TriangleAlert } from "lucide";
-  import { api, type OrgPolicy, type PolicyView, type PrunedEntry } from "../lib/api.js";
+  import { api, type AuthorityMap, type OrgPolicy, type PolicyView, type PositionsView, type PrunedEntry } from "../lib/api.js";
   import Dialog from "./Dialog.svelte";
   import Icon from "./Icon.svelte";
   import PanelHeader from "./PanelHeader.svelte";
@@ -22,6 +22,10 @@
   let pruneBusy = $state(false);
   let pruneNote = $state("");
   let topicsText = $state("");
+  // the authority map as rows a person edits: a class, an attribute (either may be blank), the position
+  type Rule = { cls: string; attribute: string; position: string };
+  let rules = $state<Rule[]>([]);
+  let tree = $state<PositionsView | null>(null);
 
   const LABELS: Record<keyof OrgPolicy, string> = {
     maxGrantDays: "Longest share",
@@ -31,6 +35,7 @@
     gradingEnabled: "Grading",
     gradingConfidence: "Grading confidence",
     restrictedTopics: "Restricted topics",
+    authorityMap: "Authority",
     derivedWindowHours: "Derived-data window",
     requestDays: "How long a request stays open",
     pruneAfterDays: "Removing expired entries",
@@ -42,7 +47,11 @@
       view = await api.policy();
       draft = { ...view.policy };
       topicsText = draft.restrictedTopics.join("\n");
-      if (view.canEdit) pruned = (await api.pruned().catch(() => ({ pruned: [] }))).pruned;
+      rules = rulesOf(draft.authorityMap);
+      if (view.canEdit) {
+        tree = await api.positions().catch(() => null);
+        pruned = (await api.pruned().catch(() => ({ pruned: [] }))).pruned;
+      }
     } catch (e) {
       loadError = e instanceof Error ? e.message : String(e);
     }
@@ -115,8 +124,61 @@
     if (view) {
       draft = { ...view.defaults };
       topicsText = draft.restrictedTopics.join("\n");
+      rules = rulesOf(draft.authorityMap);
     }
   }
+
+  // ---- the authority map: who may commit the organization to what ----
+  /** the map as rows: attribute rules, then each class's own rule and its attribute rules */
+  function rulesOf(m: AuthorityMap | undefined): Rule[] {
+    const out: Rule[] = [];
+    for (const [a, p] of Object.entries(m?.attributes ?? {})) out.push({ cls: "", attribute: a, position: p });
+    for (const [c, r] of Object.entries(m?.classes ?? {})) {
+      if (r.authority) out.push({ cls: c, attribute: "", position: r.authority });
+      for (const [a, p] of Object.entries(r.attributes ?? {})) out.push({ cls: c, attribute: a, position: p });
+    }
+    return out;
+  }
+  /** the rows as the map the server stores (sorted the way it sorts, so unchanged rows read as unchanged) */
+  function mapOf(list: Rule[]): AuthorityMap {
+    const sorted = <T,>(o: Record<string, T>) => Object.fromEntries(Object.entries(o).sort(([a], [b]) => a.localeCompare(b)));
+    const classes: Record<string, { authority?: string; attributes?: Record<string, string> }> = {};
+    const attributes: Record<string, string> = {};
+    for (const r of list) {
+      const c = r.cls.trim();
+      const a = r.attribute.trim();
+      if (!r.position || (!c && !a)) continue;
+      if (!c) attributes[a] = r.position;
+      else if (!a) classes[c] = { authority: r.position, ...classes[c] };
+      else classes[c] = { ...classes[c], attributes: { ...classes[c]?.attributes, [a]: r.position } };
+    }
+    for (const [c, r] of Object.entries(classes)) classes[c] = { ...(r.authority ? { authority: r.authority } : {}), ...(r.attributes ? { attributes: sorted(r.attributes) } : {}) };
+    return { classes: sorted(classes), attributes: sorted(attributes) };
+  }
+  function setRule(i: number, patch: Partial<Rule>) {
+    rules[i] = { ...rules[i], ...patch } as Rule;
+    if (draft) draft.authorityMap = mapOf(rules);
+  }
+  function addRule() {
+    rules.push({ cls: "", attribute: "", position: tree?.root ?? "" });
+    if (draft) draft.authorityMap = mapOf(rules);
+  }
+  function removeRule(i: number) {
+    rules.splice(i, 1);
+    if (draft) draft.authorityMap = mapOf(rules);
+  }
+  const ruleCount = (m: AuthorityMap | undefined) => rulesOf(m).length;
+  // position names as paths ("Operations › Production floor"), as the sharing panel shows them
+  const byId = $derived(new Map((tree?.tree ?? []).map((p) => [p.id, p])));
+  function path(id: string): string {
+    const parts: string[] = [];
+    for (let cur = byId.get(id); cur; cur = cur.parent ? byId.get(cur.parent) : undefined) {
+      if (cur.parent === null) break;
+      parts.unshift(cur.name);
+    }
+    return parts.length ? parts.join(" › ") : "Top of the organization";
+  }
+  const positionOptions = $derived([...(tree?.tree ?? [])].map((p) => ({ value: p.id, label: path(p.id) })).sort((a, b) => (a.value === tree?.root ? -1 : b.value === tree?.root ? 1 : a.label.localeCompare(b.label))));
 
   /** "Longest share: 90 days → 30 days" lines for one history entry */
   function diff(prev: string, next: string): string[] {
@@ -137,6 +199,10 @@
     if (k === "maxGrantDays" || k === "defaultShareDays" || k === "requestDays") return `${v} days`;
     if (k === "derivedWindowHours") return `${v} h`;
     if (k === "gradingConfidence") return `${Math.round(Number(v) * 100)}%`;
+    if (k === "authorityMap") {
+      const n = ruleCount(v as AuthorityMap);
+      return n ? `${n} rule${n === 1 ? "" : "s"}` : "no rules";
+    }
     if (Array.isArray(v)) return v.length ? v.join(", ") : "none";
     return String(v);
   }
@@ -245,6 +311,37 @@
         disabled={!draft.gradingEnabled || !view.infra.graderModel}
       ></textarea>
       <span class="field-hint">One per line. The grader files an entry higher only when it's about one of these; everything else stays with the writer's team.</span>
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet authorityBody()}
+  {#if draft && view}
+    <div class="grid gap-2">
+      {#if rules.length}
+        <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2 text-xs font-medium text-dim" aria-hidden="true">
+          <span>Class</span><span>Attribute</span><span>Authority</span><span></span>
+        </div>
+      {/if}
+      {#each rules as r, i (i)}
+        <div class="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
+          <input class="input" placeholder="any class" aria-label="class" value={r.cls} oninput={(e) => setRule(i, { cls: e.currentTarget.value })} />
+          <input class="input" placeholder="whole class" aria-label="attribute" value={r.attribute} oninput={(e) => setRule(i, { attribute: e.currentTarget.value })} />
+          <select class="input" aria-label="position holding authority" value={r.position} onchange={(e) => setRule(i, { position: e.currentTarget.value })}>
+            {#each positionOptions as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+            {#if r.position && !positionOptions.some((o) => o.value === r.position)}<option value={r.position}>{r.position} (no longer a position)</option>{/if}
+          </select>
+          <button type="button" class="btn btn-ghost btn-sm" aria-label="remove this rule" onclick={() => removeRule(i)}>Remove</button>
+        </div>
+      {/each}
+      <div>
+        <button type="button" class="btn btn-ghost btn-sm" disabled={!tree?.scoped} onclick={addRule}>Add rule</button>
+      </div>
+      <span class="field-hint">
+        A rule names the position that may commit the organization to a class of commitment (orders, hires, maintenance), or to one attribute of it (price, pay, dismissal); an attribute rule with no class applies to that attribute in every class.
+        The position named and those above it see such claims and enter them directly; people below it propose, and what they write of it is filed where the authority sees it. Anything with no rule stays with whoever wrote it.
+        Only sections no claim was extracted from go to the grader, with the restricted topics above.
+      </span>
     </div>
   {/if}
 {/snippet}
@@ -373,6 +470,7 @@
     {:else}
       {@render section("Sharing", "How long shares last and who makes them.", sharingBody)}
       {@render section("Grading", "Filing new entries where they belong.", gradingBody)}
+      {@render section("Authority", "Who may commit the organization to what: the hierarchy read the other way.", authorityBody)}
       {@render section("Derived data", "Summaries and notes built from what an agent read.", derivedBody)}
       {@render section("Expired entries", "Entries that end (a visit, this week's schedule) leave searches on their date, and the graph later.", pruningBody)}
       {@render section("Deployment", "For reference; changed at deploy, not here.", deployBody)}
