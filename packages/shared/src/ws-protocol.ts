@@ -7,6 +7,7 @@
  *  - "ui_request": extension_ui_request needing a response (server -> browser)
  *  - "ui_response": browser's answer to a ui_request (browser -> server)
  *  - "agent_state": manager-level runtime summary (server -> browser)
+ *  - "thread_record": the current conversation's on/off-record state (server -> browser)
  *  - "error":      bridge error (server -> browser)
  */
 
@@ -96,6 +97,13 @@ export interface WsAgentState {
   state: import("./api-types.js").AgentRuntimeSummary;
 }
 
+export interface WsThreadRecord {
+  v: 1;
+  agentId: string;
+  kind: "thread_record";
+  record: import("./api-types.js").ThreadRecordState;
+}
+
 export interface WsError {
   v: 1;
   agentId: string;
@@ -103,7 +111,7 @@ export interface WsError {
   message: string;
 }
 
-export type WsServerMessage = WsEvent | WsUiRequest | WsAgentState | WsError;
+export type WsServerMessage = WsEvent | WsUiRequest | WsAgentState | WsThreadRecord | WsError;
 export type WsClientMessage = WsCommand | WsUiResponse;
 
 export function isAllowedRpcCommand(type: string): type is AllowedRpcCommand {

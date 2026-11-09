@@ -184,3 +184,86 @@ export function parseExtraction(text, sections, writtenAt = Date.now()) {
   }
   return out;
 }
+
+// ---- condensed documents (docs/ORGANIZATION-MODEL.md, "Inputs: on record, condensed, per claim") ----
+//
+// A condensed document arrives in the contract's shape (model/claims.js
+// normalizeDocument) and is stored like a manual, except that its sections
+// are given, not chunked: renderRecord lays them out as one text with a span
+// per section, and sectionChunks turns the spans back into the chunk shape
+// everything else reads (readDocument, embeddings).
+import { ClaimError, normalizeDocument, validateDocument } from "./model/claims.js";
+
+/** what a condensed document's text looks like in the store: a heading line per section, a blank line between */
+export function renderRecord(doc) {
+  let text = "";
+  const spans = [];
+  for (const s of doc.sections) {
+    if (text) text += "\n\n";
+    const start = text.length;
+    const heading = s.heading ? `## ${s.heading}\n\n` : "";
+    text += heading + s.text;
+    spans.push({ index: s.index, heading: s.heading ?? "", start, end: text.length });
+  }
+  return { text: `${text}\n`, spans };
+}
+
+/** the chunks of a stored condensed document: one per section, from the spans the ingest stored */
+export function sectionChunks(text, spans) {
+  const src = String(text ?? "");
+  return spans.map((sp, i) => {
+    const body = src.slice(sp.start, sp.end);
+    const prev = i > 0 ? src.slice(Math.max(spans[i - 1].start, spans[i - 1].end - OVERLAP), spans[i - 1].end) : "";
+    return {
+      index: Number.isInteger(sp.index) ? sp.index : i,
+      heading: sp.heading ?? "",
+      start: sp.start,
+      end: sp.end,
+      // the heading line is part of the text, so a reader sees it; it leads the embedding once only
+      text: body,
+      embedText: `${prev ? `…${prev}\n` : ""}${body}`.slice(0, 6000),
+    };
+  });
+}
+
+/** a condensed document, as the ingest tool receives it: `text` is the document as JSON, or it isn't one (a manual) */
+export function parseRecordText(text) {
+  const s = String(text ?? "").trim();
+  if (!s.startsWith("{")) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(s);
+  } catch {
+    return null;
+  }
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.sections) ? parsed : null;
+}
+
+/**
+ * A condensed document made ready for the ingest: what the tool call gave
+ * (title, description) fills what the document left out, the recording
+ * person and position come from the identity when the condenser gave none
+ * (an agent's record counts as the person it acts for), and the whole is
+ * validated with the contract's normalizeDocument against `classes` (the
+ * confirmed set, or undefined when the graph has none yet). Throws an Error
+ * listing every problem by field, so a condenser can fix them all at once.
+ */
+export function prepareRecord(raw, { title, description, recorded_by, position, classes, now = Date.now() } = {}) {
+  const doc = {
+    ...raw,
+    title: typeof raw.title === "string" && raw.title.trim() ? raw.title : title,
+    description: typeof raw.description === "string" && raw.description.trim() ? raw.description : description,
+    recorded_by: typeof raw.recorded_by === "string" && raw.recorded_by.trim() ? raw.recorded_by : recorded_by,
+    position: typeof raw.position === "string" && raw.position.trim() ? raw.position : position,
+  };
+  const { document, errors } = validateDocument(doc, { classes, now });
+  if (!document) {
+    const list = errors.map((e) => `${e.field}: ${e.message}`);
+    const err = new Error(`the condensed document isn't in the contract's shape (${list.length} problem${list.length === 1 ? "" : "s"}): ${list.join("; ")}`);
+    err.errors = errors;
+    throw err;
+  }
+  return document;
+}
+
+export { ClaimError, normalizeDocument };

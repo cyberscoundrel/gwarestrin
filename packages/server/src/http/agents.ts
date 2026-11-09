@@ -3,7 +3,7 @@ import { graphTokenFor } from "../agents/graph-token.js";
 import { createReadStream } from "node:fs";
 import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { CreateAgentInput, PatchAgentInput, UpsertProfileInput } from "@gwarestrin/shared";
+import type { CreateAgentInput, PatchAgentInput, SetThreadRecordInput, UpsertProfileInput } from "@gwarestrin/shared";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import type { AgentManager } from "../agents/manager.js";
@@ -33,6 +33,14 @@ const createAgentSchema = Type.Object(
 );
 
 const patchAgentSchema = Type.Object({}, { additionalProperties: true });
+
+const setRecordSchema = Type.Object(
+  {
+    on: Type.Boolean(),
+    reason: Type.Optional(Type.String({ maxLength: 300 })),
+  },
+  { additionalProperties: false },
+);
 
 export async function registerAgentRoutes(app: FastifyInstance, config: ServerConfig, manager: AgentManager): Promise<void> {
   // the Graph worker profile is the organization's admin's alone (graph-rag
@@ -176,6 +184,31 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
       }
     });
   }
+
+  // the current conversation's on/off-record state (docs/ORGANIZATION-MODEL.md: a deliberate act of the person)
+  app.get("/api/agents/:id/record", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!manager.store.get(id)) return reply.code(404).send({ error: "not found" });
+    return { record: manager.threadRecord(id) };
+  });
+
+  app.put("/api/agents/:id/record", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const record = manager.store.get(id);
+    if (!record) return reply.code(404).send({ error: "not found" });
+    if (!Value.Check(setRecordSchema, req.body)) return reply.code(400).send({ error: "invalid record payload: { on: boolean, reason?: string }" });
+    if (workerAgent(id)) return reply.code(409).send({ error: "a graph worker's conversation is not a person's: it has no record" });
+    const input = req.body as SetThreadRecordInput;
+    // the person: the forwardauth header, else the instance's owner
+    const header = req.headers["x-authentik-username"];
+    const by = (Array.isArray(header) ? header[0] : header) ?? getInstanceMetadata()?.owner?.displayName ?? "the person";
+    const profile = manager.profiles.resolve(record.profileId);
+    try {
+      return { record: await manager.setOnRecord(id, { ...input, by, position: profile.positions?.[0] ?? null }) };
+    } catch (err) {
+      return reply.code(409).send({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
 
   app.get("/api/agents/:id/models", async (req, reply) => {
     const { id } = req.params as { id: string };

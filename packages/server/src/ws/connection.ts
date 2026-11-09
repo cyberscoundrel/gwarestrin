@@ -10,6 +10,7 @@ import {
   type WsError,
   type WsEvent,
   type WsServerMessage,
+  type WsThreadRecord,
   type WsUiRequest,
 } from "@gwarestrin/shared";
 import type { AgentManager } from "../agents/manager.js";
@@ -69,22 +70,29 @@ export class WsConnection {
       this.send({ v: 1, agentId: state.id, kind: "agent_state", state } satisfies WsAgentState);
     };
 
+    const onRecord = ({ agentId, record }: { agentId: string; record: import("@gwarestrin/shared").ThreadRecordState }) => {
+      this.send({ v: 1, agentId, kind: "thread_record", record } satisfies WsThreadRecord);
+    };
+
     const m = this.manager;
     m.on("agentEvent", onEvent);
     m.on("agentUiRequest", onUiRequest);
     m.on("agentState", onState);
+    m.on("threadRecord", onRecord);
     this.offManager = [
       () => m.off("agentEvent", onEvent),
       () => m.off("agentUiRequest", onUiRequest),
       () => m.off("agentState", onState),
+      () => m.off("threadRecord", onRecord),
     ];
 
     this.socket.on("message", (raw: unknown) => this.onMessage(raw));
     this.socket.on("close", () => this.cleanup());
     this.socket.on("error", () => this.cleanup());
 
-    // initial snapshot of all agents
+    // initial snapshot of all agents, and of each one's current conversation's record state
     for (const s of this.manager.listSummaries()) onState(s);
+    for (const r of this.manager.store.list()) onRecord({ agentId: r.id, record: this.manager.threadRecord(r.id) });
   }
 
   private onMessage(raw: unknown): void {

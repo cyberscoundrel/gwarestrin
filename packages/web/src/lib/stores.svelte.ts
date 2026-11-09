@@ -1,7 +1,7 @@
 import { getAdapter } from "./rpc-agent-adapter.js";
 import { ws } from "./ws-client.js";
 import type { AgentEvent } from "./agent-types.js";
-import type { AgentRuntimeSummary, ProfileRecord } from "@gwarestrin/shared";
+import type { AgentRuntimeSummary, ProfileRecord, ThreadRecordState } from "@gwarestrin/shared";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 
 export interface AgentListItem {
@@ -58,6 +58,8 @@ class Store {
   defaultProvider = $state<string | null>(null);
   defaultModel = $state<string | null>(null);
   private runtime = new SvelteMap<string, AgentRuntimeSummary>();
+  /** each agent's current conversation's on/off-record state (the server sends it on connect and on every change) */
+  private records = new SvelteMap<string, ThreadRecordState>();
   /** the remembered agent is restored once, on the first agent list load */
   private initialSelectionDone = false;
   private working = new SvelteSet<string>();
@@ -87,6 +89,7 @@ class Store {
         this.runtime.set(msg.state.id, msg.state);
         this.syncAgentStatus(msg.state.id);
       }
+      if (msg.kind === "thread_record") this.records.set(msg.agentId, msg.record);
       // "working" = an agent turn is in flight (drives the only looping
       // animation in the UI, so it must clear as soon as the turn settles)
       if (msg.kind === "event") {
@@ -109,6 +112,15 @@ class Store {
 
   runtimeFor(id: string): AgentRuntimeSummary | undefined {
     return this.runtime.get(id);
+  }
+
+  /** the agent's current conversation's record state (off until the server says otherwise) */
+  recordFor(id: string): ThreadRecordState | undefined {
+    return this.records.get(id);
+  }
+
+  setRecord(id: string, record: ThreadRecordState): void {
+    this.records.set(id, record);
   }
 
   onUnread(l: () => void): () => void {

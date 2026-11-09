@@ -3,7 +3,7 @@ import { instanceSettings, mcpAllowed, modelRefusal } from "../instance/settings
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentRecord, AgentRuntimeSummary, CreateAgentInput, GraphRole, PatchAgentInput, ProfileRecord } from "@gwarestrin/shared";
+import type { AgentRecord, AgentRuntimeSummary, CreateAgentInput, GraphRole, PatchAgentInput, ProfileRecord, SetThreadRecordInput, ThreadRecordState } from "@gwarestrin/shared";
 import type { ServerConfig } from "../config.js";
 import type { McpRegistryStore } from "../mcp/registry-store.js";
 import type { ProviderRegistry } from "../providers/registry.js";
@@ -18,6 +18,7 @@ import { OpenShellAgentLauncher } from "../runtime/openshell-agent.js";
 import { OpenShellProviders, OpenShellRuntime, connectOpenShell } from "../runtime/openshell.js";
 import { openShellIdentity } from "../runtime/openshell-identity.js";
 import { lastReply, lastTurn } from "./last-reply.js";
+import { condensedFromEvent, type ConfirmedClass, fetchConfirmedClasses, RECORD_FILE, recordContext, switchRecord, threadIdOf, writeRecordContext } from "./condenser.js";
 import { AgentStore } from "./store.js";
 import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.js";
 
@@ -44,6 +45,8 @@ export interface ManagerEvents {
   agentState: [state: AgentRuntimeSummary];
   agentEvent: [data: { agentId: string; event: Record<string, unknown> & { type: string } }];
   agentUiRequest: [data: { agentId: string; request: Record<string, unknown> & { type: string } }];
+  /** the current conversation's on/off-record state changed (or a document was condensed from it) */
+  threadRecord: [data: { agentId: string; record: ThreadRecordState }];
 }
 
 export class AgentManager extends EventEmitter<ManagerEvents> {
@@ -71,6 +74,8 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   private starting = new WeakSet<RpcAgent>();
   private extensionsRoot: string;
   private launcher: Promise<OpenShellAgentLauncher> | undefined;
+  /** the confirmed commitment classes, as last read from the graph (a few minutes' cache) */
+  private classes: { at: number; list: ConfirmedClass[] | null } = { at: 0, list: null };
 
   constructor(config: ServerConfig, registry: ProviderRegistry, store: AgentStore, mcpRegistry?: McpRegistryStore, profiles?: ProfileStore) {
     super();
@@ -206,6 +211,64 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
 
   listSummaries(): AgentRuntimeSummary[] {
     return this.store.list().map((r) => this.running.get(r.id)?.summary() ?? { id: r.id, status: r.status });
+  }
+
+  // ---- on record (docs/ORGANIZATION-MODEL.md; agents/condenser.ts) ----
+
+  /** the agent's current conversation's record state (off by default) */
+  threadRecord(id: string): ThreadRecordState {
+    return this.store.threadRecord(id, threadIdOf(this.store.get(id)?.sessionFile));
+  }
+
+  /**
+   * The person switches the current conversation on or off record. On
+   * record: from now, under their position, for their reason; the agent sees
+   * it in its context from its next turn (on-record.md, read by graph-context
+   * every turn) with the confirmed classes in front of it. Off again: stops
+   * further recording; what was recorded stays, and the agent is told to
+   * condense what was on record and not yet condensed.
+   */
+  async setOnRecord(id: string, input: SetThreadRecordInput & { by: string; position?: string | null }): Promise<ThreadRecordState> {
+    const record = this.store.get(id);
+    if (!record) throw new Error(`no such agent: ${id}`);
+    if (!this.running.has(id)) throw new Error("start the agent first: a conversation is on record while it runs");
+    const thread = threadIdOf(record.sessionFile);
+    if (!thread) throw new Error("this agent has no conversation yet");
+    const next = switchRecord(this.store.threadRecord(id, thread), input);
+    this.store.setThreadRecord(id, next);
+    await this.syncRecordContext(id, next);
+    this.emit("threadRecord", { agentId: id, record: next });
+    return next;
+  }
+
+  /** the record state the agent reads at every turn, on the host and (on OpenShell) in its sandbox */
+  private async syncRecordContext(id: string, state: ThreadRecordState): Promise<void> {
+    const record = this.store.get(id);
+    if (!record) return;
+    const classes = state.on ? await this.confirmedClasses() : null;
+    const text = recordContext(state, classes);
+    await writeRecordContext(dirsFor(this.config.stateDir, record).home, text);
+    if (this.onOpenShell && this.running.has(id)) {
+      await (await this.openShellLauncher()).writeHomeFile(id, RECORD_FILE, text).catch((err) => log.warn(`agent ${record.name}: record state not written into its sandbox: ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+
+  /** the conversation changed (a new session, a fork, a start): its own record state applies */
+  private async threadChanged(id: string): Promise<void> {
+    const state = this.threadRecord(id);
+    await this.syncRecordContext(id, state).catch((err) => log.warn(`record state for ${id} not written: ${err instanceof Error ? err.message : String(err)}`));
+    this.emit("threadRecord", { agentId: id, record: state });
+  }
+
+  /** the confirmed commitment classes (CommitmentClass rows), read through graph-rag as this instance; null when they can't be read */
+  async confirmedClasses(): Promise<ConfirmedClass[] | null> {
+    if (Date.now() - this.classes.at < 300_000) return this.classes.list;
+    const values = getInstanceMetadata()?.values as Record<string, { token?: unknown }> | undefined;
+    const token = typeof values?.graph?.token === "string" ? values.graph.token : undefined;
+    const url = this.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL;
+    const list = url ? await fetchConfirmedClasses(url, token) : null;
+    this.classes = { at: Date.now(), list };
+    return list;
   }
 
   /**
@@ -440,10 +503,26 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     this.running.set(id, agent);
 
     if (this.onOpenShell) agent.noteVm("running");
-    agent.on("event", (event) => this.emit("agentEvent", { agentId: id, event }));
+    agent.on("event", (event) => {
+      this.emit("agentEvent", { agentId: id, event });
+      // a document condensed from the conversation (the agent's ingest call): counted on its thread
+      const condensed = condensedFromEvent(event);
+      if (condensed) {
+        const thread = threadIdOf(this.store.get(id)?.sessionFile);
+        const state = this.store.threadRecord(id, thread);
+        if (thread && state.ever) {
+          const next = { ...state, documents: state.documents + 1, condensed_at: new Date().toISOString() };
+          this.store.setThreadRecord(id, next);
+          void this.syncRecordContext(id, next).catch(() => {});
+          this.emit("threadRecord", { agentId: id, record: next });
+        }
+      }
+    });
     agent.on("sessionFile", (file) => {
+      const changed = threadIdOf(file) !== threadIdOf(this.store.get(id)?.sessionFile);
       this.store.setSessionFile(id, file);
       log.info(`agent ${record.name} session file -> ${path.basename(file)}`);
+      if (changed) void this.threadChanged(id);
     });
     agent.on("uiRequest", (request) => {
       // gondolin-vm reports lifecycle via setStatus("gondolin", ...)
@@ -468,6 +547,8 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
       if (data?.sessionFile) this.store.setSessionFile(id, data.sessionFile);
       this.starting.delete(agent);
       this.store.setStatus(id, "running");
+      // the conversation's record state, for this thread (a stale file from another thread never lingers)
+      void this.threadChanged(id);
       log.info(`agent ${record.name} (${id}) running pid=${proc.pid}`);
       return agent.summary();
     } catch (err) {

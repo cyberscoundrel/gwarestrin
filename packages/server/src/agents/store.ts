@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AgentRecord, CreateAgentInput, GraphRole, PatchAgentInput } from "@gwarestrin/shared";
+import type { AgentRecord, CreateAgentInput, GraphRole, PatchAgentInput, ThreadRecordState } from "@gwarestrin/shared";
+import { offRecord } from "./condenser.js";
 import { scoped } from "../util/log.js";
 
 const log = scoped("store");
@@ -123,6 +124,20 @@ export class AgentStore {
     const record = this.agents.get(id);
     if (!record) return;
     record.sessionFile = sessionFile;
+    void this.persist();
+  }
+
+  /** a conversation's on/off-record state: as stored, or off (the default) */
+  threadRecord(id: string, thread: string | null): ThreadRecordState {
+    const record = this.agents.get(id);
+    return (thread && record?.threads?.[thread]) || offRecord(thread);
+  }
+
+  /** store a conversation's record state (keyed by its thread id); persisted at once */
+  setThreadRecord(id: string, state: ThreadRecordState): void {
+    const record = this.agents.get(id);
+    if (!record || !state.thread) return;
+    record.threads = { ...(record.threads ?? {}), [state.thread]: state };
     void this.persist();
   }
 
