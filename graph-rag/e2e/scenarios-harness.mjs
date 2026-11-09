@@ -141,7 +141,9 @@ export default [
       const full = loadBatch();
       const batch = { ...full, conversations: full.conversations.filter((c) => ["ux-m01", "ux-al04", "ux-aa11", "ux-aq01", "ux-ak06"].includes(c.note)) };
       for (const c of batch.conversations) {
-        const r = await ctx.tool(c.person, tool, { ...c.expected.document, conversation: c.turns });
+        // record_document (record-tools.js) takes the contract's document under `document`; any other
+        // condensing tool gets the document's fields and the conversation itself
+        const r = await ctx.tool(c.person, tool, tool === "record_document" ? { document: c.expected.document } : { ...c.expected.document, conversation: c.turns });
         ctx.check(!r.error, `${c.id} posted by ${c.person} through ${tool}: ${JSON.stringify(r).slice(0, 200)}`);
       }
       await ctx.until("the batch's sections are stored", async () => (await collectRows(batch, ctx.sql)).sections.length >= batch.conversations.reduce((a, c) => a + c.expected.sections.length, 0));
