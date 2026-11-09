@@ -1,10 +1,13 @@
 /**
  * The graph worker pool, run by the admin's workspace: one agent thread per
- * queue entry. graph-rag holds the queue (review jobs); this claims what the
- * pool has room for, makes each thread an agent under the Graph worker
- * profile (or wakes the one it had), sends it its brief, waits for its turn
- * to end, reports back and stops it. Threads stay in the rail (an admin can
- * open one and talk to it) until they're deleted after the pool's keepDays.
+ * document section (or a few sections the master grouped) with its claims.
+ * graph-rag holds the queue (review jobs) and composes each thread's brief
+ * as its section's people see it; this claims what the pool has room for,
+ * makes each thread an agent under the Graph worker profile (or wakes the
+ * one it had), sends it the brief it was given (never one written here),
+ * waits for its turn to end, reports back and stops it. Threads stay in the
+ * rail (an admin can open one and talk to it) until they're deleted after
+ * the pool's keepDays.
  *
  * Only a workspace graph-rag accepts as the organization's root gets
  * anything from the claim endpoint, so other workspaces just idle.
@@ -32,10 +35,13 @@ export interface ClaimedThread {
   job: string;
   /** the level of work the master gave it (1 quick check, 2 investigation, 3 broad): picks its model */
   level?: number | undefined;
+  /** the section (or the first of its sections) the thread reconciles: its "entry" for what it sees */
   entry: string;
+  /** a label for the rail: the claims' classes and attributes, never a title or a text */
   name: string;
   agent_id: string | null;
   minutes: number;
+  /** the brief graph-rag composed (a read, recorded against the thread's floor there) or the resume message */
   message: string;
 }
 
