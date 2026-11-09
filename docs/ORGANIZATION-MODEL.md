@@ -13,6 +13,29 @@ the host, [DEMO.md](DEMO.md)) is frozen and off limits to all of this work. It
 shares no data source with the development instance and stays down until a
 demo. Everything here lands in the development instance only.
 
+## The instance rule
+
+Ruled by the user on 2026-11-09: **an instance is an entity that has an
+instance relationship to a class.** The relationship is an `INSTANCE_OF` edge
+from the entity to a `Class` vertex, and that edge is the only record of what
+the entity is: `_class` and `_thing_type` stop being written, and the classes
+shown on an instance are read from the edge. Classes are of anything, not only
+commitments: they form one tree under the four primitives, each class a subclass
+of exactly one parent ("leased building", then "warehouse", then one street
+address as an instance). Everything below the four primitives is discovered and
+confirmed by a person. No class, no instance: a subject that cannot be related to
+a confirmed class is never minted, and stays a value on its claim until a class or
+an instance exists for it. That gate replaces every test of how a name reads or
+how often it has come up. Who may mint is unchanged: a record key, a person or a
+worker.
+
+The contract is under [Classes and instances](#classes-and-instances) and in
+`graph-rag/src/model/schema.js`. As of 2026-11-09 only the contract exists; the
+writers and readers have not moved. What the rule assumes is in [Decisions
+still open](#decisions-still-open), 6 to 19, and what it does to the open review
+findings is in [What the rule changes in the
+review](#what-the-rule-changes-in-the-review).
+
 ## Why
 
 Three weeks of graph-worker batches ([GRAPH-WORKER-RELIABILITY.md](GRAPH-WORKER-RELIABILITY.md))
@@ -104,10 +127,27 @@ pattern, and event sourcing. The convergence is why the level is trusted.
 
 ### Classes and instances
 
-A **class** is a commitment pattern that recurs (every order goes quote, PO,
-produce, ship, invoice, pay). An **instance** is one occurrence (job 4471,
-the Corvane quote). Classes are the organization's own symbols; the
-hierarchy of its people and the schema of its ERP are both made of them.
+In the user's words, on 2026-11-04:
+
+> over time as the actions satisfy the needs of the organization classes of
+> things crystalize, there might be employees and contractors and volunteers,
+> there might be software or capital resources they have relationships to,
+> instances of these classes would be individual employees or individual
+> company owned vehicles or individual software resources, relationships
+> between instances and classes form the hierarchical structure of an
+> organization while classes represent the relevant internal symbols
+
+and that agents "create the necessary nodes in the graph and their
+relationships to classes and instances".
+
+A **class** is a kind of thing the organization recognizes, of anything: a
+pattern of commitment that recurs, a kind of worker, software, a capital asset,
+a kind of building. Classes are the organization's internal symbols. An
+**instance** is one of them, an entity with an `INSTANCE_OF` edge to its class.
+Classes form a tree: "leased building" is a class, "warehouse" is a subclass of
+it, and one street-address location is an instance of warehouse. Relationships
+between instances and classes are the hierarchical structure of the
+organization, and the four primitives are the roots of the tree.
 
 Classes are **discovered, not declared**. The organization met mid-life
 hands over its fossil record: ERP tables are classes that crystallized years
@@ -118,16 +158,203 @@ commitments and events), and these are the same model at different times.
 
 Discovery is an upfront, agentic cost over the connected systems and a
 sample of the corpus, incremental afterwards (a new table, or a recurring
-commitment sequence the graph has not seen, is a discovery event, not a
-re-run). A discovered class is **confirmed by a person before anything maps
-onto it**. A wrong name at this layer poisons every later mapping.
+pattern the graph has not seen, is a discovery event, not a re-run). A
+discovered class is **confirmed by a person before anything maps onto it**. A
+wrong name at this layer poisons every later mapping.
+
+**The class vertex** (`Class`, in `schema.js`) replaces `CommitmentClass` and
+the flat lists `ACTOR_TYPES` and `THING_TYPES`. Every class has a unique `name`,
+a `status` (proposed, confirmed or retired), a `record_table` (`system:table`,
+or null when no source system records it), and optional `stages` and
+`attributes`. What primitive a class belongs to is the root it sits under, read
+from the tree (`schema.primitiveOf`) and never stored, so moving a class cannot
+leave it disagreeing.
+
+**The tree** (`SUBCLASS_OF`, from a class to its parent):
+
+- The four primitives are the only built-in roots. They exist from the start,
+  are confirmed by nobody (`confirmed_by` is `built-in`), have no parent, and hold
+  no instances directly. Everything under them is discovered and confirmed by a
+  person, including each subclass link.
+- Every other class has exactly one confirmed parent. A link has its own
+  `status`. A move is a `proposed` link that a person's confirmation swaps for the
+  confirmed one, in one transaction. A unique index on `(child, status)` holds a
+  class to one confirmed parent and one proposed one.
+- A tree is confirmed from the top: a link needs a confirmed parent
+  (`schema.assertSubclassLink`). A class whose chain doesn't reach a root through
+  confirmed classes is not in the tree, whatever its own status says, so a cycle or
+  a dangling parent makes nothing an instance. Cycles are refused at the link, and
+  `SUBCLASS_OF` has no way to express two parents.
+- A class with confirmed subclasses cannot be retired until they are moved.
+
+Read the link through its edge, `outE('SUBCLASS_OF')[status = 'confirmed'].inV()`:
+`out('SUBCLASS_OF')[status = 'confirmed']` filters on the class's own status, and
+returned the wrong parent when tried on ArcadeDB.
+
+**Inheritance.** A rule, stage list or attribute on a class applies to its
+subclasses and their instances, and the nearest class up the chain wins
+(`classChain`, `effectiveStages`, `effectiveAttributes`, `effectiveRecordTable`):
+a subclass with no stage list takes the nearest one, and with no record table
+shares its parent's. A `stage` claim needs a stage list in force; a class with none
+up its chain takes no `stage` claim. A query on a class includes the instances of
+its subclasses (`classAndSubclasses`), by
+`out('INSTANCE_OF')[status = 'confirmed'].name CONTAINSANY :names`. Authority is
+under [the authority section](#authority-the-hierarchy-read-the-other-way).
+
+**The edge** (`INSTANCE_OF`) runs from the entity to a class:
+
+- An entity may have several, one per class. Taking the subclass implies the
+  parent, so an instance points at the most specific class that fits it.
+- A unique index on `(instance, class_rid)` holds it to one edge per class.
+- A mint writes the entity and its first edge in one transaction and takes the
+  rid from what it created. It never looks the entity up afterwards by name.
+- Nothing stores a class name beside it. `_kind: 'thing'` stays as what kind of
+  row the vertex is, but it is not what makes the row an instance: an entity with
+  no edge is not one. A confirm that renames a draft cannot strand anything, because
+  the edge holds the vertex and not the name.
+- A class in `confirmed` or `retired` makes an instance. A retired class admits
+  no new one and takes none away. An edge to a `proposed` class is **held**: see
+  the migration below.
+
+**The gate** (`schema.instanceClass`). Resolving a subject keeps the order
+`resolve.js` has now: key, class and name, alias, embedding last, only against
+what the reader's home can see and only among instances. If that finds one, the
+subject is related to a class already and nothing else is asked. If it finds
+none, the gate decides whether one could exist, from the subject and the confirmed
+classes alone:
+
+1. A key belongs to the confirmed class whose record table holds it, or to the
+   subclass of it the subject names. The record table is the only thing that gives
+   a key a class.
+2. A class stated for the subject itself, if it is confirmed and is not a
+   primitive. A class with a record table in force needs the row: a name alone
+   comes back `no-row` (PO 78912).
+3. Anything else comes back `no-class`.
+
+A claim's `class` is what the claim bears on and is not the subject's class: a
+pay claim about Tomas is `hires`/`pay`, and Tomas is whatever a person confirmed
+employees to be. Nothing defaults one from the other, so a bare name on a claim
+of a confirmed class is not an instance of that class. Who may mint is a separate
+question, unchanged: a key mints on its own; a name needs a person or a worker;
+the linker alone mints nothing but by key. A document on the record path acts for
+the person who put it on record.
+
+**A person mentioned before any class is confirmed** is a value on the claim,
+like anything else with no class: the section is stored and searchable, the claim
+keeps the name, and no node is made. Nobody is exempt, since there is no built-in
+"person". Once a person confirms a class those claims can move to, they move.
+
+**A claim whose subject is not an instance** stays a value on that claim. The
+edge points back at its section, as today, and carries `subject` (JSON, as
+written, including any class it stated), `subject_norm`, and `unresolved`:
+`no-class`, `no-row` or `ambiguous`. A subject class that isn't confirmed doesn't
+refuse the document; it is what makes the subject a value. Search finds it and a
+worker can settle it, but nothing is minted.
+
+- When a person confirms a class, the claims that stated it mint their instance
+  in that step (decision 17), one per name, and move to it.
+- When an instance comes to exist any other way, the claims waiting under its
+  name move to it, on three conditions: an exact name or alias match, exactly one
+  instance of that name visible from the claim's own `_home`, and the instance's
+  classes include the one the claim stated, if it stated one.
+- `ambiguous` claims stay for a person or a worker.
+- A subject that is the class itself (`scope: "class"`) has its claim point at
+  the `Class` vertex, and no placeholder is minted for it.
+
+**How a survey proposes classes and subclasses.** The first survey maps the
+connection and drafts; it seeds nothing, and `resolve_subject` refuses a row whose
+table has no confirmed class, saying so. Each draft says what it is and where it
+goes:
+
+- A table is a draft class with that table as its record table. Transaction
+  tables go under `commitment`; `discovery.js`'s master nouns go under `actor` or
+  `resource` by the role it already assigns; the master-noun rule against drafting
+  a class goes.
+- A parent other than a root is proposed when the data shows one: a table whose
+  key is another table's key (`dbo_Contractor` on `dbo_Employee`) is a subclass of
+  it; tables that are obviously kinds of one thing get a drafted parent with no
+  table (employees, contractors and volunteers under people); a column that sorts
+  a table's rows into kinds (`CustomerType`) yields drafts with no table, under the
+  table's class.
+- The survey reports these as a `[subclass: warehouse of leased_building; because:
+  ...]` tag, and `propose_class` takes `parent` and the reason. Discovery's
+  deterministic pass only ever proposes a root as parent; anything deeper needs a
+  survey's or a worker's reason.
+- A person confirms each class and each link, parents first, and can move a class
+  as they confirm it. After that the admin starts a survey with a focus on the
+  tables worth seeding. A row left unseeded is minted from its key the first time a
+  record names it, as today.
+
+**Visibility.** Neither edge has a home and neither confers one.
+
+- An instance is seen exactly as it is now, by `_homes`.
+- From a class to its instances, a read returns only the instances the reader
+  sees, and a query covering subclasses filters every one the same way.
+- From an instance to its classes, a read gives only the classes that pass
+  `authority.visible` for the reader. A hidden class is therefore not disclosed by a
+  visible instance. An instance of a class with an authority rule is named
+  `label (instance)` at mint so the class doesn't travel in the `name` column.
+- Class vertices have no `_homes`, and nothing adds one.
+- Re-homing changes `_home`/`_homes` as it does now and doesn't touch the edge.
+- The gate takes the subject and the class list and looks no instance up, so it
+  cannot say a hidden instance exists.
+- The class list stays as it is today, readable by anyone authenticated
+  (decision 15).
+
+**Migration** (`schema.planInstanceMigration`), at boot, idempotent, on a
+development graph. In order: the DDL (`statements()`), the roots
+(`rootClassStatements()`), then the plan over every `_kind = 'thing'` row and every
+`CommitmentClass` row:
+
+1. `CommitmentClass` rows are copied to `Class`, status kept, under `commitment`.
+   Their link is confirmed because a person confirmed them as commitments.
+2. Each thing with no edge gets one to the first of: the class whose record
+   table holds one of its keys; a `_thing_type` that was an actor type; `_class` if
+   it has a key; any other `_thing_type`; `_class`. `_class` comes low because it
+   was stamped from a claim's class: Tomas stamped `hires` is not a hire, and a
+   machine a worker made under a job claim is a machine.
+3. A name in that list with no class gets a `proposed` class under the root that
+   fits it. The migration never confirms anything, so an edge to it is held.
+4. A `_thing_type` of `class` is a placeholder for class-scope claims: its claims
+   move to the `Class` vertex and it gets no edge.
+5. A thing with nothing to go on is left, and listed for a person.
+
+With no built-ins, this means every person and customer on a development graph is
+held until someone confirms a class for them. A held entity keeps its row, claims
+and `ABOUT` edges, shows no class and is not a resolution candidate. When a person
+confirms the class it becomes an instance, with no write to the entity. The `_class`
+and `_thing_type` columns are left in place and unread. The plan reports every signal
+it discarded.
+
+**Where the oracle's flat labels go** (the implementation's job). The oracle's 50
+class labels get a place in the tree in a fixture, each with a snake_case name the
+real confirm route accepts and a parent, and the batch's classes go through that
+route, parents first. Labels that are kinds of one another nest: `sample order`
+under `customer order`, `service quote` and `supplier quote` under `quote`; the
+rest go under a root or a shared parent. A label seen in one note stays a draft, as
+decision 2 and the one-occurrence rule say, so those notes are stored with no claim.
+Each expected subject states its class or its key, and a bare name is expected to
+stay a value. The bar is restated in those terms.
+
+**Other places this document still narrows classes** (listed, not changed):
+
+- "Four primitives": a resource is "what changes hands or is consumed", which
+  leaves out a company-owned vehicle, a building or software, all of which the user
+  named.
+- The components table's Policy row ("commitment classes and attributes"), and the
+  Authority stream ("one rule over commitment classes").
+- `claims.js`'s error text, "a claim about an actor must name the commitment class
+  it bears on".
+- The survey brief and `discovery.js` wording ("Draft the commitment classes",
+  "seeded as things"), which the implementation changes.
+- The hierarchy of people as classes: decision 19.
 
 ### Authority: the hierarchy read the other way
 
 The positions tree says who sees what. Read the other way it says who may
 commit the organization to what: a floor worker can promise a shift swap,
-not a price. That is one rule, **authority over a class of commitment**, and
-three existing subsystems are special cases of it:
+not a price. That is one rule, **authority over a class**, and three existing
+subsystems are special cases of it:
 
 - **Visibility**: a claim is seen by those whose authority covers its class
   (today: positions, grants, the derived floor).
@@ -136,10 +363,30 @@ three existing subsystems are special cases of it:
 - **Grading**: a note is restricted when its content commits or reveals
   above the writer's authority (today: the grader on closed topics).
 
-The policy an admin edits becomes a map from commitment classes and
-attributes (pay, dismissal, price, margin) to the position that holds
+The policy an admin edits becomes a map from classes and attributes (pay, dismissal, price, margin) to the position that holds
 authority over them. The grader runs only on the residue: free text that
 maps to no class.
+
+**Against the class tree.** A rule on a class applies to its subclasses and
+their instances. The map stays keyed by class name; `authorityOf` walks the chain
+(`schema.authorityInChain`), the most specific rule first and the nearest class
+winning on each level: an attribute rule on the class or any ancestor, then
+`policy.attributes`, then a class-wide authority on the class or any ancestor,
+then `policy.default`. An attribute rule high up beats a class-wide rule lower
+down, so a rule on a parent can't be undone by accident beneath it.
+
+`decide(identity, class, attribute, policy, positions)` applies that to the
+claim's class and to every class of its subject instance, and takes the strictest
+(`positions.commonAncestor`): a claim on an instance under several classes is held
+to the strictest of them. Visibility is the same reading.
+
+A class moved to a new parent takes the new chain at once, because `decide` reads
+it live. The structured reads follow immediately. What was stored does not:
+`_home` on existing claims and sections was set at write and is never lowered, so
+a move under a looser parent widens nothing. A move under a stricter parent is
+tightening, and its section-text residual is B6's, not decided here. The confirm
+route reports how many instances and claims a move affects before a person accepts
+it.
 
 ### Needs are commitments with the sign flipped
 
@@ -150,17 +397,16 @@ the current design (`needs.js`) stays.
 
 ### Node admission
 
-A node earns its place when **at least one** holds:
-
-1. it has an identity that outlives any one document (a person, customer,
-   machine, instance);
-2. it is referenced from more than one place;
-3. it is a commitment, decision or judgement that no source system records.
+A node earns its place by being an instance of a confirmed class (the gate
+above), and every class below the four primitives was confirmed by a person. Nothing about its name or how often it is mentioned earns it one: the
+three-rule test that was here, the second-mention rule included, is gone, along
+with the head-noun lists that patched it.
 
 Everything else is content inside a document section or a row behind a key.
 A holiday schedule, a bench, a part number inside a job, a topic: attributes
-or values on a claim, never nodes. Things are minted by a record key, by a
-person, or by a worker's explicit judgement, never by the linker alone.
+or values on a claim, unless a person has confirmed a class they are instances
+of. Things are minted by a record key, by a person, or by a worker's explicit
+judgement, never by the linker alone.
 
 ### Reference, never copy
 
@@ -202,7 +448,8 @@ of the four primitives bound to an instance, with an interval:
 
 ```
 claim(kind: commitment|event|state|observation,
-      subject: instance or actor, class, attribute, value,
+      subject: instance, class, or a value when it is neither,
+      class, attribute, value,
       valid_from, valid_until, recorded_at, recorded_by, section)
 ```
 
@@ -229,9 +476,9 @@ this model a brief is a read recorded like any other, and its floor applies.
 
 | Component | Today | With the model |
 |---|---|---|
-| Survey (`pool.js` `surveyBrief`) | seeds master data as things, writes patterns | the first discovery pass: drafts classes, stages and record tables from the connected systems for a person to confirm |
+| Survey (`pool.js` `surveyBrief`) | seeds master data as things, writes patterns | the first discovery pass: drafts a class for every transaction and master-data table, and subclasses where the data shows them, for a person to confirm; seeds nothing until they have |
 | Chat agent (`standing-instructions.ts`) | saves pasted text first | on/off record per thread; condenses on-record sections into documents with claims |
-| Linker (`things.js`) | one open call: names and types | resolve by key and by confirmed class first; one closed call for the residue (which instance, which attribute); mint nothing on its own |
+| Linker (`things.js`) | one open call: names and types | resolve by key and by confirmed class first; one closed call for the residue (which instance, which attribute); mint nothing on its own; the gate decides what could be an instance |
 | Triage (`decisions.js`) | level, reason, contradiction, candidate | level and reason only; contradiction is two claims on one attribute with overlapping intervals, a query |
 | Grader (`grading.js`) | every write | claims that map to no class |
 | Policy (`policy.js`) | restricted topics by name | commitment classes and attributes with the position holding authority |
@@ -265,8 +512,9 @@ every stream starts from, so it lands before any stream starts.
    file in the repo and every stream must handle all sixty.
 2. **The data contract as code**, in a new `graph-rag/src/model/` with unit
    tests under `graph-rag/test/`, no behavior and no edit to `server.js`:
-   - ArcadeDB types and edges for class, instance (a thing with a record
-     key and a class), claim (`CLAIMS` edge from a section or entry to its
+   - ArcadeDB types and edges for class, instance (an entity with an
+     `INSTANCE_OF` edge to its class, and a record key when a source system
+     holds it), claim (`CLAIMS` edge from a section or entry to its
      subject, carrying kind, class, attribute, value and the interval),
      source reference, audit event (an agent's write to a source system),
      and the on-record marker on a document;
@@ -318,10 +566,30 @@ not met the contract, whatever its own tests say.
 Headcount: one session for the contract, one for the split, seven streams,
 one integrator, review subagents per merge.
 
+## What the rule changes in the review
+
+Against `~/reviews/integration-2a1a12f.md`. "Closes" means the rule removes the
+route; the implementation still has to prove it with a test.
+
+| Finding | What the rule does | What is left |
+|---|---|---|
+| **NB4** first mentions have no thing | Mostly closes. A subject with a confirmed class mints on its first mention, so counting mentions is gone. A waiting claim moves when its class is confirmed or its instance appears. | A subject with no class still waits, and `poolSize: 0` still means no worker runs. With no built-in classes that now includes every person until someone confirms a class for them (decision 8). Rack C1 needs a confirmed rack class and both notes stating it. |
+| **B14** second mention mints | Closes. The second-mention rule is deleted, so "holiday schedule" has no route to a node without a confirmed class it belongs to. The head-noun lists on `claude/fix-resolve-734b26` are deleted with it if they land first. | Nothing structural. If a person confirms a `notices` class, a notice is an instance, by that person's decision. |
+| **B17** PO 78912 | Name route closes: a class with a record table in force needs the key, so `record_document` by name is `no-row`, including under a subclass that shares its parent's table. | Key route is unchanged: a key in a bound table still mints with no row check. That is decision 14. B19's remainder is the same thing. |
+| **B24** class drafting | The contradiction is settled: Discovery's master-noun rule gives way. All 16 claims' classes (`customer` 4, `work center` 8, `equipment` 3, `customer contact` 1) are drafted under `actor` or `resource`. There is no built-in shortcut, so each needs a person's confirmation like any other. | The 34 claims in 32 one-note classes are unchanged: decision 2 stores those sections with no claim. "The oracle's 100 claims" stops being the number; the oracle and the 62-note bar get restated against the rule when the writers move. |
+| **B16** class route | Closes. `_class` stamps are gone and a claim's class never marks a person, so nothing distinguishes one Diep C from another except a key. Both are then `ambiguous`. | None. |
+| **NB2** read-back binds a hidden thing | The read-back goes: a mint takes the rid it created. | Whether a floor mint beside a hidden same-named thing is right stays with B9's name scoping. |
+| **B22** raw UPSERT classes | Closes when the batch's classes go through the real confirm route, as this requires. | The rest of B22 is unaffected. |
+
+**B8, B9**: the edge is a new route to the same harm, covered by the visibility
+rules above. Their existing remainders are unchanged. **B6** is unaffected, and
+tightening a class's authority rule is forward-only for the `name` column too.
+
 ## Decisions still open
 
 Each has a default. Sessions take the default until the user changes it
-here.
+here. Decisions 6 to 10 are the assumptions the rule was specified under, with
+8 as the user corrected it; 11 to 19 arose in writing it.
 
 1. **Who confirms discovered classes.** Default: a person with admin
    authority confirms in the app; a worker that keeps finding an unconfirmed
@@ -341,3 +609,65 @@ here.
 5. **Multiple homes per instance** (DATA-SCOPING open question 2). Default:
    unchanged. A claim is seen by whoever sees the section it came from; an
    instance two branches work on has claims in both, each at its own home.
+6. **The relationship is a real edge and the only source of truth.** Default:
+   `INSTANCE_OF` from the entity to the `Class` vertex; `_class` stops being
+   written; anything that needs a class name reads the edge.
+7. **It applies to every instance.** Default: yes. One `Class` vertex type, in one
+   tree; `CommitmentClass` generalizes into it; `ACTOR_TYPES` and `THING_TYPES`
+   go.
+8. **The four primitives are the only built-in classes.** Default: yes, as the
+   user corrected on 2026-11-09, and an earlier assumption that person and customer
+   would be built in is withdrawn. Until a person confirms a class for people, every
+   person named is a value on a claim, including on a development graph after the
+   migration (decision 16).
+9. **Discovery drafts classes for master-data tables.** Default: yes, since rows
+   there are instances too.
+10. **No class, no instance.** Default: the gate replaces name-based admission,
+    and what it makes redundant is deleted: the second-mention rule, and
+    `NEVER_HEADS`, `TOPIC_HEADS` and `RECORD_WORDS` if they land. Who may mint is
+    unchanged.
+11. **One parent per class.** Default: exactly one confirmed parent, held by the
+    database. An assumption: a class that is naturally a kind of two things takes
+    one parent and is related to the other by what its instances are.
+12. **An instance may have several classes.** Default: yes, one edge per class,
+    with a class's name shown only to readers who pass for that class, and the
+    strictest authority applying to its claims. Taking a subclass implies its
+    ancestors, so one edge usually does.
+13. **A subject's class must be stated for the subject.** Default: yes. A claim's
+    class never stands in for it, so a bare name on a claim of a confirmed class
+    stays a value until an instance of that name exists. The condenser has to
+    state a subject's class, and the oracle's 63 name-only claims need restating.
+    The alternative, defaulting to the claim's class, mints Tomas Reyes as an
+    instance of `training`.
+14. **A row check when a key mints.** Default: yes in the implementation, where a
+    source is reachable, because the class gate does not stop a phantom key in a
+    bound table (B17, B19). A source that cannot be reached leaves the claim a
+    value instead of minting, matching how a key miss fails closed (B15).
+15. **Whether the confirmed class list is itself restricted.** Default: unchanged,
+    readable by anyone authenticated. The edge hides a class from a reader who
+    cannot see it on an instance; the list still names every class.
+16. **Things held by the migration.** Default: a thing whose class is unconfirmed
+    keeps its row but shows no class and is not resolved to until a person
+    confirms that class. The alternatives are to confirm classes in the migration,
+    which breaks "only a person confirms", or to delete those things.
+17. **Confirming a class mints the instances its waiting claims stated.** Default:
+    yes, one per name, because each such claim was already put on record by a person
+    who named that class. The alternative leaves them values until a worker or a
+    person mints each one.
+18. **Stages on any class.** Default: stages are optional on every class,
+    commitment or not, and a `stage` claim needs a list in force up the chain. The
+    confirm route's "a class has at least one stage" goes.
+19. **Whether positions become classes.** The design says the hierarchy of people
+    is made of classes and the user said instance-class relationships form the
+    organization's hierarchy; today's positions tree in authentik is separate.
+    Default: nothing is restructured. Position vertices can mirror the tree as
+    classes under `actor`, with people as instances, while authentik stays what
+    grants access, and that is the recommended next step because it makes the model
+    true without moving authorization. Making them the source of authorization would
+    change visibility in three ways: `_homes` would hold class names and a reader's
+    positions would be read from edges instead of the token, so authorization would
+    depend on the graph being up; a person holding two positions would already be
+    the multi-class case and the tree walk would be `classChain`; and a
+    confirmed-link write would change who sees what, so only an admin could make
+    one, and a moved position would be subject to the same forward-only rule as a
+    moved class.
