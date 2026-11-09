@@ -11,7 +11,7 @@ import { claimHome } from "../src/model/authority.js";
 import { claimsOf, normalizeDocument } from "../src/model/claims.js";
 import { parsePositionMap } from "../src/positions.js";
 import { sectionName } from "../src/documents.js";
-import { bar, checkBatch, collectRows, conversationOf, generateBatch, POSITION, TREE, verdictLine } from "../e2e/conversations.mjs";
+import { authorityMapOf, bar, checkBatch, collectRows, conversationOf, generateBatch, POSITION, prefixed, TREE, verdictLine } from "../e2e/conversations.mjs";
 
 const read = (f) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8"));
 const oracle = read("oracle-sixty.json");
@@ -235,4 +235,63 @@ test("generate --check agrees with the fixture on disk", () => {
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /up to date/);
   assert.match(r.stdout, /62 conversations, 372 turns, 68 sections, 100 claims/);
+});
+
+test("prefixed: titles, headings, conversation ids and claim ids carry the prefix; placements still match the claims; the result is still sound", () => {
+  const small = { ...fixture, conversations: fixture.conversations.filter((c) => ["ux-m01", "ux-al04", "ux-aa11"].includes(c.note)) };
+  const p = prefixed(small, "e2e-bar-1234");
+  assert.deepEqual(checkBatch(p), []);
+  const al04 = p.conversations.find((c) => c.note === "ux-al04");
+  assert.equal(al04.id, "e2e-bar-1234-conv-ux-al04");
+  assert.equal(al04.expected.document.title, "e2e-bar-1234 ux-al04 brightline po received");
+  assert.ok(al04.expected.document.sections.every((s) => s.heading.startsWith("e2e-bar-1234 ")));
+  assert.deepEqual(al04.expected.document.sections.flatMap((s) => s.claims.map((cl) => cl.id)), ["e2e-bar-1234:ux-al04#0", "e2e-bar-1234:ux-al04#1"]);
+  assert.deepEqual(al04.expected.placements.map((pl) => [pl.id, pl.home]), [
+    ["e2e-bar-1234:ux-al04#0", "ops"],
+    ["e2e-bar-1234:ux-al04#1", "org"],
+  ]);
+  assert.deepEqual(small.conversations.find((c) => c.note === "ux-al04").expected.placements[0].id, "ux-al04#0", "the original is untouched");
+  // the bar on prefixed rows is the same bar
+  assert.equal(bar(p, cleanRows(p)).ok, true);
+});
+
+test("authorityMapOf: each claim's class and attribute take its authority's position; a class whose claims agree gets one authority; disagreement goes to the ancestor", () => {
+  const small = { ...fixture, conversations: fixture.conversations.filter((c) => ["ux-m01", "ux-al04", "ux-aa11", "ux-aq01", "ux-ak06"].includes(c.note)) };
+  const map = authorityMapOf(small);
+  assert.deepEqual(map.attributes, {});
+  assert.deepEqual(map.classes["customer order"], { attributes: { status: "floor", placed: "ops", unit_price: "org" } }, JSON.stringify(map.classes["customer order"]));
+  assert.deepEqual(map.classes["work center"], { authority: "floor" });
+  assert.ok(Object.values(map.classes).every((c) => (c.authority ? ["floor", "ops", "org"].includes(c.authority) : Object.values(c.attributes).every((v) => ["floor", "ops", "org"].includes(v)))));
+  // the whole batch: every claim's position is the rule's answer or a stricter one (never a looser one)
+  const all = authorityMapOf(fixture);
+  for (const c of fixture.conversations)
+    for (const pl of c.expected.placements) {
+      const cl = c.expected.document.sections.flatMap((s) => s.claims).find((x) => x.id === pl.id);
+      const rule = all.classes[cl.class];
+      const got = rule.authority ?? rule.attributes[cl.attribute];
+      const rank = { floor: 0, ops: 1, org: 2 };
+      assert.ok(rank[got] >= rank[POSITION[pl.authority]], `${pl.id}: ${got} is at least ${POSITION[pl.authority]}`);
+    }
+  // a disagreement: two notes, one attribute, floor and org -> org
+  const a = structuredClone(small.conversations.find((c) => c.note === "ux-aq01"));
+  const b = structuredClone(a);
+  b.id = "x";
+  b.expected.placements[0].authority = "admins-only";
+  b.expected.placements[0].home = "org";
+  const m = authorityMapOf({ ...small, conversations: [a, b] });
+  const cls = a.expected.document.sections[0].claims[0].class;
+  assert.deepEqual(m.classes[cls], { authority: "org" });
+});
+
+test("the bar tolerates a stored section whose text starts with its heading line", () => {
+  const small = { ...fixture, conversations: fixture.conversations.filter((c) => ["ux-m01"].includes(c.note)) };
+  const rows = cleanRows(small);
+  const body = rows.sections[0].text;
+  rows.sections[0].text = `## ${small.conversations[0].expected.document.sections[0].heading}\n\n${body}`;
+  assert.equal(bar(small, rows).ok, true, JSON.stringify(bar(small, rows).findings));
+  // as the stored preview has it: the newline folded to a space
+  rows.sections[0].text = `## ${small.conversations[0].expected.document.sections[0].heading} ${body}`;
+  assert.equal(bar(small, rows).ok, true, JSON.stringify(bar(small, rows).findings));
+  rows.sections[0].text = `## something else\n\nnot the text`;
+  assert.equal(bar(small, rows).findings.lost.length, 1);
 });

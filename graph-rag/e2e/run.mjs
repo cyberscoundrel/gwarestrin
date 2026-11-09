@@ -44,7 +44,7 @@ async function tool(who, name, args) {
 const sql = async (query) => (await tool("admin", "query_graph", { query, language: "sql" })).rows ?? [];
 const api = async (path, opts = {}) => (await fetch(`${GRAPH}${path}`, { ...opts, headers: { authorization: `Bearer ${TOKENS.admin}`, "content-type": "application/json" } })).json();
 const models = (path, body) => fetch(`${MODELS}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json());
-const entry = async (name) => (await sql(`SELECT @rid AS rid, name, _home, _grade, _ungraded, _mentions_at FROM Entity WHERE name = '${name}'`))[0];
+const entry = async (name) => (await sql(`SELECT @rid AS rid, name, _home, _grade, _ungraded, _mentions_at, _authority, _claim_classes FROM Entity WHERE name = '${name}'`))[0];
 const thing = async (label) => (await sql(`SELECT @rid AS rid, name FROM Entity WHERE _kind = 'thing' AND label = '${label}'`))[0];
 /** what the linker left unresolved on an entry (the Admission stream: a bare name is a worker's or a person's to settle, never minted) */
 const unresolved = async (name) => JSON.parse((await sql(`SELECT _unresolved FROM Entity WHERE name = '${name}'`))[0]?._unresolved ?? "[]");

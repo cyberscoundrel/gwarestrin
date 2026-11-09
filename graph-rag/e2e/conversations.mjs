@@ -8,7 +8,7 @@
 // scripts/batch-bar.mjs, e2e/scenarios-harness.mjs and test/harness-batch.test.js.
 // The batch file's shape is documented in test/fixtures/conversations/README.md.
 import { claimHome } from "../src/model/authority.js";
-import { normalizeDocument, normalizeName } from "../src/model/claims.js";
+import { normalizeAttribute, normalizeDocument, normalizeName } from "../src/model/claims.js";
 import { ancestors, commonAncestor, parsePositionMap } from "../src/positions.js";
 
 export const BATCH_SHAPE = 1;
@@ -176,6 +176,66 @@ export function generateBatch(oracle, { recordedAt = "2026-11-06T09:00:00.000Z",
 }
 
 /**
+ * A copy of a batch whose document titles, headings, conversation ids and
+ * claim ids carry a prefix, so two scenarios can store the same conversations
+ * in one graph without one replacing the other's documents or colliding on
+ * the unique CLAIMS.id index. Placements and section homes are unchanged.
+ */
+export function prefixed(batch, prefix) {
+  const head = (h) => (h ? `${prefix} ${h}` : h);
+  return {
+    ...batch,
+    conversations: batch.conversations.map((c) => ({
+      ...c,
+      id: `${prefix}-${c.id}`,
+      expected: {
+        ...c.expected,
+        document: {
+          ...c.expected.document,
+          title: `${prefix} ${c.expected.document.title}`,
+          sections: c.expected.document.sections.map((s) => ({ ...s, heading: head(s.heading), claims: (s.claims ?? []).map((cl) => ({ ...cl, id: `${prefix}:${cl.id}` })) })),
+        },
+        sections: c.expected.sections.map((s) => ({ ...s, heading: head(s.heading) })),
+        placements: c.expected.placements.map((p) => ({ ...p, id: `${prefix}:${p.id}` })),
+      },
+    })),
+  };
+}
+
+/**
+ * The authority map a batch's placements imply, in the policy's shape
+ * ({ classes: { name: { authority } | { attributes: { attr: position } } },
+ * attributes: {} }): each claim's class and attribute take the position of
+ * its authority; a class whose claims all agree gets one `authority`; where
+ * two notes disagree on one attribute the more restrictive position (the
+ * ancestor) wins. Built from the conversations given, so a scenario's subset
+ * yields the rules its own claims need.
+ */
+export function authorityMapOf(batch, treeDoc = batch.tree ?? TREE) {
+  const tree = parsePositionMap(treeDoc);
+  const position = batch.positions ?? POSITION;
+  const above = (a, b) => a !== b && ancestors(tree, b).includes(a);
+  const perClass = new Map();
+  for (const c of batch.conversations) {
+    for (const pl of c.expected.placements) {
+      const claim = c.expected.document.sections.flatMap((s) => s.claims ?? []).find((cl) => cl.id === pl.id);
+      if (!claim) continue;
+      const pos = position[pl.authority] ?? pl.home;
+      const attr = normalizeAttribute(claim.attribute);
+      if (!perClass.has(claim.class)) perClass.set(claim.class, new Map());
+      const cur = perClass.get(claim.class).get(attr);
+      if (!cur || above(pos, cur)) perClass.get(claim.class).set(attr, pos);
+    }
+  }
+  const classes = {};
+  for (const [cls, attrs] of perClass) {
+    const values = new Set(attrs.values());
+    classes[cls] = values.size === 1 ? { authority: [...values][0] } : { attributes: Object.fromEntries(attrs) };
+  }
+  return { classes, attributes: {} };
+}
+
+/**
  * Every problem with a batch file, as strings (empty = sound): the shape,
  * alternating turns, and every expected document normalizing with
  * `normalizeDocument` (no class gate: the oracle's classes are discovery
@@ -302,7 +362,12 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE) {
       named.push({ name: s.name, home: s._home, kind: "section", heading: es.heading });
       if (s._placed_by) findings.rescues.push(`${c.id} §${es.index + 1}: a person placed the section (${s._placed_by})`);
       if (s._home !== es.home) findings.misplaced.push(`${c.id} §${es.index + 1}: seen from ${s._home}, expected ${es.home}`);
-      const have = fold(s.text);
+      // a recorded section may be stored with its heading first ("## heading", then the body; the stored preview folds
+      // the newline between them to a space), a manual's chunk is not: compare the body
+      let have = fold(s.text);
+      const hd = fold(x.document.sections[es.index].heading ?? "");
+      if (hd && have.startsWith(`## ${hd}`)) have = have.slice(3 + hd.length).trim();
+      else have = have.replace(/^##\s+\S[^\n]*?\s+(?=\S)/, (m) => (want.startsWith(fold(m)) ? m : ""));
       if (!have.startsWith(want.slice(0, Math.min(PREVIEW_CHARS, want.length)))) findings.lost.push(`${c.id} §${es.index + 1}: stored text differs ("${have.slice(0, 60)}…")`);
     }
     for (const pl of x.placements) {

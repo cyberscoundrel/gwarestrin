@@ -10,13 +10,15 @@
 //        --check only compares the file on disk with what the oracle generates (exit 1 when stale)
 //
 //   node scripts/make-conversation-batch.mjs seed <batch.json> --url http://host:8000 --tokens tokens.json
-//        [--tool ingest_document | <the Condenser stream's tool>] [--only conv-ux-m01,conv-ux-al04] [--dry-run]
+//        [--tool ingest_document | record_document | <another tool>] [--only conv-ux-m01,conv-ux-al04] [--dry-run]
 //        posts every conversation's condensed document as its person. --url is required and has no
 //        default: this never finds an instance on its own, and it is not run against the development
 //        instance without the user saying so. tokens.json is the graph-rag token map ({ tokens: [{ token,
 //        user }] }) or a plain { user: token } map; every conversation's person needs a token in it.
-//        With ingest_document (today's API) the document's sections go in as the text, no claims; with
-//        the Condenser stream's tool the expected document itself is the call's arguments.
+//        With ingest_document (the old API) the document's sections go in as the text, no claims; with
+//        record_document (the Condenser's tool) the expected document goes under its `document` argument;
+//        any other tool gets the document's fields and the conversation. A record with a claim above the
+//        recorder's authority comes back proposed (pendingId): it stays in the queue for a person to approve.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { checkBatch, generateBatch } from "../graph-rag/e2e/conversations.mjs";
@@ -117,6 +119,7 @@ if (cmd === "generate") {
       const text = d.sections.map((s) => `${s.heading ? `${s.heading}\n\n` : ""}${s.text}`).join("\n\n");
       return { title: d.title, description: d.description, text, extract: false };
     }
+    if (toolName === "record_document") return { document: d };
     return { ...d, conversation: c.turns };
   };
   console.log(`seeding ${list.length} conversation(s) from ${batch.batch} to ${url} with ${toolName}${args["dry-run"] ? " (dry run)" : ""}`);
@@ -130,7 +133,7 @@ if (cmd === "generate") {
     const r = await call(c.person, toolName, params);
     const ok = !r.error;
     if (!ok) failed++;
-    console.log(`SEED ${c.id} ${c.person} ${ok ? JSON.stringify(r).slice(0, 120) : `FAILED ${String(r.error).slice(0, 160)}`}`);
+    console.log(`SEED ${c.id} ${c.person} ${ok ? `${r.pendingId ? `PROPOSED ${r.pendingId} ` : ""}${JSON.stringify(r).slice(0, 120)}` : `FAILED ${String(r.error).slice(0, 160)}`}`);
   }
   console.log(failed ? `${failed} of ${list.length} failed` : `all ${list.length} posted`);
   process.exit(failed ? 1 : 0);
