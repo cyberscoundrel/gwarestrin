@@ -477,6 +477,7 @@
       {@render section("Grading", "Filing new entries where they belong.", gradingBody)}
       {@render section("Commitment classes", "What the organization commits to (orders, jobs, hires), discovered from the connected systems. Nothing maps onto a class until you confirm it; a wrong name here misleads every later mapping.", classesBody)}
       {@render section("Authority", "Who may commit the organization to what: the hierarchy read the other way.", authorityBody)}
+      {@render section("Derived data", "Summaries and notes built from what an agent read.", derivedBody)}
       {@render section("Expired entries", "Entries that end (a visit, this week's schedule) leave searches on their date, and the graph later.", pruningBody)}
       {@render section("Deployment", "For reference; changed at deploy, not here.", deployBody)}
       {@render section("Recent changes", view.updated_by ? `Last changed by ${view.updated_by}.` : "Who changed what, and when.", historyBody)}
