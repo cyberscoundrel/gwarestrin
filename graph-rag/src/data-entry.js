@@ -22,23 +22,31 @@
  *   in write.js replaces it; the call stays
  *   decideWrite(identity, class, attribute) -> direct | propose | hidden.
  *
- * DAB's tool arguments are assumed as DAB 2.x documents them
- * (read_records { entity, filter, first }, update_record { entity, keys,
- * item }, create_record { entity, item }, describe_entities {}); they are
- * kept in DAB_CALLS so a running instance's tools/list can correct them in
- * one place.
+ * DAB's tools are as DAB 2.0.12 (the version dab/Dockerfile pins) serves them,
+ * read off a running instance's tools/list and exercised against it:
+ * read_records { entity, filter, first }, update_record { entity, keys, fields },
+ * create_record { entity, data }. A filter's literal is typed by the column
+ * (a number bare, text quoted: DAB refuses the other). describe_entities names
+ * no primary key (its fields are empty under autoentities), so the key comes
+ * from the first-page cursor (DAB pages by primary key): primaryKeyFrom.
  */
 import { log } from "./context.js";
 import { adbCommand as realCommand, adbQuery as realQuery } from "./db.js";
 import { decide, validatePolicy } from "./model/authority.js";
 import { isoDate, normalizeAttribute } from "./model/claims.js";
 import { parseKey, parseTable } from "./model/schema.js";
-import { recordAuditEvent, settleAuditEvent } from "./audit.js";
+import { defaultHome, EVERYONE, heldPositions } from "./positions.js";
+import { attemptProposed, openAttempts, recordAuditEvent, settleAttempt, settleAuditEvent } from "./audit.js";
 
 const realDb = { adbCommand: realCommand, adbQuery: realQuery };
-// the live position map and the pending-write queue, reached when used (not at load: a test imports this module alone)
+// the live position map, token map and pending-write queue, reached when used (not at load: a test imports this module alone)
 const livePositions = async () => (await import("./scope.js")).positionMap;
 const liveQueue = async () => import("./write.js");
+/** a person as the token map holds them now ({ positions, caps }), or undefined */
+const livePeople = async () => {
+  const scope = await import("./scope.js");
+  return (name) => scope.entriesByUser.get(name);
+};
 
 /** ---- where the source systems are ---- */
 
@@ -75,16 +83,23 @@ export const forgetSources = () => Object.assign(sourcesCache, { at: 0, value: n
 
 /** ---- DAB over MCP (streamable HTTP) ---- */
 
-/** the tool calls as DAB 2.x documents them; one place to correct against a running instance's tools/list */
+/** the tool calls as DAB 2.0.12 serves them (checked against a running instance's tools/list) */
 export const DAB_CALLS = {
-  describe: () => ({ name: "describe_entities", args: {} }),
-  read: (entity, keyColumn, rowKey) => ({ name: "read_records", args: { entity, filter: `${keyColumn} eq ${odata(rowKey)}`, first: 2 } }),
-  update: (entity, keys, item) => ({ name: "update_record", args: { entity, keys, item } }),
-  create: (entity, item) => ({ name: "create_record", args: { entity, item } }),
+  // a first page of one row: its cursor names the primary key (primaryKeyFrom)
+  firstPage: (entity) => ({ name: "read_records", args: { entity, first: 1 } }),
+  read: (entity, keyColumn, literal) => ({ name: "read_records", args: { entity, filter: `${keyColumn} eq ${literal}`, first: 2 } }),
+  update: (entity, keys, fields) => ({ name: "update_record", args: { entity, keys, fields } }),
+  create: (entity, data) => ({ name: "create_record", args: { entity, data } }),
 };
 
-/** an OData literal: numbers bare, everything else quoted with doubled quotes */
-export const odata = (v) => (typeof v === "number" || /^-?\d+(\.\d+)?$/.test(String(v)) ? String(v) : `'${String(v).replace(/'/g, "''")}'`);
+/**
+ * An OData literal for a column of `type` ("number" or "string"; DAB refuses a number for a text column
+ * and the reverse). Null when the value can't be one of that type: no row of that column can hold it.
+ */
+export function odata(v, type) {
+  if (type === "number") return /^-?\d+(\.\d+)?$/.test(String(v)) ? String(v) : null;
+  return `'${String(v).replace(/'/g, "''")}'`;
+}
 
 const sessions = new Map(); // url -> mcp-session-id
 
@@ -112,7 +127,8 @@ export async function mcpToolCall(url, name, args, { fetch: f = globalThis.fetch
   const msg = await rpc("tools/call", { name, arguments: args }, 2);
   if (msg.error) throw new Error(`${name}: ${msg.error.message ?? JSON.stringify(msg.error)}`);
   const content = msg.result?.content?.find((c) => c.type === "text")?.text ?? "";
-  if (msg.result?.isError) throw new Error(`${name}: ${content.slice(0, 300)}`);
+  // the tool answered and said no: nothing was done (a transport error says nothing about that)
+  if (msg.result?.isError) throw Object.assign(new Error(`${name}: ${content.slice(0, 300)}`), { toolError: true });
   try {
     return JSON.parse(content);
   } catch {
@@ -120,65 +136,90 @@ export async function mcpToolCall(url, name, args, { fetch: f = globalThis.fetch
   }
 }
 
-/** the rows in a tool's answer, whatever DAB wraps them in */
+/** the rows in a read_records answer: DAB 2.0.12's { entity, result: { value: [...] } }, or a bare array or { value } */
 export function rowsOf(result) {
   if (Array.isArray(result)) return result;
   if (!result || typeof result !== "object") return [];
-  for (const k of ["records", "value", "items", "rows", "data", "result"]) if (Array.isArray(result[k])) return result[k];
-  const arr = Object.values(result).find(Array.isArray);
-  return arr ?? [];
+  for (const holder of [result.result, result]) {
+    if (Array.isArray(holder)) return holder;
+    if (Array.isArray(holder?.value)) return holder.value;
+  }
+  return [];
 }
-
-/** the key column of an entity, from a describe_entities answer (several shapes tolerated); null when it isn't said */
-export function keyColumnFrom(described, entity) {
-  const list = rowsOf(described).length ? rowsOf(described) : Array.isArray(described?.entities) ? described.entities : [];
-  const e = list.find((x) => String(x?.name ?? x?.entity ?? "") === entity);
-  if (!e) return null;
-  const direct = e.primaryKey ?? e.primary_key ?? e.keyFields ?? e.key_fields ?? e.keys;
-  if (Array.isArray(direct) && direct.length) return String(typeof direct[0] === "string" ? direct[0] : (direct[0]?.name ?? ""));
-  if (typeof direct === "string" && direct) return direct;
-  const fields = e.fields ?? e.columns ?? e.properties ?? [];
-  const key = (Array.isArray(fields) ? fields : Object.entries(fields).map(([name, v]) => ({ name, ...(v && typeof v === "object" ? v : {}) }))).find((f) => f && (f.isPrimaryKey || f.primaryKey || f.isKey || f.key === true || f["primary-key"]));
-  return key ? String(key.name) : null;
-}
-
-const keyColumns = new Map(); // system:table -> column
 
 /**
- * A client for one system: read a row by key, write fields to it. `urls` from
- * sourcesConfig; `fetch` injectable. Throws a plain error when the system has
- * no endpoint for what was asked.
+ * An entity's primary key from a first page's cursor: DAB pages by primary key, and its `after` is base64 JSON
+ * naming each key column ([{ EntityName, FieldName, FieldValue, Direction }]), in order, with a value of the
+ * column's type. Null when the page has no cursor (a table of one row or none) or the cursor can't be read:
+ * then the key is not known, and nothing is guessed in its place.
+ */
+export function primaryKeyFrom(page, entity) {
+  const after = page?.result?.after ?? page?.after;
+  if (typeof after !== "string" || !after) return null;
+  let cols;
+  try {
+    cols = JSON.parse(Buffer.from(after, "base64").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(cols) || !cols.length) return null;
+  if (cols.some((c) => typeof c?.FieldName !== "string" || !c.FieldName || (c.EntityName !== undefined && c.EntityName !== entity))) return null;
+  return cols.map((c) => ({ name: c.FieldName, type: typeof c.FieldValue === "number" ? "number" : "string" }));
+}
+
+const primaryKeys = new Map(); // read url + table -> [{ name, type }]
+
+/** forget the learned primary keys (a test, or a source whose schema changed) */
+export const forgetPrimaryKeys = () => primaryKeys.clear();
+
+/**
+ * A client for one system: read a row by its verified primary key, write fields to it. `urls` from
+ * sourcesConfig; `fetch` injectable. The key column is the table's primary key, learned from the source;
+ * a `key_column` a worker gives must be that column, or the call is refused, and a key that can't be
+ * learned, or that spans several columns where a record key names one, refuses the call too.
  */
 export function sourceClient(system, urls, opts = {}) {
   const call = (url, c) => mcpToolCall(url, c.name, c.args, opts);
-  const keyColumn = async (table, given) => {
-    if (given) return given;
-    const k = `${system}:${table}`;
-    if (keyColumns.has(k)) return keyColumns.get(k);
-    const col = keyColumnFrom(await call(urls.read, DAB_CALLS.describe()), table);
-    if (!col) throw new Error(`the key column of ${system}:${table} isn't known: give key_column`);
-    keyColumns.set(k, col);
-    return col;
+  const primaryKey = async (table, keyColumn) => {
+    const k = `${urls.read} ${table}`;
+    if (!primaryKeys.has(k)) {
+      const found = primaryKeyFrom(await call(urls.read, DAB_CALLS.firstPage(table)), table);
+      if (!found) throw new Error(`the primary key of ${system}:${table} can't be learned from the source (it pages by key, and this table has no second row to page to): refused rather than guessed`);
+      primaryKeys.set(k, found);
+    }
+    const pk = primaryKeys.get(k);
+    if (pk.length !== 1) throw new Error(`${system}:${table} has a composite primary key (${pk.map((c) => c.name).join(", ")}): a record key names one column, so the row can't be determined`);
+    if (keyColumn && keyColumn !== pk[0].name) throw new Error(`${keyColumn} is not the primary key of ${system}:${table}; the row is keyed by ${pk[0].name}`);
+    return pk[0];
   };
   return {
     system,
     canRead: Boolean(urls?.read),
     canWrite: Boolean(urls?.write),
-    /** the row, or null when there is none */
+    /** the row by its primary key, or null when there is none; `key_value` is the key as the row holds it */
     async readRow(table, rowKey, { key_column } = {}) {
       if (!urls?.read) throw new Error(`no read endpoint for ${system}`);
-      const col = await keyColumn(table, key_column);
-      const rows = rowsOf(await call(urls.read, DAB_CALLS.read(table, col, rowKey)));
-      if (rows.length > 1) throw new Error(`${system}:${table}:${rowKey} matched ${rows.length} rows by ${col}: not one row`);
-      return rows[0] ? { row: rows[0], key_column: col } : null;
+      const pk = await primaryKey(table, key_column);
+      const literal = odata(rowKey, pk.type);
+      if (literal === null) return null;
+      const rows = rowsOf(await call(urls.read, DAB_CALLS.read(table, pk.name, literal)));
+      if (rows.length > 1) throw new Error(`${system}:${table}:${rowKey} matched ${rows.length} rows by ${pk.name}: not one row`);
+      return rows[0] ? { row: rows[0], key_column: pk.name, key_value: rows[0][pk.name] } : null;
     },
-    /** write fields to the row (update); the source's answer */
-    async writeRow(table, rowKey, fields, { key_column } = {}) {
+    /** write fields to the row (`hit`, what readRow returned for it); the source's answer */
+    async writeRow(table, hit, fields) {
       if (!urls?.write) throw new Error(`no write-capable endpoint for ${system}: data entry can only be proposed`);
-      const col = await keyColumn(table, key_column);
-      return call(urls.write, DAB_CALLS.update(table, { [col]: rowKey }, fields));
+      assertWritable(fields, hit);
+      return call(urls.write, DAB_CALLS.update(table, { [hit.key_column]: hit.key_value }, fields));
     },
   };
+}
+
+/** the columns to write must be the row's, and never its key: a write changes one row's facts, not which row it is */
+export function assertWritable(fields, hit) {
+  const unknown = Object.keys(fields).filter((c) => !(c in hit.row));
+  if (unknown.length) throw new Error(`the row has no column ${unknown.join(", ")}: it has ${Object.keys(hit.row).join(", ")}`);
+  if (hit.key_column in fields) throw new Error(`${hit.key_column} is the row's key: a data entry doesn't change it`);
 }
 
 /** a client for the system a key names (`mssql:dbo_Job:4471` -> mssql) */
@@ -193,11 +234,32 @@ export async function clientFor(key, { db = realDb, fetch: f } = {}) {
 
 /** ---- confirming a claim against its row (pure) ---- */
 
-/** the column a claim's attribute names, among a row's: the same name once normalized, else one ending in it */
+/**
+ * The column a claim's attribute names, among a row's: the one with the same name once normalized, or null
+ * (none, or several that normalize alike). Never a column that merely contains the word: `status` is not
+ * `credit_status`.
+ */
 export function columnFor(attribute, row) {
   const a = normalizeAttribute(attribute);
-  const cols = Object.keys(row ?? {});
-  return cols.find((c) => normalizeAttribute(c) === a) ?? cols.find((c) => normalizeAttribute(c).endsWith(`_${a}`) || a.endsWith(`_${normalizeAttribute(c)}`)) ?? null;
+  const hits = Object.keys(row ?? {}).filter((c) => normalizeAttribute(c) === a);
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/**
+ * The row a claim is about, among its subject's record keys (parsed, parseKey), from what says so: the key the
+ * claim's subject names, else the one key in the table its class records in, else the thing's only key.
+ * `why` says what's missing when none can be determined; there is no first key to fall back on.
+ */
+export function rowKeyFor({ subjectKey, keys, recordTable }) {
+  const named = subjectKey ? keys.find((k) => k.key === subjectKey) : null;
+  if (named) return { key: named };
+  if (recordTable) {
+    const inTable = keys.filter((k) => `${k.system}:${k.table}` === recordTable);
+    if (inTable.length === 1) return { key: inTable[0] };
+    return { key: null, why: inTable.length ? `several of its record keys are in ${recordTable}: which row can't be determined` : `none of its record keys is in ${recordTable}, the table its class records in` };
+  }
+  if (keys.length === 1) return { key: keys[0] };
+  return { key: null, why: keys.length ? `it has several record keys (${keys.map((k) => k.key).join(", ")}) and nothing says which row this claim is about` : "it has no record key" };
 }
 
 /** two values as the same fact: numbers by value, dates by instant, text case- and space-insensitively */
@@ -295,75 +357,226 @@ export async function decideWrite(identity, cls, attribute, { policy, positions,
   return decide(identity, cls, attribute, map, positions);
 }
 
+/** ---- who authorizes ---- */
+
+/**
+ * The person an entry is made for, as they stand now (pure): `entry` is their token-map entry today
+ * ({ positions, caps }, the provisioner's), `actsFor.position` the position recorded with the section.
+ *   ok: false, why  they can't authorize: gone (no entry, or read and write taken away), holding no
+ *                   position, or moved (the recorded position is not one they hold, or isn't a position
+ *                   at all: a name typed in its place reaches nothing).
+ *   ok: true        { identity, position }: their current positions and real write capability, which is
+ *                   all the rule reads; the recorded position is only checked, never decided on.
+ * With no position map loaded (unscoped), nothing is theirs to commit: the rule answers "propose".
+ */
+export function standingOf(actsFor, entry, positions) {
+  const person = String(actsFor?.person ?? "").split("/agent:")[0];
+  const recorded = actsFor?.position ?? null;
+  const out = (why) => ({ ok: false, person, position: recorded, why });
+  if (!entry || entry.caps?.write === "deny" || entry.caps?.read === false) return out(`${person} is no longer in the organization, so can't authorize a write`);
+  const caps = { write: entry.caps?.write ?? "deny" };
+  if (!positions) return { ok: true, person, position: recorded, identity: { positions: [], caps } };
+  const held = heldPositions(positions, entry.positions);
+  if (!held.length) return out(`${person} holds no position, so can't authorize a write`);
+  if (recorded !== null && recorded !== EVERYONE) {
+    if (!positions.positions[recorded]) return out(`this was recorded under "${recorded}", which is not a position: it authorizes nothing`);
+    if (!held.includes(recorded)) return out(`${person} has moved from ${recorded} since this was recorded, so it no longer authorizes the write`);
+  }
+  return { ok: true, person, position: recorded ?? defaultHome(positions, held), identity: { positions: held, caps } };
+}
+
+/** the person behind an approver's identity: "admin" for admin, admin/liaison:ab12 and "admin (on the operator's word)" */
+export const approvingPerson = (user) => String(user ?? "").split(/[/ ]/)[0];
+
+/** the classes a table records (a column of the table can be governed by them whichever claim asked for the write) */
+async function classesOfTable(table, db) {
+  const rows = await db.adbQuery("SELECT name FROM CommitmentClass WHERE record_table = :t AND status = 'confirmed'", { t: table }).catch(() => []);
+  return rows.map((r) => r.name).filter(Boolean);
+}
+
+/** every (class, attribute) a write bears on: the claim's own, and each column written under the claim's class and the table's */
+export function decisionKeys(cls, attribute, columns, tableClasses = []) {
+  const classes = [...new Set([cls ?? null, ...tableClasses])];
+  const keys = [[cls ?? null, attribute ?? null], ...columns.flatMap((c) => classes.map((k) => [k, normalizeAttribute(c)]))];
+  return [...new Map(keys.map(([c, a]) => [`${c}\u0000${a}`, { cls: c, attribute: a }])).values()];
+}
+
 /** ---- the entry itself ---- */
+
+/** the strictest of several answers: anything hidden stops it, anything proposed holds it */
+const strictest = (answers) => (answers.includes("hidden") ? "hidden" : answers.includes("propose") ? "propose" : "direct");
 
 /**
  * Enter data into a source row. `actsFor` is the person the agent acts for
- * ({ person, position }); `by` the agent identity (its user); `key` the row
+ * ({ person, position }, as the section recorded them); `by` the agent identity (its user); `key` the row
  * (system:table:row); `fields` the columns to write; `cls`/`attribute` what
- * the write commits the organization to (the claim's). Outcomes:
+ * the write commits the organization to (the claim's). Decided for the person as
+ * they stand now (standingOf), and over every column written (decisionKeys): the
+ * strictest answer decides. Outcomes:
  *   direct  -> written through the write-capable instance; "applied" (or
  *              "failed" when the source refused it, with the error)
  *   propose -> a PendingWrite (kind "data_entry") for someone with authority;
  *              "proposed", and the worker waits
- *   hidden  -> nothing written or proposed; "refused"
+ *   hidden, or nobody standing behind it -> nothing written or proposed; "refused"
  * Every outcome is an AuditEvent WROTE to the row's SourceRef.
  */
-export async function enterData({ actsFor, by, key, fields, cls, attribute, reason, identity }, { db = realDb, fetch: f, positions, policy, decideFn, queue, proposal } = {}) {
+export async function enterData({ actsFor, by, key, fields, cls, attribute, reason, identity }, { db = realDb, fetch: f, positions, policy, decideFn, queue, proposal, people } = {}) {
   const k = parseKey(key);
   if (!k) throw new Error(`not a record key (system:table:row): ${key}`);
   if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).length) throw new Error("fields: the columns to write, with their values");
-  if (!actsFor?.person || !actsFor?.position) throw new Error("the person and position the entry is made for are needed");
-  const who = { positions: [actsFor.position], caps: { write: "direct" } };
-  const decision = decideFn ? await decideFn(who, cls, attribute) : await decideWrite(who, cls, attribute, { policy, positions, db });
-  const base = { key: k.key, authorized_by: actsFor.person, acted_by: by, position: actsFor.position };
+  if (!actsFor?.person) throw new Error("the person the entry is made for is needed");
+  positions ??= await livePositions();
+  const lookup = people ?? (await livePeople());
+  const standing = standingOf(actsFor, await lookup(String(actsFor.person).split("/agent:")[0]), positions);
   const change = { fields, class: cls ?? null, attribute: attribute ?? null, reason: String(reason ?? "").slice(0, 600) || null };
+  const base = { key: k.key, authorized_by: standing.person, acted_by: by, position: standing.position ?? "unknown" };
+  if (!standing.ok) {
+    const ev = await recordAuditEvent({ ...base, change: { ...change, refused: standing.why }, outcome: "refused" }, db);
+    return { outcome: "refused", decision: "hidden", audit: ev.id, note: `Not written: ${standing.why}. Nothing was proposed; a person who holds the authority can make this entry themselves.` };
+  }
+  const tableClasses = await classesOfTable(`${k.system}:${k.table}`, db);
+  const keys = decisionKeys(cls, attribute, Object.keys(fields), tableClasses);
+  const answers = await Promise.all(keys.map((d) => (decideFn ? decideFn(standing.identity, d.cls, d.attribute) : decideWrite(standing.identity, d.cls, d.attribute, { policy, positions, db }))));
+  const decision = strictest(answers);
+  const over = `${cls ?? "this"}${attribute ? `/${attribute}` : ""}${Object.keys(fields).some((c) => normalizeAttribute(c) !== attribute) ? ` and the columns written (${Object.keys(fields).join(", ")})` : ""}`;
   if (decision === "hidden") {
     const ev = await recordAuditEvent({ ...base, change, outcome: "refused" }, db);
-    return { outcome: "refused", decision, audit: ev.id, note: `Not written: ${actsFor.person} (${actsFor.position}) holds no authority over ${cls ?? "this"}${attribute ? `/${attribute}` : ""} and reports to nobody who does; nothing was proposed.` };
+    return { outcome: "refused", decision, audit: ev.id, note: `Not written: ${standing.person} (${base.position}) holds no authority over ${over} and reports to nobody who does; nothing was proposed.` };
   }
   if (decision === "propose") {
-    const payload = { kind: "data_entry", key: k.key, fields, class: cls ?? null, attribute: attribute ?? null, acts_for: actsFor, by, reason: change.reason };
+    const payload = { kind: "data_entry", key: k.key, fields, class: cls ?? null, attribute: attribute ?? null, acts_for: { person: standing.person, position: base.position }, by, reason: change.reason };
     const w = queue && proposal ? null : await liveQueue();
-    const queued = await (queue ?? w.queueWrite)({ kind: "data_entry", payload: JSON.stringify(payload), user: by, home: actsFor.position, ...(proposal ?? w.proposalFields)(identity ?? { role: null }, reason) });
-    const ev = await recordAuditEvent({ ...base, change, outcome: "proposed", pending_id: queued.pendingId }, db);
-    return { outcome: "proposed", decision, pendingId: queued.pendingId, audit: ev.id, note: `Proposed: ${actsFor.person} (${actsFor.position}) reports to the position holding authority over ${cls ?? "this"}${attribute ? `/${attribute}` : ""}, so the entry waits for someone there.` };
+    const queued = await (queue ?? w.queueWrite)({ kind: "data_entry", payload: JSON.stringify(payload), user: by, home: base.position, ...(proposal ?? w.proposalFields)(identity ?? { role: null }, reason) });
+    let ev;
+    try {
+      ev = await recordAuditEvent({ ...base, change, outcome: "proposed", pending_id: queued.pendingId }, db);
+    } catch (e) {
+      // a proposal the trail doesn't hold must not wait for an approver: it is withdrawn, and the worker hears why
+      await db.adbCommand("UPDATE PendingWrite SET status = 'rejected', note = :n WHERE id = :id", "sql", { n: "withdrawn: the audit event could not be recorded", id: queued.pendingId }).catch(() => {});
+      throw new Error(`the proposal was withdrawn: its audit event could not be recorded: ${String(e?.message ?? e).slice(0, 200)}`);
+    }
+    const queuedNote = standing.identity.caps.write === "queued" ? "this person's writes are queued for approval" : `${standing.person} (${base.position}) reports to the position holding authority over ${over}`;
+    return { outcome: "proposed", decision, pendingId: queued.pendingId, audit: ev.id, note: `Proposed: ${queuedNote}, so the entry waits for someone there.` };
   }
   return applyEntry({ ...base, change, fields, table: k.table, rowKey: k.row_key }, { db, fetch: f });
 }
 
-/** the write itself, audited as applied or failed */
-async function applyEntry({ key, authorized_by, acted_by, position, change, fields, table, rowKey, pending_id = null }, { db, fetch: f }) {
-  let result;
-  let before = null;
-  try {
-    const { client } = await clientFor(key, { db, fetch: f });
-    before = (await client.readRow(table, rowKey).catch(() => null))?.row ?? null;
-    result = await client.writeRow(table, rowKey, fields);
-  } catch (e) {
-    const ev = await recordAuditEvent({ key, authorized_by, acted_by, position, change: { ...change, error: String(e?.message ?? e).slice(0, 300) }, outcome: "failed", pending_id }, db);
-    if (pending_id) await settleAuditEvent(pending_id, "failed", db).catch(() => {});
-    return { outcome: "failed", decision: "direct", audit: ev.id, error: String(e?.message ?? e).slice(0, 300) };
+const holds = (row, fields) => Boolean(row) && Object.entries(fields).every(([c, v]) => c in row && (sameValue(row[c], v) || ((row[c] ?? null) === null && (v ?? null) === null)));
+
+/**
+ * Attempts on a row whose end was never recorded are settled by what the row holds now: `row` is the row as
+ * just read. Returns what was settled. A retry goes through here first, so it finds what a lost write left.
+ */
+export async function settleOpenAttempts(key, row, db = realDb, { except = null } = {}) {
+  const settled = [];
+  for (const ev of (await openAttempts(key, db)).filter((e) => e.id !== except)) {
+    const fields = ev.change?.fields ?? {};
+    const applied = Object.keys(fields).length > 0 && holds(row, fields);
+    const outcome = applied ? "applied" : "failed";
+    await settleAttempt(ev.id, outcome, { ...ev.change, ...(applied ? { after: fields } : {}), settled_later: true }, { key, acted_by: ev.acted_by }, db);
+    settled.push({ id: ev.id, outcome });
   }
-  const ev = await recordAuditEvent({ key, authorized_by, acted_by, position, change: { ...change, before: before ? pick(before, Object.keys(fields)) : null, after: fields }, outcome: "applied", pending_id }, db);
-  if (pending_id) await settleAuditEvent(pending_id, "applied", db).catch(() => {});
-  return { outcome: "applied", decision: "direct", audit: ev.id, result };
+  return settled;
+}
+
+/**
+ * The write itself, in three recorded steps so a row can't change without its event: the event goes on the trail
+ * first ("attempted": no event, no write), the source is written, and the event is settled applied or failed.
+ * A transport error says nothing about whether the row changed, so the row is read back before calling it failed;
+ * if it can't be read the event stays "attempted" and the next attempt on the row settles it.
+ */
+async function applyEntry({ key, authorized_by, acted_by, position, change, fields, table, rowKey, pending_id = null }, { db, fetch: f }) {
+  const auditDown = (e) => ({ outcome: "failed", decision: "direct", audit: null, error: `nothing was written: the audit trail could not record the attempt: ${String(e?.message ?? e).slice(0, 240)}` });
+  const refusedHere = (e) => String(e?.message ?? e).slice(0, 300);
+  let eventId = null;
+  try {
+    if (pending_id) eventId = await attemptProposed(pending_id, { authorized_by, position, change }, db);
+  } catch (e) {
+    return auditDown(e);
+  }
+  const settle = (outcome, c) => settleAttempt(eventId, outcome, c, { key, acted_by }, db);
+  const noWrite = async (e) => {
+    const c = { ...change, error: refusedHere(e) };
+    if (eventId) await settle("failed", c);
+    const ev = eventId ? { id: eventId } : await recordAuditEvent({ key, authorized_by, acted_by, position, change: c, outcome: "failed", pending_id }, db);
+    return { outcome: "failed", decision: "direct", audit: ev.id, error: c.error };
+  };
+  let client;
+  let hit;
+  try {
+    ({ client } = await clientFor(key, { db, fetch: f }));
+    hit = await client.readRow(table, rowKey);
+    if (!hit) throw new Error(`no row ${rowKey} in ${table}: the record key doesn't hold`);
+    assertWritable(fields, hit);
+  } catch (e) {
+    return noWrite(e);
+  }
+  // an earlier attempt on this row that never finished is settled before this one starts
+  await settleOpenAttempts(key, hit.row, db, { except: eventId }).catch((e) => log.warn(`open audit attempts on ${key} not settled: ${String(e).slice(0, 160)}`));
+  const attempt = { ...change, before: pick(hit.row, Object.keys(fields)) };
+  try {
+    if (eventId) await settle("attempted", attempt);
+    else eventId = (await recordAuditEvent({ key, authorized_by, acted_by, position, change: attempt, outcome: "attempted", pending_id }, db)).id;
+  } catch (e) {
+    return auditDown(e);
+  }
+  let result;
+  try {
+    result = await client.writeRow(table, hit, fields);
+  } catch (e) {
+    return afterWriteError(e, { attempt, eventId, settle, client, table, rowKey, fields });
+  }
+  const done = { ...attempt, after: fields };
+  try {
+    await settle("applied", done);
+  } catch (e) {
+    log.warn(`data entry on ${key} applied but its audit event ${eventId} wasn't settled: ${String(e).slice(0, 200)}`);
+    return { outcome: "applied", decision: "direct", audit: eventId, audit_unsettled: true, result, note: "The row was written; its audit event stays open as attempted and is settled by the next entry on this row." };
+  }
+  return { outcome: "applied", decision: "direct", audit: eventId, result };
+}
+
+/** a write that threw: the source said no (failed), or the transport broke and the row is read back to tell */
+async function afterWriteError(e, { attempt, eventId, settle, client, table, rowKey, fields }) {
+  const error = String(e?.message ?? e).slice(0, 300);
+  let row;
+  let readable = true;
+  if (!e?.toolError) {
+    try {
+      row = (await client.readRow(table, rowKey))?.row ?? null;
+    } catch {
+      readable = false;
+    }
+  }
+  if (!readable) {
+    await settle("attempted", { ...attempt, error }).catch(() => {});
+    return { outcome: "failed", decision: "direct", audit: eventId, error, unverified: true, note: "The source couldn't be reached to tell whether the row changed; the audit event stays open as attempted." };
+  }
+  if (holds(row, fields)) {
+    await settle("applied", { ...attempt, after: fields, note: `the source answered with an error (${error}) but the row holds the new values` }).catch((x) => log.warn(`audit event ${eventId} not settled: ${String(x).slice(0, 200)}`));
+    return { outcome: "applied", decision: "direct", audit: eventId };
+  }
+  await settle("failed", { ...attempt, error }).catch((x) => log.warn(`audit event ${eventId} not settled: ${String(x).slice(0, 200)}`));
+  return { outcome: "failed", decision: "direct", audit: eventId, error };
 }
 
 const pick = (row, cols) => Object.fromEntries(cols.filter((c) => c in row).map((c) => [c, row[c]]));
 
 /**
- * An approved data_entry proposal: the write runs now, authorized by the
- * approver (who holds the authority), acted by the agent that proposed it.
- * For write.js `executePending` to call on kind "data_entry" (the Authority
- * stream owns that switch); until then an approved entry is applied from here.
+ * An approved data_entry proposal: the write runs now, authorized by the person who approved it (who holds
+ * the authority), acted by the agent that proposed it; one event, the proposal's own, carries it to its end
+ * (who it was proposed for stays in `change`). The event names the person behind the approving identity.
  */
-export async function applyProposedEntry(payload, pendingId, approver, { db = realDb, fetch: f } = {}) {
+export async function applyProposedEntry(payload, pendingId, approver, { db = realDb, fetch: f, people, positions } = {}) {
   const p = typeof payload === "string" ? JSON.parse(payload) : payload;
   const k = parseKey(p.key);
   if (!k) throw new Error(`not a record key: ${p.key}`);
+  positions ??= await livePositions();
+  const authorized_by = approvingPerson(approver) || p.acts_for?.person || "unknown";
+  const entry = await (people ?? (await livePeople()))(authorized_by);
+  const position = (positions && defaultHome(positions, entry?.positions ?? [])) || p.acts_for?.position || "unknown";
   const r = await applyEntry(
-    { key: k.key, authorized_by: approver ?? p.acts_for?.person ?? "unknown", acted_by: p.by ?? "unknown", position: p.acts_for?.position ?? "unknown", change: { fields: p.fields, class: p.class, attribute: p.attribute, reason: p.reason, approved_by: approver ?? null }, fields: p.fields, table: k.table, rowKey: k.row_key, pending_id: pendingId ?? null },
+    { key: k.key, authorized_by, acted_by: p.by ?? "unknown", position, change: { fields: p.fields, class: p.class, attribute: p.attribute, reason: p.reason, proposed_for: p.acts_for ?? null, approved_by: approver ?? null }, fields: p.fields, table: k.table, rowKey: k.row_key, pending_id: pendingId ?? null },
     { db, fetch: f },
   );
   if (r.outcome === "failed") throw new Error(r.error);

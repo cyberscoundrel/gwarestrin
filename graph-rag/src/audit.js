@@ -129,7 +129,10 @@ export async function referTo(thingRid, sourceRefRid, db = realDb) {
  * Record what an agent did (or tried to do) to a row: the AuditEvent, WROTE
  * to the row's SourceRef (made if the graph has none). Every outcome is
  * recorded, applied, proposed, refused and failed alike: the trail is of
- * attempts, not of successes. Returns the stored event.
+ * attempts, not of successes. A write to a source is recorded as "attempted"
+ * first and settled after (settleAttempt), so a row can't change with no event
+ * on the trail. Throws when the event or its WROTE edge isn't stored: a caller
+ * about to write must not write. Returns the stored event.
  */
 export async function recordAuditEvent(fields, db = realDb) {
   const ev = auditEvent(fields);
@@ -140,11 +143,47 @@ export async function recordAuditEvent(fields, db = realDb) {
     { id: ev.id, key: ev.key, auth: ev.authorized_by, acted: ev.acted_by, pos: ev.position, at: ev.at, change: ev.change, outcome: ev.outcome, pending: ev.pending_id },
   );
   const made = (await db.adbQuery("SELECT @rid AS rid FROM AuditEvent WHERE id = :id LIMIT 1", { id: ev.id }))[0];
-  if (made) await db.adbCommand(`CREATE EDGE WROTE FROM ${String(made.rid)} TO ${refRid}`).catch(() => {});
+  if (!made) throw new Error(`audit event ${ev.id} wasn't stored`);
+  await db.adbCommand(`CREATE EDGE WROTE FROM ${String(made.rid)} TO ${refRid}`);
   return ev;
 }
 
-/** a proposed write was decided: the event's outcome follows (applied, failed, or refused when rejected) */
+/**
+ * An attempt's end, by its event id: the one event says what became of the write. An "applied" end also
+ * notes the row as seen; that note is secondary (the row's change is already on the trail) and is not what
+ * can fail the settling. Throws when the event isn't there to settle.
+ */
+export async function settleAttempt(id, outcome, change, { key = null, acted_by = null } = {}, db = realDb) {
+  if (!AUDIT_OUTCOMES.includes(outcome)) throw new Error(`outcome: must be one of ${AUDIT_OUTCOMES.join(", ")}`);
+  const r = await db.adbCommand("UPDATE AuditEvent SET outcome = :o, change = :c WHERE id = :id", "sql", { o: outcome, c: JSON.stringify(change ?? null).slice(0, 4000), id: String(id) });
+  if (Number(r?.[0]?.count ?? 0) !== 1) throw new Error(`audit event ${id} wasn't settled`);
+  if (outcome === "applied" && key) await ensureSourceRef(key, { seen_by: acted_by, seen: true }, db).catch(() => {});
+}
+
+/**
+ * An approved proposal becomes the attempt: its one event turns from "proposed" to "attempted" and from
+ * then on names the person who authorized it (the approver; who it was proposed for stays in `change`).
+ * Returns the event's id, or null when the proposal has no event to take on.
+ */
+export async function attemptProposed(pendingId, { authorized_by, position, change }, db = realDb) {
+  const r = await db.adbCommand("UPDATE AuditEvent SET outcome = 'attempted', authorized_by = :auth, position = :pos, change = :c WHERE pending_id = :p AND outcome = 'proposed'", "sql", {
+    auth: authorized_by,
+    pos: position,
+    c: JSON.stringify(change ?? null).slice(0, 4000),
+    p: String(pendingId),
+  });
+  if (Number(r?.[0]?.count ?? 0) < 1) return null;
+  const row = (await db.adbQuery("SELECT id FROM AuditEvent WHERE pending_id = :p AND outcome = 'attempted' LIMIT 1", { p: String(pendingId) }))[0];
+  return row?.id ?? null;
+}
+
+/** the unfinished attempts on a row, oldest first: a write that started and whose end was never recorded */
+export async function openAttempts(key, db = realDb) {
+  const rows = await db.adbQuery("SELECT id, key, acted_by, change, outcome FROM AuditEvent WHERE key = :key AND outcome = 'attempted' ORDER BY at ASC LIMIT 50", { key: String(key) });
+  return rows.filter((r) => r.outcome === "attempted").map((r) => ({ ...r, change: parseChange(r.change) }));
+}
+
+/** a proposed write ended without an attempt (it was rejected): the event's outcome follows */
 export async function settleAuditEvent(pendingId, outcome, db = realDb) {
   if (!AUDIT_OUTCOMES.includes(outcome)) throw new Error(`outcome: must be one of ${AUDIT_OUTCOMES.join(", ")}`);
   const r = await db.adbCommand("UPDATE AuditEvent SET outcome = :o WHERE pending_id = :p AND outcome = 'proposed'", "sql", { o: outcome, p: String(pendingId) });

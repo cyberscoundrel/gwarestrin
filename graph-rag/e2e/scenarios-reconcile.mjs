@@ -13,12 +13,22 @@
 // reruns this file against one stack within that minute sees the previous run's fake address.
 import { createServer } from "node:http";
 import { networkInterfaces, hostname } from "node:os";
+import { dabTool } from "./fake-dab-core.mjs";
 
 const PREFIX = "e2e-reconcile";
 const q = (s) => String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 
-/** ---- a fake DAB: one MCP endpoint, one table (dbo_Job), the tool calls it saw ---- */
-const fake = { rows: { dbo_Job: [] }, calls: [], url: null, server: null };
+/** ---- a fake DAB: one MCP endpoint, its tools as DAB 2.0.12 answers them (fake-dab-core.mjs), the tool calls it saw ---- */
+const fake = {
+  // a table's cursor needs a second row: DAB pages by primary key, and this is how the key is learned
+  tables: { dbo_Job: { primaryKey: ["Job"], rows: [] }, dbo_Customer: { primaryKey: ["Customer"], rows: [{ Customer: "TORO", Name: "Toro" }, { Customer: "ACME", Name: "Acme" }] }, dbo_Line: { primaryKey: ["Order", "Line"], rows: [{ Order: 78912, Line: 1, Qty: 5 }, { Order: 78912, Line: 2, Qty: 7 }] } },
+  get rows() {
+    return { dbo_Job: this.tables.dbo_Job.rows };
+  },
+  calls: [],
+  url: null,
+  server: null,
+};
 
 function runnerAddress() {
   for (const list of Object.values(networkInterfaces())) for (const i of list ?? []) if (i.family === "IPv4" && !i.internal) return i.address;
@@ -35,27 +45,12 @@ async function startFakeDab() {
       res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "fake-dab" });
       res.end(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }));
     };
-    const text = (obj) => ({ content: [{ type: "text", text: JSON.stringify(obj) }] });
     if (body.method === "initialize") return reply({ protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "fake-dab" } });
     if (body.method !== "tools/call") return reply({});
     const { name, arguments: args } = body.params ?? {};
     fake.calls.push({ url: req.url, name, args });
     if (process.env.FAKE_DAB_LOG) console.log(`fake DAB: ${name} ${req.url}`);
-    if (name === "describe_entities") return reply(text({ entities: Object.keys(fake.rows).map((n) => ({ name: n, fields: [{ name: "Job", isPrimaryKey: true }, { name: "Status" }, { name: "Quantity" }] })) }));
-    const table = fake.rows[args?.entity] ?? [];
-    if (name === "read_records") {
-      const m = /^(\w+) eq (.+)$/.exec(String(args?.filter ?? ""));
-      const v = m ? m[2].replace(/^'|'$/g, "") : null;
-      return reply(text({ records: m ? table.filter((r) => String(r[m[1]]) === v) : table }));
-    }
-    if (name === "update_record") {
-      if (!req.url.includes("/write")) return reply({ isError: true, content: [{ type: "text", text: "the read-only instance refuses writes" }] });
-      const row = table.find((r) => Object.entries(args.keys ?? {}).every(([k, v]) => String(r[k]) === String(v)));
-      if (!row) return reply({ isError: true, content: [{ type: "text", text: "no such row" }] });
-      Object.assign(row, args.item ?? {});
-      return reply(text({ updated: 1 }));
-    }
-    reply({ isError: true, content: [{ type: "text", text: `no tool ${name}` }] });
+    reply(dabTool(fake.tables, name, args, { write: req.url.includes("/write") }));
   });
   await new Promise((r) => fake.server.listen(4290, "0.0.0.0", r));
   fake.server.unref();
@@ -82,9 +77,9 @@ async function setup(ctx) {
     const viaPolicy = await ctx.api("/api/policy", { method: "PUT", body: JSON.stringify({ authorityMap: policy }) });
     if (viaPolicy.error) await upsertPolicy("authority", JSON.stringify(policy));
     // an instance of jobs with its record key, seen from the floor; the row behind it in the fake source
-    fake.rows.dbo_Job = [
-      { Job: "4471", Status: "running", Quantity: 500 },
-      { Job: "4472", Status: "planned", Quantity: 20 },
+    fake.tables.dbo_Job.rows = [
+      { Job: 4471, Status: "running", Quantity: 500, credit_status: "good", job_status: "open", created_date: "2026-01-02T00:00:00", Price: 12.5 },
+      { Job: 4472, Status: "planned", Quantity: 20, credit_status: "hold", job_status: "open", created_date: "2026-02-03T00:00:00", Price: 3 },
     ];
     const thing = async (rowKey) => {
       const existing = (await ctx.sql(`SELECT @rid AS rid FROM Entity WHERE _kind = 'thing' AND _keys CONTAINS 'mssql:dbo_Job:${rowKey}'`))[0];
@@ -213,7 +208,7 @@ export default [
       ctx.check(r.outcome === "applied", `applied: ${JSON.stringify(r).slice(0, 300)}`);
       ctx.check(fake.rows.dbo_Job[0].Status === "done", "the row changed");
       const write = fake.calls.filter((x) => x.name === "update_record").at(-1);
-      ctx.check(write && write.url.includes("/write") && write.args.entity === "dbo_Job" && String(write.args.keys.Job) === "4471" && write.args.item.Status === "done", `through the write-capable instance: ${JSON.stringify(write)}`);
+      ctx.check(write && write.url.includes("/write") && write.args.entity === "dbo_Job" && write.args.keys.Job === 4471 && write.args.fields.Status === "done" && !("item" in write.args), `through the write-capable instance, in DAB's argument shape: ${JSON.stringify(write)}`);
       ctx.check(!(await ctx.sql(`SELECT id FROM PendingWrite WHERE job_id = '${job}'`)).length, "nothing proposed");
       const ev = (await audit(ctx, "mssql:dbo_Job:4471")).find((e) => e.id === r.audit);
       ctx.check(ev?.outcome === "applied" && ev.authorized_by === "admin" && ev.position === ctx.POS.org, `audited as applied for the admin: ${JSON.stringify(ev)}`);
@@ -224,6 +219,139 @@ export default [
       // the same value again: nothing to enter, nothing audited
       const same = await ctx.tool(ctx.workerToken(s, ctx.randomUUID()), "enter_data", { claim_id: c, reason: "again" });
       ctx.check(same.outcome === "unchanged", `unchanged: ${JSON.stringify(same).slice(0, 200)}`);
+    },
+  },
+  {
+    // B2 (authorization half): the person the section names, as they stand now
+    name: "a data entry is decided on the person's current standing: a name for a position, someone gone or moved, a queued identity",
+    run: async (ctx) => {
+      const { job4471 } = await setup(ctx);
+      const setRow = () => {
+        fake.rows.dbo_Job[0].Status = "running";
+      };
+      setRow();
+      const entry = async (name, person, position, value = "on hold") => {
+        const s = await section(ctx, `${PREFIX} ${name}`, { person, position, text: `Job 4471 is ${value}.` });
+        const c = await claim(ctx, s, job4471, { cls: "jobs", attribute: "status", value, recorded_by: person, home: ctx.POS.floor, subject: { key: "mssql:dbo_Job:4471" } });
+        return ctx.tool(ctx.workerToken(s, ctx.randomUUID()), "enter_data", { claim_id: c, reason: "e2e standing" });
+      };
+      // a position's display name typed where its id belongs: not the root, not anything
+      const named = await entry("s6 name for position", "bob", "Operations");
+      ctx.check(named.outcome === "refused" && /not a position/.test(named.note ?? ""), `a name reaches nothing: ${JSON.stringify(named).slice(0, 300)}`);
+      // a position bob doesn't hold or sit under: he moved, or never was
+      const moved = await entry("s6 moved", "bob", ctx.POS.ops);
+      ctx.check(moved.outcome === "refused" && /moved/.test(moved.note ?? ""), `a moved person doesn't authorize: ${JSON.stringify(moved).slice(0, 300)}`);
+      // nobody in the organization by that name any more
+      const gone = await entry("s6 gone", "former-employee", ctx.POS.floor);
+      ctx.check(gone.outcome === "refused" && /no longer in the organization/.test(gone.note ?? ""), `someone gone doesn't authorize: ${JSON.stringify(gone).slice(0, 300)}`);
+      // a provisioned person (write: queued, as every non-admin is): their entries wait, even under no rule
+      const queued = await entry("s6 queued", "dana", ctx.POS.floor, "shipped");
+      ctx.check(queued.outcome === "proposed" && queued.pendingId, `a queued identity never gets direct: ${JSON.stringify(queued).slice(0, 300)}`);
+      ctx.check(fake.rows.dbo_Job[0].Status === "running", `nothing written for any of them: ${JSON.stringify(fake.rows.dbo_Job[0])}`);
+      const ev = (await audit(ctx, "mssql:dbo_Job:4471")).filter((e) => e.outcome === "refused").at(-1);
+      ctx.check(ev?.authorized_by === "former-employee" && /no longer/.test(JSON.parse(ev.change).refused ?? ""), `the refusal says why: ${JSON.stringify(ev)}`);
+      if (queued.pendingId) await ctx.api(`/api/worker/proposals/${queued.pendingId}`, { method: "POST", body: JSON.stringify({ approve: false, reason: "e2e" }) });
+    },
+  },
+  {
+    // B3: the columns written, not the claim's attribute
+    name: "the authority decision covers every column written, not only the claim's attribute",
+    run: async (ctx) => {
+      const { job4471 } = await setup(ctx);
+      const price = fake.rows.dbo_Job[0].Price;
+      const s = await section(ctx, `${PREFIX} s7 stage and price`, { person: "bob", position: ctx.POS.floor, text: "Job 4471 is at inspection." });
+      // bob holds jobs/stage at the floor; the worker tries to write Price on the strength of it (attributes.price: org)
+      const c = await claim(ctx, s, job4471, { cls: "jobs", attribute: "stage", value: "inspection", recorded_by: "bob", home: ctx.POS.floor, subject: { key: "mssql:dbo_Job:4471" } });
+      const r = await ctx.tool(ctx.workerToken(s, ctx.randomUUID()), "enter_data", { claim_id: c, fields: { Price: 1 }, reason: "the note implies it" });
+      ctx.check(r.outcome === "proposed", `Price is decided, not just jobs/stage: ${JSON.stringify(r).slice(0, 300)}`);
+      ctx.check(fake.rows.dbo_Job[0].Price === price, "Price is untouched");
+      if (r.pendingId) await ctx.api(`/api/worker/proposals/${r.pendingId}`, { method: "POST", body: JSON.stringify({ approve: false, reason: "e2e" }) });
+    },
+  },
+  {
+    // B18: an approved entry is one event, naming the person who approved it
+    name: "an approved entry yields one applied event, naming the person who approved it",
+    run: async (ctx) => {
+      const { job4472 } = await setup(ctx);
+      fake.rows.dbo_Job[1].Quantity = 20;
+      const s = await section(ctx, `${PREFIX} s8 approved`, { person: "bob", position: ctx.POS.floor, text: "Job 4472 is now 30 pieces." });
+      const c = await claim(ctx, s, job4472, { cls: "orders", attribute: "quantity", value: 30, recorded_by: "bob", home: ctx.POS.floor, subject: { key: "mssql:dbo_Job:4472" } });
+      const job = ctx.randomUUID();
+      const r = await ctx.tool(ctx.workerToken(s, job), "enter_data", { claim_id: c, reason: "the floor says 30" });
+      ctx.check(r.outcome === "proposed", `proposed first: ${JSON.stringify(r).slice(0, 300)}`);
+      const decided = await ctx.api(`/api/worker/proposals/${r.pendingId}`, { method: "POST", body: JSON.stringify({ approve: true, reason: "approved" }) });
+      ctx.check(!decided.error, `approved: ${JSON.stringify(decided).slice(0, 300)}`);
+      ctx.check(fake.rows.dbo_Job[1].Quantity === 30, `the row changed: ${JSON.stringify(fake.rows.dbo_Job[1])}`);
+      const events = (await audit(ctx, "mssql:dbo_Job:4472")).filter((e) => e.pending_id === r.pendingId);
+      ctx.check(events.length === 1 && events[0].outcome === "applied", `one event for one approved write: ${JSON.stringify(events)}`);
+      ctx.check(events[0]?.authorized_by === "admin", `it names the approver: ${JSON.stringify(events[0])}`);
+      ctx.check(JSON.parse(events[0].change).proposed_for?.person === "bob", `who it was proposed for stays on it: ${events[0]?.change}`);
+    },
+  },
+  {
+    // B18: a write whose end was never recorded isn't hidden by a retry
+    name: "a retry settles an attempt left open instead of reporting nothing to do",
+    run: async (ctx) => {
+      const { job4472 } = await setup(ctx);
+      fake.rows.dbo_Job[1].Status = "finishing";
+      const id = ctx.randomUUID();
+      const change = JSON.stringify({ fields: { Status: "finishing" }, class: "jobs", attribute: "status" });
+      const made = await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX AuditEvent SET id = '${id}', key = 'mssql:dbo_Job:4472', authorized_by = 'admin', acted_by = 'admin/worker:e2e', position = 'org', at = '${new Date().toISOString()}', change = '${q(change)}', outcome = 'attempted'` });
+      ctx.check(!made.error, `open attempt made: ${JSON.stringify(made).slice(0, 200)}`);
+      const s = await section(ctx, `${PREFIX} s10 retry`, { person: "admin", position: ctx.POS.org, text: "Job 4472 is finishing." });
+      const c = await claim(ctx, s, job4472, { cls: "jobs", attribute: "status", value: "finishing", recorded_by: "admin", home: ctx.POS.org, subject: { key: "mssql:dbo_Job:4472" } });
+      const r = await ctx.tool(ctx.workerToken(s, ctx.randomUUID()), "enter_data", { claim_id: c, reason: "the retry" });
+      ctx.check(r.outcome === "reconciled" && r.settled?.[0]?.id === id, `the retry finds it: ${JSON.stringify(r).slice(0, 300)}`);
+      const ev = (await ctx.sql(`SELECT outcome FROM AuditEvent WHERE id = '${id}'`))[0];
+      ctx.check(ev?.outcome === "applied", `settled by what the row holds: ${JSON.stringify(ev)}`);
+      const again = await ctx.tool(ctx.workerToken(s, ctx.randomUUID()), "enter_data", { claim_id: c, reason: "once more" });
+      ctx.check(again.outcome === "unchanged", `nothing left open: ${JSON.stringify(again).slice(0, 200)}`);
+    },
+  },
+  {
+    // B19: the column and the row from the schema and a verified key
+    name: "the column and the row are determined from the schema and a verified key, or the entry is refused",
+    run: async (ctx) => {
+      const { job4471 } = await setup(ctx);
+      const s = await section(ctx, `${PREFIX} s9 credit`, { person: "bob", position: ctx.POS.floor, text: "Credit is fine." });
+      // `credit` is a fragment of credit_status: not this column
+      const c = await claim(ctx, s, job4471, { cls: "jobs", attribute: "credit", value: "great", recorded_by: "bob", home: ctx.POS.floor, subject: { key: "mssql:dbo_Job:4471" } });
+      const w = ctx.workerToken(s, ctx.randomUUID());
+      const r = await ctx.tool(w, "enter_data", { claim_id: c, reason: "no such column" });
+      ctx.check(/no column named for credit/.test(r.error ?? ""), `a fragment is not a column: ${JSON.stringify(r).slice(0, 300)}`);
+      ctx.check(fake.rows.dbo_Job[0].credit_status === "good", "credit_status is untouched");
+      // a column that isn't the row's
+      const bad = await ctx.tool(w, "enter_data", { claim_id: c, fields: { Credit: "great" }, reason: "column test" });
+      ctx.check(/has no column Credit/.test(bad.error ?? ""), `a column the row hasn't: ${JSON.stringify(bad).slice(0, 300)}`);
+      // the key column is the table's primary key, whatever the worker says
+      const wrongKey = await ctx.tool(w, "enter_data", { claim_id: c, fields: { Status: "x" }, key_column: "Status", reason: "key test" });
+      ctx.check(/not the primary key/.test(wrongKey.error ?? ""), `a key_column that isn't the key: ${JSON.stringify(wrongKey).slice(0, 300)}`);
+      // the key column itself isn't written
+      const keyCol = await ctx.tool(w, "enter_data", { claim_id: c, fields: { Job: 9999 }, reason: "key test" });
+      ctx.check(/row's key/.test(keyCol.error ?? ""), `the row's key isn't written: ${JSON.stringify(keyCol).slice(0, 300)}`);
+      // a thing with two record keys, and a claim that doesn't say which row
+      const twoKeys = (await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${PREFIX} two keys (order)', label = '${PREFIX} two keys', _kind = 'thing', _thing_type = 'order', _norm = '${PREFIX} two keys', _alias_norms = [], _keys = ['mssql:dbo_Job:4471', 'mssql:dbo_Customer:TORO'], _homes = ['floor'], _home = 'org', updated_at = '${new Date().toISOString()}'` }));
+      ctx.check(!twoKeys.error, `two-key thing: ${JSON.stringify(twoKeys).slice(0, 200)}`);
+      const t = String((await ctx.sql(`SELECT @rid AS rid FROM Entity WHERE name = '${PREFIX} two keys (order)'`))[0].rid);
+      const s2 = await section(ctx, `${PREFIX} s9 two keys`, { person: "admin", position: ctx.POS.org, text: "Status is done." });
+      const c2 = await claim(ctx, s2, t, { cls: "e2e_no_table", attribute: "status", value: "two-key-target", recorded_by: "admin", home: ctx.POS.org, subject: {} });
+      const before = fake.rows.dbo_Job[0].Status;
+      const w2 = ctx.workerToken(s2, ctx.randomUUID());
+      const r2 = await ctx.tool(w2, "enter_data", { claim_id: c2, reason: "which row?" });
+      ctx.check(/several record keys/.test(r2.error ?? ""), `never the first key: ${JSON.stringify(r2).slice(0, 300)}`);
+      ctx.check(fake.rows.dbo_Job[0].Status === before, "no write");
+      // a subject resolved to a key the source has no row for: the entry is refused at the row, whatever the graph holds
+      const s3 = await section(ctx, `${PREFIX} s9 resolve`, { person: "admin", position: ctx.POS.org, text: "Job 9999 is running." });
+      const u = await claim(ctx, s3, s3, { cls: "jobs", attribute: "status", value: "running", recorded_by: "admin", home: ctx.POS.org, subject: { name: `${PREFIX} job 9999` } });
+      const w3 = ctx.workerToken(s3, ctx.randomUUID());
+      const resolved = await ctx.tool(w3, "resolve_subject", { claim_id: u, thing: { key: "mssql:dbo_Job:9999", name: `${PREFIX} job 9999`, type: "order" }, reason: "e2e" });
+      ctx.check(resolved.thing && !resolved.error, `resolved: ${JSON.stringify(resolved).slice(0, 300)}`);
+      const updates = fake.calls.filter((x) => x.name === "update_record").length;
+      const noRow = await ctx.tool(w3, "enter_data", { claim_id: u, fields: { Status: "x" }, reason: "e2e no row" });
+      ctx.check(/no such row/.test(noRow.error ?? ""), `an unverified key writes nothing: ${JSON.stringify(noRow).slice(0, 300)}`);
+      ctx.check(fake.calls.filter((x) => x.name === "update_record").length === updates, "no update was sent");
+      const row = (await ctx.sql(`SELECT _keys FROM ${job4471}`))[0];
+      ctx.check(!(row?._keys ?? []).includes("mssql:dbo_Job:9999"), `not on the job's thing: ${JSON.stringify(row)}`);
     },
   },
   {
