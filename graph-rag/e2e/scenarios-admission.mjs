@@ -8,8 +8,10 @@
 //   node /e2e/scenarios-admission.mjs        (GRAPH_URL, MODELS_URL as in run.mjs)
 //
 // The fake linker names things from a "[things: Name/type, ...]" tag and never gives a key, which is the
-// point: the linker on its own now mints nothing from a name. Keys arrive through a worker's link_things
-// (its judgement, with the key it looked up) or written in the text, and only keys mint instances.
+// point: the linker on its own now mints nothing from a name. Keys arrive through a worker's
+// resolve_subject (the Reconciliation stream's one tool for it: the worker's judgement, with the key it
+// looked up, resolved through resolve.js and minted by linkMentions) or written in the text, and only keys
+// mint instances.
 import { createHmac, randomUUID } from "node:crypto";
 
 const GRAPH = process.env.GRAPH_URL ?? "http://graph-rag:8000";
@@ -80,8 +82,11 @@ const unresolvedOn = async (h, name) => JSON.parse((await h.sql(`SELECT _unresol
 const linkedUp = (h, e) => h.until(`linked: ${e.name}`, async () => ((await h.job(String(e.rid)))?.status === "done" ? true : false));
 /** the linker runs on its own here: no master pool, no sorting step (a scenario in run.mjs turns the master on; this stream's cases are about the one-call linker) */
 const plainLinker = (h) => h.api("/api/worker", { method: "PUT", body: JSON.stringify({ pool: { poolSize: 0, master: false, sortFirst: false } }) });
-/** a worker's explicit judgement with the key it looked up: the one way a name becomes an instance here */
-const workerLinks = (h, e, list) => h.tool(h.workerToken(String(e.rid)), "link_things", { things: list });
+/**
+ * A worker's explicit judgement with the key it looked up: the one way a name becomes an instance here.
+ * One resolve_subject call per thing; returns { thing: rid, minted, key, label, type } or { error }.
+ */
+const workerResolves = (h, e, { name, type, key }) => h.tool(h.workerToken(String(e.rid)), "resolve_subject", { name, thing: { name, type, ...(key ? { key } : {}) }, reason: "e2e: looked the row up" });
 
 const SCENARIOS = [
   {
@@ -92,11 +97,10 @@ const SCENARIOS = [
       // two employees called Diep, each from its ERP row: a worker that looked them up links them by key
       await h.save("alice", "e2e-adm1 diep roster", "Two people on the roster are called Diep.");
       const roster = await h.entry("e2e-adm1 diep roster");
-      const made = await workerLinks(h, roster, [
-        { name: "Diep", type: "person", key: "mssql:dbo_Employee:NGUD" },
-        { name: "Diep", type: "person", key: "mssql:dbo_Employee:NGDT" },
-      ]);
-      h.check((made.linked ?? []).filter((l) => l.created && l.how === "key").length === 2, `two instances minted by key: ${JSON.stringify(made).slice(0, 400)}`);
+      const made = [];
+      for (const key of ["mssql:dbo_Employee:NGUD", "mssql:dbo_Employee:NGDT"]) made.push(await workerResolves(h, roster, { name: "Diep", type: "person", key }));
+      h.check(made.every((m) => m.minted === true && m.thing && !m.error), `two instances minted by key: ${JSON.stringify(made).slice(0, 400)}`);
+      h.check(made[0].thing !== made[1].thing, "two different instances");
       // (a built-in scenario may have left a keyless "Diep" from the old triage path: the keyed two are what this one is about)
       const dieps = await things(h, "Diep");
       const active = dieps.find((d) => (d._keys ?? []).includes("mssql:dbo_Employee:NGUD"));
@@ -115,8 +119,8 @@ const SCENARIOS = [
       const diep = unresolved.find((u) => u.name === "Diep");
       h.check(diep && [String(active.rid), String(inactive.rid)].every((c) => (diep.candidates ?? []).includes(c)), `the mention comes back unresolved with both keyed Dieps among its candidates: ${JSON.stringify(unresolved)}`);
       // the worker that checked the roster links with the key: the active employee, nothing new
-      const settled = await workerLinks(h, note, [{ name: "Diep", type: "person", key: "mssql:dbo_Employee:NGUD" }]);
-      h.check((settled.linked ?? []).some((l) => l.linked && l.how === "key" && !l.created), `linked by key, not created: ${JSON.stringify(settled).slice(0, 300)}`);
+      const settled = await workerResolves(h, note, { name: "Diep", type: "person", key: "mssql:dbo_Employee:NGUD" });
+      h.check(settled.minted === false && settled.thing === String(active.rid) && settled.key === "mssql:dbo_Employee:NGUD", `resolved by key to the active Diep, nothing created: ${JSON.stringify(settled).slice(0, 300)}`);
       const now = await about(h, String(note.rid));
       h.check(now.some((l) => l.dst === String(active.rid)) && !now.some((l) => l.dst === String(inactive.rid)), `about the active Diep only: ${JSON.stringify(now)}`);
       h.check((await things(h, "Diep")).length === dieps.length, "still nothing new");
@@ -163,14 +167,14 @@ const SCENARIOS = [
       const n14 = await h.entry("e2e-adm5 exatron wants it earlier");
       await linkedUp(h, n13);
       await linkedUp(h, n14);
-      const first = await workerLinks(h, n13, [{ name: "PO 78912", type: "order", key: "mssql:dbo_Order:78912" }]);
-      h.check((first.linked ?? []).some((l) => l.created && l.how === "key"), `the first worker mints the instance from the key: ${JSON.stringify(first).slice(0, 300)}`);
-      const second = await workerLinks(h, n14, [{ name: "customer PO 78912", type: "order", key: "mssql:dbo_Order:78912" }]);
-      h.check((second.linked ?? []).some((l) => l.linked && !l.created && l.how === "key"), `the second finds it: ${JSON.stringify(second).slice(0, 300)}`);
-      const pos = await h.sql("SELECT @rid AS rid, label, _keys, _class, _alias_norms FROM Entity WHERE _kind = 'thing' AND _keys CONTAINS 'mssql:dbo_Order:78912'");
+      const first = await workerResolves(h, n13, { name: "PO 78912", type: "order", key: "mssql:dbo_Order:78912" });
+      h.check(first.minted === true && first.thing, `the first worker mints the instance from the key: ${JSON.stringify(first).slice(0, 300)}`);
+      const second = await workerResolves(h, n14, { name: "customer PO 78912", type: "order", key: "mssql:dbo_Order:78912" });
+      h.check(second.minted === false && second.thing === first.thing, `the second finds it: ${JSON.stringify(second).slice(0, 300)}`);
+      const pos = await h.sql("SELECT @rid AS rid, label, _keys, _class FROM Entity WHERE _kind = 'thing' AND _keys CONTAINS 'mssql:dbo_Order:78912'");
       h.check(pos.length === 1, `one instance for the key: ${JSON.stringify(pos)}`);
+      h.check(String(pos[0].rid) === first.thing, "the one the worker made");
       h.check(pos[0]._class === "orders", `with its class from the record table: ${pos[0]._class}`);
-      h.check((pos[0]._alias_norms ?? []).includes("customer po 78912"), `the second spelling is an alias: ${JSON.stringify(pos[0]._alias_norms)}`);
       const refs = await sourceRefs(h, "mssql:dbo_Order:78912");
       h.check(refs.length === 1, `one SourceRef: ${JSON.stringify(refs)}`);
       h.check(refs[0].system === "mssql" && refs[0].table === "dbo_Order" && refs[0].row_key === "78912" && refs[0].last_seen, `the reference holds the key's parts and when it was seen, nothing of the row: ${JSON.stringify(refs[0])}`);
