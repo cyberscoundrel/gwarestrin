@@ -72,7 +72,8 @@ async function storeAsContract(ctx, c, prefix, wanted) {
   await exec(`CREATE VERTEX Entity SET name = '${q(d.title)}', _kind = 'document', _home = '${x.document_home}', _origin = '${x.document_home}', _written_by = '${q(d.recorded_by)}', _doc_id = '${docId}', _doc_status = 'ready', text_identity = '${q(`${d.title}: ${d.description}`)}', _on_record = true, _recorded_by = '${q(d.recorded_by)}', _recorded_at = '${d.recorded_at}', _record_position = '${d.position}', _record_reason = '${q(d.reason)}'`);
   for (const [i, s] of d.sections.entries()) {
     const es = x.sections[i];
-    await exec(`CREATE VERTEX Entity SET name = '${q(sectionName(d.title, i, s.heading))}', _kind = 'section', _home = '${es.home}', _origin = '${x.document_home}', _written_by = '${q(d.recorded_by)}', _doc_id = '${docId}', _doc_title = '${q(d.title)}', _section = ${i}, text_identity = '${q(s.text)}'`);
+    const shown = es.home === x.document_home ? d.title : `Document ${docId.slice(0, 8)}`; // a section below its document's title shows none of it
+    await exec(`CREATE VERTEX Entity SET name = '${q(sectionName(shown, i, shown === d.title ? s.heading : s.heading.replace(`${d.title}: `, "")))}', _kind = 'section', _home = '${es.home}', _origin = '${x.document_home}', _written_by = '${q(d.recorded_by)}', _doc_id = '${docId}', _doc_title = '${q(shown)}', _section = ${i}, text_identity = '${q(s.text)}'`);
     await exec(`CREATE EDGE PART_OF FROM (SELECT FROM Entity WHERE _kind = 'section' AND _doc_id = '${docId}' AND _section = ${i}) TO (SELECT FROM Entity WHERE _kind = 'document' AND _doc_id = '${docId}')`);
     for (const cl of s.claims) {
       const pl = x.placements.find((p) => p.id === cl.id);
@@ -132,10 +133,13 @@ async function landBatch(ctx, batch, { authorityMap, expectProposed, gradedAll =
   for (const c of accepted)
     for (const [i, s] of c.expected.document.sections.entries()) {
       const name = sectionName(c.expected.document.title, i, s.heading).trim(); // the grader's prompt trims a truncated name
+      // the grader sees a section under the name it has while it is placed: no title yet (src/document-home.js)
+      const docId = rows.documents.find((d) => d.name === c.expected.document.title)?._doc_id;
+      const asked = graded.has(name) || graded.has(sectionName(`Document ${String(docId).slice(0, 8)}`, i, s.heading).trim());
       const claims = (s.claims ?? []).map((cl) => wanted.get(cl.id));
-      const stored = rows.sections.find((x) => x.name?.trim() === name);
-      if ((gradedAll || !claims.length) && !graded.has(name)) failures.push(`${c.note}: "${name}" should have gone to the grader and never did`);
-      if (claims.length && stored && claimsSettle({ claims, facets: { identity: stored.text } }, authorityMap) && graded.has(name)) failures.push(`${c.note}: "${name}" is settled by its claims and the grader was asked about it`);
+      const stored = rows.sections.find((x) => x._doc_id === docId && Number(x._section) === i);
+      if ((gradedAll || !claims.length) && !asked) failures.push(`${c.note}: "${name}" should have gone to the grader and never did`);
+      if (claims.length && stored && claimsSettle({ claims, facets: { identity: stored.text } }, authorityMap) && asked) failures.push(`${c.note}: "${name}" is settled by its claims and the grader was asked about it`);
     }
 
   // a claim with no thing yet (admission: the first mention of a keyless name) waits on a worker; printed so a run says how many
@@ -236,10 +240,9 @@ export default [
       // a person rescues the owners' section down to Operations: a rescue and a misplacement
       const al04 = batch.conversations.find((c) => c.note === "ux-al04");
       const ownersSection = sectionName(al04.expected.document.title, 1, al04.expected.document.sections[1].heading);
-      const opsSection = sectionName(al04.expected.document.title, 0, al04.expected.document.sections[0].heading);
       await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Entity SET _home = 'ops', _placed_by = 'admin' WHERE name = '${q(ownersSection)}' AND _kind = 'section'` });
       // the lower section names the owners' section's heading: a hidden title
-      await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Entity SET text_identity = text_identity.append(' (see ${q(al04.expected.document.sections[1].heading)})') WHERE name = '${q(opsSection)}' AND _kind = 'section'` });
+      await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Entity SET text_identity = text_identity.append(' (see ${q(al04.expected.document.sections[1].heading)})') WHERE _kind = 'section' AND _section = 0 AND _doc_id LIKE '%${al04.id}'` });
       // the residue's section is gone: lost text
       const aa11 = batch.conversations.find((c) => c.note === "ux-aa11");
       await ctx.tool("admin", "execute_graph", { language: "sql", command: `DELETE FROM Entity WHERE _kind = 'section' AND _doc_title = '${q(aa11.expected.document.title)}'` });
@@ -250,11 +253,12 @@ export default [
       ctx.check(f.misplaced.length === 1 && /§2: seen from ops, expected org/.test(f.misplaced[0]), `one misplaced section (the claim edge keeps its home): ${JSON.stringify(f.misplaced)}`);
       ctx.check(f.lost.length === 2 && f.lost.some((x) => /conv-ux-aa11 §1: no section stored/.test(x)) && f.lost.some((x) => /conv-ux-al04 §1: stored text differs/.test(x)), `a lost section and the tail appended to another: ${JSON.stringify(f.lost)}`);
       // the owners' section now sits at ops, so its heading is no longer above the ops section; the hidden title shows once it is back up
-      ctx.check(f.hidden.length === 0, `no hidden title while both sections are at ops: ${JSON.stringify(f.hidden)}`);
+      // but that heading repeats the document's title, and the title stays above the ops section with its entry
+      ctx.check(f.hidden.length === 1 && /names "[^"]*" \(seen from org\)/.test(f.hidden[0]) && !/the owners part/.test(f.hidden[0]), `only the document's title is hidden while both sections are at ops: ${JSON.stringify(f.hidden)}`);
       await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Entity SET _home = 'org' WHERE name = '${q(ownersSection)}' AND _kind = 'section'` });
       const hidden = bar(batch, await collectRows(batch, ctx.sql));
-      ctx.check(hidden.findings.hidden.length === 1 && /names ".*the owners part" \(seen from org\)/.test(hidden.findings.hidden[0]), `one hidden title: ${JSON.stringify(hidden.findings.hidden)}`);
-      ctx.check(/^NOT CLEAN oracle-sixty: 3\/3 documents, 5\/5 claims; rescues 1, misplaced 0, lost 2, hidden titles 1, wrong content 0$/.test(verdictLine(batch, hidden)), `the verdict line: ${verdictLine(batch, hidden)}`);
+      ctx.check(hidden.findings.hidden.length === 2 && hidden.findings.hidden.some((x) => /names ".*the owners part" \(seen from org\)/.test(x)), `one hidden title: ${JSON.stringify(hidden.findings.hidden)}`);
+      ctx.check(/^NOT CLEAN oracle-sixty: 3\/3 documents, 5\/5 claims; rescues 1, misplaced 0, lost 2, hidden titles 2, wrong content 0$/.test(verdictLine(batch, hidden)), `the verdict line: ${verdictLine(batch, hidden)}`);
       // one row corrupted on every field the bar reads, in the graph, read back through the same query: each is named
       const m01 = batch.conversations.find((c) => c.note === "ux-m01");
       const target = m01.expected.placements[0].id;

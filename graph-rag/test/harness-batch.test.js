@@ -144,7 +144,8 @@ function cleanRows(b) {
     documents.push({ rid: `#1:${rid++}`, name: d.title, _home: c.expected.document_home, _origin: c.position, _placed_by: null, _doc_id: c.id, _doc_status: "ready", _on_record: true, _recorded_by: d.recorded_by, _recorded_at: d.recorded_at, _record_position: d.position });
     d.sections.forEach((s, i) => {
       const srid = `#2:${rid++}`;
-      sections.push({ rid: srid, name: sectionName(d.title, i, s.heading), _doc_title: d.title, _doc_id: c.id, _section: i, _home: c.expected.sections[i].home, _origin: c.position, _placed_by: null, text: s.text });
+      const shown = c.expected.sections[i].home === c.expected.document_home ? d.title : `Document ${c.id.slice(0, 8)}`; // a section below its document's title shows none of it
+      sections.push({ rid: srid, name: sectionName(shown, i, shown === d.title ? s.heading : s.heading.replace(`${d.title}: `, "")), _doc_title: shown, _doc_id: c.id, _section: i, _home: c.expected.sections[i].home, _origin: c.position, _placed_by: null, text: s.text });
       for (const cl of s.claims) {
         const w = wanted.get(cl.id);
         const home = c.expected.placements.find((p) => p.id === cl.id).home;
@@ -186,20 +187,21 @@ test("the bar: a batch stored as expected is clean; each of the four failures is
   const r3 = structuredClone(rows);
   r3.sections.splice(1, 1);
   r3.sections[0].text = "name: x\n_home: ops\n(a field dump)";
-  r3.documents.pop();
+  r3.documents.splice(r3.documents.findIndex((d) => d.name.includes("ak06")), 1); // a document whose section shows its title: it is still found
   const f3 = bar(small, r3).findings;
   assert.equal(f3.lost.length, 3, JSON.stringify(f3.lost));
   // a hidden title: the Operations section of al04 names the owners' section's heading
   const r4 = structuredClone(rows);
   const al04 = small.conversations.find((c) => c.note === "ux-al04");
-  const lower = r4.sections.find((s) => s._doc_title === al04.expected.document.title && s._section === 0);
+  const lower = r4.sections.find((s) => s._doc_id === al04.id && s._section === 0);
   lower.text += ` (see ${al04.expected.document.sections[1].heading})`;
   const f4 = bar(small, r4).findings;
-  assert.equal(f4.hidden.length, 1, JSON.stringify(f4.hidden));
-  assert.match(f4.hidden[0], /seen from ops\) names ".*the owners part" \(seen from org\)/);
+  // that heading repeats the document's title, and the title is seen from org with the owners' section: two names out of place
+  assert.equal(f4.hidden.length, 2, JSON.stringify(f4.hidden));
+  assert.ok(f4.hidden.some((x) => /seen from ops\) names ".*the owners part" \(seen from org\)/.test(x)), JSON.stringify(f4.hidden));
   // naming something at or below its own home is not hidden
   const r5 = structuredClone(rows);
-  const upper = r5.sections.find((s) => s._doc_title === al04.expected.document.title && s._section === 1);
+  const upper = r5.sections.find((s) => s._doc_id === al04.id && s._section === 1);
   upper.text += ` (see ${al04.expected.document.sections[0].heading})`;
   assert.equal(bar(small, r5).findings.hidden.length, 0);
   // no CLAIMS type in the graph at all: every claim missing

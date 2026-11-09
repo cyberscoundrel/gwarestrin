@@ -152,6 +152,14 @@ export class WsConnection {
         return;
       }
     }
+    // a new off-record thread doesn't get a turn while graph-rag still holds the last thread's "on"
+    if (type === "prompt" || type === "steer" || type === "follow_up") {
+      const refused = await this.manager.recordGateRefusal(agentId);
+      if (refused) {
+        this.sendError(agentId, refused);
+        return;
+      }
+    }
     // strip envelope fields; pass the rest through as the RPC payload
     const { v: _v, kind: _k, agentId: _a, type: _t, id: _id, ...payload } = msg;
     try {

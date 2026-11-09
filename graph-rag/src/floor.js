@@ -12,6 +12,7 @@ import { modelPost } from "./models.js";
 import { positionMap, SCOPED } from "./scope.js";
 import { decideWrite, queueWrite } from "./write.js";
 import { thingSeenFrom } from "./linker.js";
+import { settleDocument } from "./document-home.js";
 import { policy } from "./org-policy.js";
 
 /** ---- derived data: what an identity read bounds where its writes land ---- */
@@ -370,6 +371,9 @@ export async function regradeTick() {
       // raised by a tightened rule while it waited, and the grader adds nothing: the rule is still why it is here
       const note = r.w.raised && p.home === r.w.held ? r.w.raised : p.note;
       await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null${validSql}`, "sql", { home: p.home, note, until });
+      // a document's title goes with its most restricted section: its graded home or a section's has changed
+      if (r._kind === "document") await adbCommand(`UPDATE ${rid} SET _doc_base = :home`, "sql", { home: p.home });
+      if (r._doc_id) await settleDocument(r._doc_id).catch((e) => log.warn(`document ${r._doc_id} not settled after grading: ${String(e).slice(0, 160)}`));
       if (p.home !== r.w.held) {
         const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
         for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), p.home).catch(() => {});

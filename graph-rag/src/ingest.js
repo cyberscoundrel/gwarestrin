@@ -16,7 +16,7 @@ import { DOC_STORE, EXTRACT_MODEL, GRADER_MODEL, log } from "./context.js";
 import { adbCommand, adbQuery, ensureIndex, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.js";
 import { chat, embedBatch } from "./models.js";
 import { homeFilter, personOf, positionMap, resolveWriteHome, writerOf } from "./scope.js";
-import { claimsFollowEntry, derivedFloor, recordReads } from "./floor.js";
+import { claimsFollowEntry, derivedFloor, placeEntities, recordReads } from "./floor.js";
 import { queueWrite, upsertEntities } from "./write.js";
 // the Authority stream's exports, once merged (docs/ORGANIZATION-MODEL.md; MAP.md): decideWrite in write.js
 // decides a record's write by its claims' authority, placeByClaims in placement.js homes an entity by the
@@ -25,6 +25,7 @@ import * as writeRules from "./write.js";
 import * as placementRules from "./placement.js";
 import { policy } from "./org-policy.js";
 import { recordSubject } from "./linker.js";
+import { settleDocument, untitled } from "./document-home.js";
 import { normalize } from "./things.js";
 
 /** ---- documents (see documents.js and docstore.js) ---- */
@@ -34,7 +35,7 @@ let ingestQueue = Promise.resolve(); // one document at a time (grading and embe
 const chunkCache = new Map(); // doc id -> chunks (deterministic from the stored text)
 
 export async function ensureDocumentSchema() {
-  for (const prop of ["_doc_id", "_doc_title", "_doc_status"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["_doc_id", "_doc_title", "_doc_status", "_doc_base", "_heading_own"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._section IF NOT EXISTS INTEGER`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_doc_id) NOTUNIQUE`).catch(() => {});
   for (const t of ["PART_OF", "NEXT", "SOURCED_FROM"]) await adbCommand(`CREATE EDGE TYPE ${t} IF NOT EXISTS`).catch(() => {});
@@ -75,9 +76,10 @@ async function recordTitle(base, docId, origin, spans) {
 }
 
 /**
- * Ingest a stored document: its entry, its sections (graded, never below
- * the entry), their links, and, only when the ingest said so, extracted
- * facts. Re-ingesting a manual's title replaces the manual's sections; a
+ * Ingest a stored document: its sections (graded, never below the entry's
+ * grade, named for no one until they are placed), then its entry (no lower
+ * than its most restricted section: settleDocument), their links, and, only
+ * when the ingest said so, extracted facts. Re-ingesting a manual's title replaces the manual's sections; a
  * record is never replaced, and running one again (a retry, a failed ingest)
  * finishes what is missing and adds nothing (recordClaims).
  */
@@ -96,17 +98,65 @@ async function ingestDocument(p) {
     before = (await keyOf(title, "document"))[0];
   }
   p = { ...p, title };
+  const docEntry = {
+    name: p.title,
+    facets: { identity: `${p.title}: ${p.description}` },
+    properties: { description: p.description, sections: chunks.length, characters: text.length, extracted: Boolean(p.extract), ...(p.record ? { on_record: true } : {}) },
+    ...(vu ? { valid_until: vu } : {}),
+  };
+  // the entry's title is graded now and written once its sections are placed: until then no reader below a section that turns out restricted can find it
+  const [docPlaced] = await placeEntities([docEntry], p.home, p.floor ?? p.home, writtenAt);
+  // sections can be filed higher than the document (grading restricts), never lower
+  const docHome = effectiveHome(positionMap, docPlaced.home);
+  // a section keeps the name it has (a re-run, or a manual replaced in place by its title); a new one has no title until settled
+  const held = await adbQuery(`SELECT name, _section, _doc_id FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id IN :ids`, { ids: [p.doc_id, before?._doc_id].filter(Boolean) });
+  const heldName = (c) => {
+    const rows = held.filter((r) => Number(r._section) === c.index);
+    const same = rows.find((r) => r._doc_id === p.doc_id);
+    if (same) return same.name;
+    return rows.find((r) => [sectionName(p.title, c.index, c.heading), sectionName(untitled(r._doc_id), c.index, c.heading)].includes(r.name))?.name;
+  };
+  const nameOf = (c) => heldName(c) ?? sectionName(untitled(p.doc_id), c.index, c.heading);
+  // a condensed document's sections with claims are not the grader's to judge (the grader runs only on
+  // text that maps to no class): they are written where their claims put them; the rest go the usual way
+  const claimsOfSection = new Map(p.record ? p.record.sections.filter((sec) => (sec.claims ?? []).length > 0).map((sec) => [sec.index, sec.claims]) : []);
+  // with the Authority stream's placement, an entity carrying `claims` is homed by them inside upsertEntities
+  // (never graded, _claim_classes and _authority stored); until then this module writes them itself
+  const byClaims = typeof placementRules.placeByClaims === "function";
+  if (!byClaims) for (const c of chunks) if (claimsOfSection.has(c.index)) await writeClaimedSection(p, c, docHome, vu, nameOf(c));
+  const graded = byClaims ? chunks : chunks.filter((c) => !claimsOfSection.has(c.index));
+  for (let i = 0; i < graded.length; i += 32) {
+    await upsertEntities({
+      entities: graded.slice(i, i + 32).map((c) => ({
+        name: nameOf(c),
+        facets: { identity: preview(c.text) },
+        _embed: { identity: c.embedText },
+        ...(c.heading ? { properties: { heading: c.heading } } : {}),
+        ...(vu ? { valid_until: vu } : {}),
+        // its whole text goes with its claims: the facet is a preview, and what they don't account for is the grader's
+        ...(byClaims && claimsOfSection.has(c.index) ? { claims: claimsOfSection.get(c.index), _text: c.text } : {}),
+        _system: { _kind: "section", _doc_id: p.doc_id, _doc_title: untitled(p.doc_id), _section: c.index },
+      })),
+      home: p.home,
+      written_by: p.written_by,
+      // the entry's grade floors its sections; a home held through a grader outage isn't a grade, or a section could never come down from it
+      floor: docPlaced.ungraded ? (p.floor ?? p.home) : docHome,
+      // a regrade takes what its writer read, and the document as it then stands
+      regrade_floor: p.floor,
+      written_at: p.written_at,
+    });
+  }
+  // now the title has a home: the entry goes there (no lower than its most restricted section), and each section shows what it may
+  const titleHome = await settleDocument(p.doc_id, { title: p.title, base: docHome });
   await upsertEntities({
     entities: [
       {
-        name: p.title,
-        facets: { identity: `${p.title}: ${p.description}` },
-        properties: { description: p.description, sections: chunks.length, characters: text.length, extracted: Boolean(p.extract), ...(p.record ? { on_record: true } : {}) },
-        ...(vu ? { valid_until: vu } : {}),
+        ...docEntry,
         _system: {
           _kind: "document",
           _doc_id: p.doc_id,
           _doc_status: "ingesting",
+          _doc_base: docHome,
           // the on-record marker (model/schema.js): who put it on record, under which position, why
           ...(p.record ? { _recorded_by: p.record.recorded_by, _recorded_at: p.record.recorded_at, _record_position: p.record.position, _record_reason: p.record.reason } : {}),
         },
@@ -116,42 +166,13 @@ async function ingestDocument(p) {
     written_by: p.written_by,
     floor: p.floor,
     written_at: p.written_at,
+    decided: [titleHome === docHome ? docPlaced : { ...docPlaced, home: titleHome, note: `${docPlaced.note}; raised to ${homeName(positionMap, titleHome)} with its most restricted section` }],
   });
   const doc = (await keyOf(p.title, "document"))[0];
   if (!doc) throw new Error("the document entry wasn't written");
   // a boolean can't ride in _system (strings and numbers only): set the marker itself here
   if (p.record) await adbCommand(`UPDATE ${String(doc.rid)} SET _on_record = true`);
-  // sections can be filed higher than the document (grading restricts), never lower
-  const docHome = effectiveHome(positionMap, doc._home);
-  // a condensed document's sections with claims are not the grader's to judge (the grader runs only on
-  // text that maps to no class): they are written where their claims put them; the rest go the usual way
-  const claimsOfSection = new Map(p.record ? p.record.sections.filter((sec) => (sec.claims ?? []).length > 0).map((sec) => [sec.index, sec.claims]) : []);
-  // with the Authority stream's placement, an entity carrying `claims` is homed by them inside upsertEntities
-  // (never graded, _claim_classes and _authority stored); until then this module writes them itself
-  const byClaims = typeof placementRules.placeByClaims === "function";
-  if (!byClaims) for (const c of chunks) if (claimsOfSection.has(c.index)) await writeClaimedSection(p, c, docHome, vu);
-  const graded = byClaims ? chunks : chunks.filter((c) => !claimsOfSection.has(c.index));
-  for (let i = 0; i < graded.length; i += 32) {
-    await upsertEntities({
-      entities: graded.slice(i, i + 32).map((c) => ({
-        name: sectionName(p.title, c.index, c.heading),
-        facets: { identity: preview(c.text) },
-        _embed: { identity: c.embedText },
-        ...(c.heading ? { properties: { heading: c.heading } } : {}),
-        ...(vu ? { valid_until: vu } : {}),
-        // its whole text goes with its claims: the facet is a preview, and what they don't account for is the grader's
-        ...(byClaims && claimsOfSection.has(c.index) ? { claims: claimsOfSection.get(c.index), _text: c.text } : {}),
-        _system: { _kind: "section", _doc_id: p.doc_id, _doc_title: p.title, _section: c.index },
-      })),
-      home: p.home,
-      written_by: p.written_by,
-      floor: docHome,
-      // docHome may be where the document waits out an outage: a regrade takes what its writer read, and the document as it then stands
-      regrade_floor: p.floor,
-      written_at: p.written_at,
-    });
-  }
-  const sections = await adbQuery(`SELECT @rid AS rid, _home, _section FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d ORDER BY _section`, { d: p.doc_id });
+  const sections = await adbQuery(`SELECT @rid AS rid, _home, _section, _doc_title FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d ORDER BY _section`, { d: p.doc_id });
   for (const [i, s] of sections.entries()) {
     await edgeOnce("PART_OF", String(s.rid), String(doc.rid));
     if (sections[i + 1]) await edgeOnce("NEXT", String(s.rid), String(sections[i + 1].rid));
@@ -166,6 +187,8 @@ async function ingestDocument(p) {
   if (p.extract) facts = await extractFacts(p, chunks, sections, writtenAt);
   // a condensed document's claims, extracted once by the condenser: a CLAIMS edge from each section
   const claims = p.record ? await recordClaims(p, sections) : 0;
+  // a claim's authority can have raised its section
+  if (p.record) await settleDocument(p.doc_id);
   await adbCommand(`UPDATE ${String(doc.rid)} SET _doc_status = 'ready', facts = :facts${p.record ? ", claims = :claims" : ""}`, "sql", { facts, claims });
   log.info(
     `document "${p.title}" (${p.doc_id}): ${sections.length} sections${p.record ? `, on record by ${p.record.recorded_by}, ${claims} claims` : p.extract ? `, ${facts} extracted facts` : ", no extraction (as asked)"}`,
@@ -179,8 +202,7 @@ async function ingestDocument(p) {
  * authority position by recordClaims once the policy names one. Re-ingesting the same title updates it
  * in place, like any section ((name, origin) is the key).
  */
-async function writeClaimedSection(p, c, home, vu) {
-  const name = sectionName(p.title, c.index, c.heading);
+async function writeClaimedSection(p, c, home, vu, name) {
   await ensureIndex("identity");
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.heading IF NOT EXISTS STRING`).catch(() => {});
   const [vec] = await embedBatch([c.embedText.slice(0, 6000)]);
@@ -193,7 +215,7 @@ async function writeClaimedSection(p, c, home, vu) {
     s_home: home,
     s_grade: "a section with claims: homed by them, no lower than the document (not graded)",
     s_doc: p.doc_id,
-    s_title: p.title,
+    s_title: untitled(p.doc_id),
     s_index: c.index,
     s_writer: p.written_by,
     s_heading: c.heading,
@@ -297,11 +319,14 @@ async function extractFacts(p, chunks, sections, writtenAt) {
     return 0;
   }
   const homeOf = new Map(sections.map((s) => [Number(s._section), { rid: String(s.rid), home: effectiveHome(positionMap, s._home) }]));
+  // a fact is filed at its section: it may repeat only the title that section shows
+  const titleOf = new Map(sections.map((s) => [Number(s._section), s._doc_title ?? p.title]));
   const all = [];
   for (let i = 0; i < chunks.length; i += 4) {
     const group = chunks.slice(i, i + 4);
     try {
-      all.push(...parseExtraction(await chat(model, extractionPrompt(p.title, group, writtenAt)), group, writtenAt));
+      const shown = group.every((c) => titleOf.get(c.index) === p.title) ? p.title : untitled(p.doc_id);
+      all.push(...parseExtraction(await chat(model, extractionPrompt(shown, group, writtenAt)), group, writtenAt));
     } catch (e) {
       log.warn(`document "${p.title}": extraction of sections ${i + 1}-${i + group.length} failed: ${String(e).slice(0, 120)}`);
     }
@@ -322,7 +347,7 @@ async function extractFacts(p, chunks, sections, writtenAt) {
         entities: batch.map((f) => ({
           name: f.name,
           facets: { identity: f.statement },
-          properties: { source: `${p.title} §${f.section + 1}` },
+          properties: { source: `${titleOf.get(f.section) ?? untitled(p.doc_id)} §${f.section + 1}` },
           ...(f.until ? { valid_until: f.until } : {}),
         })),
         home: p.home,
@@ -527,20 +552,24 @@ export async function readDocument({ document, section, count = 3 }, identity, s
     status = d?._doc_status ?? null;
   }
   if (!docId) throw new Error(`no document "${ref}" you can see`);
-  const rows = await adbQuery(`SELECT _home, _section, _doc_title FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d${visible} ORDER BY _section`, { d: docId });
+  const rows = await adbQuery(`SELECT _home, _section, _doc_title, heading, _written_by FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d${visible} ORDER BY _section`, { d: docId });
   if (rows.length === 0) throw new Error(status === "ingesting" ? "this document is still being ingested" : `no document "${ref}" you can see`);
-  title = rows[0]._doc_title;
+  // the document's title when its entry is visible to the reader, else what the section shows
+  const entry = (await adbQuery(`SELECT name FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d${visible} LIMIT 1`, { d: docId }))[0];
+  title = entry?.name ?? rows[0]._doc_title;
   const chunks = await storedChunks(docId);
   const seen = new Set(rows.map((r) => Number(r._section)));
+  // the heading as the section shows it (document-home.js): the stored text's may repeat a title this reader can't see
+  const shownHeading = new Map(rows.map((r) => [Number(r._section), r.heading]));
   const n = Math.max(1, Math.min(6, Number(count) || 3));
   const from = section ? Math.max(0, Number(section) - 1) : 0;
   const picked = chunks.filter((c) => c.index >= from && seen.has(c.index)).slice(0, n);
-  recordReads(identity, rows.filter((r) => picked.some((c) => c.index === Number(r._section))).map((r) => effectiveHome(positionMap, r._home)));
+  recordReads(identity, rows.filter((r) => r._written_by !== scope.person && picked.some((c) => c.index === Number(r._section))).map((r) => effectiveHome(positionMap, r._home)));
   return {
     document: title,
     document_id: docId,
     // only the sections you can see are listed and returned
-    contents: chunks.filter((c) => seen.has(c.index)).map((c) => ({ section: c.index + 1, heading: c.heading || undefined })),
-    sections: picked.map((c) => ({ section: c.index + 1, heading: c.heading || undefined, text: c.text })),
+    contents: chunks.filter((c) => seen.has(c.index)).map((c) => ({ section: c.index + 1, heading: shownHeading.get(c.index) || undefined })),
+    sections: picked.map((c) => ({ section: c.index + 1, heading: shownHeading.get(c.index) || undefined, text: c.text })),
   };
 }

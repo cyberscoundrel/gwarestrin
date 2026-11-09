@@ -143,7 +143,8 @@ export function conversationOf(note, recordedAt, tree = parsePositionMap(TREE)) 
       document,
       sections: sections.map((s) => ({ index: s.index, heading: s.heading, authority: s.authority, home: sectionHome(s) })),
       placements,
-      document_home: origin,
+      // a document's title is seen no lower than its most restricted section (src/document-home.js)
+      document_home: commonAncestor(tree, [origin, ...sections.map(sectionHome)]),
     },
   };
 }
@@ -528,7 +529,8 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince =
       const home = cl._home ?? null;
       if (home !== pl.home) findings.misplaced.push(`${c.id} claim ${pl.id}: seen from ${home}, expected ${pl.home}`);
       if (!sec) findings.content.push(`${c.id} claim ${pl.id}: not from a section of this batch`);
-      else if (sec._doc_title !== x.document.title) findings.content.push(`${c.id} claim ${pl.id}: from a section of "${sec._doc_title}", expected "${x.document.title}"`);
+      // a section below its document's title shows none of it (src/document-home.js): its document is its _doc_id
+      else if (sec._doc_title !== x.document.title && !(doc && sec._doc_id === doc._doc_id)) findings.content.push(`${c.id} claim ${pl.id}: from a section of "${sec._doc_title}", expected "${x.document.title}"`);
       else if (Number(sec._section) !== pl.section) findings.misplaced.push(`${c.id} claim ${pl.id}: from §${Number(sec._section) + 1}, expected §${pl.section + 1}`);
       const want = wanted.get(pl.id);
       if (!want) {
@@ -619,7 +621,8 @@ export async function collectRows(batch, query) {
   const titles = batch.conversations.map((c) => c.expected.document.title);
   const claimIds = batch.conversations.flatMap((c) => c.expected.placements.map((p) => p.id));
   const documents = (await query(`SELECT @rid AS rid, name, _home, _origin, _placed_by, _doc_id, _doc_status, _on_record, _recorded_by, _recorded_at, _record_position FROM Entity WHERE _kind = 'document' AND name IN ${inList(titles)}`)) ?? [];
-  const sections = (await query(`SELECT @rid AS rid, name, _doc_title, _doc_id, _section, _home, _origin, _placed_by, text_identity AS text FROM Entity WHERE _kind = 'section' AND _doc_title IN ${inList(titles)}`)) ?? [];
+  const docIds = documents.map((d) => d._doc_id).filter(Boolean);
+  const sections = (await query(`SELECT @rid AS rid, name, _doc_title, _doc_id, _section, _home, _origin, _placed_by, text_identity AS text FROM Entity WHERE _kind = 'section' AND (_doc_title IN ${inList(titles)}${docIds.length ? ` OR _doc_id IN ${inList(docIds)}` : ""})`)) ?? [];
   const byId = new Map();
   const add = (list) => (list ?? []).forEach((c) => byId.set(String(c.id), c));
   if (claimIds.length) {

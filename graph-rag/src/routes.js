@@ -26,6 +26,13 @@ import { registerQueryRoutes } from "./tools-queries.js";
 /** ---- http ---- */
 export const app = express();
 app.use(express.json({ limit: "2mb" }));
+// an off-record chat agent's token changes nothing over HTTP, whichever route is added here (/mcp is decided per tool)
+app.use((req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD" || req.path === "/mcp") return next();
+  const identity = resolveIdentity(req.headers.authorization);
+  if (identity && isOffRecord(identity)) return res.status(403).json({ error: OFF_RECORD_REFUSAL });
+  next();
+});
 
 // ---- the Discovery stream's route group: drafted commitment classes, confirmed or retired by a person at the root ----
 registerDiscoveryRoutes(app);
@@ -370,11 +377,6 @@ function httpScope(req, res) {
   }
   if (!SCOPED || !positionMap) {
     res.status(409).json({ error: "the knowledge graph isn't divided into positions" });
-    return null;
-  }
-  // the routes below reach the same writes as the tools: an off-record chat agent's token doesn't get them either
-  if (req.method !== "GET" && isOffRecord(identity)) {
-    res.status(403).json({ error: OFF_RECORD_REFUSAL });
     return null;
   }
   return { identity, scope: scopeOf(identity) };

@@ -45,6 +45,35 @@ describe("record gate", () => {
     return { manager, store, id: record.id };
   }
 
+  it("a thread change: a turn waits for graph-rag, and an off-record thread gets none until it has been told", async () => {
+    let release: (r: Response) => void = () => {};
+    let mode: "hold" | "fail" | "ok" = "hold";
+    const { manager, store, id } = await managerForSwitch(async (url) => {
+      if (!url.endsWith("/api/thread-record")) return new Response("{}", { status: 404 });
+      if (mode === "fail") return new Response("down", { status: 503 });
+      if (mode === "ok") return new Response("{}", { status: 200 });
+      return new Promise<Response>((r) => { release = r; });
+    });
+    const internals = manager as unknown as { threadChanged: (id: string) => Promise<void> };
+    const settled = vi.fn();
+    try {
+      store.setSessionFile(id, "/sessions/thread-2.jsonl");
+      void internals.threadChanged(id);
+      const turn = manager.recordGateRefusal(id).then((r) => (settled(), r));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(settled).not.toHaveBeenCalled();
+      release(new Response("{}", { status: 200 }));
+      await expect(turn).resolves.toBeNull();
+
+      mode = "fail";
+      store.setSessionFile(id, "/sessions/thread-3.jsonl");
+      void internals.threadChanged(id);
+      await expect(manager.recordGateRefusal(id)).resolves.toMatch(/off record/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("the switch reaches graph-rag before it is stored; a failed push changes nothing", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
     let fail = false;

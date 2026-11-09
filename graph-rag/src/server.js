@@ -29,7 +29,7 @@ import { docStore, ensureDocumentSchema, readDocument, requestIngest, sweepOrpha
 import { ensureWorkerSchema, expireLeases, PROPOSED_NOTE, wakeIdleWaiting, worker, workerModel, workerTick } from "./worker-pool.js";
 import { registerWorkerTools, workerUpsert } from "./worker-tools.js";
 import { registerRecordTools } from "./record-tools.js";
-import { isOffRecord, loadThreadRecords, OFF_RECORD_REFUSAL, registerThreadRecordRoute } from "./record-state.js";
+import { gateOffRecordTools, isOffRecord, loadThreadRecords, OFF_RECORD_REFUSAL, registerThreadRecordRoute } from "./record-state.js";
 import { registerDiscoveryTools } from "./routes-discovery.js";
 import { statements as modelStatements } from "./model/schema.js";
 import { ensureDiscoverySchema } from "./routes-discovery.js";
@@ -59,9 +59,9 @@ export function createServer(identity) {
     audience ??= entryAudience(identity.role);
     return (await audience) ?? scope;
   };
-  // a person's chat agent in a thread not on record: no write tool at all (record-state.js). Not listed, and the
-  // handlers refuse again below: off record is enforced here, not in the agent's instructions.
-  const writable = caps.write !== "deny" && !isOffRecord(identity);
+  // listed whether or not the thread is on record: the agent's client keeps the list it fetched when it connected.
+  // An off-record chat agent is refused at the call (gateOffRecordTools, record-state.js), and again by need("write").
+  const writable = caps.write !== "deny";
   const need = (cap) => {
     requireCap(caps, cap);
     if (cap === "write" && isOffRecord(identity)) throw new Error(OFF_RECORD_REFUSAL);
@@ -71,7 +71,7 @@ export function createServer(identity) {
   const homeNote = SCOPED
     ? `\nEach entity has a home position; you only see entities homed at your positions or below them.`
     : "";
-  const server = new McpServer({ name: "graph-rag", version: "0.3.0" });
+  const server = gateOffRecordTools(new McpServer({ name: "graph-rag", version: "0.3.0" }), identity);
   // each identity is only shown the tools its capabilities allow (the
   // handlers check again: listing is not the boundary)
 
@@ -346,7 +346,7 @@ When the person asks you to let a position or a person know about something ("le
 this email said", "share the line 2 plan with the floor", "show bob the Toro schedule"):
 1. Work out what "this" is from the conversation. If it isn't in the knowledge graph yet (e.g. text
    pasted into the chat), it gets there only through the record: on record, record it and use its title;
-   off record you have no write tools, so say so and offer the person the switch.
+   off record nothing can be written, so say so and offer the person the switch.
 2. Otherwise call find_shareable with a short description and pick the matching entries; mention
    related entries only if the person seems to want them too.
 3. Match who they named: a team or role to one of the returned positions ("to"), one named person
@@ -394,7 +394,8 @@ with their question in their own words. graph-rag checks the whole graph, includ
 person can't see, and quietly asks the people who own anything that matches; an owner may then
 share it with them. If nothing matches yet, the question is posted for the people most likely to
 know, and anything saved later that answers it is offered to them. The person confirms the request
-on a card in the chat first, since it carries their question and name to others.
+on a card in the chat first, since it carries their question and name to others. Off record it is
+refused, like every write: say so and offer the person the switch.
 
 You never learn whether anything matched, who was asked, or whether anyone said no: never say
 that the information exists or that someone has it. Say the request is waiting for their

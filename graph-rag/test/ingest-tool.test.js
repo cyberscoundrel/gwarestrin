@@ -5,7 +5,7 @@ import { test } from "node:test";
 import { z } from "zod";
 import { documentShape, RECORD_TOOL, registerRecordTools } from "../src/record-tools.js";
 import { prepareRecord, recordId } from "../src/documents.js";
-import { applyThreadRecord, isOffRecord } from "../src/record-state.js";
+import { applyThreadRecord, gateOffRecordTools, isOffRecord, OFF_RECORD_TOOLS } from "../src/record-state.js";
 
 test("the record stamp: who, where and when are the server's, whatever the document or a claim says", () => {
   const raw = { title: "T", recorded_by: "admin", position: "org", recorded_at: "2020-01-01T00:00:00Z", reason: "r", sections: [{ text: "x", claims: [{ kind: "state", subject: { name: "a", class: "jobs" }, attribute: "stage", value: "planned", recorded_by: "admin", recorded_at: "2020-01-01T00:00:00Z" }] }] };
@@ -28,7 +28,7 @@ test("a document's id: the same re-send is the same record, a different document
   assert.notEqual(recordId(doc, at), recordId(doc, { ...at, person: "alice" }), "another person's identical note is theirs");
 });
 
-test("off record: a chat agent has no write tool until its thread is on record; only chat agents are gated", () => {
+test("off record: a chat agent is refused until its thread is on record; only chat agents are gated", () => {
   const chat = { agent: "a1", key: "admin/agent:a1", caps: { write: "direct" } };
   assert.equal(isOffRecord(chat), true, "never heard of: off record");
   applyThreadRecord("admin", "a1", { on: true, thread: "t1" });
@@ -38,6 +38,26 @@ test("off record: a chat agent has no write tool until its thread is on record; 
   assert.equal(isOffRecord({ agent: "w", key: "admin/agent:w", role: { kind: "worker" } }), false, "a worker isn't a conversation");
   assert.equal(isOffRecord({ user: "bob", caps: {} }), false, "a person's own token isn't an agent's");
   assert.equal(isOffRecord({ agent: "a1", key: "other/agent:a1", caps: {} }), true, "another tenant's state is another thread");
+});
+
+test("off record, a tool no one has classified is refused at the call; a read isn't; a worker's tools aren't wrapped", async () => {
+  const calls = [];
+  const fakeServer = () => ({ handlers: {}, tool(name, ...rest) { this.handlers[name] = rest.at(-1); } });
+  const chat = { agent: "gate-1", key: "admin/agent:gate-1", caps: { write: "direct" } };
+  const s = gateOffRecordTools(fakeServer(), chat);
+  s.tool("a_new_write_tool", "d", {}, async (a) => (calls.push(a), "done"));
+  s.tool("search_graph", "d", {}, async () => "read");
+  await assert.rejects(s.handlers.a_new_write_tool({ x: 1 }), /off record/);
+  assert.equal(calls.length, 0, "the handler is never reached");
+  assert.equal(await s.handlers.search_graph({}), "read");
+  assert.ok(!OFF_RECORD_TOOLS.has("request_access"), "a question goes into the graph");
+  applyThreadRecord("admin", "gate-1", { on: true, thread: "t" });
+  assert.equal(await s.handlers.a_new_write_tool({ x: 1 }), "done", "the same registration, the thread on record: it runs");
+  applyThreadRecord("admin", "gate-1", { on: false, thread: "t" });
+  await assert.rejects(s.handlers.a_new_write_tool({ x: 2 }), /off record/, "switched off with the same server: refused");
+  const worker = gateOffRecordTools(fakeServer(), { agent: "w", key: "admin/agent:w", role: { kind: "worker" } });
+  worker.tool("a_new_write_tool", "d", {}, async () => "worker");
+  assert.equal(await worker.handlers.a_new_write_tool({}), "worker");
 });
 
 test("record_document registers with a name the harness recognizes and a document schema in the contract's shape", () => {
