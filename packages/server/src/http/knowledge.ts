@@ -131,6 +131,16 @@ export async function registerKnowledgeRoutes(app: FastifyInstance, manager: Age
     const { id } = req.params as { id: string };
     return proxy(reply, `/api/worker/proposals/${encodeURIComponent(id)}`, { method: "POST", body: req.body ?? {} });
   });
+  // discovered commitment classes: drafts for a person to confirm (graph-rag gates confirming and retiring to the root)
+  app.get("/api/discovery/classes", async (req, reply) => {
+    const status = (req.query as { status?: string }).status;
+    return proxy(reply, `/api/discovery/classes${status ? `?status=${encodeURIComponent(status)}` : ""}`);
+  });
+  app.post("/api/discovery/classes/:name/:action", async (req, reply) => {
+    const { name, action } = req.params as { name: string; action: string };
+    if (action !== "confirm" && action !== "retire") return reply.code(404).send({ error: "unknown action" });
+    return proxy(reply, `/api/discovery/classes/${encodeURIComponent(name)}/${action}`, { method: "POST", body: req.body ?? {} });
+  });
   // what pruning removed (graph-rag shows it only to the root), and pruning now
   app.get("/api/pruned", async (_req, reply) => proxy(reply, "/api/pruned"));
   app.post("/api/pruned/run", async (_req, reply) => proxy(reply, "/api/pruned/run", { method: "POST", body: {} }));

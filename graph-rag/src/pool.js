@@ -106,7 +106,14 @@ export function taskThreadBrief(task) {
   ].join("\n");
 }
 
-/** what a survey of a connection asks for: a map, things with keys, relationships, follow-ups */
+/**
+ * What a survey of a connection asks for: a map, things with keys,
+ * relationships, follow-ups, and the first discovery pass: draft commitment
+ * classes for a person to confirm (docs/ORGANIZATION-MODEL.md, "Classes and
+ * instances"; discovery.js). The thread files each draft as a CommitmentClass
+ * vertex (model/schema.js) through execute_graph, status 'proposed', and
+ * never confirms one: confirmation is a person's act in Organization settings.
+ */
 export function surveyBrief(connection, focus = "", audience = "everyone") {
   return [
     audience === "everyone"
@@ -120,6 +127,10 @@ export function surveyBrief(connection, focus = "", audience = "everyone") {
     "2. Seed the master data. For tables of a few hundred rows or fewer that hold real things (customers, vendors, employees, work centers, machines), page through with read_records and link each row as a thing to that table's entry: graph-rag_link_things with entry set to the table's entry name, up to 25 things a call, each with its type, its readable name, and key \"" + connection + ":<table>:<key value>\". Don't seed transaction tables (jobs, invoices, quotes, time entries): too many.",
     "3. Relate. Record relationships between seeded things that the data establishes, with graph-rag_relate_things and the evidence (the table and columns, or the aggregate): an employee works in a work center, a vendor supplies a material class, a customer's most common parts. Use aggregate_records with groupby for patterns over the big tables (jobs per customer, open jobs per work center, top vendors by PO count) and write each pattern you find as a short entry linked to the things it's about; give patterns that will change a valid_until of a few months.",
     "4. Fan out. When there is more than one conversation can do well, queue a follow-up per topic with graph-rag_queue_followup and a precise brief (which tables, what to seed, which relationships), e.g. \"Seed vendors and relate them to the material classes they supply\". Don't repeat what you've done.",
+    "5. Draft the commitment classes. Every transaction table (orders, jobs, quotes, operations, purchase orders, invoices, maintenance: one row = one commitment) is a class a person will confirm; master-data tables (customers, employees, vendors, work centers, materials) are actors or resources, already seeded as things, never classes. For each transaction table read the distinct values of its status-like column (aggregate_records, groupby that column) and file ONE draft with graph-rag_execute_graph (language sql, one statement, status always 'proposed'):",
+    `   INSERT INTO CommitmentClass SET name = '<plural snake_case: orders, purchase_orders>', description = '<what one row commits>', stages = ['<status values in order, snake_case>'], record_table = '${connection}:<table>', status = 'proposed', proposed_by = 'survey:${connection}', confirmed_by = null, confirmed_at = null, attributes = ['stage', '<the other columns as snake_case attributes>'], reasons = ['<why this table is a class: its noun, its status column, its row count>']`,
+    "   The statement is proposed, not applied: the admin applies it from the worker proposals, which files the draft. Never write status = 'confirmed', never set confirmed_by or confirmed_at, and never update a CommitmentClass that exists: a person confirms, renames or retires classes in Organization settings. Skip a table whose class already exists (query_graph: SELECT name, record_table, status FROM CommitmentClass).",
+    "   A commitment pattern no table records (hires, shift swaps: it recurs in notes or the admin's focus, with no row behind it) is drafted through its pattern entry instead: end that entry's text with a tag like [class: hires; stages: opened, interviewing, offered, hired, declined; table: none; description: a hire: a commitment of a position to a person]. Say in each table's entry whether its rows are commitments (a class) or actors or resources (things).",
     "Stay within roughly 150 tool calls. Look things up with filters; never page through a big table.",
   ].join("\n");
 }
