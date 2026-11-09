@@ -1,18 +1,28 @@
 /**
- * The linker (see things.js): resolving mentions to things, linking statements to them, and finding things and
- * entries by name, key or id.
+ * The linker (see things.js): resolving a statement's subjects to things through resolve.js, linking the
+ * statement to them, and finding things and entries by name, key or id.
+ *
+ * Admission (docs/ORGANIZATION-MODEL.md): the linker mints a thing only from a record key (an instance, with
+ * its SourceRef) or when the caller vouches for the name (`create: true`: a worker's link_things, a person).
+ * Running on its own (jobMentions) it mints nothing but by key: a subject it can't resolve comes back
+ * unresolved, on the entry (`_unresolved`) and to triage, for a worker or a person to decide.
  */
 import { effectiveHome, homeName } from "./positions.js";
-import { duplicateEntries, entryId, mentionsPrompt, normalize, splitThingName, normalizeKey, parseMentions, parseSort, partialPerson, personCandidates, resolve, thingName } from "./things.js";
-import { DECISION_API_KEY } from "./context.js";
+import { duplicateEntries, entryId, keysInText, MAX_MENTIONS, mentionsPrompt, ngrams, normalize, splitThingName, normalizeKey, parseMentions, parseResidue, parseSort, partialPerson, personCandidates, residuePrompt, thingName } from "./things.js";
+import { hintType, pickCandidate, resolveSubject, subjectOf } from "./resolve.js";
+import { referTo } from "./sourceref.js";
+import { statements, TYPES } from "./model/schema.js";
+import { DECISION_API_KEY, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, FACETS, RID_RE } from "./db.js";
 import { embedBatch } from "./models.js";
 import { positionMap } from "./scope.js";
-import { queueWrite } from "./write.js";
 import { enqueue, worker, workerCall } from "./worker-pool.js";
 import { intakeWithTriage } from "./triage.js";
 
 const THING_KINDS_READ = ["document", "section"]; // besides plain entries, what the worker reads for things
+const THING_COLS = "@rid AS rid, label, _norm, _alias_norms, _thing_type, _keys, _class, _homes";
+const CLASS_CACHE_MS = 60_000; // confirmed classes are read this often...
+const NO_CLASS_CACHE_MS = 5_000; // ...unless there were none yet: discovery may confirm the first one any moment
 
 /** a thing's visibility follows the statements about it: add a home */
 export async function thingSeenFrom(rid, home) {
@@ -28,115 +38,188 @@ export async function aboutOnce(statementRid, thingRid, role) {
 }
 
 export const NOT_A_THING = "not an existing thing";
+/**
+ * The linker's own verdict on a name it could not resolve and may not mint: it comes back with this
+ * (and `unresolved: true`), is stored on the entry, and is a worker's or a person's to settle. It is
+ * deliberately not NOT_A_THING: triage turns those into things once it finds nothing for a worker to do,
+ * and the linker's residue must never become a thing that way.
+ */
+export const UNRESOLVED = "nothing resolves it: a worker or a person decides";
+
+let schemaReady = false;
+/** what the linker stores that the model adds to Entity (`_class`) and its own `_unresolved`; idempotent, once */
+async function ensureLinkerSchema() {
+  if (schemaReady) return;
+  for (const sql of statements({ Entity: TYPES.Entity })) await adbCommand(sql).catch(() => {});
+  await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._unresolved IF NOT EXISTS STRING`).catch(() => {});
+  schemaReady = true;
+}
+
+let classCache = { at: 0, list: [] };
+/** the confirmed classes (CommitmentClass rows a person confirmed), cached a minute; none when the type isn't there yet */
+export async function confirmedClassList({ fresh = false } = {}) {
+  if (!fresh && Date.now() - classCache.at < (classCache.list.length ? CLASS_CACHE_MS : NO_CLASS_CACHE_MS)) return classCache.list;
+  const rows = await adbQuery("SELECT name, description, stages, record_table, status FROM CommitmentClass WHERE status = 'confirmed'").catch(() => []);
+  classCache = { at: Date.now(), list: rows.map((r) => ({ name: r.name, description: r.description ?? "", stages: r.stages ?? [], record_table: r.record_table ?? null, status: "confirmed" })) };
+  return classCache.list;
+}
+
+/** a thing row as resolve.js reads it */
+const asThing = (c) => ({ rid: String(c.rid), label: c.label, _norm: c._norm, _alias_norms: c._alias_norms ?? [], _thing_type: c._thing_type ?? null, _keys: c._keys ?? [], _class: c._class ?? null, ...(c.score === undefined ? {} : { score: Number(c.score) }) });
+
+/** the database as resolve.js's lookup; `vec` is the mention's name embedding for the last step */
+function dbLookup(vec) {
+  return {
+    byKey: async (key) => (await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => [])).map(asThing)[0] ?? null,
+    byName: async ({ class: cls, actor }, n) =>
+      (
+        await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND ${cls ? "_class = :c" : "_thing_type = :t"} AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 5`, { c: cls, t: actor, n }).catch(() => [])
+      ).map(asThing),
+    byAlias: async (n) => (await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 5`, { n }).catch(() => [])).map(asThing),
+    byEmbedding: async ({ class: cls, actor, type }) => {
+      if (!Array.isArray(vec)) return [];
+      const filter = cls ? " AND _class = :c" : actor || type ? " AND _thing_type = :t" : "";
+      return (
+        await adbQuery(`SELECT ${THING_COLS}, vectorCosineSimilarity(embed_thing, [${vec.join(",")}]) AS score FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND embed_thing IS NOT NULL${filter} ORDER BY score DESC LIMIT 3`, { c: cls, t: actor ?? type }).catch(
+          () => [],
+        )
+      ).map(asThing);
+    },
+  };
+}
+
+/** mint a thing: an instance from a key (with its class and SourceRef), or a name a caller vouched for */
+async function mintThing({ name, type, cls, key, home, vec, seen_by }) {
+  await ensureLinkerSchema();
+  const n = normalize(name);
+  await adbCommand(
+    `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :label, _kind = 'thing', _thing_type = :t, _class = :c, _norm = :n, _alias_norms = :aliases, _keys = :keys, _homes = :homes, _home = :root, embed_thing = ${Array.isArray(vec) ? `[${vec.join(",")}]` : "null"}, updated_at = :now`,
+    "sql",
+    { name: thingName(type, name), label: name, t: type, c: cls ?? null, n, aliases: [], keys: key ? [key] : [], homes: [home], root: positionMap.root, now: new Date().toISOString() },
+  );
+  const rid = String(
+    (
+      await adbQuery(
+        key ? `SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k ORDER BY @rid DESC LIMIT 1` : `SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND _norm = :n ORDER BY @rid DESC LIMIT 1`,
+        { k: key, t: type, n },
+      )
+    )[0]?.rid,
+  );
+  if (key && RID_RE.test(rid)) await referTo(rid, key, { seen_by }).catch((e) => log.warn(`source ref ${key}: ${String(e?.message ?? e).slice(0, 120)}`));
+  return rid;
+}
+
+/** the unresolved shape jobMentions stores and returns: what was named, how it was described, what it could be */
+const unresolvedOf = (l) => ({ name: l.name, role: l.role, ...(l.type ? { type: l.type } : {}), ...(l.class ? { class: l.class } : {}), ...(l.actor ? { actor: l.actor } : {}), ...(l.key ? { key: l.key } : {}), ...(l.candidates?.length ? { candidates: l.candidates, unsure: l.unsure } : {}) });
 
 /**
- * Resolve mentions to things and link a statement to them (see things.js):
- * exact or very close -> that thing; close but unsure -> a new thing plus a
- * merge question for a person (or, with `unsure: "skip"`, nothing: a worker
- * thread decides instead); otherwise a new thing. Returns what happened.
+ * Resolve mentions to things and link a statement to them (see resolve.js):
+ * by key (minting the instance and its SourceRef when the key is new), by
+ * confirmed class and name, by alias, by embedding; the residue (several
+ * things it could be) is linked to nothing and comes back `unsure` with its
+ * candidates, for a worker thread, triage or a person. A name nothing
+ * resolves is minted only when the caller vouches for it (`create: true`,
+ * the default: a worker's link_things, a person) and it isn't a record key
+ * mention; otherwise it comes back `skipped: UNRESOLVED` and `unresolved: true`.
+ * `unsure` ("ask" | "skip") is kept for callers; nothing is created either
+ * way for an unsure match. Returns what happened, one item per mention.
  */
-export async function linkMentions(rid, mentions, home, { unsure = "ask", create = true } = {}) {
-  const vecs = mentions.length ? await embedBatch(mentions.map((m) => `${m.type}: ${m.name}`)) : [];
+export async function linkMentions(rid, mentions, home, { unsure = "ask", create = true, seen_by = "graph-rag linker", classes } = {}) {
+  void unsure;
+  const confirmed = classes ?? (await confirmedClassList());
+  const vecs = mentions.length ? await embedBatch(mentions.map((m) => `${m.actor ?? m.type ?? m.class ?? "thing"}: ${m.name}`)) : [];
   const out = [];
   for (const [i, m] of mentions.entries()) {
-    const n = normalize(m.name);
-    // a record key finds its thing whatever it's called (and whatever type was guessed)
-    const byKey = m.key
-      ? await adbQuery(`SELECT @rid AS rid, label, _alias_norms, _thing_type, _keys FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: m.key }).catch(() => [])
-      : [];
-    const byName = byKey.length
-      ? byKey
-      : await adbQuery(
-          `SELECT @rid AS rid, label, _alias_norms, _thing_type, _keys FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 5`,
-          { t: m.type, n },
-        ).catch(() => []);
-    const near = byName.length
-      ? []
-      : await adbQuery(
-          `SELECT @rid AS rid, label, _alias_norms, _thing_type, vectorCosineSimilarity(embed_thing, [${vecs[i].join(",")}]) AS score FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND embed_thing IS NOT NULL ORDER BY score DESC LIMIT 3`,
-          { t: m.type },
-        ).catch(() => []);
-    const cands = [...byName, ...near].map((c) => ({
-      rid: String(c.rid),
-      name: c.label,
-      aliases: c._alias_norms ?? [],
-      // a keyed match counts as the mention's type: the key decides
-      type: byKey.length ? m.type : c._thing_type,
-      keys: c._keys ?? [],
-      score: c.score === undefined ? undefined : Number(c.score),
-    }));
-    let r = resolve(m, cands);
-    // a person written partially ("John F.") that would become a new thing: known people it could mean are candidates
-    if (r.create && !r.maybe && m.type === "person" && !m.key && partialPerson(m.name)) {
+    const subject = subjectOf({ key: m.key, name: m.name, class: m.class, actor: m.actor, type: m.type });
+    const base = { name: m.name, type: m.type ?? subject.actor ?? null, role: m.role, ...(m.key ? { key: m.key } : {}), ...(subject.class ? { class: subject.class } : {}), ...(subject.actor ? { actor: subject.actor } : {}) };
+    let r = await resolveSubject(subject, { classes: confirmed, lookup: dbLookup(vecs[i]) });
+    // the residue's choice (the closed model call, or a worker naming a candidate): one of the candidates found
+    if (r.how === "none" && m.candidate && r.candidates.length) r = pickCandidate(r, m.candidate);
+    // a person written partially ("John F.") that nothing resolved: known people it could mean are candidates
+    if (r.how === "none" && !r.candidates.length && subject.actor === "person" && !m.key && partialPerson(m.name)) {
       const part = partialPerson(m.name);
-      const people = await adbQuery(`SELECT @rid AS rid, label FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = 'person' AND _norm LIKE :p LIMIT 40`, { p: `${part.first} %` }).catch(() => []);
+      const people = (await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = 'person' AND _norm LIKE :p LIMIT 40`, { p: `${part.first} %` }).catch(() => [])).map(asThing);
       const found = personCandidates(part, people).slice(0, 6);
-      if (found.length) r = { ambiguous: found.map((c) => String(c.rid)) };
+      if (found.length) r = { ...r, candidates: found, ambiguous: true };
     }
-    if (r.create && !m.key) {
+    if (r.how === "none" && !m.key) {
       // another entry's name ("ux-t06 bse certs"), or the code it starts with ("ux-t06"), is a cross-reference, not a thing: no placeholder for it
       const entry = await adbQuery(`SELECT @rid FROM ${ENTITY_LABEL} WHERE (name = :n OR name LIKE :code) AND ${ENTRY_KINDS} LIMIT 1`, {
         n: m.name,
         code: `${String(m.name).trim().replace(/[%_\\]/g, "")} %`,
       }).catch(() => []);
       if (entry.length) {
-        out.push({ name: m.name, type: m.type, role: m.role, skipped: "that's an entry, not a thing: mention it in the text instead" });
+        out.push({ ...base, skipped: "that's an entry, not a thing: mention it in the text instead" });
         continue;
       }
     }
-    if (r.create && !create) {
-      // what a worker wrote links only to things that exist (it makes new ones on purpose, with link_things)
-      out.push({ name: m.name, type: m.type, role: m.role, ...(m.key ? { key: m.key } : {}), skipped: NOT_A_THING });
+    if (r.how === "none" && r.candidates.length) {
+      // several things it could be: nothing is linked and nothing is made; a thread, triage or a person picks
+      const names = r.candidates.map((x) => `${x.label}${(x._keys ?? [])[0] ? ` [${x._keys[0]}]` : ""}`);
+      out.push({ ...base, candidates: r.candidates.map((x) => x.rid), unsure: names.join(" or "), ...(r.maybe ? { maybe: r.maybe } : {}) });
       continue;
     }
-    if (r.ambiguous) {
-      // several things go by this name: nothing is linked; a thread (or the sorting step's escalation) picks
-      const names = await adbQuery(`SELECT label, _keys FROM [${r.ambiguous.join(",")}]`).catch(() => []);
-      out.push({ name: m.name, type: m.type, role: m.role, candidates: r.ambiguous, unsure: names.map((x) => `${x.label}${(x._keys ?? [])[0] ? ` [${x._keys[0]}]` : ""}`).join(" or ") });
-      continue;
-    }
-    if (r.create && r.maybe && unsure === "skip") {
-      const other = (await adbQuery(`SELECT label FROM ${r.maybe}`))[0]?.label;
-      out.push({ name: m.name, type: m.type, role: m.role, candidates: [r.maybe], unsure: other ?? null });
-      continue;
-    }
-    let thing = r.use;
-    if (r.alias) {
-      const cur = (await adbQuery(`SELECT _alias_norms FROM ${thing}`))[0]?._alias_norms ?? [];
-      await adbCommand(`UPDATE ${thing} SET _alias_norms = :a`, "sql", { a: [...new Set([...cur, normalize(r.alias)])] }).catch(() => {});
-    }
-    if (r.create) {
-      await adbCommand(
-        `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :label, _kind = 'thing', _thing_type = :t, _norm = :n, _alias_norms = :aliases, _keys = :keys, _homes = :homes, _home = :root, embed_thing = [${vecs[i].join(",")}], updated_at = :now`,
-        "sql",
-        { name: thingName(m.type, m.name), label: m.name, t: m.type, n, aliases: [], keys: m.key ? [m.key] : [], homes: [home], root: positionMap.root, now: new Date().toISOString() },
-      );
-      thing = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _thing_type = :t AND _norm = :n ORDER BY @rid DESC LIMIT 1`, { t: m.type, n }))[0]?.rid);
-    } else if (m.key && RID_RE.test(String(thing))) {
-      // a thing found by name learns its record key
-      const cur = (await adbQuery(`SELECT _keys FROM ${thing}`))[0]?._keys ?? [];
-      if (!cur.includes(m.key)) await adbCommand(`UPDATE ${thing} SET _keys = :k`, "sql", { k: [...cur, m.key].slice(-10) }).catch(() => {});
-    }
-    if (r.create) {
-      if (r.maybe && RID_RE.test(thing)) {
-        // unsure: a person decides whether they're the same (nothing merges on its own)
-        const other = (await adbQuery(`SELECT label FROM ${r.maybe}`))[0]?.label;
-        await queueWrite({ kind: "merge", payload: JSON.stringify({ keep: r.maybe, drop: thing, keep_name: other, drop_name: m.name, type: m.type }), user: "graph-rag worker", home: positionMap.root });
+    let thing = r.rid;
+    let created = false;
+    if (r.mint) {
+      // a record key nobody holds yet: the instance, with its class and its SourceRef (the row stays in the source system)
+      thing = await mintThing({ name: r.mint.name, type: r.mint.type, cls: r.mint.class, key: r.mint.key, home, vec: vecs[i], seen_by });
+      created = true;
+    } else if (r.how === "none") {
+      if (!create) {
+        // the linker on its own mints nothing: the name goes back for a worker or a person
+        out.push({ ...base, skipped: UNRESOLVED, unresolved: true });
+        continue;
+      }
+      // the caller vouches for the name (a worker's judgement, a person): minted, with its class when a confirmed one was named
+      thing = await mintThing({ name: m.name, type: hintType({ type: m.type, actor: subject.actor, class: r.class }), cls: r.class, key: null, home, vec: vecs[i], seen_by });
+      created = true;
+    } else {
+      if (r.alias) {
+        const cur = (await adbQuery(`SELECT _alias_norms FROM ${thing}`))[0]?._alias_norms ?? [];
+        await adbCommand(`UPDATE ${thing} SET _alias_norms = :a`, "sql", { a: [...new Set([...cur, normalize(r.alias)])] }).catch(() => {});
+      }
+      if (m.key && RID_RE.test(String(thing))) {
+        // a thing found by name learns its record key, and refers to the row
+        const cur = (await adbQuery(`SELECT _keys FROM ${thing}`))[0]?._keys ?? [];
+        if (!cur.includes(m.key)) await adbCommand(`UPDATE ${thing} SET _keys = :k`, "sql", { k: [...cur, m.key].slice(-10) }).catch(() => {});
+        await referTo(thing, m.key, { seen_by }).catch((e) => log.warn(`source ref ${m.key}: ${String(e?.message ?? e).slice(0, 120)}`));
       }
     }
     if (!RID_RE.test(String(thing))) continue;
     await thingSeenFrom(thing, home);
     await aboutOnce(rid, thing, m.role);
-    out.push({ name: m.name, type: m.type, role: m.role, [r.create ? "created" : "linked"]: true });
+    out.push({ ...base, [created ? "created" : "linked"]: true, how: r.how, ...(r.class ? { class: r.class } : {}), thing });
   }
   return out;
 }
 
+/** the things already known that a text names, by exact name or alias: the candidates the closed call chooses from */
+export async function knownInText(text, limit = 12) {
+  const grams = ngrams(text);
+  if (!grams.length) return [];
+  const rows = [
+    ...(await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _norm IN :g LIMIT ${limit}`, { g: grams }).catch(() => [])),
+    ...(await adbQuery(`SELECT ${THING_COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _alias_norms CONTAINSANY :g LIMIT ${limit}`, { g: grams }).catch(() => [])),
+  ];
+  const seen = new Set();
+  return rows
+    .filter((r) => !seen.has(String(r.rid)) && seen.add(String(r.rid)))
+    .slice(0, limit)
+    .map((r) => ({ rid: String(r.rid), label: r.label, type: r._thing_type ?? null, class: r._class ?? null, keys: r._keys ?? [] }));
+}
+
 /**
- * The one-call job: find the things one statement is about and link them.
- * With a pool that sorts first, the same call decides whether a worker
- * thread should look (and an unsure match always sends it there instead of
- * to a person). Entries a worker wrote never go back to a thread.
+ * The one-call job: find the subjects one statement names and link them.
+ * Subjects already on record (CLAIMS edges from the entry) and record keys
+ * written in the text need no model. The closed call over the confirmed
+ * classes and the things already known finds the rest; resolution settles
+ * each (resolve.js); the residue with candidates gets one more closed call
+ * (which candidate) unless a worker thread will look anyway. Nothing is
+ * minted but by key: unresolved names are stored on the entry
+ * (`_unresolved`) and returned; with a pool that sorts first they go to a
+ * review thread, and the same call decides whether a worker thread should
+ * look anyway.
  */
 export async function jobMentions({ rid, from_worker, no_thread, intake }) {
   if (!RID_RE.test(String(rid))) return;
@@ -144,25 +227,62 @@ export async function jobMentions({ rid, from_worker, no_thread, intake }) {
   if (!row?.name || (row._kind && !THING_KINDS_READ.includes(row._kind))) return; // gone, or a question/thing/document entry
   const facets = Object.fromEntries(Object.keys(FACETS).filter((f) => row[`text_${f}`]).map((f) => [f, row[`text_${f}`]]));
   if (Object.keys(facets).length === 0) return;
-  const sort = worker.pool.poolSize > 0 && worker.pool.sortFirst && !worker.pool.master && !from_worker && !no_thread && !intake;
-  const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort }));
-  const mentions = parseMentions(reply);
   const home = effectiveHome(positionMap, row._home);
-  // going to triage: only existing things now; a new name becomes a thing once triage has looked (intakeWithTriage)
-  const deferNew = Boolean(intake && DECISION_API_KEY);
-  const linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: !from_worker && !deferNew });
-  await adbCommand(`UPDATE ${rid} SET _mentions_at = :now`, "sql", { now: new Date().toISOString() });
-  // with a master: into the next batch, with what linking couldn't settle
+  const text = Object.values(facets).join("\n");
+  // subjects the condenser already resolved: the entry's claims point at them
+  const claimed = (await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('CLAIMS')) FROM ${rid})`).catch(() => [])).map((e) => String(e.dst)).filter((d) => RID_RE.test(d));
+  for (const dst of new Set(claimed)) {
+    await thingSeenFrom(dst, home).catch(() => {});
+    await aboutOnce(rid, dst, "subject").catch(() => {});
+  }
+  // record keys written in the text resolve without a model
+  const keyed = keysInText(text).map((k) => ({ name: k.split(":")[2], type: null, role: "subject", key: k }));
+  const sort = worker.pool.poolSize > 0 && worker.pool.sortFirst && !worker.pool.master && !from_worker && !no_thread && !intake;
+  const classes = await confirmedClassList();
+  const candidates = await knownInText(text);
+  const reply = await workerCall(mentionsPrompt({ name: row.name, facets }, worker.instructions, { sort, classes, candidates }));
+  const named = parseMentions(reply, MAX_MENTIONS, { candidates }).filter((m) => !keyed.some((k) => k.key === m.key));
+  const mentions = [...keyed, ...named];
+  // the linker on its own: by key, by class and name, by alias, by embedding; never a new name
+  let linked = await linkMentions(rid, mentions, home, { unsure: sort ? "skip" : "ask", create: false, classes });
+  // the residue: several known things a name could be; one closed call picks, unless a worker thread will look anyway
+  const residue = linked.filter((l) => l.unsure && l.candidates?.length && !l.key);
+  if (residue.length && !sort && !(intake && DECISION_API_KEY)) {
+    const cands = (await adbQuery(`SELECT ${THING_COLS} FROM [${[...new Set(residue.flatMap((r) => r.candidates))].join(",")}]`).catch(() => [])).map(asThing);
+    const byRid = new Map(cands.map((c) => [c.rid, c]));
+    const asked = residue.map((r) => ({ name: r.name, role: r.role, candidates: r.candidates.map((c) => byRid.get(c)).filter(Boolean).map((c) => ({ rid: c.rid, label: c.label, type: c._thing_type, class: c._class, keys: c._keys })) })).filter((r) => r.candidates.length);
+    const picks = asked.length ? parseResidue(await workerCall(residuePrompt({ name: row.name, facets }, asked)).catch(() => ""), asked) : new Map();
+    if (picks.size) {
+      const settled = await linkMentions(
+        rid,
+        residue.filter((r) => picks.has(r.name)).map((r) => ({ name: r.name, type: r.type, role: r.role, class: r.class, actor: r.actor, candidate: picks.get(r.name) })),
+        home,
+        { unsure: "skip", create: false, classes },
+      );
+      linked = linked.map((l) => settled.find((s) => s.name === l.name && (s.linked || s.created)) ?? l);
+    }
+  }
+  const unresolved = linked.filter((l) => l.unresolved || l.unsure).map(unresolvedOf);
+  await ensureLinkerSchema();
+  await adbCommand(`UPDATE ${rid} SET _mentions_at = :now, _unresolved = :u`, "sql", { now: new Date().toISOString(), u: unresolved.length ? JSON.stringify(unresolved) : null });
+  // with a master: into the next batch, with what linking couldn't settle (unresolved names go as fresh ones for its worker)
   if (intake) await intakeWithTriage(String(rid), row, linked, home);
   if (sort) {
     const verdict = parseSort(reply);
     const unsure = linked.filter((l) => l.unsure);
-    if (verdict.review || unsure.length) {
-      const why = [verdict.why, ...unsure.map((u) => `"${u.name}" may be the existing ${u.type} "${u.unsure}"`)].filter(Boolean).join("; ");
+    const fresh = linked.filter((l) => l.unresolved);
+    if (verdict.review || unsure.length || fresh.length) {
+      const why = [
+        verdict.why,
+        ...unsure.map((u) => `"${u.name}" may be the existing ${u.type ?? "thing"} "${u.unsure}"`),
+        ...(fresh.length ? [`nothing known resolves ${fresh.map((f) => `"${f.name}"`).join(", ")}: link an existing thing, make one on purpose, or leave it in the text`] : []),
+      ]
+        .filter(Boolean)
+        .join("; ");
       await enqueue("review", { rid: String(rid), why }, { key: `review:${rid}` });
     }
   }
-  return { things: mentions.length };
+  return { things: linked.filter((l) => l.linked || l.created).length, unresolved };
 }
 
 /** a thing's full name ("Toro (customer)", as searches show it) is its name and type */
@@ -180,7 +300,7 @@ export async function thingNamed(name) {
   const full = splitThingName(name);
   const n = normalize(full ? full.name : name);
   const things = await adbQuery(
-    `SELECT @rid AS rid, label, _thing_type FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (name = :full OR _norm = :n OR _alias_norms CONTAINS :n)${full ? " AND _thing_type = :t" : ""} LIMIT 1`,
+    `SELECT @rid AS rid, label, _thing_type FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (name = :full OR _norm = :n OR _alias_norms CONTAINS :n)${full ? " AND (_thing_type = :t OR _class = :t)" : ""} LIMIT 1`,
     { full: name, n, t: full?.type },
   ).catch(() => []);
   if (!things.length) return null;
@@ -189,17 +309,17 @@ export async function thingNamed(name) {
   return entry.length ? null : things[0];
 }
 
-/** one thing by key, or by name/alias and type; null when there's none (or several) */
+/** one thing by key, or by name/alias and type (a hint, an actor type or a class); null when there's none (or several) */
 export async function findThing(ref) {
   const t = bareThing(ref);
   const key = normalizeKey(t.key);
   if (key) {
-    const k = (await adbQuery(`SELECT @rid AS rid, label, _thing_type, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }))[0];
+    const k = (await adbQuery(`SELECT @rid AS rid, label, _thing_type, _class, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }))[0];
     if (k) return k;
   }
   const n = normalize(t.name);
   const rows = await adbQuery(
-    `SELECT @rid AS rid, label, _thing_type, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n)${t.type ? " AND _thing_type = :t" : ""} LIMIT 2`,
+    `SELECT @rid AS rid, label, _thing_type, _class, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n)${t.type ? " AND (_thing_type = :t OR _class = :t)" : ""} LIMIT 2`,
     { n, t: t.type },
   );
   return rows.length === 1 ? rows[0] : null;
