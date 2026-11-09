@@ -30,6 +30,7 @@ import { ensureWorkerSchema, expireLeases, PROPOSED_NOTE, wakeIdleWaiting, worke
 import { registerWorkerTools, workerUpsert } from "./worker-tools.js";
 import { registerRecordTools } from "./record-tools.js";
 import { statements as modelStatements } from "./model/schema.js";
+import { ensureDiscoverySchema } from "./routes-discovery.js";
 import { ensureTriageSchema } from "./triage.js";
 import { batchTick, ensureMasterSchema, registerHandlerTools, registerLiaisonTools, registerMasterTools } from "./master-tools.js";
 import { ensurePruneSchema, pruneExpired, pruneSink } from "./pruning.js";
@@ -467,6 +468,8 @@ async function boot() {
   // the organization model's types (model/schema.js): CommitmentClass, SourceRef, AuditEvent, the CLAIMS,
   // REFERS_TO and WROTE edges and the on-record marker on Entity; idempotent DDL, run at every start
   for (const sql of modelStatements()) await adbCommand(sql).catch((e) => log.warn(`model schema: ${sql}: ${String(e).slice(0, 120)}`));
+  // the Discovery stream's extra class properties (attributes, reasons) and its event log
+  await ensureDiscoverySchema().catch((e) => log.warn(`discovery schema: ${String(e).slice(0, 120)}`));
   if (SCOPED && positionMap) {
     // entities from before origins: their origin is where they are (legacy, unhomed ones: the root)
     await adbCommand(`UPDATE ${ENTITY_LABEL} SET _origin = _home WHERE _origin IS NULL AND _home IS NOT NULL`).catch((e) => log.warn(`origin migration: ${e}`));

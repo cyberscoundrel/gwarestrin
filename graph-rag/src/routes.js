@@ -18,10 +18,14 @@ import { decideProposal, masterStatus } from "./master-tools.js";
 import { pruneExpired, prunePreview } from "./pruning.js";
 import { canEditPolicy, policy, policyDefaults, policyMeta, savePolicy } from "./org-policy.js";
 import { createServer } from "./server.js";
+import { registerDiscoveryRoutes } from "./routes-discovery.js";
 
 /** ---- http ---- */
 export const app = express();
 app.use(express.json({ limit: "2mb" }));
+
+// ---- the Discovery stream's route group: drafted commitment classes, confirmed or retired by a person at the root ----
+registerDiscoveryRoutes(app);
 
 app.post("/mcp", async (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);
