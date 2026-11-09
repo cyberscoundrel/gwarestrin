@@ -45,11 +45,18 @@ than the origin, raised to the authority position. A section's home is that
 of its claims; a section with no claims (the oracle's residue) stays at the
 origin, where the grader is the only judge.
 
+A record with a claim whose home is above the recorder's position (an
+admins-only price recorded from Operations) is proposed by the authority
+rule, not written; the person holding that authority approves it, and only
+then do its sections and claims land. The end-to-end scenario approves those
+as the admin before running the bar; the seeder leaves them in the queue.
+
 ## How it is used
 
 - `scripts/make-conversation-batch.mjs seed <batch> --url URL --tokens f` posts
   every conversation's condensed document as its person (through
-  `ingest_document` today; through the Condenser stream's tool with `--tool`).
+  `ingest_document` by default; `--tool record_document` posts the document
+  under the Condenser tool's `document` argument).
   It takes no default URL and is never run against the development instance
   without the user saying so.
 - `scripts/batch-bar.mjs <batch> --url URL --token T` reads the batch's

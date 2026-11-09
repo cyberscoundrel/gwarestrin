@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import { normalizeDocument } from "../src/model/claims.js";
 import { statements } from "../src/model/schema.js";
 import { sectionName } from "../src/documents.js";
-import { bar, checkBatch, collectRows, subjectLabel, verdictLine } from "./conversations.mjs";
+import { authorityMapOf, bar, checkBatch, collectRows, prefixed, subjectLabel, verdictLine } from "./conversations.mjs";
 
 export const CONDENSE_TOOL_RE = /condens|on_record|record_document|record_conversation/i;
 const BATCH = new URL("../test/fixtures/conversations/oracle-sixty.batch.json", import.meta.url);
@@ -95,14 +95,15 @@ export default [
     run: async (ctx) => {
       const full = loadBatch();
       const pick = ["ux-m01", "ux-al04", "ux-aa11"]; // one authority, two authorities, the residue
-      const batch = { ...full, conversations: full.conversations.filter((c) => pick.includes(c.note)) };
+      const prefix = `e2e-bar-${ctx.randomUUID().slice(0, 8)}`;
+      // under a prefix of its own: the end-to-end scenario below records the same conversations through the real path
+      const batch = prefixed({ ...full, conversations: full.conversations.filter((c) => pick.includes(c.note)) }, prefix);
       ctx.check(batch.conversations.length === 3, "the three picked conversations are in the batch");
       // the model's DDL is idempotent; the harness runs it since nothing on main does yet
       for (const ddl of statements()) {
         const r = await ctx.tool("admin", "execute_graph", { language: "sql", command: ddl });
         ctx.check(!r.error || /already exists/i.test(r.error), `${ddl}: ${r.error ?? "ok"}`);
       }
-      const prefix = `e2e-harness-${ctx.randomUUID().slice(0, 8)}`;
       for (const c of batch.conversations) await storeAsContract(ctx, c, prefix);
       const rows = await collectRows(batch, ctx.sql);
       ctx.check(rows.documents.length === 3 && rows.sections.length === 4 && rows.claims.length === 5, `read back 3 documents, 4 sections, 5 claims: ${rows.documents.length}/${rows.sections.length}/${rows.claims.length}`);
@@ -153,17 +154,40 @@ export default [
         });
         ctx.check(!r.error, `class ${name} confirmed: ${JSON.stringify(r).slice(0, 200)}`);
       }
-      for (const c of batch.conversations) {
-        // record_document (record-tools.js) takes the contract's document under `document`; any other
-        // condensing tool gets the document's fields and the conversation itself
-        const r = await ctx.tool(c.person, tool, tool === "record_document" ? { document: c.expected.document } : { ...c.expected.document, conversation: c.turns });
-        ctx.check(!r.error, `${c.id} posted by ${c.person} through ${tool}: ${JSON.stringify(r).slice(0, 200)}`);
+      // the organization's policy for the batch: the authority map its placements imply (the rule that homes a
+      // claimed section above its origin), and no derived-data window (earlier scenarios' reads would otherwise
+      // lift a recorder's writes); both put back afterwards, as the Authority scenarios do
+      const before = (await ctx.api("/api/policy")).policy ?? {};
+      const set = await ctx.api("/api/policy", { method: "PUT", body: JSON.stringify({ authorityMap: authorityMapOf(batch), derivedWindowHours: 0 }) });
+      ctx.check(set.policy?.authorityMap, `the authority map is a policy setting: ${JSON.stringify(set).slice(0, 300)}`);
+      try {
+        const proposed = [];
+        for (const c of batch.conversations) {
+          // record_document (record-tools.js) takes the contract's document under `document`; any other
+          // condensing tool gets the document's fields and the conversation itself
+          const r = await ctx.tool(c.person, tool, tool === "record_document" ? { document: c.expected.document } : { ...c.expected.document, conversation: c.turns });
+          ctx.check(!r.error, `${c.id} posted by ${c.person} through ${tool}: ${JSON.stringify(r).slice(0, 200)}`);
+          const pending = r.pendingId ?? (r.queued ? r.id : null);
+          if (pending) {
+            // the authority rule: a record with a claim above the recorder's authority is proposed, and the person
+            // holding that authority approves it. That is the designed flow, not a rescue (nothing is moved by hand)
+            proposed.push(c.id);
+            const ok = await ctx.api(`/api/queue/${pending}/approve`, { method: "POST", body: "{}" });
+            ctx.check(ok.result?.approved || ok.approved, `${c.id}: the admin approves the proposed record: ${JSON.stringify(ok).slice(0, 200)}`);
+          }
+        }
+        const expectedProposed = batch.conversations.filter((c) => c.expected.placements.some((p) => p.home !== c.position)).map((c) => c.id);
+        ctx.check(JSON.stringify(proposed.sort()) === JSON.stringify(expectedProposed.sort()), `exactly the records with a claim above the recorder's position are proposed: ${JSON.stringify(proposed)} vs expected ${JSON.stringify(expectedProposed)}`);
+        await ctx.until("the batch's sections are stored", async () => (await collectRows(batch, ctx.sql)).sections.length >= batch.conversations.reduce((a, c) => a + c.expected.sections.length, 0));
+        // the claims land a moment after the sections: wait for all of them before judging
+        await ctx.until("the batch's claims are stored", async () => (await collectRows(batch, ctx.sql)).claims.length >= batch.conversations.reduce((a, c) => a + c.expected.placements.length, 0), 60_000).catch(() => {});
+        const result = bar(batch, await collectRows(batch, ctx.sql));
+        ctx.check(result.ok, `${verdictLine(batch, result)} ${JSON.stringify(result.findings).slice(0, 600)}`);
+        const calls = await (await fetch(`${ctx.MODELS}/__calls`)).json();
+        ctx.check((calls["grader:claimed"] ?? 0) === 0, `the grader was never asked about a section with claims: ${calls["grader:claimed"]}`);
+      } finally {
+        await ctx.api("/api/policy", { method: "PUT", body: JSON.stringify({ authorityMap: before.authorityMap ?? { classes: {}, attributes: {} }, derivedWindowHours: before.derivedWindowHours ?? 12 }) });
       }
-      await ctx.until("the batch's sections are stored", async () => (await collectRows(batch, ctx.sql)).sections.length >= batch.conversations.reduce((a, c) => a + c.expected.sections.length, 0));
-      const result = bar(batch, await collectRows(batch, ctx.sql));
-      ctx.check(result.ok, `${verdictLine(batch, result)} ${JSON.stringify(result.findings).slice(0, 400)}`);
-      const calls = await (await fetch(`${ctx.MODELS}/__calls`)).json();
-      ctx.check((calls["grader:claimed"] ?? 0) === 0, `the grader was never asked about a section with claims: ${calls["grader:claimed"]}`);
     },
   },
 ];
