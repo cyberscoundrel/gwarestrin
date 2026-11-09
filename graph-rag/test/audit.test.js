@@ -31,14 +31,23 @@ export function fakeDb() {
         return [{ count: r ? 1 : 0 }];
       }
       if (sql.startsWith("CREATE VERTEX AuditEvent")) {
+        if (db.failCreate?.(params)) throw new Error("audit store down");
         events.push({ rid: `#11:${rid++}`, id: params.id, key: params.key, authorized_by: params.auth, acted_by: params.acted, position: params.pos, at: params.at, change: params.change, outcome: params.outcome, pending_id: params.pending });
         return [{ count: 1 }];
       }
       if (sql.startsWith("UPDATE AuditEvent SET outcome")) {
+        if (db.failSettle?.(sql, params)) throw new Error("audit store down");
+        // a settle by id (the attempt's own end), a proposal's rejection, or a proposal taken on by its approver
+        if (params.id) {
+          const hit = events.filter((e) => e.id === params.id);
+          for (const e of hit) Object.assign(e, { outcome: params.o, change: params.c });
+          return [{ count: hit.length }];
+        }
         const hit = events.filter((e) => e.pending_id === params.p && e.outcome === "proposed");
-        for (const e of hit) e.outcome = params.o;
+        for (const e of hit) Object.assign(e, sql.includes("'attempted'") ? { outcome: "attempted", authorized_by: params.auth, position: params.pos, change: params.c } : { outcome: params.o });
         return [{ count: hit.length }];
       }
+      if (sql.startsWith("UPDATE PendingWrite")) return [{ count: 1 }];
       if (sql.startsWith("CREATE EDGE")) {
         const m = /CREATE EDGE (\w+) FROM (#\d+:\d+) TO (#\d+:\d+)/.exec(sql);
         edges.push({ type: m[1], from: m[2], to: m[3] });
@@ -54,6 +63,9 @@ export function fakeDb() {
       if (sql.includes("FROM AuditEvent")) {
         let rows = [...events];
         if (params.key) rows = rows.filter((e) => e.key === params.key);
+        if (params.p) rows = rows.filter((e) => e.pending_id === params.p);
+        const lit = /outcome = '(\w+)'/.exec(sql);
+        if (lit) rows = rows.filter((e) => e.outcome === lit[1]);
         if (params.outcome) rows = rows.filter((e) => e.outcome === params.outcome);
         if (params.auth) rows = rows.filter((e) => e.authorized_by === params.auth);
         if (params.since) rows = rows.filter((e) => e.at >= params.since);
@@ -81,10 +93,10 @@ test("an audit event names the row, the person, the agent, the position and what
   assert.deepEqual(JSON.parse(ev.change), { fields: { Status: "running" } });
   assert.equal(ev.pending_id, null);
   assert.throws(() => auditEvent({ key: "4471", authorized_by: "bob", acted_by: "a", position: "floor", outcome: "applied" }), /not a record key/);
-  assert.throws(() => auditEvent({ key: "mssql:dbo_Job:4471", authorized_by: "bob", acted_by: "a", position: "floor", outcome: "done" }), /outcome: must be one of applied, proposed, refused, failed/);
+  assert.throws(() => auditEvent({ key: "mssql:dbo_Job:4471", authorized_by: "bob", acted_by: "a", position: "floor", outcome: "done" }), /outcome: must be one of applied, proposed, refused, failed, attempted/);
   assert.throws(() => auditEvent({ key: "mssql:dbo_Job:4471", authorized_by: "", acted_by: "a", position: "floor", outcome: "applied" }), /authorized_by: needs a value/);
   assert.throws(() => auditEvent({ key: "mssql:dbo_Job:4471", authorized_by: "bob", acted_by: "a", position: "floor", outcome: "proposed" }), /pending_id/);
-  assert.deepEqual(AUDIT_OUTCOMES, ["applied", "proposed", "refused", "failed"]);
+  assert.deepEqual(AUDIT_OUTCOMES, ["applied", "proposed", "refused", "failed", "attempted"]);
 });
 
 test("a source reference is the key split, never the row", () => {

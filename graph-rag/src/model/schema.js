@@ -27,8 +27,8 @@ export const CLAIM_KINDS = ["commitment", "event", "state", "observation"];
 export const ACTOR_TYPES = ["person", "position", "customer", "supplier", "agent"];
 /** a class's life: proposed by discovery or a worker, confirmed by a person, retired by one */
 export const CLASS_STATUSES = ["proposed", "confirmed", "retired"];
-/** what became of an agent's write to a source system */
-export const AUDIT_OUTCOMES = ["applied", "proposed", "refused", "failed"];
+/** what became of an agent's write to a source system; "attempted": started, its end not yet recorded */
+export const AUDIT_OUTCOMES = ["applied", "proposed", "refused", "failed", "attempted"];
 /** the attribute every class has: which of its stages an instance is at */
 export const STAGE_ATTRIBUTE = "stage";
 

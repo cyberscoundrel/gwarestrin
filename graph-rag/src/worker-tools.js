@@ -20,7 +20,7 @@ import { positionMap } from "./scope.js";
 import { liftRefusal, workerWriteFloor } from "./floor.js";
 import { actsForOf, assertNotWaiting, claimById, claimsOnAttribute, logChange, PROPOSED_NOTE, raiseQuestion, resolveSubjectStub, unresolvedNames } from "./worker-pool.js";
 import { ensureSourceRef, referTo } from "./audit.js";
-import { clientFor, columnFor, confirmAgainstRow, enterData } from "./data-entry.js";
+import { assertWritable, clientFor, columnFor, confirmAgainstRow, enterData, rowKeyFor, settleOpenAttempts } from "./data-entry.js";
 import { closeIntervals, overlaps } from "./model/claims.js";
 import { parseKey } from "./model/schema.js";
 import { randomUUID } from "node:crypto";
@@ -37,12 +37,24 @@ async function needClaim(id) {
   return c;
 }
 
-/** the record key of a claim's subject: the thing's key in a system the source knows, else none */
+/**
+ * The row a claim's subject means, among the thing's record keys: the one the claim names, else the one in
+ * its class's table, else the only one (data-entry.js rowKeyFor). `why` says what's missing when none can
+ * be determined.
+ */
 async function keyOf(claim) {
   if (!claim.resolved) return null;
   const t = (await adbQuery(`SELECT label, _keys, _class FROM ${claim.thing}`).catch(() => []))[0];
   const keys = (Array.isArray(t?._keys) ? t._keys : []).map((k) => parseKey(k)).filter(Boolean);
-  return { thing: t, key: keys[0] ?? null, keys };
+  const cls = claim.class ? (await adbQuery("SELECT record_table FROM CommitmentClass WHERE name = :n AND status = 'confirmed' LIMIT 1", { n: claim.class }).catch(() => []))[0] : null;
+  return { thing: t, keys, ...rowKeyFor({ subjectKey: claim.subject?.key ?? null, keys, recordTable: cls?.record_table ?? null }) };
+}
+
+/** a key a worker offers for an existing thing must be a row the source holds; anything else is refused, not stored */
+async function assertRowExists(key) {
+  const { client } = await clientFor(key.key);
+  const hit = await client.readRow(key.table, key.row_key);
+  if (!hit) throw new Error(`${key.key}: the source has no such row, so it can't be added to this thing's keys`);
 }
 
 /** where a claim's section is seen from */
@@ -60,8 +72,8 @@ async function sectionHome(claim) {
 async function workerConfirmClaim(args, identity) {
   const claim = await needClaim(args.claim_id);
   if (!claim.resolved) throw new Error(`claim ${claim.id}'s subject is unresolved: resolve it first (resolve_subject), or ask`);
-  const { thing, key } = await keyOf(claim);
-  if (!key) throw new Error(`${thing?.label ?? claim.thing} has no record key: no source row to confirm against`);
+  const { thing, key, why } = await keyOf(claim);
+  if (!key) throw new Error(`${thing?.label ?? claim.thing}: ${why}, so there's no source row to confirm against`);
   const { client } = await clientFor(key.key);
   const hit = await client.readRow(key.table, key.row_key, { key_column: args.key_column });
   const refRid = await ensureSourceRef(key.key, { seen_by: identity.user, seen: Boolean(hit) });
@@ -170,6 +182,7 @@ async function workerResolveSubject(args, identity) {
     // an existing thing learns the key and the class it was resolved under, and is seen from here
     const cur = (await adbQuery(`SELECT _keys, _class FROM ${thing.rid}`).catch(() => []))[0] ?? {};
     const keys = Array.isArray(cur._keys) ? cur._keys : [];
+    if (key && !keys.includes(key.key)) await assertRowExists(key);
     await adbCommand(`UPDATE ${thing.rid} SET _keys = :k, _class = :c`, "sql", {
       k: key && !keys.includes(key.key) ? [...keys, key.key].slice(-10) : keys,
       c: cur._class ?? claim?.class ?? null,
@@ -250,18 +263,27 @@ async function workerEnterData(args, identity) {
   await assertNotWaiting(identity);
   const claim = await needClaim(args.claim_id);
   if (!claim.resolved) throw new Error(`claim ${claim.id}'s subject is unresolved: resolve it first`);
-  const { thing, key } = await keyOf(claim);
-  if (!key) throw new Error(`${thing?.label ?? claim.thing} has no record key: there is no source row to enter data into`);
+  const { thing, key, why } = await keyOf(claim);
+  if (!key) throw new Error(`${thing?.label ?? claim.thing}: ${why}, so there's no source row to enter data into`);
   const actsFor = await actsForOf(claim.section);
   if (!actsFor) throw new Error("the section says nobody put it on record: a data entry needs the person it's made for");
+  // the row, by its verified primary key, and its columns as they are: a write that can't name both is refused
+  const { client } = await clientFor(key.key);
+  const hit = await client.readRow(key.table, key.row_key, { key_column: args.key_column });
+  if (!hit) throw new Error(`${key.key}: the source has no such row: the key may be wrong, or the row is gone. Report it.`);
   let fields = args.fields && Object.keys(args.fields).length ? args.fields : null;
-  if (!fields) {
-    const { client } = await clientFor(key.key);
-    const hit = await client.readRow(key.table, key.row_key, { key_column: args.key_column }).catch(() => null);
-    const column = hit ? columnFor(claim.attribute, hit.row) : null;
-    if (!column) throw new Error(`the row has no column for ${claim.attribute}: give fields ({ column: value }) naming the column to write`);
-    if (confirmAgainstRow(claim, hit.row).confirmed) return { claim: claim.id, key: key.key, outcome: "unchanged", note: "The row already holds the claimed value: nothing to enter." };
+  if (fields) assertWritable(fields, hit);
+  else {
+    const column = columnFor(claim.attribute, hit.row);
+    if (!column) throw new Error(`the row has no column named for ${claim.attribute} (it has ${Object.keys(hit.row).join(", ")}): give fields ({ column: value }) naming the column to write`);
+    if (confirmAgainstRow(claim, hit.row).confirmed) {
+      // a retry finds an earlier write's unfinished trail before it says there's nothing to do
+      const settled = await settleOpenAttempts(key.key, hit.row);
+      if (settled.length) return { claim: claim.id, key: key.key, outcome: "reconciled", settled, note: "The row holds the claimed value, and an earlier entry on it hadn't been settled on the trail: it now has." };
+      return { claim: claim.id, key: key.key, outcome: "unchanged", note: "The row already holds the claimed value: nothing to enter." };
+    }
     fields = { [column]: claim.value_num ?? claim.value };
+    assertWritable(fields, hit);
   }
   const r = await enterData({ actsFor, by: identity.user, key: key.key, fields, cls: claim.class, attribute: claim.attribute, reason: args.reason, identity });
   await logChange(identity, { kind: "data_entry", claim: claim.id, key: key.key, outcome: r.outcome, fields, ...(r.pendingId ? { pending: r.pendingId } : {}), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
@@ -273,8 +295,9 @@ export function registerWorkerTools(server, { identity, need }) {
   server.tool(
     "confirm_claim",
     `Confirm a claim from your brief against the source row its subject refers to (read-only): the row is
-looked up by the subject's record key and its column for the claim's attribute is compared with the
-claim's value. Nothing is written. key_column names the row's key column when the source can't say.`,
+looked up by the subject's record key and its primary key, and its column for the claim's attribute is
+compared with the claim's value. Nothing is written. key_column, if you give it, must be the table's
+primary key; anything else is refused.`,
     { claim_id: z.string().min(8).max(80), key_column: z.string().max(80).optional(), reason: z.string().max(300).optional() },
     async (args) => {
       need("read");
@@ -322,10 +345,12 @@ answers it. The need meets the claim's section and closes.`,
   );
   server.tool(
     "enter_data",
-    `Enter a claim's value into the source row its subject refers to (the row's column for the attribute,
-or the fields you give), for the person who put the section on record. Applied when that person holds
-authority over the class and attribute; proposed for someone who does otherwise (then END YOUR TURN: you
-resume with the decision); refused when they hold none. Every attempt is audited. Give a reason.`,
+    `Enter a claim's value into the source row its subject refers to (the row's column named for the
+attribute, or the fields you give: real columns of that row, never its key), for the person who put the
+section on record, as they stand now. Applied when that person holds authority over the class, the
+attribute and every column written; proposed for someone who does otherwise (then END YOUR TURN: you
+resume with the decision); refused when they hold none, have left, or have moved. Every attempt is
+audited. Give a reason.`,
     {
       claim_id: z.string().min(8).max(80),
       fields: z.record(z.union([z.string().max(2000), z.number(), z.boolean(), z.null()])).optional(),

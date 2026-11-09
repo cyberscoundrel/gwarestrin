@@ -278,18 +278,24 @@ async function documentOf(rid, row) {
     recorded_by: recordedBy,
     recorded_at: doc?._recorded_at ?? row._recorded_at ?? null,
     position: position ? effectiveHome(positionMap, position) : effectiveHome(positionMap, row._home),
+    recorded_position: position,
     position_name: homeName(positionMap, position ?? row._home),
     reason: doc?._record_reason ?? row._record_reason ?? null,
   };
 }
 
-/** who a section's worker acts for: the person who put it on record, under their position */
+/**
+ * Who a section's worker acts for: the person who put it on record, and the position as stored, unread
+ * (null when none was recorded). Never the effective home: that fails upward to the root for an unknown
+ * value, which is right for who sees a section and wrong for who authorizes a write (data-entry.js decides
+ * on the person's current standing).
+ */
 export async function actsForOf(sectionRid) {
   if (!RID_RE.test(String(sectionRid))) return null;
   const row = (await adbQuery(`SELECT _home, _recorded_by, _record_position, _written_by, _doc_title, _recorded_at, _record_reason FROM ${sectionRid}`).catch(() => []))[0];
   if (!row) return null;
   const d = await documentOf(sectionRid, row);
-  return d.recorded_by ? { person: d.recorded_by, position: d.position } : null;
+  return d.recorded_by ? { person: d.recorded_by, position: d.recorded_position } : null;
 }
 
 /**
