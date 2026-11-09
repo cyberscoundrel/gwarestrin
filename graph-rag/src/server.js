@@ -28,6 +28,8 @@ import { ensureNeedSchema, expireRequests, requestAccess } from "./requests.js";
 import { docStore, ensureDocumentSchema, readDocument, requestIngest, sweepOrphanDocuments } from "./ingest.js";
 import { ensureWorkerSchema, expireLeases, PROPOSED_NOTE, wakeIdleWaiting, worker, workerModel, workerTick } from "./worker-pool.js";
 import { registerWorkerTools, workerUpsert } from "./worker-tools.js";
+import { registerRecordTools } from "./record-tools.js";
+import { statements as modelStatements } from "./model/schema.js";
 import { ensureTriageSchema } from "./triage.js";
 import { batchTick, ensureMasterSchema, registerHandlerTools, registerLiaisonTools, registerMasterTools } from "./master-tools.js";
 import { ensurePruneSchema, pruneExpired, pruneSink } from "./pruning.js";
@@ -269,6 +271,9 @@ a search.${role === "worker" ? " Like search_graph, it shows what your entry's p
   // ---- a graph worker thread's own tools (one queue entry: its entry) ----
   if (SCOPED && role === "worker") registerWorkerTools(server, { identity, scope, need });
 
+  // ---- a person's chat agent puts a condensed section of an on-record thread on record (record-tools.js) ----
+  if (SCOPED && caps.write !== "deny" && !role) registerRecordTools(server, { identity, scope, need });
+
   // ---- the master's tools: start workers, settle stops, hand the rest to the operator ----
   if (SCOPED && role === "master") registerMasterTools(server, { identity });
 
@@ -440,6 +445,9 @@ async function boot() {
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_home) NOTUNIQUE`).catch(() => {});
   for (const prop of ["_origin", "_grade", "_valid_until", "_valid_by", "_ungraded", "_placed_by", "_placed_at", "_written_by"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (name, _origin) NOTUNIQUE`).catch(() => {});
+  // the organization model's types (model/schema.js): CommitmentClass, SourceRef, AuditEvent, the CLAIMS,
+  // REFERS_TO and WROTE edges and the on-record marker on Entity; idempotent DDL, run at every start
+  for (const sql of modelStatements()) await adbCommand(sql).catch((e) => log.warn(`model schema: ${sql}: ${String(e).slice(0, 120)}`));
   if (SCOPED && positionMap) {
     // entities from before origins: their origin is where they are (legacy, unhomed ones: the root)
     await adbCommand(`UPDATE ${ENTITY_LABEL} SET _origin = _home WHERE _origin IS NULL AND _home IS NOT NULL`).catch((e) => log.warn(`origin migration: ${e}`));
