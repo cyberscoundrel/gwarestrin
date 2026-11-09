@@ -341,3 +341,23 @@ here.
 5. **Multiple homes per instance** (DATA-SCOPING open question 2). Default:
    unchanged. A claim is seen by whoever sees the section it came from; an
    instance two branches work on has claims in both, each at its own home.
+   **When an authority rule tightens** (decided by the user), that sentence
+   stays true by moving the section, not by hiding the claim from it. When a
+   change to the map raises the authority over a class or attribute (a rule
+   appears, moves up the tree, or moves to another branch), every section
+   holding a claim the rule now covers moves to the lowest home above both
+   where it is and the new authority, with all of its text and every claim on
+   it: a section's other text rises with it, which is accepted. It happens on
+   the policy change itself, whatever wrote the map, and is recorded on
+   `PolicyChange` until finished, so a restart completes it and running it
+   twice changes nothing. `_grade` says which rule raised the section and who
+   changed that rule. What depends on the section follows: facts extracted
+   from it, the things its claims are about (no longer seen from a home with
+   no statement about them left), and the document entry once none of its
+   sections is left at the document's home. While another section is still
+   seen there the document stays, and so does its title. Only tightening
+   moves anything: a rule moved down the tree or removed leaves every
+   section where it is, and a person lowers one on purpose with `set_home`,
+   which is a widening and so goes through approval. What has been shared
+   with someone by a grant on that entry stays shared until the grant ends
+   or is revoked: grants are not authority.

@@ -10,7 +10,7 @@ process.env.ARCADEDB_URL = "http://127.0.0.1:9"; // read marks persist in the ba
 const scope = await import("../src/scope.js");
 const { loadPositionMap, scopeOf } = scope;
 const { claimsSettle, hasClaims, placeByClaims } = await import("../src/placement.js");
-const { authorityOf, decide, staleAuthorities, validatePolicy, visible } = await import("../src/model/authority.js");
+const { authorityOf, authorityRule, decide, staleAuthorities, tightens, validatePolicy, visible } = await import("../src/model/authority.js");
 const { applyPolicyUpdate, defaultPolicy, normalizeStored } = await import("../src/policy.js");
 const { authorityMapFor, authorityPolicy, decideWrite, forgetAuthorityPolicy } = await import("../src/data-entry.js");
 const { currentState, history, stateAsOf, stateOfAttribute, conflicts } = await import("../src/state.js");
@@ -289,4 +289,24 @@ test("B4 remainder: class keys are normalized as attribute keys are, and one loo
   assert.deepEqual(stored.classes.jobs, { authority: "ops", attributes: { a: "floor", b: "ops" } }, "stored: the stricter position, every rule kept");
   assert.equal(validatePolicy({ classes: { "!!": { authority: "ops" } } }, map, { stored: true }).classes["!!"], undefined);
   assert.throws(() => validatePolicy({ classes: { "!!": { authority: "ops" } } }, map), /no name/);
+});
+
+test("B6: what tightens a rule, per class and attribute: a rule appearing or moving up or across, never one moved down or removed", () => {
+  const tree = { root: "org", positions: { org: { name: "org", parent: null }, ops: { name: "ops", parent: "org" }, floor: { name: "floor", parent: "ops" }, hr: { name: "hr", parent: "org" } } };
+  const on = (p) => ({ classes: {}, attributes: { pay: p } });
+  const none = { classes: {}, attributes: {} };
+  assert.equal(tightens(none, on("ops"), "jobs", "pay", tree), true, "a rule appears");
+  assert.equal(tightens(on("floor"), on("ops"), "jobs", "pay", tree), true, "up the tree");
+  assert.equal(tightens(on("ops"), on("hr"), "jobs", "pay", tree), true, "to another branch: the old branch loses it");
+  assert.equal(tightens(on("ops"), on("floor"), "jobs", "pay", tree), false, "down the tree");
+  assert.equal(tightens(on("ops"), none, "jobs", "pay", tree), false, "removed");
+  assert.equal(tightens(on("ops"), on("ops"), "jobs", "pay", tree), false, "unchanged");
+  assert.equal(tightens(on("ops"), on("ops"), "jobs", "other", tree), false, "another attribute");
+  assert.equal(tightens(none, on("gone"), "jobs", "pay", tree), true, "a stale position fails upward");
+  assert.equal(tightens(on("gone"), on("ops"), "jobs", "pay", tree), false, "off a stale position (the root) down to a real one");
+  const specific = { classes: { jobs: { authority: "org", attributes: { pay: "ops" } } }, attributes: {} };
+  assert.equal(tightens({ classes: { jobs: { authority: "org" } }, attributes: {} }, specific, "jobs", "pay", tree), false, "a more specific rule that is lower loosens this attribute");
+  assert.equal(authorityRule(specific, "Jobs", "Pay").field, "classes.jobs.attributes.pay");
+  assert.equal(authorityRule(specific, "jobs", "stage").field, "classes.jobs.authority");
+  assert.equal(authorityRule(on("ops"), null, "pay").field, "attributes.pay");
 });

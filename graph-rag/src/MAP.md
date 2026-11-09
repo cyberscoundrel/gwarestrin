@@ -32,6 +32,7 @@ changes.
 | `master-tools.js` | 343 | the master (`batchTick`, signals, `masterStartWorker`, …), handlers, and the MCP registration of the master, handler and liaison tools | Reconciliation and data entry |
 | `pruning.js` | 79 | `pruneExpired`, `prunePreview` | housekeeping; the integrator |
 | `org-policy.js` | 70 | the organization policy: `policy`, `loadPolicy`, `savePolicy`, `expiryRules`, `canEditPolicy` | Authority |
+| `tightening.js` | 217 | a rule that tightens re-homes what is already written: `settleTightening` | Authority |
 | `routes.js` | 459 | the express app: `/mcp` and every `/api/*` route | shared: each stream adds its own route group; the integrator merges |
 | `server.js` | 491 | the composition root: `createServer` (the MCP tool table) and `boot` | the integrator |
 

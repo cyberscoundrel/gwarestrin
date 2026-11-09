@@ -39,25 +39,35 @@ export const DECISIONS = ["direct", "propose", "hidden"];
 /** a class name as a policy key, normalized as an attribute's is: "Jobs" is a rule for jobs, "Work Center" for work_center */
 export const classKey = normalizeAttribute;
 
+/** the rule that decides class/attribute, most specific first: { authority, field } naming it in the map, or null */
+export function authorityRule(policy, cls, attribute) {
+  if (!policy || typeof policy !== "object") return null;
+  const key = cls ? (policy.classes?.[cls] ? cls : classKey(cls)) : null;
+  const c = key ? policy.classes?.[key] : undefined;
+  const a = normalizeAttribute(attribute) || null;
+  const pick = (v, field) => (typeof v === "string" && v ? { authority: v, field } : null);
+  return (c && a && pick(c.attributes?.[a], `classes.${key}.attributes.${a}`)) || (a && pick(policy.attributes?.[a], `attributes.${a}`)) || (c && pick(c.authority, `classes.${key}.authority`)) || pick(policy.default, "default");
+}
+
 /** the position holding authority over class/attribute, or null when no rule applies */
 export function authorityOf(policy, cls, attribute) {
-  if (!policy || typeof policy !== "object") return null;
-  const c = cls ? (policy.classes?.[cls] ?? policy.classes?.[classKey(cls)]) : undefined;
-  const a = normalizeAttribute(attribute) || null;
-  const pick = (v) => (typeof v === "string" && v ? v : null);
-  if (c && a) {
-    const r = pick(c.attributes?.[a]);
-    if (r) return r;
-  }
-  if (a) {
-    const r = pick(policy.attributes?.[a]);
-    if (r) return r;
-  }
-  if (c) {
-    const r = pick(c.authority);
-    if (r) return r;
-  }
-  return pick(policy.default);
+  return authorityRule(policy, cls, attribute)?.authority ?? null;
+}
+
+/**
+ * Does going from map `prev` to map `next` tighten class/attribute: is there now an authority where
+ * there was none, or one that isn't below the old one? A rule moved down the tree, or removed, loosens;
+ * a rule moved to another branch tightens, since the old branch loses it. A stale position counts as
+ * the root (fail upward), as in decide.
+ */
+export function tightens(prev, next, cls, attribute, positions) {
+  const at = (map) => {
+    const a = authorityOf(map, cls, attribute);
+    return a === null ? null : positions.positions[a] ? a : positions.root;
+  };
+  const [from, to] = [at(prev), at(next)];
+  if (to === null || from === to) return false;
+  return from === null || !ancestors(positions, to).includes(from);
 }
 
 /**

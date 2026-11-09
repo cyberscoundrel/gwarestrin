@@ -367,7 +367,9 @@ export async function regradeTick() {
       const validSql = until !== undefined && r._valid_by !== "writer" ? ", _valid_until = :until, _valid_by = 'grader'" : "";
       // the claims first: if this fails the section is still waiting and the next tick does both
       await claimsFollowEntry(rid, p.home);
-      await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null${validSql}`, "sql", { home: p.home, note: p.note, until });
+      // raised by a tightened rule while it waited, and the grader adds nothing: the rule is still why it is here
+      const note = r.w.raised && p.home === r.w.held ? r.w.raised : p.note;
+      await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null${validSql}`, "sql", { home: p.home, note, until });
       if (p.home !== r.w.held) {
         const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
         for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), p.home).catch(() => {});

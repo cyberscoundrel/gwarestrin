@@ -242,11 +242,14 @@ async function recordClaims(p, sections) {
     if (!thingsAt.has(home)) thingsAt.set(home, new Map());
     return thingsAt.get(home);
   };
-  const authority = authorityPolicy();
   let n = 0;
   for (const section of p.record.sections) {
     const s = byIndex.get(section.index);
     if (!s) continue;
+    // the rule and the section as they stand now: a rule may have tightened while this ran (tightening.js)
+    const authority = authorityPolicy();
+    const current = (await adbQuery(`SELECT _home FROM ${s.rid}`))[0];
+    if (current) s.home = effectiveHome(positionMap, current._home);
     // a claim's id is the one it was given, else its place in this document: running the document again finds what is already written
     const written = new Set((await adbQuery(`SELECT id FROM (SELECT expand(outE('CLAIMS')) FROM ${s.rid})`)).map((r) => r.id));
     for (const [j, c] of (section.claims ?? []).entries()) {
