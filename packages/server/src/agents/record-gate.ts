@@ -1,3 +1,7 @@
+import type { AgentRecord, GraphRole, ThreadRecordState } from "@gwarestrin/shared";
+import { McpHttpClient } from "../analyze/mcp-client.js";
+import { graphTokenFor } from "./graph-token.js";
+
 /**
  * Off record is enforced where the graph's tools are, not in the agent's
  * prompt (docs/ORGANIZATION-MODEL.md, "On record is a deliberate act"):
@@ -11,6 +15,8 @@ export interface ThreadRecordPush {
   agent: string;
   thread: string | null;
   on: boolean;
+  /** the position the person put the thread on record under: where its sections start (R11.5) */
+  position?: string | null | undefined;
 }
 
 /** graph-rag's HTTP base is the MCP URL's */
@@ -27,4 +33,110 @@ export async function pushThreadRecord(mcpUrl: string, token: string | undefined
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`the knowledge graph didn't take the record state (${res.status}): ${(await res.text().catch(() => "")).slice(0, 200)}`);
+}
+
+/**
+ * A file uploaded on record is a record (R11.12). When a file reaches an agent's workspace while its current
+ * thread is on record, the app puts it on record through graph-rag's record_file tool with the agent's own
+ * delegated token: graph-rag refuses it unless that thread is on record (the same gate as every write), and
+ * stamps the person and the position the thread was put on record under. Off record nothing is sent.
+ *
+ * NEEDS A RULING (record 4): only text files go on record (no NUL byte, valid UTF-8, under the size limit);
+ * anything else stays a file in the workspace, and the reply says why.
+ */
+export const UPLOAD_MAX_BYTES = 1_500_000;
+
+/** the file's text when it can go on record, else why not */
+export function uploadText(bytes: Uint8Array): { text: string } | { refused: string } {
+  if (bytes.byteLength > UPLOAD_MAX_BYTES) return { refused: `larger than ${UPLOAD_MAX_BYTES} bytes` };
+  if (bytes.includes(0)) return { refused: "not a text file" };
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return { refused: "not a text file (not UTF-8)" };
+  }
+  if (text.trim().length < 20) return { refused: "no text to put on record" };
+  return { text };
+}
+
+export interface UploadRecordResult {
+  file: string;
+  recorded?: Record<string, unknown>;
+  refused?: string;
+}
+
+/**
+ * Put one uploaded file on record for an agent whose thread is on record. `onRecord` false sends nothing.
+ * `client` calls graph-rag's MCP tools with the agent's own token.
+ */
+export async function recordUpload(
+  client: { callTool(name: string, args: Record<string, unknown>): Promise<string> },
+  input: { file: string; bytes: Uint8Array; onRecord: boolean; reason?: string | null | undefined },
+): Promise<UploadRecordResult> {
+  if (!input.onRecord) return { file: input.file, refused: "the conversation is off record" };
+  const t = uploadText(input.bytes);
+  if ("refused" in t) return { file: input.file, refused: t.refused };
+  const text = await client.callTool("record_file", { file: input.file, text: t.text, ...(input.reason ? { reason: input.reason } : {}) });
+  let recorded: Record<string, unknown>;
+  try {
+    recorded = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return { file: input.file, refused: text.slice(0, 300) };
+  }
+  return { file: input.file, recorded };
+}
+
+/** what recordUploadsFor needs of the agent manager (structural, so a test can hand it a real one) */
+export interface UploadAgents {
+  store: { get(id: string): (AgentRecord & { graphRole?: GraphRole | undefined }) | undefined };
+  threadRecord(id: string): ThreadRecordState;
+  profileFor(record: { profileId?: string | undefined }): { positions?: string[] | undefined };
+  mcpServerUrl(name: string): string | undefined;
+}
+
+/** one uploaded file: its name and size, and how to read it back from where it was written */
+export interface UploadedFile {
+  file: string;
+  size: number;
+  read: () => Promise<Uint8Array>;
+}
+
+/**
+ * The upload route's half of R11.12: after files reach an agent's workspace, each one goes on record when the
+ * agent's current thread is on record, through graph-rag's record_file with the agent's own delegated token
+ * (graph-rag checks the thread again, and stamps the person and the position the thread is on record under).
+ * Off record, or for a graph worker, nothing is sent and the result is empty. One file's failure is reported
+ * for that file and never fails the upload.
+ */
+export async function recordUploadsFor(
+  agents: UploadAgents,
+  id: string,
+  files: UploadedFile[],
+  deps: {
+    client?: (url: string, token: string | undefined) => { callTool(name: string, args: Record<string, unknown>): Promise<string> };
+    token?: (record: AgentRecord & { graphRole?: GraphRole | undefined }, profile: { positions?: string[] | undefined }) => string | undefined;
+  } = {},
+): Promise<UploadRecordResult[]> {
+  const record = agents.store.get(id);
+  if (!record || record.graphRole) return [];
+  const state = agents.threadRecord(id);
+  if (!state.on) return [];
+  const url = agents.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL;
+  if (!url) return files.map((f) => ({ file: f.file, refused: "no knowledge graph is connected" }));
+  const token = (deps.token ?? graphTokenFor)(record, agents.profileFor(record));
+  const client = (deps.client ?? ((u, t) => new McpHttpClient(u, t)))(url, token);
+  const out: UploadRecordResult[] = [];
+  for (const f of files) {
+    if (f.size > UPLOAD_MAX_BYTES) {
+      out.push({ file: f.file, refused: `larger than ${UPLOAD_MAX_BYTES} bytes` });
+      continue;
+    }
+    try {
+      out.push(await recordUpload(client, { file: f.file, bytes: await f.read(), onRecord: true, reason: state.reason }));
+    } catch (err) {
+      out.push({ file: f.file, refused: `not put on record: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) });
+    }
+  }
+  return out;
 }

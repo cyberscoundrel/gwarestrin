@@ -18,6 +18,7 @@ import { dropWaitingShares, refreshGrants, resolveWaitingShares, storeGrant } fr
 import { ASSERTIONS, meetAssertion } from "./requests.js";
 import { docStore, startIngest } from "./ingest.js";
 import { aboutOnce, ENTRY_KINDS, instanceSeenFrom, normalize } from "./instances.js";
+import { bodyOf } from "./check.js";
 import { settleDocument } from "./document-home.js";
 import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, worker } from "./worker-pool.js";
 
@@ -111,7 +112,7 @@ export async function upsertEntities({ entities, home, floor, regrade_floor, wri
     const place = placements?.[idx];
     // awaiting grading: what it needs to be graded again (regradeTick); graded now: no longer awaiting
     const ungradedSql = place?.ungraded
-      ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: regrade_floor ?? floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString(), ...(typeof e._text === "string" ? { text: e._text.slice(0, 6000) } : {}) }))}'`
+      ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: regrade_floor ?? floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString(), text: bodyOf(e), ...(place.keep ? { keep: place.keep } : {}), ...(place.carry ?? {}) }))}'`
       : place?.graded // graded now: no longer awaiting
         ? ", n.`_ungraded` = null"
         : "";
@@ -198,6 +199,9 @@ export async function upsertEntities({ entities, home, floor, regrade_floor, wri
       const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin: home });
       if (rows[0]) await askAboutPlacement(String(rows[0].rid), e.name, p);
     }
+    // R11.13: a document's title takes the strictest home among its sections, an update's check included (record stream)
+    const docs = await adbQuery(`SELECT _doc_id FROM ${ENTITY_LABEL} WHERE name IN :names AND _origin = :origin AND _kind = 'section' AND _doc_id IS NOT NULL`, { names: entities.map((e) => e.name), origin: home }).catch(() => []);
+    for (const d of new Set(docs.map((r) => r._doc_id))) await settleDocument(d);
   }
   return { merged, embedded, facets_indexed: [...knownIndexes], ...(placements ? { placed } : {}) };
 }

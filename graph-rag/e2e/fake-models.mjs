@@ -97,6 +97,9 @@ export function answerChoice(question, { criteria = {}, entry = "" }) {
 export function decide(body) {
   const entry = String(body?.state?.entry ?? "");
   const investigate = entry.includes("[L2]");
+  // the record stream's check (graph-rag/src/check.js): "[admins]" in a note is a restricted category only the top may see
+  const top = Object.entries(body?.questions?.visible_from?.criteria ?? {}).find(([, v]) => /^org\b/.test(String(v)))?.[0];
+  const said = entry.includes("[admins]") && top ? `${entry} [category: c1] [visible_from: ${top}]` : entry;
   const answers = {
     level: investigate ? { score: 2, probabilities: { 0: 0.05, 1: 0.15, 2: 0.7, 3: 0.1 } } : { score: 0, probabilities: { 0: 0.9, 1: 0.1, 2: 0, 3: 0 } },
     reason: investigate ? { choice: "record_lookup", probabilities: { record_lookup: 0.8 } } : { choice: "plain_fact", probabilities: { plain_fact: 0.9 } },
@@ -104,7 +107,8 @@ export function decide(body) {
   for (const [q, spec] of Object.entries(body?.questions ?? {})) {
     if (q === "level" || q === "reason") continue;
     if (spec?.type === "choice") {
-      answers[q] = answerChoice(q, { criteria: spec.criteria ?? {}, entry });
+      // the record stream's check reads its tags from `said`; no name lookup: no fake resolves a name (R4)
+      answers[q] = answerChoice(q, { criteria: spec.criteria ?? {}, entry: said });
     } else if (spec?.type === "noul") answers[q] = { noul: entry.includes("[contradicts]") ? 0.9 : 0.05 };
     else if (spec?.type === "score") answers[q] = { score: 0, probabilities: { 0: 0.9, 1: 0.1 } };
   }

@@ -1,24 +1,37 @@
 /**
- * Documents (see documents.js and docstore.js): ingesting a stored text into an entry and its sections; reading
- * it back. A condensed document (R2: the condensed document and its sections are the record) takes the same
- * path: its sections are given rather than chunked, and the document entry carries the on-record marker.
+ * The record (R2: "The condensed document and its sections are the record"): a document a person put on record,
+ * stored whole in the document store, with an entry and one entry per section in the graph; reading it back.
+ *
+ * Two ways in, one path:
+ *  - a condensed document (recordDocument): the chat agent, which was in the conversation, condenses its
+ *    on-record sections into text sections (model/record.js). No claims, no class names (R2, R5).
+ *  - a file (recordFile): a file uploaded on record is a record (R11.12). Its text is stored as it is and
+ *    chunked into sections; nothing condenses it.
+ *
+ * Every section starts at the position of the person who put it on record (R11.5), is held no lower than what
+ * the writing agent read, the person's own notes aside (R11.13), and is checked once by the restrict-only typed
+ * check (R4; check.js through floor.js placeEntities): uncertain holds one level higher, no answer is admin-only
+ * until checked (R11.11). The document's title and description take the strictest home among its sections
+ * (R11.13; document-home.js). Once written, each section is queued for a worker the way every write is
+ * (write.js; the filing stream splits by home, R11.6).
  */
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { effectiveHome, homeName } from "./positions.js";
 import { liveClause, parseValidUntil } from "./extent.js";
 import { createDocStore } from "./docstore.js";
-import { chunk, MAX_CHARS, MAX_SECTIONS, parseRecordText, prepareRecord, preview, recordId, renderRecord, sectionChunks, sectionName } from "./documents.js";
+import { chunk, MAX_CHARS, MAX_SECTIONS, normalizeDocument, parseRecordText, prepareRecord, preview, recordId, renderRecord, sectionChunks, sectionName, stableUuid } from "./documents.js";
 import { DOC_STORE, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE } from "./db.js";
 import { homeFilter, personOf, positionMap, resolveWriteHome, writerOf } from "./scope.js";
-import { derivedFloor, placeEntities, recordReads } from "./floor.js";
+import { derivedFloor, recordReads } from "./floor.js";
 import { decideWrite, queueWrite, upsertEntities } from "./write.js";
 import { settleDocument, untitled } from "./document-home.js";
+import { threadPosition } from "./record-state.js";
 
 /** ---- documents (see documents.js and docstore.js) ---- */
 
 export const docStore = createDocStore(DOC_STORE);
-let ingestQueue = Promise.resolve(); // one document at a time (grading and embedding are the cost)
+let ingestQueue = Promise.resolve(); // one document at a time (the check and embedding are the cost)
 const chunkCache = new Map(); // doc id -> chunks (deterministic from the stored text)
 
 export async function ensureDocumentSchema() {
@@ -31,7 +44,7 @@ export async function ensureDocumentSchema() {
 async function storedChunks(docId) {
   if (chunkCache.has(docId)) return chunkCache.get(docId);
   const { text, meta } = await docStore.get(docId);
-  // a condensed document's sections are the spans its ingest stored; a manual's are chunked from its text
+  // a record's sections are the spans its ingest stored (older texts without spans are chunked as they read)
   const cs = Array.isArray(meta?.sections) ? sectionChunks(text, meta.sections) : chunk(text);
   if (chunkCache.size > 50) chunkCache.delete(chunkCache.keys().next().value);
   chunkCache.set(docId, cs);
@@ -49,9 +62,8 @@ const distinctTitle = (base, docId) => `${String(base).slice(0, 68)} (${docId.sl
 
 /**
  * The name a record goes under at this origin: its title, unless another document or entry already holds that
- * name or one of the section names it would use. A model picks titles by topic, so a reused title is usually a
- * different record: it is written beside the earlier one, never over it (only a manual is replaced by a new text
- * under its title).
+ * name or one of the section names it would use. A reused title is usually a different record: it is written
+ * beside the earlier one, never over it.
  */
 async function recordTitle(base, docId, origin, spans) {
   const names = [base, ...spans.map((sp) => sectionName(base, sp.index, sp.heading))];
@@ -60,76 +72,59 @@ async function recordTitle(base, docId, origin, spans) {
 }
 
 /**
- * Ingest a stored document: its sections (graded, never below the entry's
- * grade, named for no one until they are placed), then its entry (no lower
- * than its most restricted section: settleDocument) and their links. Re-ingesting a
- * manual's title replaces the manual's sections; a record is never replaced, and
- * running one again (a retry, a failed ingest) finishes what is missing and adds nothing.
+ * Ingest a stored record: its sections (each checked once, starting at its recorder's position and no lower
+ * than what its writer read), then its entry at the strictest home among them (settleDocument), and their
+ * links. A record is never replaced: running one again (a retry, a failed ingest) finishes what is missing
+ * and adds nothing.
  */
 async function ingestDocument(p) {
-  const writtenAt = Date.parse(p.written_at) || Date.now();
   const { text, meta } = await docStore.get(p.doc_id);
-  const chunks = p.record ? sectionChunks(text, meta?.sections ?? []) : chunk(text);
+  const chunks = Array.isArray(meta?.sections) ? sectionChunks(text, meta.sections) : chunk(text);
   chunkCache.set(p.doc_id, chunks);
   const vu = p.valid_until; // ISO, "lasting", or undefined: as resolved when it was written
   const keyOf = (name, kind) => adbQuery(`SELECT @rid AS rid, _home, _doc_id, _on_record FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin AND _kind = :kind LIMIT 1`, { name, origin: p.home, kind });
-  let title = p.record ? await recordTitle(p.title, p.doc_id, p.home, meta?.sections ?? []) : p.title;
-  let before = (await keyOf(title, "document"))[0];
-  // a manual never replaces a record: it goes beside it, under a name of its own
-  if (!p.record && before?._on_record === true && before._doc_id !== p.doc_id) {
-    title = distinctTitle(p.title, p.doc_id);
-    before = (await keyOf(title, "document"))[0];
-  }
+  const title = await recordTitle(p.title, p.doc_id, p.home, chunks);
   p = { ...p, title };
-  const docEntry = {
-    name: p.title,
-    facets: { identity: `${p.title}: ${p.description}` },
-    properties: { description: p.description, sections: chunks.length, characters: text.length, ...(p.record ? { on_record: true } : {}) },
-    ...(vu ? { valid_until: vu } : {}),
-  };
-  // the entry's title is graded now and written once its sections are placed: until then no reader below a section that turns out restricted can find it
-  const [docPlaced] = await placeEntities([docEntry], p.home, p.floor ?? p.home, writtenAt);
-  // sections can be filed higher than the document (grading restricts), never lower
-  const docHome = effectiveHome(positionMap, docPlaced.home);
-  // a section keeps the name it has (a re-run, or a manual replaced in place by its title); a new one has no title until settled
-  const held = await adbQuery(`SELECT name, _section, _doc_id FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id IN :ids`, { ids: [p.doc_id, before?._doc_id].filter(Boolean) });
-  const heldName = (c) => {
-    const rows = held.filter((r) => Number(r._section) === c.index);
-    const same = rows.find((r) => r._doc_id === p.doc_id);
-    if (same) return same.name;
-    return rows.find((r) => [sectionName(p.title, c.index, c.heading), sectionName(untitled(r._doc_id), c.index, c.heading)].includes(r.name))?.name;
-  };
-  const nameOf = (c) => heldName(c) ?? sectionName(untitled(p.doc_id), c.index, c.heading);
+  // a section keeps the name it has (a re-run); a new one has no title until settled
+  const held = await adbQuery(`SELECT name, _section FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d`, { d: p.doc_id });
+  const nameOf = (c) => held.find((r) => Number(r._section) === c.index)?.name ?? sectionName(untitled(p.doc_id), c.index, c.heading);
   for (let i = 0; i < chunks.length; i += 32) {
     await upsertEntities({
       entities: chunks.slice(i, i + 32).map((c) => ({
         name: nameOf(c),
         facets: { identity: preview(c.text) },
         _embed: { identity: c.embedText },
+        // the check reads the whole section (the facet is a preview), and so does its recheck
+        _text: c.text,
         ...(c.heading ? { properties: { heading: c.heading } } : {}),
         ...(vu ? { valid_until: vu } : {}),
         _system: { _kind: "section", _doc_id: p.doc_id, _doc_title: untitled(p.doc_id), _section: c.index },
       })),
+      // R11.5: a section starts at the position of the person who put it on record
       home: p.home,
       written_by: p.written_by,
-      // the entry's grade floors its sections; a home held through a grader outage isn't a grade, or a section could never come down from it
-      floor: docPlaced.ungraded ? (p.floor ?? p.home) : docHome,
-      // a regrade takes what its writer read, and the document as it then stands
+      // R11.13: an agent cannot write lower than what it read (the person's own notes don't count)
+      floor: p.floor ?? p.home,
       regrade_floor: p.floor,
       written_at: p.written_at,
     });
   }
-  // now the title has a home: the entry goes there (no lower than its most restricted section), and each section shows what it may
-  const titleHome = await settleDocument(p.doc_id, { title: p.title, base: docHome });
+  // R11.13: the title takes the strictest home among its sections; its own floor is what its writer read
+  const base = p.floor ?? p.home;
+  const titleHome = (await settleDocument(p.doc_id, { title: p.title, base })) ?? base;
+  const description = p.description ?? `${p.title}, put on record by ${p.record?.recorded_by ?? "a person"}`;
   await upsertEntities({
     entities: [
       {
-        ...docEntry,
+        name: p.title,
+        facets: { identity: `${p.title}: ${description}` },
+        properties: { description, sections: chunks.length, characters: text.length, on_record: true, ...(p.file ? { file: p.file } : {}) },
+        ...(vu ? { valid_until: vu } : {}),
         _system: {
           _kind: "document",
           _doc_id: p.doc_id,
           _doc_status: "ingesting",
-          _doc_base: docHome,
+          _doc_base: base,
           // the on-record marker (model/schema.js): who put it on record, under which position, why
           ...(p.record ? { _recorded_by: p.record.recorded_by, _recorded_at: p.record.recorded_at, _record_position: p.record.position, _record_reason: p.record.reason } : {}),
         },
@@ -139,26 +134,23 @@ async function ingestDocument(p) {
     written_by: p.written_by,
     floor: p.floor,
     written_at: p.written_at,
-    decided: [titleHome === docHome ? docPlaced : { ...docPlaced, home: titleHome, note: `${docPlaced.note}; raised to ${homeName(positionMap, titleHome)} with its most restricted section` }],
+    // not checked on its own: it goes where its most restricted section is (R11.13)
+    decided: [{ home: titleHome, note: `with its most restricted section (${homeName(positionMap, titleHome)})`, graded: true }],
   });
   const doc = (await keyOf(p.title, "document"))[0];
   if (!doc) throw new Error("the document entry wasn't written");
   // a boolean can't ride in _system (strings and numbers only): set the marker itself here
-  if (p.record) await adbCommand(`UPDATE ${String(doc.rid)} SET _on_record = true`);
-  const sections = await adbQuery(`SELECT @rid AS rid, _home, _section, _doc_title FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d ORDER BY _section`, { d: p.doc_id });
+  await adbCommand(`UPDATE ${String(doc.rid)} SET _on_record = true`);
+  const sections = await adbQuery(`SELECT @rid AS rid, _home, _section FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d ORDER BY _section`, { d: p.doc_id });
   for (const [i, s] of sections.entries()) {
     await edgeOnce("PART_OF", String(s.rid), String(doc.rid));
     if (sections[i + 1]) await edgeOnce("NEXT", String(s.rid), String(sections[i + 1].rid));
   }
-  // a manual re-ingested under its title: sections past the new end, and the old text, go (a record's name is its own)
-  if (before?._doc_id && before._doc_id !== p.doc_id) {
-    await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :old`, "sql", { old: before._doc_id }).catch(() => {});
-    await docStore.remove(before._doc_id).catch(() => {});
-    chunkCache.delete(before._doc_id);
-  }
+  // a section's check can have finished after the first settling (a recheck): settle once more
+  await settleDocument(p.doc_id);
   await adbCommand(`UPDATE ${String(doc.rid)} SET _doc_status = 'ready'`);
-  log.info(`document "${p.title}" (${p.doc_id}): ${sections.length} sections${p.record ? `, on record by ${p.record.recorded_by}` : ""}`);
-  return { doc_id: p.doc_id, sections: sections.length, ...(p.record ? { on_record: true } : {}) };
+  log.info(`record "${p.title}" (${p.doc_id}): ${sections.length} sections, on record by ${p.record?.recorded_by ?? p.written_by ?? "?"}${p.file ? ` from the file ${p.file}` : ""}`);
+  return { doc_id: p.doc_id, sections: sections.length, on_record: true };
 }
 
 /**
@@ -199,118 +191,152 @@ export function startIngest(p) {
   ingestQueue = ingestQueue
     .then(() => ingestDocument(p))
     .catch(async (e) => {
-      log.warn(`document "${p.title}" (${p.doc_id}) failed: ${String(e).slice(0, 600)}`);
+      log.warn(`record "${p.title}" (${p.doc_id}) failed: ${String(e).slice(0, 600)}`);
       await adbCommand(`UPDATE ${ENTITY_LABEL} SET _doc_status = 'failed' WHERE _kind = 'document' AND _doc_id = :d`, "sql", { d: p.doc_id }).catch(() => {});
     });
   return ingestQueue;
 }
 
 /**
- * A condensed document put on record: the contract's document shape (model/record.js), validated here before
- * anything is stored. The tool call's title and description fill what the document left out; the recording
- * person, position and time are the server's. Stored and ingested like a manual (after approval for queued
- * writers), with the on-record marker. Also reachable through ingest_document with the document as JSON in `text`.
+ * Where a record by this identity starts (R11.5): the position the person chose when they put the thread on
+ * record, when it is one they hold; else their own position (the identity's default write home).
+ *
+ * NEEDS A RULING (record 9): the tool's `home` argument is gone, so an agent can't start a record anywhere
+ * else; a person moves a section afterwards with set_home, as before.
+ * NEEDS A RULING (record 12): with no position chosen at the switch (a person's own token, or a thread pushed
+ * without one), the record starts at the identity's default write home, its deepest held position.
  */
-export async function recordDocument(raw, identity, scope, { title, description, home: requestedHome, valid_until } = {}) {
-  if (!docStore) throw new Error("no document store is configured (DOC_STORE)");
-  const home = resolveWriteHome(scope, requestedHome);
-  let now = Date.now();
-  // who recorded it, under which position and when are the server's: an agent's record counts as the person it
-  // acts for, at the position its token holds, now, whatever the document says.
-  // Only in open mode (no identities, standalone development) does the condenser's word stand.
+export function recordHome(identity, scope) {
+  const chosen = threadPosition(identity);
+  if (chosen && Array.isArray(scope.held) && scope.held.includes(chosen)) return chosen;
+  return resolveWriteHome(scope, undefined);
+}
+
+/** who recorded it and under which position: the server's, from the token (an agent's record is its person's); open mode takes the document's word */
+function recorderOf(identity, home) {
   const person = identity.open ? null : personOf(identity.user);
-  const position = identity.positions?.includes(home) ? home : (identity.positions?.[0] ?? home ?? "unscoped");
-  const prepare = (at) => prepareRecord(raw, { title, description, recorded_by: person ?? undefined, position, now: at, stamp: person ? { recorded_by: person, position, recorded_at: new Date(at).toISOString() } : undefined });
-  let document = prepare(now);
-  // a re-send is the same document: finished once it is not ingested again, and a failed run continues from its
-  // first recording
-  const doc_id = recordId(raw, { person: document.recorded_by, home, title: document.title });
-  const existing = (await adbQuery(`SELECT name, _doc_status, _recorded_at, sections FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: doc_id }))[0];
+  return { person, position: home ?? "unscoped" };
+}
+
+/**
+ * Store a prepared record and start (or queue) its ingest. Shared by condensed documents and files. A re-send
+ * is the same record (`doc_id` derives from what it says): finished once it is not ingested again.
+ */
+async function putOnRecord({ doc_id, title, description, text, spans, document, file }, identity, home, valid_until) {
+  const existing = (await adbQuery(`SELECT name, _doc_status, sections FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: doc_id }))[0];
   if (existing?._doc_status === "ready") {
-    return { already_on_record: true, doc_id, title: existing.name, sections: Number(existing.sections) || document.sections.length, note: "this document is already on record; nothing was added" };
+    return { already_on_record: true, doc_id, title: existing.name, sections: Number(existing.sections) || spans.length, note: "this is already on record; nothing was added" };
   }
-  if (existing?._recorded_at) {
-    now = Date.parse(existing._recorded_at) || now;
-    document = prepare(now);
-  }
-  const { text, spans } = renderRecord(document);
-  if (text.length > MAX_CHARS) throw new Error(`documents are limited to ${MAX_CHARS} characters`);
-  if (spans.length > MAX_SECTIONS) throw new Error(`documents are limited to ${MAX_SECTIONS} sections (this one has ${spans.length})`);
+  if (text.length > MAX_CHARS) throw new Error(`a record is limited to ${MAX_CHARS} characters`);
+  if (spans.length > MAX_SECTIONS) throw new Error(`a record is limited to ${MAX_SECTIONS} sections (this one has ${spans.length})`);
+  const now = Date.parse(document.recorded_at) || Date.now();
   const v = parseValidUntil(valid_until, now);
-  // the write-or-propose decision: queuing and the derived floor (write.js decideWrite)
+  // the write-or-propose decision: the identity's queuing and the derived floor (write.js decideWrite)
+  // NEEDS A RULING (record 5): a queued writer's record still waits for approval before it is checked and filed
   const decision = decideWrite(identity, { kind: "ingest" }, { origin: home });
   const queued = decision.action !== "direct";
-  // the name it goes under (checked again when the ingest runs: an earlier record keeps its title)
-  const recordName = await recordTitle(document.title, doc_id, home, spans);
+  const recordName = await recordTitle(title, doc_id, home, spans);
   const payload = {
     doc_id,
     title: recordName,
-    description: (document.description ?? `${document.title}, put on record by ${document.recorded_by}`).slice(0, 500),
+    description: String(description ?? `${title}, put on record by ${document.recorded_by}`).slice(0, 500),
     home,
     floor: derivedFloor(identity, home),
     written_at: document.recorded_at,
     ...(v ? { valid_until: v.valid_until ?? "lasting" } : {}),
     chars: text.length,
     sections: spans.length,
+    ...(file ? { file } : {}),
     // the record itself: who, under which position, why (the approval runs this payload)
     record: { recorded_by: document.recorded_by, recorded_at: document.recorded_at, position: document.position, reason: document.reason },
     ...writerOf(identity),
   };
-  await docStore.put(doc_id, text, { title: payload.title, by: identity.user, at: payload.written_at, on_record: true, sections: spans });
+  await docStore.put(doc_id, text, { title: payload.title, by: identity.user, at: payload.written_at, on_record: true, sections: spans, ...(file ? { file } : {}) });
+  const said = { doc_id, title: recordName, on_record: true, sections: spans.length, position: homeName(positionMap, home) };
   if (queued) {
     // a re-send while the first waits for approval is that same proposal
     const waiting = (await adbQuery("SELECT id FROM PendingWrite WHERE kind = 'ingest' AND status = 'pending' AND payload LIKE :p LIMIT 1", { p: `%"doc_id":"${doc_id}"%` }))[0];
     const q = waiting ? { queued: true, pendingId: waiting.id } : await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home: decision.home ?? home });
-    return {
-      ...q,
-      doc_id,
-      title: recordName,
-      on_record: true,
-      sections: spans.length,
-      ...(decision.reason ? { reason: decision.reason } : {}),
-      note: "the record is stored; it's added to the knowledge graph once the ingest is approved",
-    };
+    return { ...q, ...said, ...(decision.reason ? { reason: decision.reason } : {}), note: "the record is stored; it's checked and filed once the ingest is approved" };
   }
   void startIngest(payload);
-  return { ingesting: true, doc_id, title: recordName, on_record: true, sections: spans.length, note: "sections are being graded and embedded; search finds them in a minute or two" };
+  return { ingesting: true, ...said, note: "each section is being checked and embedded, then a worker files it; search finds it in a minute or two" };
 }
 
-/** an ingest from a tool call: stored now; ingested now, or after approval for queued writers */
-export async function requestIngest({ title, description, text, home: requestedHome, valid_until }, identity, scope) {
+/**
+ * A condensed document put on record: the contract's shape (model/record.js), validated before anything is
+ * stored. The tool call's title and description fill what the document left out; the recording person,
+ * position and time are the server's. Also reachable through ingest_document with the document as JSON.
+ */
+export async function recordDocument(raw, identity, scope, { title, description, valid_until } = {}) {
   if (!docStore) throw new Error("no document store is configured (DOC_STORE)");
-  // a condensed document rides in text as JSON: the record path, not the chunker
-  const record = parseRecordText(text);
-  if (record) return recordDocument(record, identity, scope, { title, description, home: requestedHome, valid_until });
-  const body = String(text ?? "");
-  if (body.trim().length < 20) throw new Error("the document text is empty");
-  if (body.length > MAX_CHARS) throw new Error(`documents are limited to ${MAX_CHARS} characters`);
+  const home = recordHome(identity, scope);
+  const { person, position } = recorderOf(identity, home);
+  const at = new Date().toISOString();
+  const prepare = (when) => prepareRecord(raw, { title, description, recorded_by: person ?? undefined, position, now: Date.parse(when), stamp: person ? { recorded_by: person, position, recorded_at: when } : undefined });
+  let document = prepare(at);
+  const doc_id = recordId(raw, { person: document.recorded_by, home, title: document.title });
+  // a failed run continues from its first recording
+  const first = (await adbQuery(`SELECT _recorded_at FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: doc_id }))[0]?._recorded_at;
+  if (first) document = prepare(first);
+  const { text, spans } = renderRecord(document);
+  return putOnRecord({ doc_id, title: document.title, description: document.description, text, spans, document }, identity, home, valid_until);
+}
+
+/** the reason a file is on record when the person gave none */
+const fileReason = (file) => `the file ${file} was uploaded on record`;
+
+/**
+ * A file uploaded on record (R11.12: a file uploaded on record is a record and gets a worker): its text is the
+ * record, stored as it is and chunked into sections. Nothing condenses it. Title: the one given, else the file
+ * name. The same file sent again by the same person is the same record.
+ * NEEDS A RULING (record 13): "the same" is the same person, home, title and text.
+ *
+ * NEEDS A RULING (record 4): only text is taken (a PDF or an office file must be turned into text first), and a
+ * file is not condensed.
+ */
+export async function recordFile({ file, text, title, description, reason, valid_until }, identity, scope) {
+  if (!docStore) throw new Error("no document store is configured (DOC_STORE)");
+  const name = String(file ?? "").trim().replace(/^.*[\\/]/, "").slice(0, 200);
+  const body = String(text ?? "").replace(/\r\n?/g, "\n");
+  if (body.trim().length < 20) throw new Error("the file's text is empty (only text files can be put on record)");
+  if (body.includes("\u0000")) throw new Error("this file isn't text: only text files can be put on record");
+  if (body.length > MAX_CHARS) throw new Error(`a record is limited to ${MAX_CHARS} characters`);
   const chunks = chunk(body);
-  if (chunks.length > MAX_SECTIONS) throw new Error(`documents are limited to ${MAX_SECTIONS} sections (this one has ${chunks.length})`);
-  const home = resolveWriteHome(scope, requestedHome);
-  const now = Date.now();
-  const v = parseValidUntil(valid_until, now);
-  const doc_id = randomUUID();
-  // the one write-or-propose rule (write.js decideWrite): the identity's queuing and the derived floor
-  const decision = decideWrite(identity, { kind: "ingest" }, { origin: home });
-  const payload = {
-    doc_id,
-    title: String(title).trim().slice(0, 200),
-    description: String(description).trim().slice(0, 500),
-    home,
-    floor: decision.floor ?? derivedFloor(identity, home),
-    written_at: new Date(now).toISOString(),
-    ...(v ? { valid_until: v.valid_until ?? "lasting" } : {}),
-    chars: body.length,
-    sections: chunks.length,
-    ...writerOf(identity),
-  };
-  await docStore.put(doc_id, body, { title: payload.title, by: identity.user, at: payload.written_at });
-  if (decision.action !== "direct") {
-    const q = await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home: decision.home ?? home });
-    return { ...q, doc_id, sections: chunks.length, note: "the document is stored; it's added to the knowledge graph once the ingest is approved" };
-  }
-  void startIngest(payload);
-  return { ingesting: true, doc_id, sections: chunks.length, note: "sections are being graded and embedded; search finds them in a minute or two" };
+  if (chunks.length === 0) throw new Error("the file's text is empty");
+  if (chunks.length > MAX_SECTIONS) throw new Error(`a record is limited to ${MAX_SECTIONS} sections (this one has ${chunks.length})`);
+  const home = recordHome(identity, scope);
+  const { person, position } = recorderOf(identity, home);
+  const shown = String(title ?? "").trim() || name || "Uploaded file";
+  const hash = createHash("sha256").update(body).digest("hex");
+  const doc_id = stableUuid("file", person ?? identity.user ?? "", home ?? "", shown, hash);
+  const first = (await adbQuery(`SELECT _recorded_at FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: doc_id }))[0]?._recorded_at;
+  // the contract's shape for the record's marker (model/record.js): every section text, recorded by the person
+  const document = normalizeDocument(
+    {
+      title: shown,
+      description: description ?? null,
+      recorded_by: person ?? identity.user ?? "unknown",
+      position,
+      reason: String(reason ?? "").trim() || fileReason(name || shown),
+      recorded_at: first ?? new Date().toISOString(),
+      sections: chunks.map((c) => ({ heading: c.heading || null, text: c.text })),
+    },
+    {},
+  );
+  const spans = chunks.map((c) => ({ index: c.index, heading: c.heading ?? "", start: c.start, end: c.end }));
+  return putOnRecord({ doc_id, title: shown, description: document.description, text: body, spans, document, file: name || undefined }, identity, home, valid_until);
+}
+
+/**
+ * ingest_document: everything a person or their agent ingests is a record (R2, R11.12). A condensed document
+ * rides in `text` as JSON; any other text is a file's, stored as it is and chunked.
+ */
+export async function requestIngest({ title, description, text, valid_until, file, reason }, identity, scope) {
+  if (!docStore) throw new Error("no document store is configured (DOC_STORE)");
+  const record = parseRecordText(text);
+  if (record) return recordDocument(record, identity, scope, { title, description, valid_until });
+  return recordFile({ file, text, title, description, reason, valid_until }, identity, scope);
 }
 
 /** read a document's sections the caller can see (text from the document store) */

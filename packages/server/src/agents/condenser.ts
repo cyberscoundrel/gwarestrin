@@ -78,7 +78,7 @@ export function recordContext(state: ThreadRecordState): string {
   if (state.on) {
     out.push(
       "",
-      `This conversation is ON RECORD since ${when(state.since)}: ${record}. What is said here from that moment on is meant for the organization's knowledge graph: condense each section of it into a document with the context a reader needs (see "On record" in your workspace instructions), at a natural boundary or when the person asks. Use these values in the document: recorded_by "${state.by ?? ""}"${state.position ? `, position "${state.position}"` : ""}, reason as above unless the person gives a better one.`,
+      `This conversation is ON RECORD since ${when(state.since)}: ${record}. What is said here from that moment on is meant for the organization's knowledge graph: condense each section of it into a document with the context a reader needs (see "On record" in your workspace instructions), at a natural boundary or when the person asks. Use the reason above unless the person gives a better one; who recorded it and under which position are stamped by the graph. A file the person uploads while it is on record is put on record as it is.`,
     );
   } else {
     out.push(
@@ -127,4 +127,14 @@ export function condensedFromEvent(event: Record<string, unknown> & { type: stri
     }
   }
   return null;
+}
+
+/**
+ * What graph-rag is told about an agent's current thread (record-gate.ts pushThreadRecord): whether it is on
+ * record and, while it is, the position the person put it on record under, where its sections start (R11.5).
+ * NEEDS A RULING (record 15): which of a person's positions that is when they hold several. Today it is the agent
+ * profile's first-listed position (http/agents.ts), and the person can't choose another at the switch.
+ */
+export function gatePushOf(agent: string, state: ThreadRecordState): { agent: string; thread: string | null; on: boolean; position?: string } {
+  return { agent, thread: state.thread, on: state.on, ...(state.on && state.position ? { position: state.position } : {}) };
 }

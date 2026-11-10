@@ -203,6 +203,8 @@ export async function registerAgentRoutes(app: FastifyInstance, config: ServerCo
     const header = req.headers["x-authentik-username"];
     const by = (Array.isArray(header) ? header[0] : header) ?? getInstanceMetadata()?.owner?.displayName ?? "the person";
     const profile = manager.profiles.resolve(record.profileId);
+    // NEEDS A RULING (record 15): R11.5 says a record starts at the position of the person who put it on record, not
+    // which one when they hold several; the profile's first-listed position is used, and the person can't choose another.
     try {
       return { record: await manager.setOnRecord(id, { ...input, by, position: profile.positions?.[0] ?? null }) };
     } catch (err) {

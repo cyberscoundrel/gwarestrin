@@ -100,23 +100,23 @@ await scenario("a graded note lands at its writer's position", async () => {
   check(!e._ungraded, "not awaiting grading");
 });
 
-await scenario("the grader out: held one level up, no proposal, graded on its own when it's back", async () => {
-  await models("/__fail", { model: "grader", status: 402 });
+await scenario("the check out: admin-only, no proposal, checked on its own when it's back", async () => {
+  await models("/__fail", { model: "decisions", status: 402 });
   await save("bob", "e2e-a2 belt", "Maintenance replaced the compressor belt.");
   const e = await entry("e2e-a2 belt");
-  check(e?._home === POS.ops, `held one level up (ops), got ${e?._home}`);
-  check(e._ungraded, "marked awaiting grading");
+  check(e?._home === POS.org, `admin-only until checked (org), got ${e?._home}`);
+  check(e._ungraded, "marked awaiting its check");
   const queue = (await api("/api/queue")).pending ?? [];
   check(!queue.some((p) => String(p.payload).includes("e2e-a2")), "no move-back proposal for a person");
   const st = await api("/api/worker");
-  check(st.dependencies?.["model:grader"]?.ok === false, `grader shown out: ${JSON.stringify(st.dependencies)}`);
+  check(st.dependencies?.decisions?.ok === false, `the check shown out: ${JSON.stringify(st.dependencies)}`);
   check(st.awaiting_grading >= 1, "counted as awaiting grading");
-  await models("/__ok", { model: "grader" });
-  const back = await until("regraded", async () => {
+  await models("/__ok", { model: "decisions" });
+  const back = await until("rechecked", async () => {
     const x = await entry("e2e-a2 belt");
     return x && !x._ungraded && x._home === POS.floor ? x : false;
   });
-  check(/graded/.test(back._grade), `grade note: ${back._grade}`);
+  check(/checked/.test(back._grade), `grade note: ${back._grade}`);
 });
 
 await scenario("the sweep embeds rows whose text the old inline SQL couldn't parse", async () => {

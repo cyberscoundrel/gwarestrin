@@ -18,7 +18,7 @@ import { OpenShellAgentLauncher } from "../runtime/openshell-agent.js";
 import { OpenShellProviders, OpenShellRuntime, connectOpenShell } from "../runtime/openshell.js";
 import { openShellIdentity } from "../runtime/openshell-identity.js";
 import { lastReply, lastTurn } from "./last-reply.js";
-import { condensedFromEvent, RECORD_FILE, recordContext, switchRecord, threadIdOf, writeRecordContext } from "./condenser.js";
+import { condensedFromEvent, gatePushOf, RECORD_FILE, recordContext, switchRecord, threadIdOf, writeRecordContext } from "./condenser.js";
 import { pushThreadRecord } from "./record-gate.js";
 import { AgentStore } from "./store.js";
 import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.js";
@@ -274,7 +274,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   /** tell graph-rag this agent's current thread and whether it is on record; throws when it can't be told */
   private async pushRecordGate(id: string, state: ThreadRecordState): Promise<void> {
     const { url, token } = this.instanceGraph();
-    if (url) await pushThreadRecord(url, token, { agent: id, thread: state.thread, on: state.on });
+    if (url) await pushThreadRecord(url, token, gatePushOf(id, state)); // with the position it is on record under (R11.5)
   }
 
   /**
