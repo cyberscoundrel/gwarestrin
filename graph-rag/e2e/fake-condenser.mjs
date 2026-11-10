@@ -60,8 +60,8 @@ export const THREADS = {
         },
         {
           heading: "Aetrium pricing",
-          // the harness's grader restricts [admins] to the top
-          text: "We should stop quoting Aetrium below cost; Karl thinks we lose money on every bearing job. [admins]",
+          // the harness's decision model reads these tags: pricing and margins, sure, and only the top (from Operations, P2) may see it
+          text: "We should stop quoting Aetrium below cost; Karl thinks we lose money on every bearing job. [category: c5] [visible_from: P2]",
         },
         {
           heading: "Shop hours on Friday",

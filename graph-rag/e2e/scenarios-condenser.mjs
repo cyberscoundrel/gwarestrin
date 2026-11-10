@@ -1,8 +1,8 @@
 // The Condenser stream's acceptance scenarios for the replay harness (see
 // run.mjs for the style; the harness's loader runs them): an off-record
 // thread writes nothing; an on-record section becomes one document of three
-// sections at three sensitivities, each seen by the right people; a manual
-// ingests exactly as before. A record is text sections, no claims (R2). The condenser is the fake in
+// sections at three sensitivities, each seen by the right people; a long text
+// sent through ingest_document is a record too. A record is text sections, no claims (R2). The condenser is the fake in
 // fake-condenser.mjs (a canned document per thread), sent the way a chat
 // agent sends it: ingest_document with the document as JSON in text.
 //
@@ -138,6 +138,7 @@ export const scenarios = [
         set_home: { entities: [{ name: "e2e-cond " + M + " note" }], to: POS.org },
         ingest_document: { title: "e2e-cond " + M + " doc", description: "pasted", text: injected.repeat(3) },
         record_document: { document: { title: "e2e-cond " + M + " record", reason: "injected", sections: [{ heading: "x", text: injected }] } },
+        record_file: { file: "e2e-cond-" + M + ".txt", text: injected.repeat(2) },
         grant_access: { entities: [{ name: "e2e-cond " + M + " note" }], to: POS.floor, reason: "injected" },
         revoke_grant: { id: "e2e-no-such-grant" },
         request_access: { question: M + " what is our Q4 margin on the Exatron account" },
@@ -177,7 +178,7 @@ export const scenarios = [
       }
       const self = await putThreadRecord(ctx, token, { agent, thread: "t-self", on: true });
       check(self.status === 403, "the agent cannot switch its own thread on: " + self.status);
-      for (const name of ["upsert_entities", "record_document"]) await refusedAt(name);
+      for (const name of ["upsert_entities", "record_document", "record_file"]) await refusedAt(name);
       check((await written()) === 0, "still nothing after trying");
       const found = (await ctx.tool("admin", "search_graph", { query: M + " gauge drifted" })).results ?? [];
       check(!found.some((r) => JSON.stringify(r).includes(M)), "nothing of the off-record thread is findable: " + JSON.stringify(found).slice(0, 200));
@@ -202,7 +203,7 @@ export const scenarios = [
     },
   },
   {
-    name: "condenser: a document's title is seen no lower than its most restricted section, through every read, a slow grader, a move and a regrade",
+    name: "condenser: a document's title is seen no lower than its most restricted section, through every read, a slow check, a move and a recheck",
     async run(ctx) {
       const { tool, sql, check, until, POS } = ctx;
       const secret = "Vexley Ronan dismissal";
@@ -219,9 +220,9 @@ export const scenarios = [
       const fake = (path, body) => fetch(models + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) });
       const bob = await onRecordAgent(ctx, [POS.floor]);
 
-      // one section, raised: the entry goes with it; and while the grader is still working the title is nowhere below it
-      await fake("/__slow", { model: "grader", match: "[admins] slowtitle", ms: 2500 });
-      const single = await tool(bob, "record_document", { document: { title: secret + " notes", reason: "r", sections: [{ heading: "Case", text: "[admins] slowtitle Vexley Ronan is being let go; keep this among the admins." }] } });
+      // one section, raised: the entry goes with it; and while the check is still working the title is nowhere below it
+      await fake("/__slow", { model: "decisions", match: "slowtitle", ms: 2500 });
+      const single = await tool(bob, "record_document", { document: { title: secret + " notes", reason: "r", sections: [{ heading: "Case", text: "[category: c2] [visible_from: P3] slowtitle Vexley Ronan is being let go; keep this among the admins." }] } });
       check(single.doc_id, "recorded: " + JSON.stringify(single).slice(0, 200));
       for (let i = 0; i < 6; i++) {
         const mid = await tool("bob", "search_graph", { query: secret + " notes", k: 16 });
@@ -237,7 +238,7 @@ export const scenarios = [
 
       // a writer reading their own raised document learns nothing new: it doesn't hold their next note up there
       if ((await ctx.api("/api/policy")).policy?.derivedWindowHours > 0) {
-        const own = await tool("carol", "record_document", { document: { title: "e2e-cond carol own " + secret, reason: "r", sections: [{ heading: "Case", text: "[admins] Vexley Ronan is being let go; carol's own note." }] } });
+        const own = await tool("carol", "record_document", { document: { title: "e2e-cond carol own " + secret, reason: "r", sections: [{ heading: "Case", text: "[category: c2] [visible_from: P2] Vexley Ronan is being let go; carol's own note." }] } });
         await ready(own.doc_id);
         check((await entry(own.doc_id))._home === POS.org, "her document's entry is raised with its section");
         const hits = (await tool("carol", "search_graph", { query: "e2e-cond carol own " + secret, k: 16 })).results ?? [];
@@ -251,7 +252,7 @@ export const scenarios = [
       const mixedTitle = secret + " and the Thursday rota";
       const mixed = await tool(bob, "record_document", { document: { title: mixedTitle, description: "About " + secret, reason: "r", sections: [
         { heading: mixedTitle + ": Rota", text: "Lathe 4 is on first shift on Thursday this week." },
-        { heading: "Case", text: "[admins] Vexley Ronan is being let go; keep this among the admins." },
+        { heading: "Case", text: "[category: c2] [visible_from: P3] Vexley Ronan is being let go; keep this among the admins." },
       ] } });
       await ready(mixed.doc_id);
       check((await entry(mixed.doc_id))._home === POS.org, "the entry is homed with its most restricted section");
@@ -286,16 +287,16 @@ export const scenarios = [
       check(approved.ok, "approved: " + approved.status + " " + (await approved.text()).slice(0, 200));
       check((await entry(moved.doc_id))._home === POS.floor, "the entry came back with it");
 
-      // a grader outage holds a section high; regraded down, the title comes down with it and no higher name is left at the floor
-      await fake("/__fail", { model: "grader", status: 500 });
+      // no answer from the check holds a section admin-only; rechecked down, the title comes down with it and no higher name is left at the floor
+      await fake("/__fail", { model: "decisions", status: 500 });
       const held = await tool(bob, "record_document", { document: { title: "e2e-cond held " + secret, reason: "r", sections: [{ heading: "Note", text: "Lathe 3 has had its belts replaced this week." }] } });
       await ready(held.doc_id);
       const whileHeld = await entry(held.doc_id);
-      check(whileHeld._home !== POS.floor, "held above the writer while the grader is out: " + JSON.stringify(whileHeld));
+      check(whileHeld._home === POS.org, "admin-only while the check gives no answer: " + JSON.stringify(whileHeld));
       check(!JSON.stringify((await tool("bob", "search_graph", { query: "e2e-cond held " + secret, k: 16 })).results ?? []).includes("e2e-cond held"), "the title isn't at the floor while the section is held");
-      await fake("/__ok", { model: "grader" });
-      await until("regraded", async () => (await entry(held.doc_id))._home === POS.floor && (await sections(held.doc_id))[0]._home === POS.floor, 150000);
-      check(titleSeen((await sections(held.doc_id))[0]), "regraded down, the section and entry have their title back at the floor");
+      await fake("/__ok", { model: "decisions" });
+      await until("rechecked", async () => (await entry(held.doc_id))._home === POS.floor && (await sections(held.doc_id))[0]._home === POS.floor, 300000);
+      check(titleSeen((await sections(held.doc_id))[0]), "rechecked down, the section and entry have their title back at the floor");
     },
   },
   {
@@ -323,12 +324,12 @@ export const scenarios = [
       check(sections.length === 3, `three sections stored: ${sections.length}`);
       const parts = await sql(`SELECT count(*) AS n FROM PART_OF WHERE @in = ${entry.rid}`);
       check(Number(parts[0]?.n) === 3, `each section PART_OF the document: ${JSON.stringify(parts)}`);
-      // sensitivities: every section goes to the grader, which keeps the Toro section at the recorder's position
+      // sensitivities: every section is checked once, which keeps the Toro section at the recorder's position
       // and raises the pricing section to the top; nothing sits below where the recorder writes
       check(sections[0]._home === POS.ops, `the Toro section is at Operations: ${sections[0]._home}`);
-      check(sections[1]._home === POS.org, `the pricing section is graded to the top: ${sections[1]._home}`);
+      check(sections[1]._home === POS.org, `the pricing section is restricted to the top: ${sections[1]._home}`);
       const grades = await sql(`SELECT _section, _grade FROM Entity WHERE _kind = 'section' AND _doc_id = '${sent.doc_id}' ORDER BY _section`);
-      check(/graded/.test(grades[0]._grade ?? "") && /graded|admins/.test(grades[1]._grade ?? ""), `how each was placed: ${JSON.stringify(grades)}`);
+      check(/checked/.test(grades[0]._grade ?? "") && /restricted by the check/.test(grades[1]._grade ?? ""), `how each was placed: ${JSON.stringify(grades)}`);
       // ...and the shop-hours section released to everyone, which a person approves (the standing instructions' set_home step)
       const moved = await tool(opsAgent, "set_home", { entities: [{ name: sections[2].name }], to: "Everyone" });
       const pid = moved.results?.[0]?.pendingId ?? moved.results?.[0]?.id;
@@ -352,18 +353,18 @@ export const scenarios = [
   },
 
   {
-    name: "condenser: a manual ingests exactly as before",
+    name: "condenser: a long text sent through ingest_document is a record too, stored as it is in sections (R11.12)",
     async run(ctx) {
       const { tool, sql, until, check, POS } = ctx;
       const para = (w) => Array.from({ length: 12 }, (_, i) => `${w} step ${i + 1}: check the ${w} every 500 hours and log the reading.`).join(" ");
       const text = `# e2e-cond Mill 1 manual\n\n## Lubrication\n\n${para("spindle")}\n\n## Coolant\n\n${para("coolant")}\n\n## Safety\n\n${para("guard")}\n`;
       const r = await tool("alice", "ingest_document", { title: "e2e-cond Mill 1 manual", description: "The Mill 1 manual.", text });
-      check(r.doc_id && r.ingesting === true && r.on_record === undefined, `a manual ingests as before: ${JSON.stringify(r).slice(0, 200)}`);
-      const entry = await until("the manual is ready", async () => {
-        const d = (await sql(`SELECT @rid AS rid, _home, _doc_status, _on_record, sections FROM Entity WHERE _kind = 'document' AND _doc_id = '${r.doc_id}'`))[0];
+      check(r.doc_id && r.ingesting === true && r.on_record === true, `a text ingests as a record: ${JSON.stringify(r).slice(0, 200)}`);
+      const entry = await until("the record is ready", async () => {
+        const d = (await sql(`SELECT @rid AS rid, _home, _doc_status, _on_record, _recorded_by, _record_position, sections FROM Entity WHERE _kind = 'document' AND _doc_id = '${r.doc_id}'`))[0];
         return d?._doc_status === "ready" ? d : false;
       });
-      check(entry._on_record !== true, "no on-record marker on a manual");
+      check(entry._on_record === true && entry._recorded_by === "alice" && entry._record_position === POS.ops, `on record by alice at Operations: ${JSON.stringify(entry)}`);
       // written from the writer's position; the derived floor may hold it higher when alice read above it
       // earlier in the run (reading an entry released to everyone lifts it to the root), as for any write
       const origin = (await sql(`SELECT _origin FROM Entity WHERE _kind = 'document' AND _doc_id = '${r.doc_id}'`))[0]?._origin;
