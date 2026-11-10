@@ -12,8 +12,9 @@
 // Two roles for the organization's graph worker agents (payload.r), honoured
 // only when the tenant is the organization's root with direct writes (its
 // admin); anyone else's claim is ignored and the token is an ordinary agent's:
-//   worker   one queue entry's thread (j: job id, e: the entry's rid). Sees the
-//            whole graph and may run read-only raw queries; it writes
+//   worker   one queue entry's thread (j: job id, e: the entry's rid). Reads
+//            only its entry's audience (server.js readScope; R11), so it is
+//            never offered query_graph, which no home filter covers; it writes
 //            directly, and proposes (then waits) what it judges a large
 //            change. Raw writes and widening who sees something are always
 //            proposals.

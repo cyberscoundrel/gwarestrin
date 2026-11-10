@@ -175,7 +175,7 @@ await scenario("a worker writes no entry text, wherever grading put the entry", 
   check((await entry("e2e-l1 bonus note"))?._home === POS.org, "the entry is still at the top");
 });
 
-await scenario("a worker (or a master's task) searches and reads instances as its entries' audience sees them; beyond: true shows more", async () => {
+await scenario("a worker (or a master's task) searches and reads instances as its entries' audience sees them, and beyond: true shows nothing more", async () => {
   await save("alice", "e2e-s1 zephyrine budget", "The zephyrine fixture budget is 9,000. [admins]");
   check((await entry("e2e-s1 zephyrine budget"))?._home === POS.org, "the budget note is at the top");
   await save("bob", "e2e-s2 zephyrine fixture", "The zephyrine fixture is on the bench.");
@@ -192,10 +192,11 @@ await scenario("a worker (or a master's task) searches and reads instances as it
   const said = (r) => (r.things ?? []).flatMap((t) => (t.statements ?? []).map((x) => x.name));
   const about = await tool(w, "about_thing", { name: "zephyrine fixture" });
   check(said(about).includes("e2e-s2 zephyrine fixture") && !said(about).includes("e2e-s1 zephyrine budget"), `about_thing shows the floor's view: ${JSON.stringify(about).slice(0, 300)}`);
+  // R11: each worker sees only its audience; the old way past it reads nothing more
   const aboutAll = await tool(w, "about_thing", { name: "zephyrine fixture", beyond: true });
-  check(said(aboutAll).includes("e2e-s1 zephyrine budget"), `beyond shows the top's: ${JSON.stringify(aboutAll).slice(0, 300)}`);
+  check(!said(aboutAll).includes("e2e-s1 zephyrine budget"), `beyond shows nothing more: ${JSON.stringify(aboutAll).slice(0, 300)}`);
   const all = await tool(w, "search_graph", { query: "zephyrine fixture budget", beyond: true });
-  check(names(all).includes("e2e-s1 zephyrine budget"), `found with beyond: ${names(all).join(", ")}`);
+  check(!names(all).includes("e2e-s1 zephyrine budget"), `not found with beyond either: ${names(all).join(", ")}`);
   // a master's task (a record at the top) about the floor's entry: its worker sees what the floor sees
   await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = 'e2e-s3 zephyrine task', _kind = 'task', _home = '${POS.org}', _origin = '${POS.org}'` });
   const task = (await sql("SELECT @rid AS rid FROM Entity WHERE name = 'e2e-s3 zephyrine task' AND _kind = 'task'"))[0];
@@ -206,7 +207,7 @@ await scenario("a worker (or a master's task) searches and reads instances as it
   check(said(taskAbout).includes("e2e-s2 zephyrine fixture") && !said(taskAbout).includes("e2e-s1 zephyrine budget"), `a task's worker sees its entries' view: ${JSON.stringify(taskAbout).slice(0, 300)}`);
 });
 
-await scenario("a worker reads documents as its entry's people do; beyond: true reads more, and a worker writes no entry text", async () => {
+await scenario("a worker reads documents as its entry's people do, beyond: true reads nothing more, and a worker writes no entry text", async () => {
   const doc = await tool("alice", "ingest_document", { title: "e2e-d1 quillon contract", description: "The quillon supply contract.", text: "The quillon supply contract pays 12,000 a year. [admins]" });
   check(doc.doc_id, `ingested: ${JSON.stringify(doc).slice(0, 300)}`);
   await until("the section is placed", async () => (await sql(`SELECT _home FROM Entity WHERE _kind = 'section' AND _doc_id = '${doc.doc_id}'`))[0]?._home === POS.org);
@@ -216,9 +217,64 @@ await scenario("a worker reads documents as its entry's people do; beyond: true 
   const hidden = await tool(w, "read_document", { document: doc.doc_id, section: 1 });
   check(!(hidden.sections ?? []).length, `the floor's view has no section: ${JSON.stringify(hidden).slice(0, 300)}`);
   const all = await tool(w, "read_document", { document: doc.doc_id, section: 1, beyond: true });
-  check((all.sections ?? []).length === 1, `beyond reads the section: ${JSON.stringify(all).slice(0, 300)}`);
+  check(!(all.sections ?? []).length && !JSON.stringify(all).includes("12,000"), `beyond reads nothing more: ${JSON.stringify(all).slice(0, 300)}`);
   const viaUpsert = await tool(w, "upsert_entities", { entities: [{ name: "e2e-d2 quillon bench", facets: { state: "On bench 2; under contract." } }] });
   check(/writes no entries/.test(viaUpsert.error ?? ""), `upsert_entities is refused: ${JSON.stringify(viaUpsert).slice(0, 300)}`);
+});
+
+await scenario("a worker cannot read above its audience by any read tool it is offered, and one whose entry can't be resolved reads nothing", async () => {
+  const listTools = async (who) => {
+    const r = await fetch(`${GRAPH}/mcp`, { method: "POST", headers: { authorization: `Bearer ${who}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: id++, method: "tools/list", params: {} }) });
+    const t = await r.text();
+    const line = t.split("\n").find((l) => l.startsWith("data:"));
+    return (JSON.parse(line ? line.slice(5) : t).result?.tools ?? []).map((x) => x.name);
+  };
+  const secret = "e2e-a1 vellichor payroll";
+  await save("alice", secret, "The vellichor crew's raises are 4 percent from March. [admins]");
+  check((await entry(secret))?._home === POS.org, "the secret is at the top");
+  const doc = await tool("alice", "ingest_document", { title: "e2e-a2 vellichor raises", description: "The vellichor raises.", text: "Vellichor raises: 4 percent from March. [admins]" });
+  check(doc.doc_id, `ingested: ${JSON.stringify(doc).slice(0, 200)}`);
+  await until("the section is placed", async () => (await sql(`SELECT _home FROM Entity WHERE _kind = 'section' AND _doc_id = '${doc.doc_id}'`))[0]?._home === POS.org);
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = 'vellichor crew (instance)', label = 'vellichor crew', _kind = 'thing', _norm = 'vellichor crew', _alias_norms = [], _homes = ['${POS.org}'], _home = '${POS.org}'` });
+  await save("bob", "e2e-a3 vellichor bench", "The vellichor crew is on bench 4 this week.");
+  const floorEntry = await entry("e2e-a3 vellichor bench");
+  check(floorEntry?._home === POS.floor, "the worker's entry is on the floor");
+  const w = workerToken(String(floorEntry.rid));
+  // the secret's content, never a name this scenario passes in (a reply may echo what it was asked)
+  const leaked = (r) => /4 percent/i.test(JSON.stringify(r));
+  // every tool a worker is offered, sorted into reads (checked here) and the rest: a new read tool fails this until it's checked
+  const offered = await listTools(w);
+  const READS = ["search_graph", "about_thing", "read_document", "schema_graph"];
+  // execute_graph: a worker's raw command is always a proposal for an admin (write.js), never run for it
+  const NOT_READS = ["upsert_entities", "set_home", "raise_question", "execute_graph"];
+  const unknown = offered.filter((t) => !READS.includes(t) && !NOT_READS.includes(t));
+  check(!unknown.length, `a worker tool this scenario doesn't sort into reads or not: ${unknown.join(", ")}`);
+  check(!offered.includes("query_graph"), `no raw reads for a worker: ${offered.join(", ")}`);
+  const raw = "SELECT text_identity FROM Entity WHERE text_identity LIKE '%percent%'";
+  const q = await tool(w, "query_graph", { query: raw, language: "sql" });
+  check(!leaked(q) && !(q.rows ?? []).length && q.error, `query_graph refused: ${JSON.stringify(q).slice(0, 200)}`);
+  const x = await tool(w, "execute_graph", { command: raw, language: "sql", reason: "e2e: a read dressed as a command" });
+  check(!leaked(x) && !(x.rows ?? []).length && (x.pendingId || x.error), `execute_graph only proposes, and shows nothing: ${JSON.stringify(x).slice(0, 200)}`);
+  if (x.pendingId) await api(`/api/worker/proposals/${x.pendingId}`, { method: "POST", body: JSON.stringify({ approve: false, reason: "e2e" }) });
+  for (const beyond of [undefined, true]) {
+    const extra = beyond ? { beyond } : {};
+    const s = await tool(w, "search_graph", { query: "vellichor crew raises 4 percent", ...extra });
+    check(Array.isArray(s.results) && !leaked(s.results), `search_graph${beyond ? " beyond" : ""}: ${JSON.stringify(s).slice(0, 300)}`);
+    const a = await tool(w, "about_thing", { name: "vellichor crew", ...extra });
+    check(!leaked(a), `about_thing${beyond ? " beyond" : ""}: ${JSON.stringify(a).slice(0, 300)}`);
+    for (const args of [{ document: doc.doc_id }, { document: doc.doc_id, section: 1 }, { document: "e2e-a2 vellichor raises" }]) {
+      const d = await tool(w, "read_document", { ...args, ...extra });
+      check(!leaked(d), `read_document ${JSON.stringify(args)}${beyond ? " beyond" : ""}: ${JSON.stringify(d).slice(0, 300)}`);
+    }
+  }
+  check(!leaked(await tool(w, "schema_graph", {})), "schema_graph names no entry");
+  // the control: the admin's search does find it, so the worker's reads could have shown it
+  const adminSees = await tool("admin", "search_graph", { query: "vellichor crew raises 4 percent" });
+  check(leaked(adminSees.results ?? []), `the admin's search finds it: ${JSON.stringify(adminSees).slice(0, 200)}`);
+  // a worker whose entry is gone or never was: nothing at all, not the delegating admin's whole view
+  const lost = workerToken("#9999:9999");
+  const none = await tool(lost, "search_graph", { query: "vellichor crew bench 4" });
+  check(Array.isArray(none.results) && none.results.length === 0, `an unresolved audience reads nothing: ${JSON.stringify(none).slice(0, 300)}`);
 });
 
 await scenario("grading restricts only for a listed topic: one it can't name stays with the writer's team", async () => {

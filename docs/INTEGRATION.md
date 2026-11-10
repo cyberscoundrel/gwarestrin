@@ -38,10 +38,35 @@ It lands on `build-base` with the first stream merge.
   follow it: of the nine notes with a stated row change or state, eight say
   something changed; ux-m01 ("INSPECT-2 is down") states a state, so it is Held.
 
+### The review of ba583bc (`~/reviews/build-build-base-ba583bc.md`): the integrator's items
+
+- **B3, fixed.** Worker reads no longer take `beyond: true` (`server.js`):
+  `search_graph`, `about_thing` and `read_document` read only the worker's
+  entry's audience (R11: "each seeing only its audience"), and an audience that
+  can't be resolved reads nothing, where it used to fall back to the delegating
+  admin's whole view. The orchestrator (master) keeps its full view.
+- **Found while fixing B3, and fixed with it.** A worker delegated by an admin
+  inherited `raw`, so it was offered `query_graph`, which bypasses every read
+  filter. A worker is no longer offered it, and the handler refuses a worker
+  too (`server.js`). `execute_graph` stays: a worker's raw command is always a
+  proposal for an admin (`write.js`), never run for it.
+- **The test.** A replay scenario lists every tool a worker is offered and fails
+  on one it doesn't sort into reads or writes. It checks that each read tool,
+  with and without `beyond`, returns nothing of a root-only note, a root-only
+  document or a root-only instance, that `query_graph` is neither offered nor
+  answered, and that `execute_graph` only proposes and shows nothing. A control shows the admin's search does find the note, and a worker
+  whose entry doesn't exist reads nothing.
+- **Item 9, fixed.** The stale `CommitmentClass` sentence in `model/schema.js`
+  is gone, and so are the dead triage statistics in `packages/web/src/lib/api.ts`
+  and `GraphWorkerPanel.svelte`. That panel is the filing stream's file,
+  changed here at the coordinator's request: five lines, one `{#if}` block.
+
 ### Requests to the streams
 
 | To | Request | Why |
 |---|---|---|
+| filing | `packages/server/src/agents/instructions/worker.ts:13` and `graph-roles.ts:30` still tell workers about `beyond: true` and `query_graph`, which workers no longer have (B3) | The instructions should name only the tools a worker is offered |
+| filing | Expect a one-block change in `GraphWorkerPanel.svelte` (the triage line removed, review item 9) when merging | So the conflict, if any, keeps both |
 | filing | Write every brief, exactly as sent, to `BriefLog` (`model/schema.js`): `{ id, record, audience, worker, brief (JSON), dropped (JSON), at }` | The leak gate scans every brief as sent (proposal B; integrate.md 2.6). Without it the gate sees only what workers wrote |
 | filing | A Held entry for a piece with no source at all (ux-aa11, "the thing from Tuesday") needs a `target.table`, which `normalizeEntry` requires | Either a table is named or the shape allows none; see choice I-6 |
 | classes | Name the property that holds an instance's source key (`eval/collect.mjs` reads `_record_key`, `record_key` or `key`) | Placement checks compare the key with the row |

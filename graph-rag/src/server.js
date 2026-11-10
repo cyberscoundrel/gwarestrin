@@ -42,18 +42,22 @@ const facetDoc = Object.entries(FACETS)
   .map(([f, d]) => `- ${f}: ${d}`)
   .join("\n");
 
+/** a reader that sees nothing: a worker whose audience can't be resolved (homeFilter reads an empty set as no rows) */
+const NOTHING = Object.freeze({ homes: new Set(), root: false });
+
 export function createServer(identity) {
   const caps = identity.caps;
   const scope = scopeOf(identity);
   // the graph worker's agents (see delegation.js): their own tools, not the sharing and review ones
   const role = identity.role?.kind;
-  // a worker reads what its entry's people see, resolved once per request; beyond: true reads
-  // everything, and only then can what it read hold its write for an admin
+  // a worker reads only what its entry's people see (R11: one worker per home, "each seeing only its
+  // audience"), resolved once per request. There is no way past it: the orchestrator (master) is the one
+  // that sees everything. An audience that can't be resolved reads nothing, never the delegator's whole view.
   let audience;
-  const readScope = async (args) => {
-    if (role !== "worker" || args?.beyond) return scope;
+  const readScope = async () => {
+    if (role !== "worker") return scope;
     audience ??= entryAudience(identity.role);
-    return (await audience) ?? scope;
+    return (await audience) ?? (SCOPED ? NOTHING : scope);
   };
   // listed whether or not the thread is on record: the agent's client keeps the list it fetched when it connected.
   // An off-record chat agent is refused at the call (gateOffRecordTools, record-state.js), and again by need("write").
@@ -71,8 +75,9 @@ export function createServer(identity) {
   // each identity is only shown the tools its capabilities allow (the
   // handlers check again: listing is not the boundary)
 
-  // raw Cypher/SQL bypasses every read filter: only listed for raw identities
-  if (caps.raw === true && scope.root) server.tool(
+  // raw Cypher/SQL bypasses every read filter: only listed for raw identities, and never for a worker,
+  // which sees only its audience (R11). A worker's raw commands (execute_graph) are always proposals.
+  if (caps.raw === true && scope.root && role !== "worker") server.tool(
     "query_graph",
     `Run a READ-ONLY query against the knowledge graph (openCypher or SQL). Use for exact identifiers, structure, and schema exploration. Returns JSON rows.`,
     {
@@ -82,6 +87,7 @@ export function createServer(identity) {
     async (args) => {
       need("read");
       need("raw");
+      if (role === "worker") throw new Error("a worker reads only its audience: no raw queries");
       return { content: [{ type: "text", text: JSON.stringify(await queryGraph(args)) }] };
     },
   );
@@ -97,13 +103,11 @@ shows them too, marked expired (for history: "who was on shift last Friday?"). F
 lexical matching if embeddings are unavailable.${homeNote}${
       role === "worker"
         ? `
-It searches what the people who see your entry see. beyond: true searches everything, but then what you
-write may be held for an admin (you read what they can't see): use it only when the entry needs it.`
+It searches what the people who see your entry see, and nothing more.`
         : ""
     }`,
     {
       query: z.string().min(1),
-      ...(role === "worker" ? { beyond: z.boolean().optional() } : {}),
       include_expired: z.boolean().optional(),
       facets: z.array(z.string()).optional(),
       k: z.number().int().min(1).max(32).optional(),
@@ -118,7 +122,7 @@ write may be held for an admin (you read what they can't see): use it only when 
     async (args) => {
       need("read");
       const read = [];
-      const result = await searchGraph(args, await readScope(args), read, { ownEntry: identity.role?.entry ?? null });
+      const result = await searchGraph(args, await readScope(), read, { ownEntry: identity.role?.entry ?? null });
       recordReads(identity, read);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
@@ -260,11 +264,11 @@ upsert_entities. Re-ingesting the same title replaces the document.`,
     "about_thing",
     `Everything you can see about one instance (a person, a customer, a machine, a building), by name
 (aliases work: "Toro Co." finds Toro): the sections about it. Use it for "what do we know about X"
-questions, and to find related entries after a search.${role === "worker" ? " Like search_graph, it shows what your entry's people see; beyond: true shows everything, and then what you write may be held for an admin." : ""}`,
-    { name: z.string().min(2), ...(role === "worker" ? { beyond: z.boolean().optional() } : {}) },
+questions, and to find related entries after a search.${role === "worker" ? " Like search_graph, it shows what your entry's people see, and nothing more." : ""}`,
+    { name: z.string().min(2) },
     async (args) => {
       need("read");
-      return { content: [{ type: "text", text: JSON.stringify(await aboutThing(args, identity, await readScope(args))) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await aboutThing(args, identity, await readScope())) }] };
     },
   );
 
@@ -289,16 +293,15 @@ questions, and to find related entries after a search.${role === "worker" ? " Li
     `Read a document from the knowledge graph. Search results with kind "section" are parts of a
 document (document, document_id, section): pass document_id (or the document's title) and the
 section to read it in full, with up to count sections from there (default 3, at most 6). Without
-a section you get its contents (the sections you can see) and the first sections.${role === "worker" ? " Like search_graph, it shows what your entry's people see; beyond: true shows everything, and then what you write may be held for an admin." : ""}`,
+a section you get its contents (the sections you can see) and the first sections.${role === "worker" ? " Like search_graph, it shows what your entry's people see, and nothing more." : ""}`,
     {
       document: z.string().min(1),
       section: z.number().int().min(1).optional(),
       count: z.number().int().min(1).max(6).optional(),
-      ...(role === "worker" ? { beyond: z.boolean().optional() } : {}),
     },
     async (args) => {
       need("read");
-      return { content: [{ type: "text", text: JSON.stringify(await readDocument(args, identity, await readScope(args))) }] };
+      return { content: [{ type: "text", text: JSON.stringify(await readDocument(args, identity, await readScope())) }] };
     },
   );
 

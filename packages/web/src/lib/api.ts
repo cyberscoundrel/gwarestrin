@@ -74,8 +74,6 @@ export interface GraphWorkerView {
   open_questions?: number;
   open_proposals?: number;
   master?: MasterStatus | null;
-  /** triage of saved entries by a decision model (today) */
-  triage?: TriageStats | null;
   /** model routes and the decision API: one that's out pauses the work that needs it */
   dependencies?: Record<string, DependencyHealth>;
   /** graph-rag's background loops: one that keeps failing shows here */
@@ -85,16 +83,6 @@ export interface GraphWorkerView {
 }
 export type DependencyHealth = { ok: true; at?: string | null } | { ok: false; since: string; reason: string; retry_at: string };
 export type LoopHealth = { ok: true; at?: string | null } | { ok: false; since: string; failures: number; error: string };
-export interface TriageStats {
-  on: boolean;
-  model: string | null;
-  today: number;
-  byLevel: Record<string, number>;
-  settledNames: number;
-  sampled: number;
-  /** of triaged entries a worker then handled: it found something to do, or nothing */
-  outcomes: { needed: number; nothing_done: number };
-}
 
 /** the graph worker pool: agent threads, one per queue entry (see graph-rag/src/pool.js) */
 export interface PoolSettings {

@@ -70,10 +70,10 @@ test("graph worker roles: only the organization's admin can give them; anyone el
   const w = resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "worker-1234567", p: ["floor"], r: "worker", j: job, e: "#12:3", iat: 1 }), entryFor, map);
   assert.deepEqual(w.role, { kind: "worker", job, entry: "#12:3" });
   assert.equal(w.user, "admin/worker:worker-1");
-  assert.deepEqual(w.positions, ["org"], "a worker sees the whole graph, whatever it asked for");
+  assert.deepEqual(w.positions, ["org"], "its positions are the admin's; its reads are narrowed to its entry's audience (server.js)");
   assert.equal(w.caps.write, "direct", "it writes directly, and proposes what it judges large");
   assert.equal(w.caps.approve, false);
-  assert.equal(w.caps.raw, true, "read-only raw queries (raw writes queue like any other)");
+  assert.equal(w.caps.raw, true, "raw commands, always as proposals (write.js); no raw reads (server.js lists no query_graph for a worker)");
   const l = resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "l1", p: [], r: "liaison", iat: 1 }), entryFor, map);
   assert.deepEqual(l.role, { kind: "liaison" });
   assert.equal(l.caps.write, "deny");

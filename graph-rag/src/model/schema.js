@@ -11,10 +11,9 @@
 //   ABOUT (edge)           section -> instance: sections relate to instances (R2)
 //   FilingEntry (document) the filing log (filing.js); outside the graph: no edges, no graph read (R9)
 //   WorkerRequest (document) a worker's request of the orchestrator (filing.js, R10)
+//   BriefLog (document)    every brief as sent to a worker, for the leak gate (docs/build/integrate.md, 2.6)
 //
 // Gone (R2, R3, R9): CLAIMS, SourceRef, REFERS_TO, AuditEvent, WROTE, CommitmentClass.
-// The classes and discovery stream moves discovery's drafts off CommitmentClass (discovery.js keeps its
-// own DDL for it until then).
 
 /**
  * A connected-system key: `system:table:row` (`mssql:dbo_Customer:TORO`). A class's record table is the
