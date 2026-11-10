@@ -3,7 +3,7 @@
 // with them.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyFloor, floorLifts, place } from "../src/placement.js";
+import { applyFloor, floorLifts, place, placeOverWaiting } from "../src/placement.js";
 import { UNCHECKED } from "../src/check.js";
 import { EVERYONE, parsePositionMap } from "../src/positions.js";
 
@@ -72,4 +72,24 @@ test("a floor lifts a write only when it's above where the entry lives", () => {
   assert.equal(floorLifts(map, "ops", "floor"), false);
   assert.equal(floorLifts(map, EVERYONE, "org"), false);
   assert.equal(floorLifts(map, "floor", undefined), false);
+});
+
+test("new text over an entry still waiting for its check: with no answer it waits on, its marker carrying what bounded it", () => {
+  const p = placeOverWaiting(map, { origin: "floor", verdict: undefined, held: "org", marker: { keep: "ops", rule: "ops", raised: "raised by e2e_k" }, floor: "floor" });
+  assert.equal(p.home, "org");
+  assert.equal(p.ungraded, true, "a fresh marker is written, with this write's text");
+  assert.equal(p.keep, "ops");
+  assert.deepEqual(p.carry, { rule: "ops", raised: "raised by e2e_k" });
+});
+
+test("new text over a waiting entry with an answer: placed from where it was before it waited, never below the rule", () => {
+  assert.equal(placeOverWaiting(map, { origin: "floor", verdict: sure("org"), held: "org", marker: { keep: "floor" }, floor: "floor" }).home, "org", "a sure category raises it");
+  assert.equal(placeOverWaiting(map, { origin: "floor", verdict: sure("floor"), held: "org", marker: { keep: "ops" }, floor: "floor" }).home, "ops", "never below where it was before it waited");
+  assert.equal(placeOverWaiting(map, { origin: "floor", verdict: sure("floor"), held: "org", marker: {}, floor: "floor" }).home, "floor", "new from its first write: placed like a new one");
+  const ruled = placeOverWaiting(map, { origin: "floor", verdict: sure("floor"), held: "org", marker: { rule: "ops", raised: "raised by e2e_k" }, floor: "floor" });
+  assert.equal(ruled.home, "ops", "the class map's rule holds");
+  assert.equal(ruled.note, "raised by e2e_k");
+  const unsure = placeOverWaiting(map, { origin: "floor", verdict: { home: "ops", sure: false, confidence: 0.4, reason: "r" }, held: "org", marker: { keep: "floor" }, floor: "floor" });
+  assert.equal(unsure.home, "ops");
+  assert.equal(unsure.review?.to, "floor");
 });

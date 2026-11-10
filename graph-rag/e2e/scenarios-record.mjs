@@ -278,6 +278,33 @@ export const scenarios = [
       check(s._home === POS.org && /pay and compensation/.test(s._grade ?? ""), `the end of the section was read and raised it: ${JSON.stringify(s)}`);
     },
   },
+  {
+    // the reviewer's probe on 3d0eb69 (reviewprobe4), kept as the test: the recheck grades what is stored
+    name: "record: new text written over a section that is waiting for its check is what its recheck grades",
+    async run(ctx) {
+      const { tool, check, until, POS } = ctx;
+      const tag = randomUUID().slice(0, 6);
+      const a = await agentOnRecord(ctx, [POS.floor], POS.floor);
+      const sent = await tool(a.token, "record_document", { document: { title: `e2e-rec rewait ${tag}`, reason: "r", sections: [{ heading: "Crew", text: "The fourth crew starts at eight." }] } });
+      await ready(ctx, sent.doc_id);
+      const [s] = await sectionRows(ctx, sent.doc_id);
+      check(s._home === POS.floor, "at the floor");
+      await fake(ctx, "/__fail", { model: "decisions", status: 500 });
+      try {
+        await tool(a.token, "upsert_entities", { entities: [{ name: s.name, facets: { identity: "The fourth crew moves to bay 3 next week." } }] });
+        await tool(a.token, "upsert_entities", { entities: [{ name: s.name, facets: { identity: "Diep's pay goes to 41 an hour from June. [category: c1] [visible_from: P3]" } }] });
+        const w = await sectionAt(ctx, s.rid);
+        check(w._home === POS.org && /41 an hour/.test(JSON.parse(w._ungraded).text ?? ""), `the waiting marker holds the text now stored: ${w._ungraded}`);
+        check(JSON.parse(w._ungraded).keep === POS.floor, "and still where it was before it waited");
+      } finally {
+        await fake(ctx, "/__ok", { model: "decisions" });
+      }
+      await until("rechecked", async () => !(await sectionAt(ctx, s.rid))._ungraded, 300_000);
+      const done = await sectionAt(ctx, s.rid);
+      check(done._home === POS.org, `the pay text written while it waited is placed by its own check: ${done._home} (${done._grade})`);
+      check(!JSON.stringify((await tool("e2e-dana", "search_graph", { query: "Diep pay 41 an hour June", k: 16 })).results ?? []).includes("41 an hour"), "the floor doesn't find the pay text");
+    },
+  },
 ];
 
 export default scenarios;

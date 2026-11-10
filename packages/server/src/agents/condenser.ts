@@ -132,6 +132,8 @@ export function condensedFromEvent(event: Record<string, unknown> & { type: stri
 /**
  * What graph-rag is told about an agent's current thread (record-gate.ts pushThreadRecord): whether it is on
  * record and, while it is, the position the person put it on record under, where its sections start (R11.5).
+ * NEEDS A RULING (record 15): which of a person's positions that is when they hold several. Today it is the agent
+ * profile's first-listed position (http/agents.ts), and the person can't choose another at the switch.
  */
 export function gatePushOf(agent: string, state: ThreadRecordState): { agent: string; thread: string | null; on: boolean; position?: string } {
   return { agent, thread: state.thread, on: state.on, ...(state.on && state.position ? { position: state.position } : {}) };

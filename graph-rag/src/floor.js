@@ -4,7 +4,7 @@
  */
 import { commonAncestor, effectiveHome, EVERYONE, homeName, visibleHomes } from "./positions.js";
 import { askWith, checkEntities, decisionConfig } from "./check.js";
-import { applyFloor, floorLifts, place as placeOne } from "./placement.js";
+import { applyFloor, floorLifts, place as placeOne, placeOverWaiting } from "./placement.js";
 import * as context from "./context.js";
 import { health, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
@@ -189,7 +189,7 @@ export async function placeEntities(entities, origin, floor) {
   const existing = await Promise.all(
     entities.map((e) =>
       adbQuery(`SELECT _home, _ungraded FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin }).then((rows) =>
-        rows[0] ? { home: effectiveHome(positionMap, rows[0]._home), awaiting: Boolean(rows[0]._ungraded) } : undefined,
+        rows[0] ? { home: effectiveHome(positionMap, rows[0]._home), awaiting: Boolean(rows[0]._ungraded), marker: markerOf(rows[0]._ungraded) } : undefined,
       ),
     ),
   );
@@ -200,15 +200,22 @@ export async function placeEntities(entities, origin, floor) {
   }
   const verdicts = await checkBatch(origin, entities);
   return entities.map((_, i) => {
-    const p = placeOne(positionMap, {
-      origin,
-      verdict: verdicts[i],
-      // still waiting for its check: this write's answer settles it like a new one
-      existing: existing[i]?.awaiting && verdicts[i] !== undefined ? undefined : at(i),
-      floor,
-    });
+    // still waiting for its check: the marker is rewritten with this write's text (placement.js placeOverWaiting)
+    const p = existing[i]?.awaiting
+      ? placeOverWaiting(positionMap, { origin, verdict: verdicts[i], held: at(i), marker: existing[i].marker, floor })
+      : placeOne(positionMap, { origin, verdict: verdicts[i], existing: at(i), floor });
     return { ...p, graded: verdicts[i] !== undefined };
   });
+}
+
+/** an entry's waiting marker, parsed ({} when unreadable) */
+function markerOf(json) {
+  try {
+    const w = JSON.parse(json || "{}");
+    return w && typeof w === "object" ? w : {};
+  } catch {
+    return {};
+  }
 }
 
 /** the check as an identity: an agent with no position, whose every write is a proposal */

@@ -112,7 +112,7 @@ export async function upsertEntities({ entities, home, floor, regrade_floor, wri
     const place = placements?.[idx];
     // awaiting grading: what it needs to be graded again (regradeTick); graded now: no longer awaiting
     const ungradedSql = place?.ungraded
-      ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: regrade_floor ?? floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString(), text: bodyOf(e), ...(place.keep ? { keep: place.keep } : {}) }))}'`
+      ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: regrade_floor ?? floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString(), text: bodyOf(e), ...(place.keep ? { keep: place.keep } : {}), ...(place.carry ?? {}) }))}'`
       : place?.graded // graded now: no longer awaiting
         ? ", n.`_ungraded` = null"
         : "";

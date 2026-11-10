@@ -2,8 +2,8 @@
 // it: a section starts at the position of the person who put it on record, R11.5), the typed check's verdict
 // (which may only restrict it, R4; check.js), and the derived-data floor (an agent cannot write lower than what
 // it read, R11.13). Every path that homes an entry (a write, a recheck, a worker's write) goes through here.
-import { placeChecked } from "./check.js";
-import { ancestors, EVERYONE, homeName } from "./positions.js";
+import { placeChecked, UNCHECKED } from "./check.js";
+import { ancestors, commonAncestor, EVERYONE, homeName } from "./positions.js";
 
 /**
  * Apply a derived-data floor to a placement. The floor is at or above the origin, so it and the placement lie
@@ -31,6 +31,27 @@ export function place(map, { origin, verdict, existing, floor }) {
   const p = placeChecked(map, { origin, verdict, existing });
   const { unchecked, ...rest } = p;
   return applyFloor(map, unchecked ? { ...rest, ungraded: true } : rest, origin, floor);
+}
+
+/**
+ * New text written over an entry still waiting for its check (its `_ungraded` marker, parsed: `keep`, where it
+ * was before it waited; `rule` and `raised`, a class map entry that tightened meanwhile). The marker is
+ * rewritten with this write's text, so the recheck grades what is stored; what bounded the old text bounds the
+ * new. With no answer it goes on waiting where it is held (`held`), carrying `keep` and `rule`. With an
+ * answer it is placed as an update of the home it had before it waited, and never below the rule.
+ */
+export function placeOverWaiting(map, { origin, verdict, held, marker = {}, floor }) {
+  const valid = (h) => (typeof h === "string" && map.positions[h] ? h : null);
+  const keep = valid(marker.keep);
+  const rule = valid(marker.rule);
+  if (verdict === undefined) {
+    return { home: held, note: UNCHECKED, ungraded: true, ...(keep ? { keep } : {}), carry: rule ? { rule, ...(marker.raised ? { raised: marker.raised } : {}) } : {} };
+  }
+  const p = place(map, { origin, verdict, existing: keep ?? undefined, floor });
+  const home = commonAncestor(map, [p.home, ...(rule ? [rule] : [])]);
+  if (home === p.home) return p;
+  const { review: _review, ...rest } = p;
+  return { ...rest, home, note: marker.raised ?? `held at ${homeName(map, home)} by the class map` };
 }
 
 /** would a floor hold a write above where the entry lives (a worker's write is then refused or proposed, never silently lifted) */

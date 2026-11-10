@@ -332,3 +332,19 @@ what "the same file" is; record 14, a sure "none" ignores `visible_from` and is 
 category (non-blocking 1).
 
 Requests 1 and 2 above (files.ts, manager.ts) are now done here as listed hunks; the other requests stand.
+
+## Re-review of 3d0eb69: one blocking finding
+
+- **R2-B1, fixed.** New text written over a section still waiting for its check now rewrites the waiting
+  marker with that text (`placement.js placeOverWaiting`, called from `floor.js placeEntities`), so the
+  recheck grades what is stored. The marker keeps its `keep` (where the section was before it waited) and its
+  `rule` (a class map entry that tightened meanwhile). When the update gets an answer, it is placed as an
+  update of the home the section had before it waited, never below the rule. `write.js` (integrator's): the
+  marker also takes `place.carry`, a one-expression change to my earlier hunk.
+  - Test: the reviewer's probe, kept as `scenarios-record.mjs` "new text written over a section that is
+    waiting for its check is what its recheck grades". It failed at 3d0eb69 (the marker held the old text)
+    and passes now. Unit tests are in `placement.test.js`.
+- **Marked (review non-blocking 1): record 15.** Which of a person's positions a record starts at when they
+  hold several. Today it is the agent profile's first-listed position, and the person can't choose another at
+  the switch. Marked at `packages/server/src/http/agents.ts` (comment only, an integrator file) and at
+  `condenser.ts gatePushOf`.
