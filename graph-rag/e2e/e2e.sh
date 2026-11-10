@@ -84,6 +84,8 @@ docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$C
   -e TOKEN_MAP_PATH=/cfg/tokens.json -e POSITION_MAP_PATH=/cfg/positions.json \
   -e SWEEP_INTERVAL_MS=5000 -e DOC_STORE=fs:/tmp/documents \
   -e DAB_SYSTEM=mssql -e DAB_READ_URL=http://source:5000/mcp -e DAB_WRITE_URL=http://source:5001/mcp \
+  -e DAB_READ_HOME=everyone -e DAB_WRITE_TABLES=dbo_Job,dbo_Work_Center \
+  -e DAB_GUARD_SERVER=gr-e2e-fake -e DAB_GUARD_DATABASE=S0Fake \
   "$GR_IMAGE" >/dev/null
 
 status=0

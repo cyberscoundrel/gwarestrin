@@ -13,12 +13,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { dabTool } from "./fake-dab-core.mjs";
 import { dataset } from "../eval/s0.mjs";
 
+/** what the fake's identity view answers: test-sql's dbo_GwConnectionIdentity, as the guards read it */
+export const IDENTITY = { server_name: "gr-e2e-fake", database_name: "S0Fake", login_name: "s0_write" };
+const withIdentity = (tables) => ({ ...tables, dbo_GwConnectionIdentity: { primaryKey: ["id"], rows: [{ id: 1, ...IDENTITY }] } });
+
 export const READ_PORT = 5000;
 export const WRITE_PORT = 5001;
 
 /** the state and the handler, apart from the sockets (test/harness-fakes.test.js drives it directly) */
 export function fakeSource() {
-  let tables = dataset();
+  let tables = withIdentity(dataset());
   const calls = [];
   const rpc = (msg, write, port) => {
     const reply = (result) => ({ jsonrpc: "2.0", id: msg.id ?? null, result });
@@ -37,7 +41,7 @@ export function fakeSource() {
     if (method === "GET" && path === "/__dump") return JSON.parse(JSON.stringify(tables));
     if (method === "GET" && path === "/__calls") return calls;
     if (method === "POST" && path === "/__reset") {
-      tables = dataset();
+      tables = withIdentity(dataset());
       calls.length = 0;
       return { ok: true };
     }

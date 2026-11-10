@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { answerChoice, CLAIMED_TAG, condense, createFakeModels, decide, grade, isCondenseRequest, loadCondenser, vector } from "../e2e/fake-models.mjs";
 import { fakeSource } from "../e2e/fake-source.mjs";
-import { dumpSource, guardTestSource, keyFromCursor } from "../eval/dump.mjs";
+import { connectionIdentity, dumpSource, guardTestSource, keyFromCursor } from "../eval/dump.mjs";
 import { dataset } from "../eval/s0.mjs";
 
 const graderUser = (items) => [
@@ -68,14 +68,19 @@ test("the fake source: S0 through DAB's tools; the read endpoint refuses writes,
   await assert.rejects(read("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } }), /Permission denied/);
   await call(true)("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } });
   const dumped = await dumpSource(read, { keys: { dbo_Vendor: ["Vendor"], dbo_Material: ["Material"] } });
-  assert.deepEqual(Object.keys(dumped).sort(), Object.keys(dataset()).sort());
+  assert.deepEqual(Object.keys(dumped).sort(), Object.keys(dataset()).sort(), "the identity view is left out of a dump");
+  assert.deepEqual(await connectionIdentity(read), { server: "gr-e2e-fake", database: "S0Fake", login: "s0_write" });
+  await guardTestSource(() => connectionIdentity(read), { server: "GR-E2E-FAKE", database: "s0fake" });
+  await assert.rejects(guardTestSource(() => connectionIdentity(read), { server: "gwsynth-sql", database: "GwSynthMfg" }), /refusing to run/);
   assert.deepEqual(dumped.dbo_Job.primaryKey, ["Job"], "the key from the first page's cursor");
   assert.equal(dumped.dbo_Job.rows.find((r) => r.Job === "4471").Status, "Rush");
   assert.deepEqual(src.control("GET", "/__dump").dbo_Job, dumped.dbo_Job);
   assert.equal(src.control("POST", "/__plant", { table: "dbo_Work_Center", keys: { Work_Center: "CNC" }, fields: { Status: "Down" } }).ok, true);
   assert.equal(src.control("GET", "/__calls").filter((c) => c.error).length, 1);
   src.control("POST", "/__reset");
-  assert.deepEqual(src.control("GET", "/__dump"), dataset());
+  const reset = src.control("GET", "/__dump");
+  delete reset.dbo_GwConnectionIdentity;
+  assert.deepEqual(reset, dataset());
   assert.equal(keyFromCursor(null), null);
 });
 

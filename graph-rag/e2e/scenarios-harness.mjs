@@ -32,11 +32,16 @@ export default [
     name: "the fake test source serves S0 on two endpoints, and the evaluation's own dump and row gate catch a change no Filed entry names",
     run: async (ctx) => {
       const { check } = ctx;
-      const { mcpClient, dumpSource } = await import(ctx.evalUrl("dump.mjs"));
+      const { connectionIdentity, guardTestSource, mcpClient, dumpSource } = await import(ctx.evalUrl("dump.mjs"));
       const { diffDumps, rowGate } = await import(ctx.evalUrl("source.mjs"));
       const read = mcpClient(ctx.SOURCE.read);
       const write = mcpClient(ctx.SOURCE.write);
       const keys = { dbo_Vendor: ["Vendor"], dbo_Material: ["Material"] };
+      // the guard first: nothing is read until the connection names the expected test server and database
+      await guardTestSource(() => connectionIdentity(read), { server: "gr-e2e-fake", database: "S0Fake" });
+      let refusedGuard = null;
+      await guardTestSource(() => connectionIdentity(read), { server: "gwsynth-sql", database: "GwSynthMfg" }).catch((e) => (refusedGuard = e.message));
+      check(/refusing to run/.test(refusedGuard ?? ""), `another server's names are refused: ${refusedGuard}`);
       const before = await dumpSource(read, { keys });
       check(before.dbo_Employee.rows.some((r) => r.Employee === "NGDT" && r.Status === "Inactive"), "S0's inactive Diep is there");
       let refused = null;

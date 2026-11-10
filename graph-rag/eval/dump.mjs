@@ -59,7 +59,8 @@ export function keyFromCursor(cursor) {
  */
 export async function dumpSource(call, { tables = null, keys = {}, page = 500, maxPages = 2000 } = {}) {
   const described = await call("describe_entities", {});
-  const names = tables ?? (described?.entities ?? []).map((e) => e.name);
+  // the identity view (test-sql's guard) is no table: its row names the connection, not data
+  const names = tables ?? (described?.entities ?? []).map((e) => e.name).filter((n) => n !== IDENTITY_ENTITY);
   const out = {};
   for (const entity of names) {
     const first = await call("read_records", { entity, first: 1 });
@@ -79,6 +80,16 @@ export async function dumpSource(call, { tables = null, keys = {}, page = 500, m
   return out;
 }
 
+/** the view test-sql/seed.mjs creates, whose one row names the server, database and login of the connection reading it */
+export const IDENTITY_ENTITY = "dbo_GwConnectionIdentity";
+
+/** the identity a connection reports, through that connection: { server, database, login } (throws if it has none) */
+export async function connectionIdentity(call) {
+  const v = valueOf(await call("read_records", { entity: IDENTITY_ENTITY, first: 2 }));
+  if (v.length !== 1) throw new Error(`${IDENTITY_ENTITY} answered ${v.length} rows, not one`);
+  return { server: v[0].server_name, database: v[0].database_name, login: v[0].login_name ?? null };
+}
+
 /**
  * Proposal B's guard: the write connection must say it holds the test server and database. `whoami` returns
  * { server, database } read through the write connection; throws unless both match.
@@ -86,7 +97,8 @@ export async function dumpSource(call, { tables = null, keys = {}, page = 500, m
 export async function guardTestSource(whoami, { server, database }) {
   const got = await whoami();
   if (!server || !database) throw new Error("the guard needs the test server and database names");
-  if (String(got?.server) !== String(server) || String(got?.database) !== String(database)) {
+  const same = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
+  if (!same(got?.server, server) || !same(got?.database, database)) {
     throw new Error(`refusing to run: the write connection holds ${got?.server}/${got?.database}, not the test source ${server}/${database}`);
   }
   return got;
