@@ -390,14 +390,36 @@ await scenario("a model with a limit gets no more threads than it serves; the re
   const before = (await api("/api/worker")).pool;
   await api("/api/worker", { method: "PUT", body: JSON.stringify({ pool: { poolSize: 5 } }) });
   try {
-    await save("alice", "e2e-l1 capacity note", "The capacity test note.");
-    const rid = String((await entry("e2e-l1 capacity note")).rid);
+    // a worker takes only a record that is on record (R11), and one job per record and home: so four records,
+    // each put on record by alice's on-record agent, one section each, every one past the check
+    const agent = randomUUID();
+    const on = await fetch(`${GRAPH}/api/thread-record`, { method: "PUT", headers: { authorization: `Bearer ${TOKENS.alice}`, "content-type": "application/json" }, body: JSON.stringify({ agent, on: true }) });
+    check(on.ok, `alice's agent on record: ${on.status}`);
+    const recorder = delegated({ u: "alice", a: agent, p: [POS.ops] });
+    const tag = randomUUID().slice(0, 8);
+    const sections = [];
+    for (const n of [1, 2, 3, 4]) {
+      const title = `e2e-l${n} capacity record ${tag}`;
+      const r = await tool(recorder, "record_document", { document: { title, recorded_by: "alice", position: POS.ops, reason: "e2e: capacity", sections: [{ text: `Capacity test record ${n}: the saw is on bench ${n}.` }] } });
+      check(!r.error, `${title} recorded: ${JSON.stringify(r).slice(0, 200)}`);
+      const pending = r.pendingId ?? (r.queued ? r.id : null);
+      if (pending) check((await api(`/api/queue/${pending}/approve`, { method: "POST", body: "{}" })).result?.approved !== false, "approved");
+      const section = await until(`${title} ready and checked`, async () => {
+        const doc = (await sql(`SELECT _doc_status, _doc_id FROM Entity WHERE _kind = 'document' AND name = '${title}'`))[0];
+        if (doc?._doc_status !== "ready") return null;
+        const sec = (await sql(`SELECT @rid AS rid, _ungraded FROM Entity WHERE _kind = 'section' AND _doc_id = '${doc._doc_id}'`))[0];
+        return sec && (sec._ungraded === null || sec._ungraded === undefined) ? String(sec.rid) : null;
+      });
+      sections.push(section);
+    }
+    // the record path queues its own jobs for these sections: out of the way, so only this scenario's are counted
+    await tool("admin", "execute_graph", { command: `UPDATE Job SET status = 'done', summary = 'e2e: set aside' WHERE kind = 'review' AND status = 'pending' AND (${sections.map((r) => `payload LIKE '%"${r}"%'`).join(" OR ")})`, language: "sql" });
     const now = new Date(Date.now() - 1000).toISOString();
     const ids = [];
-    for (const level of [1, 1, 1, 2]) {
+    for (const [i, level] of [1, 1, 1, 2].entries()) {
       const jid = randomUUID();
       ids.push(jid);
-      const payload = JSON.stringify({ rid, level }).replace(/'/g, "\\'");
+      const payload = JSON.stringify({ rid: sections[i], level }).replace(/'/g, "\\'");
       const r = await tool("admin", "execute_graph", { command: `INSERT INTO Job SET id = '${jid}', kind = 'review', job_key = 'e2e:${jid}', payload = '${payload}', status = 'pending', attempts = 0, priority = 9, run_after = '${now}', created_at = '${now}', updated_at = '${now}'`, language: "sql" });
       check(!r.error, `job inserted: ${JSON.stringify(r).slice(0, 200)}`);
     }

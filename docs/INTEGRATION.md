@@ -17,7 +17,19 @@ evaluation plan is [build/integrate.md](build/integrate.md).
 |---|---|---|---|---|---|
 | 0 | contract (ba583bc) | coordinator | fast-forward base | none | graph-rag 172/172, e2e 25/25 |
 
-No stream branch has landed yet.
+No stream branch has landed yet. The order, each once it passes review:
+classes (4bd1154), sources (c1eaf39), record (b076783), then filing at its
+tip then, all onto this branch. The synthetic test database runs as compose
+project `gwsynth`.
+
+**Prepared for the landing.** The built-in capacity scenario in `run.mjs`
+queued its threads on a plain saved note; on the filing branch a worker takes
+only a record that is on record (R11), and one job per record and home, so it
+failed there. It now records four on-record documents through alice's
+on-record agent and queues one thread per section, and passes on this branch
+and on the filing branch (b0e8ca7) with this `run.mjs`. The Filed-or-Proposed
+decision stays in `enterData` (the sources stream), not `fileToSource`, as
+the coordinator relayed.
 
 ### The integrator's branch, before landing
 
