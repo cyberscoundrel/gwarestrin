@@ -402,3 +402,21 @@ F1 to F17 stand as phase 0 set them, except where noted. Each is marked `NEEDS A
 - **BriefLog holds the message as sent.** At the integrator's request, `brief` also carries `why` and the rendered
   `message`, computed before the row is written, so the leak scan covers everything the worker receives. `why` is
   set only by code (`refileKept`'s fixed text); no orchestrator tool passes free text into it.
+
+## The classes branch merged (c1323a3)
+
+- **One implementation for instances and dependencies (review C-B7).** `create_instance` and `state_dependency`
+  call the classes stream's `relateInstance` and `addDependency` (`instances.js`) with the worker's audience as
+  the scope, the worker as the actor (its identity for the write floor), and `{ home: the section's home }`.
+  Filing's own minting (`existingInstance`, `mintInstance`, `dependencyEnd`) is gone. Filing still reads a key's
+  row first (R3, through the audience gate of F-B1) and relates the section to the instance and to both ends
+  after (R11.8).
+- **The homing rule, as classes built it and the coordinator accepted:** a new node's home is the caller's
+  `opts.home` (a worker's section home), else its evidence (a key's connection home), else the writer's home. It is
+  never below the writer's derived floor (R11.13), and an edge to existing nodes that would be seen lower than that
+  floor is refused. One node per key across the graph: one held where the worker can't see it is refused without
+  naming it. Names are deduplicated under the class, among what the worker sees. Since a worker can read no
+  connection above its audience (F-B1), a key's connection home never sits above the section's home it is given.
+- **Tests:** `test/filing.test.js` checks what filing hands the classes stream (the scope, the home, the
+  identity), that no node is made without its row, and that filing writes no vertex or instance or dependency edge
+  itself. The e2e scenarios make instances through the real `relateInstance`.

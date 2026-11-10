@@ -138,7 +138,7 @@ function setup({ rows = [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472
   const signals = [];
   const resumed = [];
   let n = 0;
-  const h = { found: [] };
+  const h = { found: [], related: [], depended: [] };
   const env = {
     db,
     store,
@@ -148,6 +148,10 @@ function setup({ rows = [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472
     findRows: async (...a) => (h.found.push(a), { status: "ok", rows: [{ Name: "Bob", Pay: 41 }] }),
     classesForTable: async (table) => [...classes.values()].filter((c) => c.record_table === table).map((c) => ({ key: c.key, home: c.home })),
     connectionHome: () => undefined,
+    instances: {
+      relate: async (args, scope, actor, opts) => (h.related.push({ args, scope, actor, opts }), h.relateAnswer ?? { instance: "#80:1", name: args.name, class: args.class, created: true, related: true }),
+      depend: async (args, scope, actor, opts) => (h.depended.push({ args, scope, actor, opts }), { dependency: { from: args.from.startsWith("#") ? args.from : "#80:5", to: args.to.startsWith("#") ? args.to : "#80:6", stated_as: args.stated_as } }),
+    },
     // the real decision: data-entry.js over the class map, the recorder as the token map holds them, and the fake DAB
     entered: [],
     enter: (args, opts = {}) => (env.entered.push(args), enterData(args, { journal: makeJournal(env), index: null, ...opts, db, fetch: dab.fetch, positions: map, policy, people: (name) => people[name], queue: async (e) => (queued.push(e), { queued: true, pendingId: `pend-${queued.length}` }) })),
@@ -156,7 +160,7 @@ function setup({ rows = [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472
     now: () => `2026-11-10T00:00:${String(n++).padStart(2, "0")}.000Z`,
     rule,
   };
-  return { env, dab, db, store, queued, signals, resumed, found: h.found };
+  return { env, dab, db, store, queued, signals, resumed, found: h.found, related: h.related, depended: h.depended, h };
 }
 
 const piece = (over = {}) => ({ section: "#71:3", piece: "job 4471 is complete", said: "writing Status complete to job 4471", class: "jobs", key: "mssql:dbo_Job:4471", fields: { Status: "complete" }, ...over });
@@ -358,17 +362,6 @@ test("an approved Proposed piece becomes Filed in the log, pointing back; a reje
   assert.match(filed[0].reason, /approved by alice/);
 });
 
-test("an instance: a lasting individual under a visible class; a class whose rows stay in the source refuses (R3)", async () => {
-  const h = setup();
-  await assert.rejects(createInstance({ section: "#71:3", name: "job 4471", class: "jobs", key: "mssql:dbo_Job:4471" }, identity, h.env), /rows stay in the source/);
-  await assert.rejects(createInstance({ section: "#71:3", name: "Nobody", class: "people", key: "mssql:dbo_Crew:E9" }, identity, h.env), /no such row/);
-  const r = await createInstance({ section: "#71:3", name: "Diep", class: "people", key: "mssql:dbo_Crew:E1" }, identity, h.env);
-  assert.equal(r.created, true);
-  assert.ok(h.db.statements.some((s) => s.startsWith("CREATE VERTEX Entity") && s.includes("_kind = 'thing'")));
-  assert.ok(h.db.statements.some((s) => s.startsWith("CREATE EDGE INSTANCE_OF")));
-  assert.ok(h.db.statements.some((s) => s.startsWith("CREATE EDGE ABOUT FROM #71:3")));
-});
-
 /** ---- briefs, claim gates and the orchestrator's split by home (worker-pool.js, orchestrator.js) ---- */
 
 const { composeFilingBrief, filingJob, logBrief } = await import("../src/worker-pool.js");
@@ -516,14 +509,6 @@ test("F-B1: a worker reads no table above its audience: resolve_name, file_to_so
   assert.equal((await resolveName({ name: "Bob", table: "mssql:dbo_Job", column: "Name" }, identity, h.env)).source.status, "ok");
 });
 
-test("an instance holding the key that the audience can't see is refused, not reused (review, non-blocking 1)", async () => {
-  const h = setup();
-  const q = h.db.adbQuery.bind(h.db);
-  h.db.adbQuery = async (sql, params) => (sql.includes("_keys CONTAINS") ? [{ rid: "#80:9", label: "the payroll", _homes: ["org"] }] : q(sql, params));
-  await assert.rejects(createInstance({ section: "#71:3", name: "Diep", class: "people", key: "mssql:dbo_Crew:E1" }, identity, h.env), /held by an instance your audience can't see/);
-  assert.ok(!h.db.statements.some((st) => st.startsWith("CREATE EDGE ABOUT")), "the section isn't related to it");
-});
-
 test("every brief is logged as sent (BriefLog, for the leak gate), and one that can't be logged is refused", async () => {
   const composed = await composeFilingBrief({ record: "doc-1", home: "floor", sections: ["#71:3"] }, { db: graphDb({ docHome: "ops" }), positions: map, sources: {}, entries: async () => [] });
   const seen = [];
@@ -562,4 +547,38 @@ test("the journal's store names no column ArcadeDB reads as a keyword (before, t
   for (const kw of ["before", "table", "key"]) assert.ok(!columns.includes(kw), `${kw} is not a column`);
   assert.equal(params.row_before, '{"Status":null}');
   assert.deepEqual((await store.attempt("a1")).before, { Status: null });
+});
+
+test("create_instance goes through the classes stream's relateInstance (C-B7): the row is read first, the audience and the section's home are handed over, and the section relates to it after", async () => {
+  const h = setup();
+  await assert.rejects(createInstance({ section: "#71:3", name: "Nobody", class: "people", key: "mssql:dbo_Crew:E9" }, identity, h.env), /no such row/);
+  assert.equal(h.related.length, 0, "no node without its row (R3)");
+  const r = await createInstance({ section: "#71:3", name: "Diep", class: "people", key: "mssql:dbo_Crew:E1" }, identity, h.env);
+  assert.deepEqual([r.instance, r.created], ["#80:1", true]);
+  const [call] = h.related;
+  assert.deepEqual(call.args, { class: "people", key: "mssql:dbo_Crew:E1", name: "Diep" });
+  assert.deepEqual([...call.scope.homes].sort(), ["everyone", "floor"], "the worker's audience, never wider");
+  assert.deepEqual(call.opts, { home: "floor" }, "a new node is homed at the section's home (R11.8)");
+  assert.equal(call.actor.identity, identity, "the write floor is the worker's (R11.13)");
+  assert.ok(h.db.statements.some((st) => st.startsWith("CREATE EDGE ABOUT FROM #71:3 TO #80:1")), "the section relates to it");
+  // a refusal of the classes stream's reaches the worker, and the section relates to nothing
+  h.env.instances.relate = async () => { throw new Error("mssql:dbo_Crew:E2 is held where you can't see it: ask the orchestrator"); };
+  const before = h.db.statements.length;
+  await assert.rejects(createInstance({ section: "#71:3", name: "Sam", class: "people", key: "mssql:dbo_Crew:E2" }, identity, h.env), /held where you can't see it/);
+  assert.equal(h.db.statements.slice(before).filter((st) => st.startsWith("CREATE EDGE ABOUT")).length, 0);
+  // filing makes no node itself any more
+  assert.ok(!h.db.statements.some((st) => st.startsWith("CREATE VERTEX") || st.startsWith("CREATE EDGE INSTANCE_OF") || st.startsWith("CREATE EDGE DEPENDS_ON")));
+});
+
+test("state_dependency goes through the classes stream's addDependency (C-B7): a key's row is read first, stated by the record, both ends related to the section", async () => {
+  const { stateDependency } = await import("../src/filing.js");
+  const h = setup();
+  const r = await stateDependency({ section: "#71:3", from: "mssql:dbo_Job:4471", to: "#80:1", stated_as: "record", note: "waits on the plating" }, identity, h.env);
+  assert.deepEqual([r.from, r.to], ["#80:5", "#80:1"]);
+  const [call] = h.depended;
+  assert.deepEqual([call.args.from, call.args.to, call.args.stated_as, call.args.stated_by, call.args.source], ["mssql:dbo_Job:4471", "#80:1", "record", "doc-1", "#71:3"]);
+  assert.deepEqual(call.opts, { home: "floor" });
+  for (const rid of ["#80:5", "#80:1"]) assert.ok(h.db.statements.some((st) => st.startsWith(`CREATE EDGE ABOUT FROM #71:3 TO ${rid}`)));
+  await assert.rejects(stateDependency({ section: "#71:3", from: "mssql:dbo_Job:9999", to: "#80:1", stated_as: "agent" }, identity, h.env), /no such row/);
+  assert.equal(h.depended.length, 1, "no dependency on a row the source doesn't hold");
 });

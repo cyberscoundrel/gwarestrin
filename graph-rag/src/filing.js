@@ -24,12 +24,13 @@
  */
 import { randomUUID } from "node:crypto";
 import { adbCommand as realCommand, adbQuery as realQuery, ENTITY_LABEL, RID_RE } from "./db.js";
-import { canSee, EVERYONE } from "./positions.js";
+import { canSee, EVERYONE, visibleHomes } from "./positions.js";
 import { classKey } from "./model/classes.js";
 import { parseKey } from "./model/schema.js";
 import { disagreeingColumns, FILED, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, onDisagreement, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
 import { enterData, findRows, getRow, sameValue } from "./data-entry.js";
 import { sourceFor } from "./sources.js";
+import { addDependency, relateInstance } from "./instances.js";
 
 const realDb = { adbCommand: realCommand, adbQuery: realQuery };
 const json = (v) => (v === null || v === undefined ? null : JSON.stringify(v));
@@ -168,6 +169,8 @@ export async function liveEnv(over = {}) {
       return d?.read?.home ?? positions?.root ?? null;
     }),
     // the write is begun and settled in this env's own log (its store), not the live one; the class index decides inheritance
+    // instances and dependencies: the classes stream's one implementation (instances.js)
+    instances: over.instances ?? { relate: relateInstance, depend: addDependency },
     enter: over.enter ?? ((args, opts = {}) => enterData(args, { db, fetch: over.fetch, positions, people: over.people, policy: over.policy, journal: makeJournal(env), index: over.index, ...opts })),
     signal: over.signal ?? (async (kind, payload) => (await import("./master-tools.js")).emitSignal(kind, payload)),
     resume: over.resume ?? (async (job, message) => (await import("./worker-pool.js")).resumeThread(job, message)),
@@ -458,67 +461,37 @@ async function relate(env, ctx, section, rid, role = "about") {
   if (!homes.includes(ctx.home)) await env.db.adbCommand(`UPDATE ${rid} SET _homes = :homes`, "sql", { homes: [...homes, ctx.home] });
 }
 
-/** the instance holding a key, or with this name under this class, when one exists */
-/**
- * The instance holding a key, or with this name under this class, when one exists that the audience sees (R11.8).
- * One holding the key that the audience can't see is refused, not reused: relating to it would bring its label
- * down to this home (review, non-blocking 1). A same-named one it can't see is passed over.
- */
-async function existingInstance(env, ctx, { key, label, cls }) {
-  const seen = (r) => (Array.isArray(r?._homes) ? r._homes : []).some((h) => h === EVERYONE || audienceSees(env, ctx, h));
-  if (key) {
-    const hit = (await env.db.adbQuery(`SELECT @rid AS rid, label, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => []))[0];
-    if (hit && !seen(hit)) throw refuse(`${key} is held by an instance your audience can't see: hold the piece, or request it of the orchestrator`);
-    if (hit) return hit;
-  }
-  if (label && cls?.rid) {
-    const hits = await env.db.adbQuery(`SELECT @rid AS rid, label, _homes FROM (SELECT expand(in('INSTANCE_OF')) FROM ${cls.rid}) WHERE _norm = :n LIMIT 5`, { n: normName(label) }).catch(() => []);
-    const visible = hits.find(seen);
-    if (visible) return visible;
-  }
-  return null;
-}
+/** the worker's audience as a reader scope (classes.js seesHome): the homes visible from its job's home */
+const workerScope = (env, ctx) => ({ homes: env.positions ? visibleHomes(env.positions, [ctx.home]) : null, granted: null });
+/** the actor the classes stream's instance functions write as: the worker, with its identity for the write floor (R11.13) */
+const workerActor = (identity) => ({ user: identity.user, agent: true, run: null, identity });
 
-async function mintInstance(env, ctx, { label, key, cls, by }) {
-  const name = String(label).replace(/\s+/g, " ").trim().slice(0, 120);
-  const rows = await env.db.adbCommand(
-    `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :name, _kind = 'thing', _norm = :norm, _keys = :keys, _homes = :homes, _home = :home, _origin = :home, updated_at = :now`,
-    "sql",
-    { name, norm: normName(name), keys: key ? [key] : [], homes: [ctx.home], home: ctx.home, now: env.now() },
-  );
-  const rid = String(rows?.[0]?.["@rid"] ?? rows?.[0]?.rid ?? (await env.db.adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _norm = :n ORDER BY @rid DESC LIMIT 1`, { n: normName(name) }))[0]?.rid);
-  if (cls?.rid) await env.db.adbCommand(`CREATE EDGE INSTANCE_OF FROM ${rid} TO ${cls.rid} SET added_by = :who, at = :at`, "sql", { who: by, at: env.now() });
-  return rid;
+/** a key's row is read before a node is made for it (R3), through the audience gate (F-B1) */
+async function rowExists(env, ctx, key) {
+  const read = await workerRead(env, ctx, key);
+  if (read.status !== "ok") throw refuse(read.status === "unreachable" ? `${key}: the source can't be reached to check the row: hold the piece instead` : `${key}: the source has no such row`);
 }
 
 /**
- * A lasting individual under an existing class (R3, R7): made once (an instance holding the key, or of that name
- * under that class, is reused), related to the section. A row of a class whose rows stay in the source is refused:
- * the section stores its key (section_key), and the row earns a node only through a dependency (R3).
+ * A lasting individual under an existing class (R3, R7), made or related by the classes stream's `relateInstance`
+ * (instances.js: the one implementation, review C-B7). It checks the class against the audience, keeps one node per
+ * key (refusing one held where the worker can't see), dedupes names under the class among what the worker sees, homes
+ * a new node at the section's home under the write floor (R11.8, R11.13), and refuses a transactional row's node
+ * (R3). Filing reads the row first and relates the section to the instance after.
  * NEEDS A RULING (F5): creating an instance isn't in R11's list of low or high stakes; R7 lets workers do it.
  */
 export async function createInstance(args, identity, env) {
   const ctx = await jobContext(identity, env.db);
   if (!ctx) throw refuse("this thread has no record to file");
   const section = ownSection(ctx, args.section);
-  const cls = await visibleClass(env, ctx, args.class);
   const label = String(args.name ?? "").trim();
   if (!label) throw refuse("name: the individual's name");
   const key = args.key ? parseKey(args.key)?.key : null;
   if (args.key && !key) throw refuse(`key: not system:table:row: ${args.key}`);
-  if (key && cls.record_table && tableOf(key) === cls.record_table && !cls.rows_are_nodes) throw refuse(`${cls.key}'s rows stay in the source (R3): store the key on the section (graph-rag_section_key), or state a dependency if the graph must say something the source can't hold`);
-  if (key) {
-    const read = await workerRead(env, ctx, key);
-    if (read.status !== "ok") throw refuse(read.status === "unreachable" ? `${key}: the source can't be reached to check the row: hold the piece instead` : `${key}: the source has no such row`);
-  }
-  const found = await existingInstance(env, ctx, { key, label, cls });
-  const rid = found ? String(found.rid) : await mintInstance(env, ctx, { label, key, cls, by: identity.user });
-  if (found) {
-    const linked = await env.db.adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('INSTANCE_OF')) FROM ${rid})`).catch(() => []);
-    if (!linked.some((e) => String(e.dst) === cls.rid)) await env.db.adbCommand(`CREATE EDGE INSTANCE_OF FROM ${rid} TO ${cls.rid} SET added_by = :who, at = :at`, "sql", { who: identity.user, at: env.now() });
-  }
-  await relate(env, ctx, section, rid);
-  return { instance: rid, created: !found, class: cls.key, note: found ? "An instance already held this; the section now relates to it." : "Made, and the section relates to it." };
+  if (key) await rowExists(env, ctx, key);
+  const r = await env.instances.relate({ class: args.class, ...(key ? { key } : {}), name: label }, workerScope(env, ctx), workerActor(identity), { home: ctx.home });
+  await relate(env, ctx, section, r.instance);
+  return { instance: r.instance, created: r.created, class: r.class, note: r.created ? "Made, and the section relates to it." : "An instance already held this; the section now relates to it." };
 }
 
 /** relate a section to an instance its audience sees (low stakes: R11) */
@@ -546,42 +519,32 @@ export async function sectionKey(args, identity, env) {
   return { section, key, stored: true };
 }
 
-/** an end of a dependency: a visible instance, or a transactional row that earns its node here (R3) */
-async function dependencyEnd(env, ctx, ref, by) {
-  if (RID_RE.test(String(ref ?? "").trim())) return (await visibleInstance(env, ctx, ref)).rid;
-  const key = parseKey(ref)?.key;
-  if (!key) throw refuse(`${ref}: an instance id, or a row's key`);
-  // the row's table must be one the audience may read before anything about it is looked up (F-B1)
-  await assertTableReadable(env, ctx, tableOf(key));
-  const held = (await env.db.adbQuery(`SELECT @rid AS rid, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => []))[0];
-  if (held) return (await visibleInstance(env, ctx, held.rid)).rid;
-  const read = await workerRead(env, ctx, key);
-  if (read.status !== "ok") throw refuse(read.status === "unreachable" ? `${key}: the source can't be reached to check the row` : `${key}: the source has no such row`);
-  const table = tableOf(key);
-  const cls = (await env.db.adbQuery(`SELECT _class_key AS key FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _record_table = :t AND _status <> 'retired' LIMIT 1`, { t: table }).catch(() => []))[0];
-  const c = cls ? await env.classes.get(cls.key) : null;
-  // the row's class, when one points at its table and the audience sees it; else a bare node referring back by key
-  return mintInstance(env, ctx, { label: key, key, cls: c && audienceSees(env, ctx, c.home) ? c : null, by });
-}
-
-/** a dependency between instances, stated by the record or by the agent (R1); a transactional row earns its node here (R3) */
+/**
+ * A dependency between instances, stated by the record or by the agent (R1), written by the classes stream's
+ * `addDependency` (instances.js, review C-B7): each end an instance the audience sees, or a row's key whose node it
+ * makes (R3: a dependency the source can't hold), and refused when the edge would be seen lower than the write floor
+ * (R11.13). Filing reads a key's row first and relates the section to both ends after.
+ */
 export async function stateDependency(args, identity, env) {
   const ctx = await jobContext(identity, env.db);
   if (!ctx) throw refuse("this thread has no record to file");
   const section = ownSection(ctx, args.section);
   const statedAs = args.stated_as === "agent" ? "agent" : "record";
-  const from = await dependencyEnd(env, ctx, args.from, identity.user);
-  const to = await dependencyEnd(env, ctx, args.to, identity.user);
-  if (from === to) throw refuse("an instance can't depend on itself");
-  const { normalizeDependency } = await import("./model/classes.js");
-  const d = normalizeDependency({ from, to, stated_as: statedAs, stated_by: statedAs === "record" ? ctx.record : identity.user, source: section, note: args.note, valid_from: args.valid_from, valid_until: args.valid_until, stated_at: env.now() });
-  await env.db.adbCommand(
-    `CREATE EDGE DEPENDS_ON FROM ${from} TO ${to} SET stated_as = :sa, stated_by = :sb, source = :src, note = :note, stated_at = :at, valid_from = :vf, valid_until = :vu`,
-    "sql",
-    { sa: d.stated_as, sb: d.stated_by, src: d.source, note: d.note, at: d.stated_at, vf: d.valid_from, vu: d.valid_until },
+  for (const end of [args.from, args.to]) {
+    const s = String(end ?? "").trim();
+    if (RID_RE.test(s)) continue;
+    const key = parseKey(s)?.key;
+    if (!key) throw refuse(`${s}: an instance id, or a row's key`);
+    await rowExists(env, ctx, key);
+  }
+  const r = await env.instances.depend(
+    { from: String(args.from).trim(), to: String(args.to).trim(), stated_as: statedAs, stated_by: statedAs === "record" ? ctx.record : identity.user, source: section, note: args.note, valid_from: args.valid_from, valid_until: args.valid_until, stated_at: env.now() },
+    workerScope(env, ctx),
+    workerActor(identity),
+    { home: ctx.home },
   );
-  for (const rid of [from, to]) await relate(env, ctx, section, rid);
-  return { from, to, stated_as: d.stated_as, note: "Stated. It is seen only by someone who sees both ends (R11)." };
+  for (const rid of [r.dependency.from, r.dependency.to]) await relate(env, ctx, section, rid);
+  return { from: r.dependency.from, to: r.dependency.to, stated_as: r.dependency.stated_as, note: "Stated. It is seen only by someone who sees both ends (R11)." };
 }
 
 /** look a name up: instances this audience sees, and rows of a table whose column holds it (read-only; R3) */
