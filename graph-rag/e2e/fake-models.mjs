@@ -161,6 +161,9 @@ export function answerChoice(question, { criteria = {}, candidates = "", entry =
 export function decide(body, lookup = {}) {
   const entry = String(body?.state?.entry ?? "");
   const investigate = entry.includes("[L2]");
+  // the record stream's check (graph-rag/src/check.js): "[admins]" in a note is a restricted category only the top may see
+  const top = Object.entries(body?.questions?.visible_from?.criteria ?? {}).find(([, v]) => /^org\b/.test(String(v)))?.[0];
+  const said = entry.includes("[admins]") && top ? `${entry} [category: c1] [visible_from: ${top}]` : entry;
   const answers = {
     level: investigate ? { score: 2, probabilities: { 0: 0.05, 1: 0.15, 2: 0.7, 3: 0.1 } } : { score: 0, probabilities: { 0: 0.9, 1: 0.1, 2: 0, 3: 0 } },
     reason: investigate ? { choice: "record_lookup", probabilities: { record_lookup: 0.8 } } : { choice: "plain_fact", probabilities: { plain_fact: 0.9 } },
@@ -169,7 +172,7 @@ export function decide(body, lookup = {}) {
     if (q === "level" || q === "reason") continue;
     if (spec?.type === "choice") {
       const n = /^who_(\d+)$/.exec(q)?.[1];
-      answers[q] = answerChoice(q, { criteria: spec.criteria ?? {}, candidates: n !== undefined ? body.state?.[`candidates_${n}`] : "", entry, lookup });
+      answers[q] = answerChoice(q, { criteria: spec.criteria ?? {}, candidates: n !== undefined ? body.state?.[`candidates_${n}`] : "", entry: said, lookup });
     } else if (spec?.type === "noul") answers[q] = { noul: entry.includes("[contradicts]") ? 0.9 : 0.05 };
     else if (spec?.type === "score") answers[q] = { score: 0, probabilities: { 0: 0.9, 1: 0.1 } };
   }
