@@ -9,6 +9,8 @@
 import { discoverScenarioFiles, loadScenarioFiles, selected, skipReason, summaryLine } from "./scenarios.mjs";
 const GRAPH = process.env.GRAPH_URL ?? "http://graph-rag:8000";
 const MODELS = process.env.MODELS_URL ?? "http://models:4000";
+// the fake test source (fake-source.mjs): read endpoint, write endpoint, and its control routes on the read port
+const SOURCE = { read: "http://source:5000/mcp", write: "http://source:5001/mcp", control: "http://source:5000" };
 import { createHmac, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -79,6 +81,8 @@ async function scenario(name, fn, meta = OWN) {
     // a failed scenario never leaves a model failing, slowed or primed for the next one
     for (const model of ["grader", "ds-flash", "embed", "decisions"]) await models("/__ok", { model });
     await models("/__reset", {}).catch(() => {});
+    // ... and every scenario starts from S0 in the fake source
+    await fetch(`${SOURCE.control}/__reset`, { method: "POST" }).catch(() => {});
   }
 }
 const check = (cond, msg) => {
@@ -387,9 +391,15 @@ await scenario("nothing in the background kept failing", async () => {
 const E2E_DIR = fileURLToPath(new URL("./", import.meta.url));
 const FIXTURES = new URL("../test/fixtures/", import.meta.url);
 /** what a scenario file's run(context) receives: this file's helpers, by name */
+/** the fake source's control routes: GET /__dump, /__calls; POST /__reset, /__plant */
+const source = async (path, body) => (await fetch(`${SOURCE.control}${path}`, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json();
+
 const context = {
   GRAPH,
   MODELS,
+  SOURCE,
+  source,
+  sourceDump: () => source("/__dump"),
   TOKENS,
   POS,
   tool,
@@ -414,6 +424,8 @@ const context = {
   e2eDir: E2E_DIR,
   // a stream's scenario can import this checkout's modules read-only (`src/model/schema.js`)
   srcUrl: (rel) => new URL(`../src/${rel}`, import.meta.url),
+  // the real-model evaluation's modules (graph-rag/eval/), read-only
+  evalUrl: (rel) => new URL(`../eval/${rel}`, import.meta.url),
 };
 const files = discoverScenarioFiles(E2E_DIR);
 // the harness's own stream last: what its agents read would raise what people have read

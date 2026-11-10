@@ -1,6 +1,6 @@
 # Scenario files
 
-The replay harness (`e2e.sh`, `run.mjs`) runs its own 22 scenarios and then
+The replay harness (`e2e.sh`, `run.mjs`) runs its own built-in scenarios and then
 every stream's, from `graph-rag/e2e/scenarios-<stream>.mjs`, as one suite
 with one summary line (`N/N scenarios passed`, `(k skipped)` when any were)
 and the same `PASS`/`FAIL name: reason` lines. A stream adds its file and
@@ -23,7 +23,7 @@ export default [
 
 - `name`: a sentence; it prints as `PASS name [stream]`.
 - `run(ctx)`: throws (or fails a `ctx.check`) to fail. Scenarios run in
-  file order, files in name order, after the 22 built-in ones, against the
+  file order, files in name order, after the built-in ones, against the
   same graph: use a prefix of your own for entry names (`e2e-<stream>-...`)
   and look nothing up by a name another stream might also write.
 - `skip` (optional): a reason string, `true`, or an `async (ctx)` returning
@@ -37,7 +37,7 @@ failed scenario named `load scenarios-<stream>.mjs`; the rest still run.
 
 `ONLY=condenser graph-rag/e2e/e2e.sh` runs only the scenarios whose name,
 file or stream contains a term (comma-separated terms, any match); `ONLY=harness`
-is the built-in 22 plus `scenarios-harness.mjs`.
+is the built-in ones plus `scenarios-harness.mjs`.
 
 ## What `run` receives
 
@@ -46,12 +46,14 @@ Everything `run.mjs` has, by name, on one object:
 | field | what it is |
 |---|---|
 | `GRAPH`, `MODELS` | the graph-rag and fake-models base URLs inside the network |
+| `SOURCE` | the fake test source (`fake-source.mjs`): `{ read, write, control }`, the read and write DAB MCP endpoints and the control base |
+| `source(path, body?)`, `sourceDump()` | the fake source's control routes (`GET /__dump`, `GET /__calls`, `POST /__reset`, `POST /__plant {table, keys, fields}`); `sourceDump()` is every table as `{ table: { primaryKey, rows } }` |
 | `TOKENS` | `{ admin, alice, bob, carol }` -> bearer tokens (e2e.sh): admin at the root (`write: direct`, `approve`, `raw`), alice at Operations, bob at the Production floor, carol at Operations for negative checks (she never writes; a search records what it shows as reads, and a writer's own notes graded above them show via "writer", so searching as alice raises her derived floor for the rest of the run) |
 | `POS` | `{ org, ops, floor }` -> position ids of the harness tree (root `org` > `ops` > `floor`) |
 | `tool(who, name, args)` | one MCP `tools/call` as `who` (a key of `TOKENS`, or a raw token); returns the tool's JSON, or `{ error }` |
 | `sql(query)` | `query_graph` in SQL as the admin (raw); rows |
 | `api(path, init?)` | an `/api/*` call as the admin; parsed JSON |
-| `models(path, body)` | a POST to the fake models' control routes (`/__fail`, `/__ok`, `/__slow`, `/__resolve`, `/__condense`, `/__reset`) |
+| `models(path, body)` | a POST to the fake models' control routes (`/__fail`, `/__ok`, `/__slow`, `/__condense`, `/__reset`) |
 | `entry(name)` | `{ rid, name, _home, _grade, _ungraded, _mentions_at }` of an entry, or undefined |
 | `thing(label)` | `{ rid, name }` of a thing by its label |
 | `job(rid, kind = "mentions")` | the latest Job row whose payload names the rid |
@@ -62,6 +64,7 @@ Everything `run.mjs` has, by name, on one object:
 | `randomUUID()` | node's |
 | `fixtures.read(name)`, `fixtures.url(name)`, `fixtures.dir` | `graph-rag/test/fixtures/` (`classes.json`, `policy.json`, `positions.json`, `oracle-sixty.json` (the 62 notes, test input only: R9), |
 | `srcUrl(rel)` | a URL into `graph-rag/src/` for a read-only `import()` of a module (`srcUrl("model/schema.js")`); a static `import ... from "../src/model/schema.js"` works too |
+| `evalUrl(rel)` | a URL into `graph-rag/eval/` (the real-model evaluation: labels, records, row diff and gate, leak scan, snapshot reads) for a read-only `import()` |
 | `e2eDir` | this directory's path |
 
 The runner mounts the whole `graph-rag` checkout read-only at `/gr`, so
@@ -69,7 +72,21 @@ relative imports from a scenario file (`../src/model/schema.js`,
 `../test/fixtures/...`) resolve as they do on the host.
 
 After each scenario `run.mjs` clears every fake-model override (`/__ok` for
-every model, then `/__reset`), so a scenario need not clean up its own.
+every model, then `/__reset`) and puts the fake source back to S0, so a
+scenario need not clean up its own.
+
+## The fake source
+
+`fake-source.mjs` serves S0 (`graph-rag/eval/s0.mjs`: a synthetic ERP of
+jobs, work centers, employees, customers, vendors and material; no real data)
+as two Data API builder MCP endpoints over one dataset, answering as
+`fake-dab-core.mjs` says DAB 2.0.12 does: `http://source:5000/mcp` is
+read-only and refuses `create_record` and `update_record`,
+`http://source:5001/mcp` takes them. graph-rag runs with `DAB_SYSTEM=mssql`,
+`DAB_READ_URL` and `DAB_WRITE_URL` pointed at them, so a filing write goes
+through the real adapter to the fake. The evaluation reads the source with its
+own client (`eval/dump.mjs`), never the adapter's, so the row gate can't be
+fooled by the code it judges.
 
 ## The fakes
 
@@ -81,11 +98,9 @@ wants by what it writes. Markers:
 | a note (grader) | `[admins]` | restricted to the top (topic "personnel and health") |
 | a note (grader) | `[no-topic]` | would restrict but names no listed topic: stays where written |
 | a section (grader) | `[claimed]` | a section with claims: stays at the writer's position, and `GET /__calls` counts it under `grader:claimed` (the grader must never be asked about one) |
-| a statement (linker) | `[things: Name/type, Other/type]` | those mentions |
 | an entry (decision model) | `[L2]` | an investigation (level 2, record_lookup); else nothing to do |
 | an entry (decision model) | `[contradicts]` | the `contradiction` question answers yes |
-| an entry (decision model) | `[who_0: c1]` | the closed question `who_0` picks `c1` |
-| an entry (decision model) | `[resolve: Diep=NGUD]` | any `who_<n>` whose candidate line contains `NGUD` picks it; `POST /__resolve {name, pick}` adds a lookup at run time; built in: Diep -> NGUD, Brian -> LOWB, John F. -> FRAJ; else `none` |
+| an entry (decision model) | `[who_0: c1]` | the closed question `who_0` picks `c1`; with no tag, `none` (no fake resolves a name: the linker and triage are gone, R4, and a fake that knew which Diep is meant would hand a test its answer) |
 | a conversation (condenser) | `[title: ...]`, `[on record: person\|position\|reason]`, `[claim: kind\|subject\|class\|attribute\|value]` | the built-in condenser's document: one section per blank-line block, the tags its claims (tags stripped from the text); `POST /__condense {match, document}` answers a given document when the text contains `match` |
 
 A chat request is the condenser's when its model name or system prompt
@@ -99,5 +114,11 @@ export function matches(body) { ... }           // optional: claim a request; de
 ```
 
 `GET /__condenser` says whether it was loaded. The decision model's closed
-questions (`who_<n>`, any `type: "choice"`) are answered from the lookup
-above; `level` and `reason` as before.
+questions (any `type: "choice"`) are answered from their tag only; `level`
+and `reason` as before.
+
+**No fake hands a test its answer.** A fake reads only the request it was
+sent. It never reads the evaluation's labels, S0's expectations, the marker
+map, or anything a scenario asserts, and no tag names a filing outcome: a tag
+names something a model could do, and the scenario checks what the system did
+with it.

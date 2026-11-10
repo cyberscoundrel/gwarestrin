@@ -1,4 +1,99 @@
-# Integrating the seven streams
+# Integration
+
+## The build on `build-base` (current)
+
+Status: 2026-11-10. `build-base` is at ba583bc: the contract and the removals
+([BUILD.md](BUILD.md)). The four streams (record, classes, filing, sources)
+build from it; the integrator lands them one at a time, each after the
+independent reviewer has passed it, with every check run after each merge and
+`build-base` moved only by a fast-forward push. The design is
+[ORGANIZATION-MODEL.md](ORGANIZATION-MODEL.md); the rulings
+(`~/reviews/design-rulings.md`, R1 to R12) outrank it and this file. The
+evaluation plan is [build/integrate.md](build/integrate.md).
+
+### Landed
+
+| # | Branch (tip) | Reviewed | Merge | Conflicts, and what each side kept | Checks |
+|---|---|---|---|---|---|
+| 0 | contract (ba583bc) | coordinator | fast-forward base | none | graph-rag 172/172, e2e 25/25 |
+
+No stream branch has landed yet.
+
+### The integrator's branch, before landing
+
+`claude/build-integrate-a53e86`: the evaluation (`graph-rag/eval/`,
+`test/eval.test.js`), the harness rework (`e2e/fake-source.mjs`, `e2e.sh`,
+`run.mjs`, `fake-models.mjs`, `scenarios-harness.mjs`, `SCENARIOS.md`), the
+scripts (`scripts/make-records.mjs`, `source-dump.mjs`, `filing-report.mjs`)
+and one contract addition: the `BriefLog` document type in `model/schema.js`.
+It lands on `build-base` with the first stream merge.
+
+### Ruled since the contract
+
+- **F4 is R12** (the user, 2026-11-10: "Yes, write changes"). A record that
+  says something changed is an update, filed to the source given the
+  recorder's authority and checked by the orchestrator afterwards; a record
+  that describes the current state and disagrees with the source, without
+  saying anything changed, is Held with a question to the recorder. The labels
+  follow it: of the nine notes with a stated row change or state, eight say
+  something changed; ux-m01 ("INSPECT-2 is down") states a state, so it is Held.
+
+### Requests to the streams
+
+| To | Request | Why |
+|---|---|---|
+| filing | Write every brief, exactly as sent, to `BriefLog` (`model/schema.js`): `{ id, record, audience, worker, brief (JSON), dropped (JSON), at }` | The leak gate scans every brief as sent (proposal B; integrate.md 2.6). Without it the gate sees only what workers wrote |
+| filing | A Held entry for a piece with no source at all (ux-aa11, "the thing from Tuesday") needs a `target.table`, which `normalizeEntry` requires | Either a table is named or the shape allows none; see choice I-6 |
+| classes | Name the property that holds an instance's source key (`eval/collect.mjs` reads `_record_key`, `record_key` or `key`) | Placement checks compare the key with the row |
+| record | The path a file uploaded on record takes (R11), for `make-records.mjs seed` (it calls `record_document` as the person today) | The 62 notes enter as uploaded documents (choice I-8) |
+| sources | Publish the synthetic database's tables, writable columns and rows, as a dump `make-records.mjs check --data` reads | The outcome labels are computed against S0 until then (choice I-1) |
+
+### Choices needing a ruling
+
+The contract's, as [BUILD.md](BUILD.md) lists them (owner in brackets):
+
+| # | The choice made |
+|---|---|
+| 1 | A class name is unique in the organization, whatever the homes (classes) |
+| 2 | A class whose `rows_are_nodes` is unset keeps its rows in the source (classes) |
+| 3 | The four roots are homed at `everyone` (classes) |
+| 4 | A dependency carries when it was stated, and optionally from and until when (classes) |
+| 5 | The stored map's global `attributes` and `default` entries decide nothing; a class's per-column entries count, strictest wins (filing) |
+| 6 | A class with no entry takes its nearest ancestors' entries, strictest of them (filing) |
+| 7 | A recorder has authority when they hold the mapped position or one above it (filing) |
+| 8 | The filing log is a `FilingEntry` document type in the same ArcadeDB (filing) |
+| 9 | An orchestrator's verdict is `matches`, `differs` or `unverifiable` (filing) |
+| 10 | A source conflict is Held with a question and also raises a `conflict` request (filing) |
+| 11 | A source write may create and update, never delete (sources) |
+| 12 | A recorder who has left or moved: the adapter refuses and the piece is Held (sources, filing) |
+| 13 | A proposal on a class missing from the map is approved by a person at the root (sources) |
+| 14 | Re-homing moves the sections about a class's own instances only (record) |
+
+The integrator's (labels and evaluation, [build/integrate.md](build/integrate.md)):
+
+| # | The choice made |
+|---|---|
+| I-1 | **S0**, the test source the labels assume: Job and Work_Center writable (create, update; named columns), Employee, Customer, Vendor and Material read-only; the invented jobs 3260410, 3260455, 3260471 absent; no Brightline, Corvane or HILL rows. Replaced by the sources stream's synthetic database when it ships |
+| I-2 | **M0**, the test map, keyed by a class's source table (Job and Customer and Vendor and Material at Operations, Work_Center at the floor, Employee at the root), because classes don't exist until discovery mints them |
+| I-3 | Authority is the recorder's position at or above the mapped one (the same as contract choice 7) |
+| I-4 | No attribute-level map entries in M0: Operations files a price on a Job row; visibility is the check's job |
+| I-5 | **Someone or something the source should hold but doesn't** (Lucas, Marisol Vega, Tomas, Kayla, Brightline, Corvane, HILL, Andre, Darrin S.): the labels accept a new instance with Kept and a Held question to the recorder alike, and the report says which each model chose (the coordinator: that is what the user wants to observe) |
+| I-6 | ux-aa11's unresolvable subject is labelled Held; Kept is accepted |
+| I-7 | A disagreement with an earlier Kept document (ux-ad15 against ux-ac13) is labelled Held, since for Kept the document is the source |
+| I-8 | The records enter as uploaded documents, one section each, with the condenser out of the first run, so every setup gets identical input; note codes are stripped from titles (ux-v02's text keeps its own "Per ux-z03") |
+| I-9 | Marker records (six, seeded) are added beside the 62 for the leak gate; a marker's home is read from the graph after the run, not planted |
+| I-10 | S0 has no free-text notes column, so a Filed piece is always a structured value |
+| I-11 | ux-t07 stays as input, labelled Kept |
+| I-12 | **R12's reading of ux-m01**: "INSPECT-2 is down until the gauge is recalibrated" describes a state and says nothing changed, so it is Held, not Filed |
+| I-13 | The `BriefLog` type is added to the contract (`model/schema.js`) for the leak gate; the filing stream writes it |
+| I-14 | The test configuration sets the synthetic connection's home to everyone (the coordinator), so the source carries no markers and source writes are scanned as seen by everyone |
+
+---
+
+The rest of this file is the earlier integration report (the `integration`
+branch, before the rulings), kept as history.
+
+## History: integrating the seven streams
 
 Status: 2026-11-09. The `integration` branch merges the seven stream branches
 of [ORGANIZATION-MODEL.md](ORGANIZATION-MODEL.md) one at a time in dependency

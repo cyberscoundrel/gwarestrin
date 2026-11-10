@@ -6,7 +6,10 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { answerChoice, CLAIMED_TAG, condense, createFakeModels, decide, grade, isCondenseRequest, loadCondenser, mentions, RESOLUTION, vector } from "../e2e/fake-models.mjs";
+import { answerChoice, CLAIMED_TAG, condense, createFakeModels, decide, grade, isCondenseRequest, loadCondenser, vector } from "../e2e/fake-models.mjs";
+import { fakeSource } from "../e2e/fake-source.mjs";
+import { dumpSource, guardTestSource, keyFromCursor } from "../eval/dump.mjs";
+import { dataset } from "../eval/s0.mjs";
 
 const graderUser = (items) => [
   { role: "system", content: "You decide who in an organization may see a piece of information in its knowledge base." },
@@ -30,40 +33,56 @@ test("the grader: [admins] to the top, routine at the writer's; a [claimed] sect
   assert.equal(JSON.parse(grade(graderUser(["plain"]))).items[0].visible_from, "P1", "no counter given: still answers");
 });
 
-test("the linker and the vectors are unchanged: mentions from the tag, deterministic unit vectors", () => {
-  const m = JSON.parse(mentions([{ role: "user", content: "HILL shipped pins. [things: HILL/supplier, gage pins]" }]));
-  assert.deepEqual(m.things, [
-    { name: "HILL", type: "supplier", role: "mentions" },
-    { name: "gage pins", type: "other", role: "mentions" },
-  ]);
+test("the vectors are unchanged: deterministic unit vectors from the words", () => {
   const v = vector("coolant on CNC 1");
   assert.equal(v.length, 384);
   assert.deepEqual(v, vector("coolant on CNC 1"));
   assert.ok(Math.abs(Math.hypot(...v) - 1) < 1e-9);
 });
 
-test("the decision model: triage as before, and a who_<n> answered from the tags, the run-time lookup, or the built-in table", () => {
-  const candidates = "c0: Diep Tran (person), inactive employee NGDT\nc1: Diep Nguyen (person), active employee NGUD";
-  const who = { type: "choice", criteria: { c0: "Diep Tran (person)", c1: "Diep Nguyen (person)", none: "None of them" } };
-  const ask = (entry, lookup) => decide({ state: { entry, candidates_0: candidates }, questions: { level: { type: "score" }, reason: { type: "choice" }, who_0: who } }, lookup).answers;
-  const plain = ask("x: Diep is running CNC 5 this afternoon");
-  assert.equal(plain.level.score, 0);
-  assert.equal(plain.reason.choice, "plain_fact");
-  assert.equal(plain.who_0.choice, "c1", "the built-in table: Diep is the active NGUD");
-  assert.equal(plain.who_0.probabilities.c1, 0.9);
-  assert.equal(ask("x: Diep is on CNC 5 [who_0: c0]").who_0.choice, "c0", "a tag names the choice");
-  assert.equal(ask("x: Diep is on CNC 5 [resolve: Diep=NGDT]").who_0.choice, "c0", "a resolve tag picks by the candidate line");
-  assert.equal(ask("x: Someone is on CNC 5").who_0.choice, "none", "nothing to go on: none");
-  assert.equal(ask("x: Tomas is on CNC 5", { Tomas: "NGDT" }).who_0.choice, "c0", "the run-time lookup");
-  assert.equal(ask("x: Ask John F. about fixtures [L2]").level.score, 2);
-  assert.equal(RESOLUTION.Diep, "NGUD");
+test("the decision model: a closed question answered only from its tag, else none; no built-in names, nothing about Diep", () => {
+  const who = { type: "choice", criteria: { c0: "Diep Ngo (person)", c1: "Diep Nguyen (person)", none: "None of them" } };
+  const ask = (entry) => decide({ state: { entry }, questions: { who_0: who } }).answers;
+  assert.equal(ask("x: Diep is running CNC 5 this afternoon").who_0.choice, "none", "no table resolves Diep for the test");
+  assert.equal(ask("x: Diep is on CNC 5 [who_0: c1]").who_0.choice, "c1", "a tag names the choice");
+  assert.equal(ask("x: Diep is on CNC 5 [who_0: c1]").who_0.probabilities.c1, 0.9);
   const contra = decide({ state: { entry: "x: Rack C1 holds aluminum [contradicts]", related: "y: C1 titanium" }, questions: { contradiction: { type: "noul" } } }).answers;
   assert.equal(contra.contradiction.noul, 0.9);
-  const noCriteria = answerChoice("which_attribute", { criteria: { price: "p", margin: "m" }, entry: "the margin [which_attribute: margin]" });
-  assert.equal(noCriteria.choice, "margin", "any closed choice question, by its tag");
   const unsure = answerChoice("which_attribute", { criteria: { price: "p", margin: "m" }, entry: "nothing" });
   assert.equal(unsure.choice, "price");
   assert.equal(unsure.probabilities.price, 0.5, "no none, nothing to go on: spread");
+});
+
+test("the fake source: S0 through DAB's tools; the read endpoint refuses writes, the write endpoint takes them; dump, plant and reset", async () => {
+  const src = fakeSource();
+  const call = (write) => async (name, args) => {
+    const r = src.rpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, write, write ? 5001 : 5000);
+    const text = r.result.content[0].text;
+    if (r.result.isError) throw new Error(text);
+    return JSON.parse(text);
+  };
+  const read = call(false);
+  const found = await read("read_records", { entity: "dbo_Employee", filter: "Employee eq 'NGDT'" });
+  assert.equal(found.result.value[0].Status, "Inactive");
+  await assert.rejects(read("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } }), /Permission denied/);
+  await call(true)("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } });
+  const dumped = await dumpSource(read, { keys: { dbo_Vendor: ["Vendor"], dbo_Material: ["Material"] } });
+  assert.deepEqual(Object.keys(dumped).sort(), Object.keys(dataset()).sort());
+  assert.deepEqual(dumped.dbo_Job.primaryKey, ["Job"], "the key from the first page's cursor");
+  assert.equal(dumped.dbo_Job.rows.find((r) => r.Job === "4471").Status, "Rush");
+  assert.deepEqual(src.control("GET", "/__dump").dbo_Job, dumped.dbo_Job);
+  assert.equal(src.control("POST", "/__plant", { table: "dbo_Work_Center", keys: { Work_Center: "CNC" }, fields: { Status: "Down" } }).ok, true);
+  assert.equal(src.control("GET", "/__calls").filter((c) => c.error).length, 1);
+  src.control("POST", "/__reset");
+  assert.deepEqual(src.control("GET", "/__dump"), dataset());
+  assert.equal(keyFromCursor(null), null);
+});
+
+test("the guard: a write connection that holds anything but the test server and database stops the run", async () => {
+  const want = { server: "gr-test-sql", database: "gwtest" };
+  assert.deepEqual(await guardTestSource(async () => want, want), want);
+  await assert.rejects(guardTestSource(async () => ({ server: "mssql-server", database: "ERP" }), want), /refusing to run/);
+  await assert.rejects(guardTestSource(async () => want, {}), /needs the test server/);
 });
 
 test("the built-in condenser: a document in the contract's shape from the text's tags; a lookup answers first", () => {
@@ -136,15 +155,13 @@ test("the server: routes a condenser request to the hook, counts claimed grader 
     await post("/__fail", { model: "grader", status: 402 });
     const failing = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "grader", messages: [] }) });
     assert.equal(failing.status, 402);
-    await post("/__resolve", { name: "Tomas", pick: "NGDT" });
-    const d = await post("/decisions", { state: { entry: "x: Tomas", candidates_0: "c0: T (person), NGDT" }, questions: { who_0: { type: "choice", criteria: { c0: "T", none: "n" } } } });
-    assert.equal(d.answers.who_0.choice, "c0");
+    const d = await post("/decisions", { state: { entry: "x: Tomas [who_0: c0]" }, questions: { who_0: { type: "choice", criteria: { c0: "T", none: "n" } } } });
+    assert.equal(d.answers.who_0.choice, "c0", "from the entry's tag");
+    assert.equal((await fetch(`${base}/__resolve`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).status, 404, "no lookup route: names aren't resolved for a test");
     const reset = await post("/__reset", {});
     assert.deepEqual(reset, { reset: true });
     const ok = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "grader", messages: graderUser(["plain"]) }) });
     assert.equal(ok.status, 200, "the failure is cleared");
-    const d2 = await post("/decisions", { state: { entry: "x: Tomas", candidates_0: "c0: T (person), NGDT" }, questions: { who_0: { type: "choice", criteria: { c0: "T", none: "n" } } } });
-    assert.equal(d2.answers.who_0.choice, "none", "the lookup is cleared");
     const info = await (await fetch(`${base}/__condenser`)).json();
     assert.deepEqual(info, { loaded: true, file: "x" });
   } finally {

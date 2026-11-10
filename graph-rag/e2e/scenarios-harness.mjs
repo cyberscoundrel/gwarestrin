@@ -20,7 +20,84 @@ async function approveIfProposed(ctx, r) {
   return { proposed: true, approved: Boolean(ok.result?.approved || ok.approved), reply: ok };
 }
 
+/** query_graph as the admin, throwing on an error (ctx.sql reads an error as no rows, which would hide a drift) */
+const strictQuery = (ctx) => async (query) => {
+  const r = await ctx.tool("admin", "query_graph", { query, language: "sql" });
+  if (r.error) throw new Error(String(r.error));
+  return r.rows ?? [];
+};
+
 export default [
+  {
+    name: "the fake test source serves S0 on two endpoints, and the evaluation's own dump and row gate catch a change no Filed entry names",
+    run: async (ctx) => {
+      const { check } = ctx;
+      const { mcpClient, dumpSource } = await import(ctx.evalUrl("dump.mjs"));
+      const { diffDumps, rowGate } = await import(ctx.evalUrl("source.mjs"));
+      const read = mcpClient(ctx.SOURCE.read);
+      const write = mcpClient(ctx.SOURCE.write);
+      const keys = { dbo_Vendor: ["Vendor"], dbo_Material: ["Material"] };
+      const before = await dumpSource(read, { keys });
+      check(before.dbo_Employee.rows.some((r) => r.Employee === "NGDT" && r.Status === "Inactive"), "S0's inactive Diep is there");
+      let refused = null;
+      await read("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } }).catch((e) => (refused = String(e.message)));
+      check(/Permission denied/.test(refused ?? ""), `the read endpoint refuses a write: ${refused}`);
+      check((await dumpSource(read, { keys })).dbo_Job.rows.find((r) => r.Job === "4471").Status === "Active", "nothing changed");
+      // a write nobody logged: the gate must fail it
+      await write("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } });
+      const changes = diffDumps(before, await dumpSource(read, { keys }));
+      check(changes.length === 1 && changes[0].key === "mssql:dbo_Job:4471" && changes[0].columns.join() === "Status", `one change: ${JSON.stringify(changes)}`);
+      check(!rowGate(changes, []).ok, "no Filed entry: the gate fails");
+      const filed = { id: "e", outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471", fields: { Status: "Rush" } } };
+      check(rowGate(changes, [filed]).ok, "a Filed entry naming the row and its column: the gate passes");
+      check((await ctx.sourceDump()).dbo_Job.rows.find((r) => r.Job === "4471").Status === "Rush", "the control route's dump agrees");
+      await ctx.source("/__reset", {});
+      check(diffDumps(before, await dumpSource(read, { keys })).length === 0, "reset: back to S0");
+    },
+  },
+  {
+    name: "the evaluation's snapshot reads run against the contract's schema, find a marker record where it landed, and the leak scan flags it only above its home",
+    run: async (ctx) => {
+      const { check, POS, until } = ctx;
+      const { collectGraph } = await import(ctx.evalUrl("collect.mjs"));
+      const { markerRecords } = await import(ctx.evalUrl("records.mjs"));
+      const { markerHomes, scanLeaks, sectionItems } = await import(ctx.evalUrl("leaks.mjs"));
+      const { POSITIONS } = await import(ctx.evalUrl("s0.mjs"));
+      const query = strictQuery(ctx);
+      const empty = await collectGraph(query);
+      for (const k of ["entries", "requests", "briefs", "documents", "sections", "classes", "instances"]) check(Array.isArray(empty[k]), `${k} read`);
+      // marker-3: alice's Operations matter; recorded through the record path as her on-record agent
+      const seed = Number.parseInt(ctx.randomUUID().slice(0, 6), 16);
+      const { records, markers } = markerRecords(seed);
+      const rec = records.find((r) => r.note === "marker-3");
+      rec.document.title = `${rec.document.title} ${seed}`;
+      const agent = await onRecordAgent(ctx, "alice", POS.ops);
+      const r = await ctx.tool(agent, RECORD_TOOL, { document: rec.document });
+      check(!r.error, `recorded: ${JSON.stringify(r).slice(0, 300)}`);
+      await approveIfProposed(ctx, r);
+      const word = markers.find((m) => m.record === "marker-3").word;
+      const snap = await until("the marker's section is readable", async () => {
+        const s = await collectGraph(query, { records: [rec] });
+        return s.sections.some((x) => x.text.includes(word)) && s.recordIds["marker-3"] ? s : null;
+      });
+      const homes = markerHomes([{ word, record: "marker-3", recordId: snap.recordIds["marker-3"] }], snap.sections, POSITIONS);
+      check(homes[0].home === POS.ops, `the marker's home is the section's: ${JSON.stringify(homes)}`);
+      const clean = scanLeaks(sectionItems(snap.sections), homes, POSITIONS);
+      check(clean.ok, `no section above its audience holds it: ${JSON.stringify(clean.leaks)}`);
+      // what bob's search returns is what a floor brief could carry: the marker must not be in it
+      // (only the results: the reply also echoes the query, which names the marker)
+      const seen = await ctx.tool("bob", "search_graph", { query: `${word} Metals bar stock` });
+      check(Array.isArray(seen.results), `bob searched: ${JSON.stringify(seen).slice(0, 200)}`);
+      const bobs = scanLeaks([{ where: "search:bob", audience: POS.floor, text: JSON.stringify(seen.results) }], homes, POSITIONS);
+      // alice, at the marker's own home, does find it: the search could have shown it, so bob's clean scan means something
+      const hers = await ctx.tool("alice", "search_graph", { query: `${word} Metals bar stock` });
+      check(JSON.stringify(hers.results ?? []).includes(word), `alice's search finds it: ${JSON.stringify(hers).slice(0, 300)}`);
+      check(bobs.ok, `the floor's search doesn't carry it: ${JSON.stringify(bobs.leaks)}`);
+      // the gate's teeth: the same words in something the floor sees
+      const planted = scanLeaks([{ where: "brief:planted", audience: POS.floor, text: `context: ${word.toUpperCase()} metals` }], homes, POSITIONS);
+      check(!planted.ok && planted.leaks[0].where === "brief:planted", "a planted floor brief with the marker is a leak");
+    },
+  },
   {
     name: "the record path under the live derived floor: what an agent read above its position holds its record there, and an agent that read nothing lands at its own",
     run: async (ctx) => {

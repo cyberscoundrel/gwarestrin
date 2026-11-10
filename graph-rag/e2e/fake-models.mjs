@@ -8,22 +8,17 @@
 //   POST /v1/chat/completions    the grader (writer's position, sure; "[admins]" in a note = the top;
 //                                an item marked [claimed] is a section with claims: the grader is not
 //                                its judge, it stays at the writer's position and the call is counted),
-//                                the linker (mentions from the statement's [things: Name/type/option..., ...] tag;
-//                                an option is a number (the model picks that listed candidate), key=sys|table|row or class=C),
-//                                the residue's pick ([pick: Name=PICK] picks the candidate whose line contains PICK),
 //                                the condenser (a request whose model or system prompt says "condens":
 //                                fake-condenser.mjs next to this file when present, else the built-in
 //                                one: sections from the text, claims from [claim: kind|subject|class|attribute|value] tags)
 //   POST /decisions              triage: "[L2]" in the entry = an investigation, else nothing to do;
-//                                closed questions (who_<n>, any `choice`) answered from a lookup:
-//                                a [who_0: c1] tag, a [resolve: Name=KEY] tag, /__resolve, or the
-//                                built-in table (Diep -> NGUD ...), else "none"
+//                                a closed question (any `choice`) answered from a [<question>: <key>] tag, else "none"
+//                                (no built-in answers: the linker and triage are gone, R4, and a fake that resolved
+//                                names would hand a test its answer)
 //   POST /__fail {model, status} a model (or "decisions") answers with status
 //   POST /__ok {model}           ... and recovers
 //   POST /__slow {model, match, ms}  a request to it whose input contains match waits ms first
 //                                ({} clears them): to order two writers' calls
-//   POST /__resolve {name, pick} the decision model picks the candidate whose line contains pick
-//                                when the entry names name ({} clears them)
 //   POST /__condense {match, document}  the built-in condenser answers document (an object) when
 //                                the conversation contains match ({} clears them)
 //   POST /__reset                clears every override above (run.mjs calls it after each scenario)
@@ -31,7 +26,6 @@
 //   GET  /__decisions            every decision request: its question names and the reason question's criteria (kept across /__reset)
 //   GET  /__graded               the name of every item the grader was asked about, in order (kept across /__reset)
 //   GET  /__condenser            whether fake-condenser.mjs was loaded
-//   POST /__prompts              the last system prompts the linker's model was sent, newest last
 // Imported by test/harness-fakes.test.js for its pure parts; listens only when run as a program.
 import { createServer } from "node:http";
 import { existsSync } from "node:fs";
@@ -84,81 +78,23 @@ export function grade(messages, counts = null) {
   });
 }
 
-export function mentions(messages) {
-  const user = userText(messages);
-  const tag = /\[things: ([^\]]*)\]/.exec(user);
-  const things = tag
-    ? tag[1]
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map((s) => {
-          const [name, type = "other", ...options] = s.split("/").map((x) => x.trim());
-          const thing = { name, type, role: "mentions" };
-          for (const o of options) {
-            if (/^\d+$/.test(o)) thing.candidate = Number(o);
-            else if (o.startsWith("key=")) thing.key = o.slice(4).replaceAll("|", ":"); // key=mssql|dbo_Order|78912: bars, so the tag in the statement's text is not itself a key written in it
-            else if (o.startsWith("class=")) thing.class = o.slice(6);
-          }
-          return thing;
-        })
-    : [];
-  return JSON.stringify({ things, review: false, why: "" });
-}
-
-/** the residue's closed call: [pick: Name=PICK] in the statement picks the listed candidate whose line contains PICK */
-export function residue(messages) {
-  const user = userText(messages);
-  const picks = [];
-  for (const m of user.matchAll(/\[pick:\s*([^=\]]+)=([^\]]+)\]/g)) {
-    const name = m[1].trim();
-    const block = new RegExp(`^"${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"[^\\n]*could be:\\n((?:  .*\\n?)*)`, "m").exec(user)?.[1] ?? "";
-    const line = block.split("\n").find((l) => l.includes(m[2].trim()));
-    const rid = /^\s*(#\d+:\d+):/.exec(line ?? "")?.[1];
-    if (rid) picks.push({ name, candidate: rid });
-  }
-  return JSON.stringify({ picks });
-}
-
-// ---- the decision model: triage's score, and the closed questions from a lookup ----
-
-/** the batches' same-name cases: the active employee's key wins (ORACLE.md, "Resolution by key and class before embedding") */
-export const RESOLUTION = { Diep: "NGUD", Brian: "LOWB", "John F.": "FRAJ", John: "FRAJ" };
+// ---- the decision model: the closed questions, answered from tags in the text ----
 
 /**
- * One closed question. `criteria` is the question's choices (key -> label);
- * `candidates` the matching `candidates_<n>` state text ("c0: Diep Nguyen
- * (person), active employee NGUD"), when the question is a who_<n>. Picks,
- * in order: a `[<question>: <key>]` tag in the entry; a `[resolve: Name=PICK]`
- * tag or a runtime/built-in lookup whose name the entry contains, choosing
- * the candidate whose line contains PICK; else "none" when that is a choice,
- * else the first choice, unsure.
+ * One closed question: a `[<question>: <key>]` tag in the text picks that choice, sure; else "none" when that
+ * is a choice, else the first choice, unsure. No built-in answers: the linker and triage are gone (R4), and a
+ * fake that knew which employee "Diep" is would hand a test its answer.
  */
-export function answerChoice(question, { criteria = {}, candidates = "", entry = "", lookup = {} }) {
+export function answerChoice(question, { criteria = {}, entry = "" }) {
   const keys = Object.keys(criteria);
   const sure = (choice) => ({ choice, probabilities: Object.fromEntries(keys.map((k) => [k, k === choice ? 0.9 : Number((0.1 / Math.max(1, keys.length - 1)).toFixed(3))])) });
-  const tagged = new RegExp(`\\[${question.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*([^\\]]+)\\]`).exec(entry)?.[1]?.trim();
+  const tagged = new RegExp(`\\[${question.replace(/[.*+?^${}()|[\]\\]/g, "\\export function decide(body, lookup = {}) {")}:\\s*([^\\]]+)\\]`).exec(entry)?.[1]?.trim();
   if (tagged && criteria[tagged]) return sure(tagged);
-  const lines = String(candidates)
-    .split("\n")
-    .map((l) => /^(c\d+):\s*(.*)$/.exec(l.trim()))
-    .filter(Boolean);
-  const byPick = (pick) => lines.find((l) => l[2].includes(pick))?.[1];
-  for (const m of entry.matchAll(/\[resolve:\s*([^=\]]+)=([^\]]+)\]/g)) {
-    const key = byPick(m[2].trim());
-    if (key && criteria[key]) return sure(key);
-  }
-  for (const [name, pick] of [...Object.entries(lookup), ...Object.entries(RESOLUTION)]) {
-    if (!entry.includes(name)) continue;
-    const key = byPick(pick);
-    if (key && criteria[key]) return sure(key);
-  }
   if (criteria.none) return sure("none");
-  const first = keys[0];
-  return { choice: first, probabilities: Object.fromEntries(keys.map((k) => [k, Number((1 / Math.max(1, keys.length)).toFixed(3))])) };
+  return { choice: keys[0], probabilities: Object.fromEntries(keys.map((k) => [k, Number((1 / Math.max(1, keys.length)).toFixed(3))])) };
 }
 
-export function decide(body, lookup = {}) {
+export function decide(body) {
   const entry = String(body?.state?.entry ?? "");
   const investigate = entry.includes("[L2]");
   const answers = {
@@ -168,8 +104,7 @@ export function decide(body, lookup = {}) {
   for (const [q, spec] of Object.entries(body?.questions ?? {})) {
     if (q === "level" || q === "reason") continue;
     if (spec?.type === "choice") {
-      const n = /^who_(\d+)$/.exec(q)?.[1];
-      answers[q] = answerChoice(q, { criteria: spec.criteria ?? {}, candidates: n !== undefined ? body.state?.[`candidates_${n}`] : "", entry, lookup });
+      answers[q] = answerChoice(q, { criteria: spec.criteria ?? {}, entry });
     } else if (spec?.type === "noul") answers[q] = { noul: entry.includes("[contradicts]") ? 0.9 : 0.05 };
     else if (spec?.type === "score") answers[q] = { score: 0, probabilities: { 0: 0.9, 1: 0.1 } };
   }
@@ -256,9 +191,7 @@ const read = (req) =>
 export function createFakeModels({ condenser = null } = {}) {
   const failing = new Map(); // model -> status
   let slow = []; // {model, match, ms}
-  let resolve = {}; // name -> pick (the decision model's lookup)
   let condenseLookups = []; // {match, document}
-  let prompts = []; // the linker's system prompts, for a scenario to read what its model was offered
   const calls = {};
   const counts = {};
   const server = createServer(async (req, res) => {
@@ -274,11 +207,9 @@ export function createFakeModels({ condenser = null } = {}) {
     if (path === "/__graded") return send(200, { graded: counts.graded ?? [] });
     if (path === "/__decisions") return send(200, { decisions: counts.decisions ?? [] });
     if (path === "/__slow") return (slow = body.model ? [...slow, body] : []), send(200, { slow });
-    if (path === "/__resolve") return (resolve = body.name ? { ...resolve, [body.name]: String(body.pick) } : {}), send(200, { resolve });
     if (path === "/__condense") return (condenseLookups = body.match ? [...condenseLookups, body] : []), send(200, { condense: condenseLookups.map((l) => l.match) });
-    if (path === "/__reset") return failing.clear(), (slow = []), (resolve = {}), (condenseLookups = []), send(200, { reset: true });
+    if (path === "/__reset") return failing.clear(), (slow = []), (condenseLookups = []), send(200, { reset: true });
     if (path === "/__condenser") return send(200, { loaded: Boolean(condenser), file: condenser?.file ?? null });
-    if (path === "/__prompts") return send(200, { prompts });
     if (path === "/decisions") (counts.decisions ??= []).push({ questions: Object.keys(body.questions ?? {}), reasons: Object.keys(body.questions?.reason?.criteria ?? {}) });
     const model = path === "/decisions" ? "decisions" : body.model;
     calls[model] = (calls[model] ?? 0) + 1;
@@ -286,7 +217,7 @@ export function createFakeModels({ condenser = null } = {}) {
     if (wait) await new Promise((r) => setTimeout(r, Number(wait.ms) || 0));
     if (failing.has(model)) return send(failing.get(model), { error: { message: `fake: ${model} answers ${failing.get(model)}`, code: failing.get(model) } });
     if (path === "/embeddings") return send(200, { data: (body.input ?? []).map((t, index) => ({ index, embedding: vector(t) })) });
-    if (path === "/decisions") return send(200, decide(body, resolve));
+    if (path === "/decisions") return send(200, decide(body));
     if (path === "/chat/completions") {
       const messages = body.messages ?? [];
       const system = systemText(messages);
@@ -295,10 +226,6 @@ export function createFakeModels({ condenser = null } = {}) {
         const out = await condenser.condense(messages, body);
         content = typeof out === "string" ? out : JSON.stringify(out);
       } else if (system.includes("who in an organization may see")) content = grade(messages, counts);
-      else if (system.includes("You find the things a statement")) {
-        prompts = [...prompts.slice(-39), system];
-        content = mentions(messages);
-      } else if (system.includes("names things that may be ones already known")) content = residue(messages);
       else if (isCondenseRequest(body)) content = condense(messages, condenseLookups);
       else content = "{}";
       return send(200, { choices: [{ message: { role: "assistant", content } }] });

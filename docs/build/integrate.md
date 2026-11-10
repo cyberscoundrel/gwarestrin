@@ -242,6 +242,13 @@ when their position is at or above the mapped one. A class with no source table 
 entry (R11: missing means Proposed), which matters only for a row target. There are no
 attribute-level entries, because R6 maps classes **[needs a ruling]**.
 
+**R12 (2026-11-10, settling F4).** Stated changes are written: a record that says something
+changed is an update, filed given the recorder's authority and checked by the orchestrator
+afterwards. A record that describes the current state and disagrees with the source, without
+saying anything changed, is Held. Of the nine notes with a stated row change or state (m01, z01,
+aa07, ab05, ag03, aj02, ak03, al04, au04), eight say something changed and follow R2's table;
+m01 ("INSPECT-2 is down") states a state, so it is Held **[needs a ruling: this reading]**.
+
 **Key.** **F** Filed, **P** Proposed, **H** Held, **K** Kept. `Job:4471.Status` is a row
 and column. `+Job` is a new row. `doc` is the document. "resolves" lists the instances
 the sections should link to. "Must not" lists named wrong actions (2.1, 2.5). Start home
@@ -252,7 +259,7 @@ is the recorder's position (R11). The check may only raise it, and is not graded
 |---|---|---|---|---|---|
 | note 13 | alice | **K** doc: probable slip of 3260356 to next week, and the inspect backlog; the dependency 3260356 → INSPECT-2 is stated | | write Promised_Date ("probably"); mint a PO 78912 node | Job 3260356 (by key), INSPECT-2, Exatron |
 | note 14 | bob | **K** doc: Exatron wants the next EPP-D98-2-B batch earlier (a need); **K** doc: Darrin S. checking material (a task) | H asking who Darrin S. is | write to Job 3260357 | Job 3260357 (by part), Exatron |
-| m01 | alice | **F** `Work_Center:INSPECT-2.Status` = down; **H** which EPP-D98 job waits (two match) | dependency edges to both open EPP-D98 jobs, instead of H | pick one job silently | INSPECT-2, Exatron |
+| m01 | alice | **H** `Work_Center:INSPECT-2.Status`: "is down" states a state the source disagrees with and says nothing changed (R12), so ask alice; **H** which EPP-D98 job waits (two match) | dependency edges to both open EPP-D98 jobs, instead of the second H | write Status; pick one job silently | INSPECT-2, Exatron |
 | m03 | alice | **K** doc: recommendation to stop quoting Aetrium below cost | | write anything; new pricing class without a request | Aetrium |
 | t01 | alice | **K** doc: fridge cleaned Fridays 3pm | | | |
 | t02 | bob | **K** doc: holiday party Dec 19, noon | | | |
@@ -313,15 +320,15 @@ is the recorder's position (R11). The check may only raise it, and is not graded
 | av06 | alice | **K** doc: the owner's plan to retire and sell | | | |
 | aw10 | alice | **K** doc: Diep's lifting limit; the doctor's note | | | NGUD |
 
-Under S0 and M0: 2 Filed (m01, ab05), 4 Proposed (z01, aa07, ag03, au04), 7 Held (m01, aa11, ab05, ad15, aj02, ak03, al04), and the rest Kept. Rows that
-may change: `Work_Center:INSPECT-2` and one new `Job` (ab05). The row-diff gate (2.2)
-expects exactly those two, unless a person approves a Proposed piece during the run.
+Under S0 and M0: 1 Filed (ab05), 4 Proposed (z01, aa07, ag03, au04), 8 Held (m01 twice, aa11, ab05, ad15, aj02, ak03, al04), and the rest Kept: 73 pieces. The one row that
+may change is a new `Job` (ab05). The row-diff gate (2.2) checks every change against a Filed
+entry, whatever the labels expect; the labels only score the outcomes.
 The mostly-Kept spread follows from the notes: most are about things no system in S0
 holds. Recurring Kept is R2's signal for a discovered class (Tomas and Kayla as
 personnel; equipment faults on the forklift, the coffee maker and CNC 2; coolant; racks),
 which feeds 2.3 when the orchestrator re-files in a later batch (R11).
 
-The labels file is `graph-rag/test/fixtures/filing-labels.json`, written in phase 1 from
+The labels are `graph-rag/eval/labels.mjs`, written in phase 1 from
 this table: layer 1 by hand, and layer 2 regenerated from the sources stream's real
 declaration. `make-records.mjs check` fails when a label names a table, column or key
 that the declaration lacks.
@@ -362,3 +369,36 @@ database and which models, is the user's to answer first.
 10. **There is no free-text notes column in S0**, so "Filed" always means a structured
     value.
 11. **t07 stays as input**, labelled Kept. Its former test fell away with claims (R11).
+12. **R12's reading of m01**: "is down" describes a state, so Held.
+13. **`BriefLog`**, a document type added to the contract so the leak gate sees every brief as
+    sent. The filing stream writes it.
+
+The current list, with the contract's own, is in [INTEGRATION.md](../INTEGRATION.md).
+
+## Phase 1: what is built
+
+All of it runs against fake models, the fake source and the throwaway graph; none of it has met
+a real model.
+
+| Part | Where | Shown by |
+|---|---|---|
+| S0, M0 and the test positions | `graph-rag/eval/s0.mjs` | `test/eval.test.js` |
+| The labels, as code: layer 1 by hand, layer 2 recomputed by R2's table and R12 | `eval/labels.mjs` | labels sound against the oracle's 62 ids and S0; a different dataset is checked with `make-records.mjs check --data` |
+| The 62 records, batch order, and the marker records | `eval/records.mjs` | every record a valid document; ordering of the notes that follow others |
+| Row diff, the row gate, accounts against the diff | `eval/source.mjs` | gate passes a logged write and fails an unlogged one, a Proposed-only one, an unnamed column and a delete |
+| Outcome matching, named wrong actions, links | `eval/outcomes.mjs` | a perfect log scores perfect; wrong target and wrong rule told apart |
+| Leak scan | `eval/leaks.mjs` | flags a marker above the audience only; a marker read from the real graph (e2e) |
+| Tree, stability, duplicates, placements | `eval/tree.mjs` | multi-parent tree, survival across runs, the inactive Diep flagged |
+| The typed check compared | `eval/check.mjs` | agreement, kappa, unsure rate, stability |
+| The report and the comparison | `eval/report.mjs` | a clean snapshot passes both gates, a planted change and a planted leak fail them |
+| The snapshot reads | `eval/collect.mjs` | run against the contract's schema in the replay harness |
+| Source dump and the test-source guard | `eval/dump.mjs` | against the fake source, in unit tests and e2e |
+| The fake source | `e2e/fake-source.mjs`, `e2e.sh` | e2e: reads by key, the read endpoint refuses writes, the gate catches an unlogged write |
+| Scripts | `scripts/make-records.mjs`, `source-dump.mjs`, `filing-report.mjs` | `--url` required, no default instance |
+
+**Not yet possible, and why.** The filing log, briefs, requests and the orchestrator don't exist
+until the filing stream lands, so no scenario files a record end to end yet; the classes stream
+decides where an instance's key lives; the record stream decides the upload path and replaces the
+grader with the typed check, which is when the check comparison gets real answers. Each binds in
+phase 2, when its stream lands, as a scenario in `scenarios-harness.mjs` that runs the 62 records
+through the fakes and holds the run to both gates.

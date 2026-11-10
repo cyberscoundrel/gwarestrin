@@ -133,6 +133,23 @@ export const TYPES = {
       { properties: ["outcome"], unique: false },
     ],
   },
+  BriefLog: {
+    kind: "document",
+    doc: "every brief as it was sent to a worker (brief.js scopeBrief's output, verbatim), so the leak gate can scan it (docs/build/integrate.md, 2.6); not part of the graph",
+    properties: {
+      id: "STRING",
+      record: "STRING", // the document's record id
+      audience: "STRING", // the home the brief is for
+      worker: "STRING",
+      brief: "STRING", // JSON: the brief exactly as sent
+      dropped: "STRING", // JSON: scopeBrief's counts of what it left out
+      at: "STRING",
+    },
+    indexes: [
+      { properties: ["id"], unique: true },
+      { properties: ["record"], unique: false },
+    ],
+  },
   WorkerRequest: {
     kind: "document",
     doc: "a worker's request of the orchestrator (filing.js normalizeRequest)",

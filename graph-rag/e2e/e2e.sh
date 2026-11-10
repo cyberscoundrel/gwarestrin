@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # The replay harness: a throwaway ArcadeDB, graph-rag built from this
-# checkout, and fake models (fake-models.mjs) on a private Docker network;
+# checkout, fake models (fake-models.mjs) and a fake test source
+# (fake-source.mjs: S0 from eval/s0.mjs, behind two DAB-shaped endpoints) on a
+# private Docker network;
 # then the scenarios (run.mjs, plus every stream's scenarios-<stream>.mjs: see
 # SCENARIOS.md). Nothing touches a running stack, and nothing calls a real
 # model. Needs only Docker.
@@ -26,12 +28,12 @@ fi
 
 cleanup() {
   if [ "${KEEP:-}" != "1" ]; then
-    docker rm -f "$NET-gr" "$NET-adb" "$NET-models" >/dev/null 2>&1 || true
+    docker rm -f "$NET-gr" "$NET-adb" "$NET-models" "$NET-source" >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
     docker rmi "$GR_IMAGE" >/dev/null 2>&1 || true
     rm -rf "$CFG"
   else
-    echo "kept: containers $NET-{gr,adb,models} on network $NET"
+    echo "kept: containers $NET-{gr,adb,models,source} on network $NET"
   fi
 }
 trap cleanup EXIT
@@ -58,6 +60,8 @@ docker run -d --name "$NET-adb" --network "$NET" --network-alias arcadedb \
   -e ARCADEDB_SETTINGS="-Darcadedb.server.rootPassword=e2e-password -Darcadedb.server.defaultDatabases=gwarestrin[root]" \
   "$ADB_IMAGE" >/dev/null
 docker run -d --name "$NET-models" --network "$NET" --network-alias models -v "$PWD/e2e:/e2e:ro" "$NODE" node /e2e/fake-models.mjs >/dev/null
+# the fake source reads eval/s0.mjs, so it gets the checkout (read-only), as the runner does
+docker run -d --name "$NET-source" --network "$NET" --network-alias source -v "$PWD:/gr:ro" "$NODE" node /gr/e2e/fake-source.mjs >/dev/null
 echo "building graph-rag from this checkout"
 docker build -q -t "$GR_IMAGE" . >/dev/null
 
@@ -79,6 +83,7 @@ docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$C
   -e DECISION_URL=http://models:4000/decisions -e DECISION_API_KEY=e2e \
   -e TOKEN_MAP_PATH=/cfg/tokens.json -e POSITION_MAP_PATH=/cfg/positions.json \
   -e SWEEP_INTERVAL_MS=5000 -e DOC_STORE=fs:/tmp/documents \
+  -e DAB_SYSTEM=mssql -e DAB_READ_URL=http://source:5000/mcp -e DAB_WRITE_URL=http://source:5001/mcp \
   "$GR_IMAGE" >/dev/null
 
 status=0
