@@ -169,6 +169,7 @@ export function checkReady() {
  * The language-model grader is gone (R4: the language-model fallback goes), and with it the end dates it
  * judged. Kept for requests.js, which asked it how long a question matters: it now always gives no answer,
  * so a question lasts as long as it is open. (The integrator can drop that call.)
+ * NEEDS A RULING (record 10): no typed question judges end dates; a writer's own valid_until still stands.
  */
 export async function gradeBatch(_origin, entities) {
   return entities.map(() => undefined);

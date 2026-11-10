@@ -199,3 +199,97 @@ listed again in the Phase 1 report.
   stream's enqueue (the job's shape for one home group).
 - The contract step's removals: claims, the linker, triage, the authority map.
 - The filing stream: its enqueue, and briefs that read only one home group (R7, R11.6).
+
+---
+
+# Phase 1: what was built
+
+Built on `build-base` at ba583bc, following `docs/BUILD.md`. Each item names its ruling and the tests that show
+it.
+
+## The pipeline as it runs
+
+1. **On and off record (R11.12).** Off record is the default. `record-state.js` refuses every tool from a chat
+   agent that is not a read, at the call. The switch now also carries the position the person chose
+   (`PUT /api/thread-record {position}`), held while the thread is on record.
+2. **Where a section starts (R11.5).** `ingest.js recordHome`: the position the person chose at the switch,
+   when it is one they hold, else their own position. The record tool's `home` argument is gone.
+3. **What the agent read (R11.13).** The derived floor (`floor.js derivedFloor`) holds every section no lower
+   than what the writing agent read. The person's own notes are not marked as reads (`readDocument`,
+   `search.js`), so they don't raise it.
+4. **The check (R4, R11.11).** `check.js`, new. It makes one typed decision-model call per section, asking two
+   closed questions: `category` (the policy's categories, default the nine in code, plus `none`) and
+   `visible_from` (the recorder's position and those above it). Code decides from the probabilities:
+   - a sure `none` stays;
+   - a sure category with a sure level goes to that level;
+   - anything unsure is held one level higher and a rehome proposal back is queued for a person;
+   - no answer (unconfigured, switched off, an error, an unusable answer) is the root, admin-only, marked
+     `_ungraded`. `regradeTick` rechecks it once the decision model answers.
+
+   The language-model grader, its prompt, its parser and its release suggestions are gone (`grading.js` keeps
+   only the categories).
+5. **The title (R11.13).** The title is not checked on its own. It takes the strictest home among its sections
+   (`settleDocument`), and comes down with them after a recheck.
+6. **A file on record is a record (R11.12).** The new tool `record_file {file, text, title?, reason?}` stores
+   the text as it is, chunks it into sections, and checks each one. The same file sent again is the same record.
+   `ingest_document` with plain text takes the same path, so everything a person or their agent ingests is a
+   record. Off record a chat agent is refused at the call; a person's own token records directly. The server
+   half is `record-gate.ts recordUpload`, which sends an upload through `record_file` with the agent's own
+   token, text files only.
+7. **To a worker.** Each section is queued the way every write is (`write.js`). Splitting by home is the
+   filing stream's (R11.6).
+
+## Tests
+
+| What | Where |
+|---|---|
+| The check's questions, verdicts, thresholds, no answer, unsure, one call per section | `graph-rag/test/check.test.js` (16) |
+| Placement: restrict-only, admin-only on no answer, the floor, updates never widen | `graph-rag/test/placement.test.js` |
+| No language-model grader left; the nine categories | `graph-rag/test/grading.test.js` |
+| The record tools: no `home`, no claim or class words, `record_file`, both gated off record, the thread's position, where a record starts | `graph-rag/test/ingest-tool.test.js` |
+| The position pushed to graph-rag; an upload on record goes through `record_file`, off record nothing, text only; the instructions | `packages/server/test/condenser.test.ts` |
+| Replay: where a section starts; the check's three outcomes, the flag and the title; no answer then recheck; a file on record; an agent's reads versus its person's own notes | `graph-rag/e2e/scenarios-record.mjs` (5) |
+| Replay: the condenser scenarios moved to the check, `record_file` in the off-record list, plain text as a record | `graph-rag/e2e/scenarios-condenser.mjs` |
+
+## Shared files touched (commit 4ccd02c, for the integrator to take or redo)
+
+- `graph-rag/e2e/fake-models.mjs`: a note's `[admins]` marker answers the check's two questions (a sure
+  category, only the top), as it answered the old grader. Without it, six built-in scenarios fail.
+- `graph-rag/e2e/run.mjs`: the outage scenario fails `decisions` instead of `grader`, and expects admin-only
+  (R11.11) instead of one level up.
+
+## Requests to the integrator (not built here: the files are the integrator's)
+
+1. `packages/server/src/http/files.ts`: after an upload to an agent whose current thread is on record, call
+   `recordUpload(new McpHttpClient(graphUrl, agentGraphToken), { file, bytes, onRecord: true })` per file and
+   return what each says. Test: `condenser.test.ts`, "a file uploaded on record is a record". Until then a chat
+   agent records a file through `record_file` itself, as its instructions say.
+2. `packages/server/src/agents/manager.ts pushRecordGate`: send `gatePushOf(id, state)` (condenser.ts) instead of
+   `{ agent, thread, on }`, so graph-rag hears the position chosen at the switch. Today the switch takes the
+   profile's first position, and graph-rag falls back to the same default, so behaviour is unchanged until a
+   person can choose.
+3. `graph-rag/src/requests.js`: drop the `gradeBatch` call. It now always gives no answer, so a question lasts
+   as long as it is open. Also `server.js` (its boot log line) and `routes.js` (`graderModel`): report the check
+   (`DECISION_*`) instead of `GRADER_MODEL`.
+4. `packages/server/src/agents/scaffold.ts`: give a chat agent only each connection's read tools (the
+   `readTools` list graph workers get), so nothing reaches a source from a chat agent (R11.12, R2; choice 7).
+5. `graph-rag/src/server.js`: don't register `upsert_entities` and `embed_backfill` for a chat agent. Only the
+   record tools write, and nothing mints except the orchestrator and workers (R7).
+6. Filing: a section with `_ungraded` set is still waiting for its check, admin-only. Filing it before then
+   files it for the root's audience.
+
+## Choices that need a ruling (marked `NEEDS A RULING` in the code)
+
+| # | Where | The choice made |
+|---|---|---|
+| 1 | `check.js checkVerdict` | How high a sure category raises: the model's `visible_from` choice, from the recorder's position up. |
+| 2 | `check.js checkVerdict` | "Unsure" means a probability under `gradingConfidence` (0.6). It holds at the stricter of one level up and an above-origin level the model leaned to. |
+| 3 | `check.js adminOnly`, `floor.js checkReady` | "Admin-only" is the root. The check switched off, or no decision key, counts as no answer. |
+| 4 | `ingest.js recordFile`, `record-gate.ts` | Only text files go on record, stored as they are and not condensed. PDFs and office files are refused. |
+| 5 | `ingest.js putOnRecord` | A queued writer's record still waits for approval before it is checked and filed. |
+| 6 | `record-state.js` | Reads stay open off record: "reaches" is read as "is stored in or written to". |
+| 7 | request 4 above | A chat agent never writes to a source, even on record. Not built here (scaffold.ts). |
+| 8 | (not built) | Off-record turns inside an on-record condense: the tools gate the thread's state at the call, not which turns the agent condensed. |
+| 9 | `ingest.js recordHome` | The record tool's `home` argument is gone. A person moves a section afterwards with `set_home`. |
+| 10 | `floor.js gradeBatch` | No typed question judges end dates. A writer's own `valid_until` stands. |
+| 11 | `floor.js placeEntities` | R4 says once per section. Every entity written through `upsertEntities` is checked the same way (the restrict-only side). |

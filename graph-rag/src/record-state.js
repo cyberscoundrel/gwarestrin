@@ -27,6 +27,9 @@ export const isOffRecord = (identity) => isChatAgent(identity) && threads.get(id
 /** the refusal a gated tool answers with (the agent passes it on: the person can switch the thread on) */
 export const OFF_RECORD_REFUSAL = "this conversation is off record, so nothing from it can be written to the knowledge graph; the person can switch it on record";
 
+// NEEDS A RULING (record 6): R11.12 says nothing from an off-record thread reaches the graph or any source; reads stay
+// open off record (a query carries the conversation's words to the graph service, nothing is stored), reading
+// "reaches" as "is stored in or written to".
 /**
  * What an off-record chat agent may call: the tools that only read and carry nothing of the conversation into the
  * graph. Everything else is refused, so a tool added later is closed until someone decides it belongs here.

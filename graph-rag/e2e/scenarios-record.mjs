@@ -180,21 +180,25 @@ export const scenarios = [
     async run(ctx) {
       const { tool, check, POS } = ctx;
       const tag = randomUUID().slice(0, 6);
-      // alice records at Operations; the admin records at Operations through one agent
+      // alice records from Operations (held higher by what she read earlier in the run, if she did: H is where it is)
       const alice = await tool("alice", "record_file", { file: `ops-${tag}.txt`, text: "Operations note: the Exatron contract renewal is due in March; Karl leads it." });
       await ready(ctx, alice.doc_id);
-      const own = await agentOnRecord(ctx, [POS.floor, POS.ops], POS.ops);
+      const H = (await sectionRows(ctx, alice.doc_id))[0]._home;
+      check(H !== POS.floor, `alice's note is above the floor: ${H}`);
+      // the admin records at H through a fresh agent (nothing read)
+      const own = await agentOnRecord(ctx, [POS.floor, H], H);
       const mine = await tool(own.token, "record_document", { document: { title: `e2e-rec own ${tag}`, reason: "r", sections: [{ text: "Operations note: the dock door repair is booked for Thursday." }] } });
       await ready(ctx, mine.doc_id);
       // an agent of the admin's that reads alice's Operations note, then writes at the floor: held at Operations
-      const reader = await agentOnRecord(ctx, [POS.floor, POS.ops], POS.floor);
+      const reader = await agentOnRecord(ctx, [POS.floor, H], POS.floor);
       const r1 = await tool(reader.token, "read_document", { document: alice.doc_id });
       check(r1.sections?.length, `it read alice's note: ${JSON.stringify(r1).slice(0, 200)}`);
       const held = await tool(reader.token, "record_document", { document: { title: `e2e-rec derived ${tag}`, reason: "r", sections: [{ text: "Floor note: the renewal means extra Exatron runs in March." }] } });
       await ready(ctx, held.doc_id);
-      check((await sectionRows(ctx, held.doc_id))[0]._home === POS.ops, `held no lower than what it read: ${JSON.stringify(await sectionRows(ctx, held.doc_id))}`);
-      // an agent of the admin's that reads only the admin's own Operations note, then writes at the floor: stays at the floor
-      const ownReader = await agentOnRecord(ctx, [POS.floor, POS.ops], POS.floor);
+      check((await sectionRows(ctx, held.doc_id))[0]._home === H, `held no lower than what it read: ${JSON.stringify(await sectionRows(ctx, held.doc_id))}`);
+      check((await sectionRows(ctx, mine.doc_id))[0]._home === H, "its person's own note is at H too");
+      // an agent of the admin's that reads only the admin's own note at H, then writes at the floor: stays at the floor
+      const ownReader = await agentOnRecord(ctx, [POS.floor, H], POS.floor);
       const r2 = await tool(ownReader.token, "read_document", { document: mine.doc_id });
       check(r2.sections?.length, `it read its person's own note: ${JSON.stringify(r2).slice(0, 200)}`);
       const free = await tool(ownReader.token, "record_document", { document: { title: `e2e-rec ownread ${tag}`, reason: "r", sections: [{ text: "Floor note: the dock door will be shut Thursday morning." }] } });
