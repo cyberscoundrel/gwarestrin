@@ -12,7 +12,7 @@ import { positionMap } from "./scope.js";
 import { parseKey } from "./model/schema.js";
 import { dependencyVisible, mayMakeNode, normalizeDependency, normalizeInstanceEdge, strictestHome, unrelated } from "./model/classes.js";
 import { ShapeError } from "./model/text.js";
-import { allClasses, seesHome, visibleClass } from "./classes.js";
+import { allClasses, evidenceContext, seesHome, visibleClass } from "./classes.js";
 import { connectionHome, noteHome } from "./discovery.js";
 
 /** "Toro Co." / "TORO" / "toro" -> "toro co" / "toro" */
@@ -91,19 +91,19 @@ export async function findInstance({ instance, key, name } = {}, scope) {
  * reads it; notes, the strictest of theirs; nothing, the root. Sections about it add their homes later
  * (instanceSeenFrom).
  */
-export function instanceHome({ key, notes = [] }, positions) {
+export function instanceHome({ key, notes = [] }, { positions, connectionHome: homeOfConnection = connectionHome, noteHome: homeOfNote = (n) => noteHome(n, positions) }) {
   const k = parseKey(key);
-  if (k) return connectionHome(k.system) ?? positions.root;
-  if (notes.length) return strictestHome(positions, notes.map((n) => noteHome(n, positions) ?? positions.root));
+  if (k) return homeOfConnection(k.system) ?? positions.root;
+  if (notes.length) return strictestHome(positions, notes.map((n) => homeOfNote(n) ?? positions.root));
   return positions.root;
 }
 
 async function makeNode({ key, name, home, run, by }) {
   const label = String(name ?? parseKey(key)?.row_key ?? key).trim().slice(0, 200);
   await adbCommand(
-    `CREATE VERTEX ${ENTITY_LABEL} SET name = :label, label = :label, _norm = :norm, _kind = 'thing', _keys = :keys, _home = :home, _homes = [:home], _origin = :home, _run = :run, _written_by = :by`,
+    `CREATE VERTEX ${ENTITY_LABEL} SET name = :label, label = :label, _norm = :norm, _kind = 'thing', _keys = :keys, _home = :home, _homes = [:home], _origin = :home, _run = :run, _written_by = :who`,
     "sql",
-    { label, norm: normalize(label), keys: key ? [String(key).trim()] : [], home, run: run ?? null, by },
+    { label, norm: normalize(label), keys: key ? [String(key).trim()] : [], home, run: run ?? null, who: by },
   );
   const r = (await adbQuery(`SELECT ${NODE} FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _norm = :n AND _home = :home ORDER BY @rid DESC LIMIT 1`, { n: normalize(label), home }))[0];
   return { ...r, rid: String(r.rid) };
@@ -131,12 +131,12 @@ export async function relateInstance(args, scope, actor) {
     const ok = mayMakeNode(cls, { key, dependency: args.dependency === true, reason: args.reason });
     if (!ok.ok) throw bad("key", ok.reason);
     if (!key && !args.name) throw bad("name", "an instance needs its record key or its name");
-    node = await makeNode({ key, name: args.name, home: instanceHome({ key, notes: args.notes ?? [] }, positionMap), run: actor.run, by: actor.user });
+    node = await makeNode({ key, name: args.name, home: instanceHome({ key, notes: args.notes ?? [] }, await evidenceContext((args.notes ?? []).map((ref) => ({ kind: "notes", ref })))), run: actor.run, by: actor.user });
     created = true;
   }
   const edge = normalizeInstanceEdge({ instance: node.rid, class: cls.key, added_by: actor.user });
   const have = await adbQuery(`SELECT @rid AS rid FROM INSTANCE_OF WHERE @out = ${node.rid} AND @in = ${cls.rid}`).catch(() => []);
-  if (!have.length) await adbCommand(`CREATE EDGE INSTANCE_OF FROM ${node.rid} TO ${cls.rid} SET added_by = :by, at = :at`, "sql", { by: edge.added_by, at: edge.at });
+  if (!have.length) await adbCommand(`CREATE EDGE INSTANCE_OF FROM ${node.rid} TO ${cls.rid} SET added_by = :who, at = :at`, "sql", { who: edge.added_by, at: edge.at });
   return { instance: node.rid, name: node.label ?? node.name, class: cls.key, created, related: !have.length };
 }
 
@@ -190,9 +190,9 @@ export async function readDependencies({ instance }, scope) {
   const node = await findInstance({ instance }, scope);
   if (!node) throw bad("instance", `no instance ${instance} that you can see`, 404);
   const edges = [
-    ...(await adbQuery(`SELECT @out AS from, @in AS to, stated_as, stated_by, source, note, stated_at, valid_from, valid_until FROM DEPENDS_ON WHERE @out = ${node.rid}`)),
-    ...(await adbQuery(`SELECT @out AS from, @in AS to, stated_as, stated_by, source, note, stated_at, valid_from, valid_until FROM DEPENDS_ON WHERE @in = ${node.rid}`)),
-  ].map((e) => ({ ...e, from: String(e.from), to: String(e.to) }));
+    ...(await adbQuery(`SELECT @out AS src, @in AS dst, stated_as, stated_by, source, note, stated_at, valid_from, valid_until FROM DEPENDS_ON WHERE @out = ${node.rid}`)),
+    ...(await adbQuery(`SELECT @out AS src, @in AS dst, stated_as, stated_by, source, note, stated_at, valid_from, valid_until FROM DEPENDS_ON WHERE @in = ${node.rid}`)),
+  ].map(({ src, dst, ...e }) => ({ ...e, from: String(src), to: String(dst) }));
   const ends = [...new Set(edges.flatMap((e) => [e.from, e.to]))];
   const rows = ends.length ? await adbQuery(`SELECT ${NODE} FROM [${ends.join(",")}]`) : [];
   const byRid = new Map(rows.map((r) => [String(r.rid), r]));

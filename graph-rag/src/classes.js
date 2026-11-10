@@ -133,7 +133,7 @@ export async function visibleClass(name, scope) {
 }
 
 /** the home-from-evidence context: connection homes from CONNECTION_HOMES, notes from the history or a section's home */
-async function evidenceContext(evidence) {
+export async function evidenceContext(evidence) {
   const sections = new Map();
   const refs = (evidence ?? []).filter((e) => e.kind === "notes" && RID_RE.test(String(e.ref ?? ""))).map((e) => e.ref);
   if (refs.length) for (const r of await adbQuery(`SELECT @rid AS rid, _home FROM [${refs.join(",")}]`).catch(() => [])) sections.set(String(r.rid), r._home ?? positionMap.root);
@@ -175,7 +175,7 @@ export async function settleHomes() {
 async function linkParents(rid, parents, all, by) {
   const ridOf = new Map(all.map((c) => [c.key, c.rid]));
   const at = new Date().toISOString();
-  for (const p of parents) await adbCommand(`CREATE EDGE SUBCLASS_OF FROM ${rid} TO ${ridOf.get(p)} SET added_by = :by, at = :at`, "sql", { by, at });
+  for (const p of parents) await adbCommand(`CREATE EDGE SUBCLASS_OF FROM ${rid} TO ${ridOf.get(p)} SET added_by = :who, at = :at`, "sql", { who: by, at });
 }
 
 /**
@@ -201,9 +201,9 @@ export async function createClass(input, actor) {
   const own = homeFromEvidence(cls.evidence, await evidenceContext(cls.evidence));
   const home = treeHomes(classIndex([...all, cls]), (c) => (c.key === cls.key ? own : c.home), positionMap).get(cls.key);
   await adbCommand(
-    `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'class', _class_name = :name, _class_key = :key, _home = :home, _origin = :home, _description = :description, _evidence = :evidence, _rows_are_nodes = :nodes, _record_table = :table, _stages = :stages, _status = 'active', _corrections = '[]', _run = :run, _written_by = :by`,
+    `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'class', _class_name = :name, _class_key = :key, _home = :home, _origin = :home, _description = :description, _evidence = :evidence, _rows_are_nodes = :nodes, _record_table = :table, _stages = :stages, _status = 'active', _corrections = '[]', _run = :run, _written_by = :who`,
     "sql",
-    { name: cls.name, key: cls.key, home, description: cls.description, evidence: JSON.stringify(cls.evidence), nodes: cls.rows_are_nodes, table: cls.record_table, stages: cls.stages, run: actor.run ?? null, by: actor.user },
+    { name: cls.name, key: cls.key, home, description: cls.description, evidence: JSON.stringify(cls.evidence), nodes: cls.rows_are_nodes, table: cls.record_table, stages: cls.stages, run: actor.run ?? null, who: actor.user },
   );
   const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _class_key = :key`, { key: cls.key }))[0]?.rid);
   await linkParents(rid, cls.parents, all, actor.user);
@@ -305,7 +305,7 @@ export async function instanceCounts() {
 /** start a run: its id, kept in the DiscoveryRun log with what it examines */
 export async function startRun(by, focus = "") {
   const id = `run-${new Date().toISOString().replace(/[-:.TZ]/g, "").slice(0, 14)}-${Math.random().toString(36).slice(2, 6)}`;
-  await adbCommand("INSERT INTO DiscoveryRun SET id = :id, started_by = :by, started_at = :at, focus = :focus, examined = []", "sql", { id, by, at: new Date().toISOString(), focus: String(focus).slice(0, 1000) });
+  await adbCommand("INSERT INTO DiscoveryRun SET id = :id, started_by = :who, started_at = :at, focus = :focus, examined = []", "sql", { id, who: by, at: new Date().toISOString(), focus: String(focus).slice(0, 1000) });
   return id;
 }
 
