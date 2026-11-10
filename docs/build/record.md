@@ -311,3 +311,24 @@ it.
   tightens doesn't move it. Its recheck would then have placed it below the rule. The waiting marker now
   carries `rule`, the home the class map requires, and `regradeTick` places the section no lower than that.
   This failed on the old code and passes now.
+
+## Review of b076783: five blocking findings
+
+Each fix has a test that fails at b076783 and passes now.
+
+| # | Fix | Test (failed at b076783) |
+|---|---|---|
+| R-B1 | `files.ts` (integrator's, an 8-line hunk) calls `record-gate.ts recordUploadsFor` after an upload. When the agent's current thread is on record, each file goes to graph-rag's `record_file` with the agent's own token. Off record, and for a graph worker, nothing is sent. The reply lists what each file became. | `condenser.test.ts`, "a file uploaded while the thread is on record goes to graph-rag's record_file", through the real route and manager |
+| R-B2 | `manager.ts` (integrator's, one line) pushes `gatePushOf(id, state)`, so graph-rag hears the position the thread is on record under (R11.5). | `condenser.test.ts`, "graph-rag is told the position" |
+| R-B3 | `check.js placeChecked`: new text over an existing entry follows R11.11. Unsure holds it at least one level above where it started and flags a person. No answer is admin-only and marked; the marker's `keep` stops its recheck going below where it was (`floor.js`). | `scenarios-record.mjs`, "new text written over a section follows R11.11", and "new text over a section with no answer"; `check.test.js` |
+| R-B4 | `write.js` (integrator's, a 3-line hunk) settles the documents of the sections a write touched, so a title follows a section the check raised on an update (R11.13). | `scenarios-record.mjs`, "new text written over a section…" (title at ops, then at org) |
+| R-B5 | `check.js piecesOf` and `strictestVerdict`: a long section is checked whole, in 6000-character pieces that overlap by 400. The strictest piece holds; an unsure piece makes the section unsure, and a piece with no answer makes it no answer. The recheck marker keeps the whole text (`write.js`). | `scenarios-record.mjs`, "a long section is checked whole"; `check.test.js` |
+
+`fake-models.mjs`: this branch's side stays `entry: said`, so it is compatible with the reviewer's resolution
+`answerChoice(q, { criteria: spec.criteria ?? {}, entry: said })`.
+
+Newly marked (review non-blocking 6): record 12, no chosen position means the deepest held position; record 13,
+what "the same file" is; record 14, a sure "none" ignores `visible_from` and is sure at the same threshold as a
+category (non-blocking 1).
+
+Requests 1 and 2 above (files.ts, manager.ts) are now done here as listed hunks; the other requests stand.

@@ -269,7 +269,9 @@ export async function regradeTick() {
     // a class map entry that tightened while it waited (tightening.js): no lower than the home the rule requires
     // (`rule`; an older marker has only `held`, where the rule put it)
     const rule = w.rule && positionMap.positions[w.rule] ? w.rule : w.raised ? w.held : null;
-    const home = rule ? commonAncestor(positionMap, [p.home, rule]) : p.home;
+    // an update that got no answer: never below where it was before the new text (`keep`, check.js placeChecked)
+    const keep = w.keep && positionMap.positions[w.keep] ? w.keep : null;
+    const home = commonAncestor(positionMap, [p.home, ...(rule ? [rule] : []), ...(keep ? [keep] : [])]);
     const note = w.raised && rule && home === rule && home !== p.home ? w.raised : p.note;
     await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null`, "sql", { home, note });
     if (r._doc_id) await settleDocument(r._doc_id).catch((e) => log.warn(`document ${r._doc_id} not settled after its check: ${String(e).slice(0, 160)}`));

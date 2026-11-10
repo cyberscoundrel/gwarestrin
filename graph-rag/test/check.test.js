@@ -3,7 +3,7 @@
 // here judges whether a model classified anything well; that is measured on real models.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { adminOnly, categoryKeys, checkEntities, checkRequest, checkVerdict, placeChecked, UNCHECKED } from "../src/check.js";
+import { adminOnly, categoryKeys, checkEntities, checkRequest, checkVerdict, piecesOf, placeChecked, strictestVerdict, UNCHECKED } from "../src/check.js";
 import { DEFAULT_TOPICS } from "../src/grading.js";
 import { parsePositionMap } from "../src/positions.js";
 
@@ -129,10 +129,49 @@ test("a sure verdict places it, and no placement ever proposes a release below i
   assert.equal(p.review, undefined);
 });
 
-test("an update only restricts further, and no answer keeps it where it is", () => {
+test("an update never widens; new text over it follows R11.11: unsure is held higher and flagged, no answer is admin-only", () => {
   assert.equal(placeChecked(map, { origin: "floor", verdict: { home: "org", sure: true, confidence: 0.9, reason: "pay" }, existing: "ops" }).home, "org");
-  assert.equal(placeChecked(map, { origin: "floor", verdict: { home: "floor", sure: true, confidence: 0.9, reason: "none" }, existing: "ops" }).home, "ops");
-  assert.equal(placeChecked(map, { origin: "floor", verdict: undefined, existing: "ops" }).home, "ops");
+  assert.equal(placeChecked(map, { origin: "floor", verdict: { home: "floor", sure: true, confidence: 0.9, reason: "none" }, existing: "ops" }).home, "ops", "never widened");
+  const unsure = placeChecked(map, { origin: "floor", verdict: { home: "ops", sure: false, confidence: 0.4, reason: "maybe pay" }, existing: "floor" });
+  assert.equal(unsure.home, "ops", "unsure: one level above where it started");
+  assert.equal(unsure.review?.to, "floor", "and a person is asked to bring it back");
+  const held = placeChecked(map, { origin: "floor", verdict: { home: "ops", sure: false, confidence: 0.4, reason: "maybe" }, existing: "org" });
+  assert.equal(held.home, "org", "already held higher: stays");
+  assert.equal(held.review, undefined);
+  const none = placeChecked(map, { origin: "floor", verdict: undefined, existing: "floor" });
+  assert.equal(none.home, "org", "no answer: admin-only until checked");
+  assert.equal(none.unchecked, true);
+  assert.equal(none.keep, "floor", "its recheck never goes below where it was");
+  assert.equal(placeChecked(map, { origin: "floor", verdict: undefined, existing: "org" }).unchecked, undefined, "already admin-only: nothing to hold");
+});
+
+test("a long section is checked whole, in overlapping pieces, and the strictest piece holds (R4)", async () => {
+  const filler = "Job 4471 runs on CNC 2 this week and ships on Friday. ".repeat(170);
+  const text = `${filler}SECRET: Diep's pay goes to 30 an hour.`;
+  assert.ok(text.length > 9000);
+  const pieces = piecesOf({ _text: text, properties: { heading: "Week" } });
+  assert.ok(pieces.length >= 2, "more than one piece");
+  assert.ok(pieces.every((p) => p.startsWith("Week\n")), "each led by its heading");
+  assert.ok(pieces.at(-1).includes("SECRET"), "the end of the section is read");
+  assert.equal(pieces.map((p) => p.slice(5)).join("").replace(/\s/g, "").length >= text.replace(/\s/g, "").length, true, "nothing is left out");
+  const keys = categoryKeys(DEFAULT_TOPICS);
+  const ask = async ({ state }) => ({ answers: state.entry.includes("SECRET") ? { category: choice("c1", 0.9, keys), visible_from: choice("P3", 0.9, ["P1", "P2", "P3"]) } : { category: choice("none", 0.9, keys), visible_from: choice("P1", 0.9, ["P1", "P2", "P3"]) } });
+  const [v] = await checkEntities(map, "floor", [{ name: "long", _text: text }], { topics: DEFAULT_TOPICS, threshold: 0.6, ask });
+  assert.equal(v.home, "org", "the restricted part at the end raises the whole section");
+  assert.equal(v.sure, true);
+  let n = 0;
+  const failsLater = async (req) => (++n === 2 ? Promise.reject(new Error("503")) : ask(req));
+  assert.deepEqual(await checkEntities(map, "floor", [{ name: "long", _text: text }], { topics: DEFAULT_TOPICS, threshold: 0.6, ask: failsLater }), [undefined], "no answer for any piece is no answer");
+});
+
+test("the strictest verdict: any unsure piece makes the section unsure, the strictest home holds", () => {
+  const v = strictestVerdict(map, [
+    { home: "floor", sure: true, confidence: 0.9, category: null, reason: "none" },
+    { home: "ops", sure: false, confidence: 0.4, category: null, reason: "unsure" },
+  ]);
+  assert.equal(v.home, "ops");
+  assert.equal(v.sure, false);
+  assert.equal(strictestVerdict(map, [{ home: "floor", sure: true, confidence: 0.9, reason: "x" }, null]), null);
 });
 
 test("checkEntities makes one call per entity, and an error, a null or a bad answer is no answer", async () => {

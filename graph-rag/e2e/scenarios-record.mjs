@@ -29,6 +29,7 @@ async function agentOnRecord(ctx, positions, position) {
 
 const docRow = async (ctx, docId) => (await ctx.sql(`SELECT @rid AS rid, name, _home, _doc_status, _record_position, _recorded_by, _record_reason, file FROM Entity WHERE _kind = 'document' AND _doc_id = '${docId}'`))[0];
 const sectionRows = (ctx, docId) => ctx.sql(`SELECT @rid AS rid, name, _home, _grade, _ungraded, _section, _doc_title FROM Entity WHERE _kind = 'section' AND _doc_id = '${docId}' ORDER BY _section`);
+const sectionAt = async (ctx, rid) => (await ctx.sql(`SELECT @rid AS rid, name, _home, _grade, _ungraded FROM ${rid}`))[0];
 const ready = (ctx, docId, ms = 90_000) => ctx.until(`record ${docId} ready`, async () => ((await docRow(ctx, docId))?._doc_status === "ready" ? docRow(ctx, docId) : false), ms);
 
 export const scenarios = [
@@ -204,6 +205,77 @@ export const scenarios = [
       const free = await tool(ownReader.token, "record_document", { document: { title: `e2e-rec ownread ${tag}`, reason: "r", sections: [{ text: "Floor note: the dock door will be shut Thursday morning." }] } });
       await ready(ctx, free.doc_id);
       check((await sectionRows(ctx, free.doc_id))[0]._home === POS.floor, `a person's own notes don't raise their level: ${JSON.stringify(await sectionRows(ctx, free.doc_id))}`);
+    },
+  },
+  {
+    name: "record: new text written over a section follows R11.11: unsure holds it higher and asks a person, a sure category raises it, and the title goes with it (R11.13)",
+    async run(ctx) {
+      const { tool, sql, check, POS } = ctx;
+      const tag = randomUUID().slice(0, 6);
+      const a = await agentOnRecord(ctx, [POS.floor], POS.floor);
+      const sent = await tool(a.token, "record_document", { document: { title: `e2e-rec update ${tag}`, reason: "r", sections: [{ heading: "Crew", text: "The second crew starts at six." }, { heading: "Saw", text: "The bay 2 saw has a new blade." }] } });
+      await ready(ctx, sent.doc_id);
+      const [crew, saw] = await sectionRows(ctx, sent.doc_id);
+      check(crew._home === POS.floor && saw._home === POS.floor && (await docRow(ctx, sent.doc_id))._home === POS.floor, "all at the floor to begin with");
+      // unsure new text: one level higher, flagged, and the title follows
+      await tool(a.token, "upsert_entities", { entities: [{ name: crew.name, facets: { identity: "The second crew may be getting a pay review. [category: c1]" } }] });
+      const unsure = await sectionAt(ctx, crew.rid);
+      check(unsure._home === POS.ops, `unsure: held one level higher: ${JSON.stringify(unsure)}`);
+      check((await sql(`SELECT count(*) AS n FROM PendingWrite WHERE kind = 'rehome' AND status = 'pending' AND payload LIKE '%${String(unsure.name).replace(/'/g, "''").slice(0, 50)}%'`))[0].n >= 1, "and a person is asked about it");
+      check((await docRow(ctx, sent.doc_id))._home === POS.ops, `the title goes with its strictest section: ${(await docRow(ctx, sent.doc_id))._home}`);
+      // a sure category over it: raised to the top, and the title with it, the other section below shows none
+      await tool(a.token, "upsert_entities", { entities: [{ name: unsure.name, facets: { identity: "The second crew's rate goes to 24 an hour. [category: c1] [visible_from: P3]" } }] });
+      check((await sectionAt(ctx, crew.rid))._home === POS.org, "a sure category raises it");
+      const d = await docRow(ctx, sent.doc_id);
+      check(d._home === POS.org, `the title is no lower than the raised section: ${d._home}`);
+      const low = await sectionAt(ctx, saw.rid);
+      check(low._home === POS.floor && !String(low.name).includes(`e2e-rec update ${tag}`), `the floor's section keeps no title: ${low.name}`);
+      check(!JSON.stringify((await tool("e2e-dana", "search_graph", { query: "second crew rate 24 an hour", k: 16 })).results ?? []).includes("24 an hour"), "the floor doesn't find the raised text");
+    },
+  },
+  {
+    name: "record: new text over a section with no answer from the check is admin-only until checked, then never lower than it was",
+    async run(ctx) {
+      const { tool, check, until, POS } = ctx;
+      const tag = randomUUID().slice(0, 6);
+      const a = await agentOnRecord(ctx, [POS.floor], POS.floor);
+      const sent = await tool(a.token, "record_document", { document: { title: `e2e-rec noanswer ${tag}`, reason: "r", sections: [{ heading: "Crew", text: "The third crew starts at seven." }] } });
+      await ready(ctx, sent.doc_id);
+      const [s] = await sectionRows(ctx, sent.doc_id);
+      check(s._home === POS.floor, "at the floor");
+      await fake(ctx, "/__fail", { model: "decisions", status: 500 });
+      try {
+        await tool(a.token, "upsert_entities", { entities: [{ name: s.name, facets: { identity: "The third crew's pay goes up to 26 an hour." } }] });
+        const w = await sectionAt(ctx, s.rid);
+        check(w._home === POS.org && w._ungraded, `no answer: admin-only, waiting for its check: ${JSON.stringify(w)}`);
+        check(JSON.parse(w._ungraded).keep === POS.floor, `it keeps where it was for its recheck: ${w._ungraded}`);
+        check(!JSON.stringify((await tool("e2e-dana", "search_graph", { query: "third crew pay 26 an hour", k: 16 })).results ?? []).includes("26 an hour"), "the floor doesn't find it while it waits");
+        check((await docRow(ctx, sent.doc_id))._home === POS.org, "the title waits with it");
+      } finally {
+        await fake(ctx, "/__ok", { model: "decisions" });
+      }
+      await until("rechecked", async () => !(await sectionAt(ctx, s.rid))._ungraded, 300_000);
+      check((await sectionAt(ctx, s.rid))._home === POS.floor, "checked: nothing restricted, back where it was");
+      check((await docRow(ctx, sent.doc_id))._home === POS.floor, "and the title with it");
+    },
+  },
+  {
+    name: "record: a long section is checked whole: a restricted sentence past the first pieces still raises it (R4)",
+    async run(ctx) {
+      const { tool, check, POS } = ctx;
+      const tag = randomUUID().slice(0, 6);
+      const filler = "Job 4471 runs on CNC 2 this week and ships on Friday. ".repeat(180);
+      const text = `${filler}Diep's rate goes to 30 an hour. [category: c1] [visible_from: P3]`;
+      check(text.length > 9000, "longer than any one piece");
+      const a = await agentOnRecord(ctx, [POS.floor], POS.floor);
+      const sent = await tool(a.token, "record_document", { document: { title: `e2e-rec long ${tag}`, reason: "r", sections: [{ heading: "Week", text }] } });
+      await ready(ctx, sent.doc_id);
+      // checked, not merely waiting admin-only (an earlier scenario may have paused the decision model)
+      const s = await ctx.until("checked", async () => {
+        const [x] = await sectionRows(ctx, sent.doc_id);
+        return x && !x._ungraded ? x : false;
+      }, 300_000);
+      check(s._home === POS.org && /pay and compensation/.test(s._grade ?? ""), `the end of the section was read and raised it: ${JSON.stringify(s)}`);
     },
   },
 ];

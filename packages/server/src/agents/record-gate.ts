@@ -1,3 +1,7 @@
+import type { AgentRecord, GraphRole, ThreadRecordState } from "@gwarestrin/shared";
+import { McpHttpClient } from "../analyze/mcp-client.js";
+import { graphTokenFor } from "./graph-token.js";
+
 /**
  * Off record is enforced where the graph's tools are, not in the agent's
  * prompt (docs/ORGANIZATION-MODEL.md, "On record is a deliberate act"):
@@ -81,4 +85,58 @@ export async function recordUpload(
     return { file: input.file, refused: text.slice(0, 300) };
   }
   return { file: input.file, recorded };
+}
+
+/** what recordUploadsFor needs of the agent manager (structural, so a test can hand it a real one) */
+export interface UploadAgents {
+  store: { get(id: string): (AgentRecord & { graphRole?: GraphRole | undefined }) | undefined };
+  threadRecord(id: string): ThreadRecordState;
+  profileFor(record: { profileId?: string | undefined }): { positions?: string[] | undefined };
+  mcpServerUrl(name: string): string | undefined;
+}
+
+/** one uploaded file: its name and size, and how to read it back from where it was written */
+export interface UploadedFile {
+  file: string;
+  size: number;
+  read: () => Promise<Uint8Array>;
+}
+
+/**
+ * The upload route's half of R11.12: after files reach an agent's workspace, each one goes on record when the
+ * agent's current thread is on record, through graph-rag's record_file with the agent's own delegated token
+ * (graph-rag checks the thread again, and stamps the person and the position the thread is on record under).
+ * Off record, or for a graph worker, nothing is sent and the result is empty. One file's failure is reported
+ * for that file and never fails the upload.
+ */
+export async function recordUploadsFor(
+  agents: UploadAgents,
+  id: string,
+  files: UploadedFile[],
+  deps: {
+    client?: (url: string, token: string | undefined) => { callTool(name: string, args: Record<string, unknown>): Promise<string> };
+    token?: (record: AgentRecord & { graphRole?: GraphRole | undefined }, profile: { positions?: string[] | undefined }) => string | undefined;
+  } = {},
+): Promise<UploadRecordResult[]> {
+  const record = agents.store.get(id);
+  if (!record || record.graphRole) return [];
+  const state = agents.threadRecord(id);
+  if (!state.on) return [];
+  const url = agents.mcpServerUrl("graph-rag") ?? process.env.GWARESTRIN_GRAPH_MCP_URL;
+  if (!url) return files.map((f) => ({ file: f.file, refused: "no knowledge graph is connected" }));
+  const token = (deps.token ?? graphTokenFor)(record, agents.profileFor(record));
+  const client = (deps.client ?? ((u, t) => new McpHttpClient(u, t)))(url, token);
+  const out: UploadRecordResult[] = [];
+  for (const f of files) {
+    if (f.size > UPLOAD_MAX_BYTES) {
+      out.push({ file: f.file, refused: `larger than ${UPLOAD_MAX_BYTES} bytes` });
+      continue;
+    }
+    try {
+      out.push(await recordUpload(client, { file: f.file, bytes: await f.read(), onRecord: true, reason: state.reason }));
+    } catch (err) {
+      out.push({ file: f.file, refused: `not put on record: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300) });
+    }
+  }
+  return out;
 }

@@ -1,12 +1,13 @@
 import fastifyMultipart from "@fastify/multipart";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import type { FastifyInstance } from "fastify";
 import type { AgentManager } from "../agents/manager.js";
 import { dirsFor } from "../agents/scaffold.js";
+import { recordUploadsFor, type UploadedFile } from "../agents/record-gate.js";
 import type { ServerConfig } from "../config.js";
 import { scoped } from "../util/log.js";
 import { assertMutable, HttpPathError, resolveSafe } from "../util/paths.js";
@@ -122,13 +123,17 @@ export async function registerFileRoutes(app: FastifyInstance, config: ServerCon
       const sfs = await sandboxFsFor(config, manager, id);
       if (sfs) {
         const uploaded: Array<{ name: string; size: number }> = [];
+        const files: UploadedFile[] = [];
         for await (const part of req.files()) {
           const filename = path.basename(part.filename || "upload");
           const rel = path.posix.join(destDir.replace(/\\/g, "/"), filename);
           assertMutable(rel);
-          uploaded.push({ name: filename, size: await sfs.write(rel, part.file) });
+          const size = await sfs.write(rel, part.file);
+          uploaded.push({ name: filename, size });
+          files.push({ file: filename, size, read: async () => Buffer.concat(await (await sfs.open(rel)).stream.toArray()) });
         }
-        return reply.code(201).send({ uploaded, path: destDir });
+        // R11.12: a file uploaded on record is a record (record-gate.ts)
+        return reply.code(201).send({ uploaded, path: destDir, recorded: await recordUploadsFor(manager, id, files) });
       }
       const { abs: dirAbs } = await resolveSafe({ root: workspaceFor(config, manager, id), input: destDir });
       const dirSt = await stat(dirAbs).catch(() => undefined);
@@ -136,6 +141,7 @@ export async function registerFileRoutes(app: FastifyInstance, config: ServerCon
       await mkdir(dirAbs, { recursive: true });
 
       const written: Array<{ name: string; size: number }> = [];
+      const files: UploadedFile[] = [];
       for await (const part of req.files()) {
         const filename = path.basename(part.filename || "upload");
         const target = path.join(dirAbs, filename);
@@ -149,9 +155,11 @@ export async function registerFileRoutes(app: FastifyInstance, config: ServerCon
         const st = await stat(tmp);
         await rename(tmp, targetAbs);
         written.push({ name: filename, size: st.size });
+        files.push({ file: filename, size: st.size, read: () => readFile(targetAbs) });
         void target;
       }
-      return reply.code(201).send({ uploaded: written, path: destDir });
+      // R11.12: a file uploaded on record is a record (record-gate.ts)
+      return reply.code(201).send({ uploaded: written, path: destDir, recorded: await recordUploadsFor(manager, id, files) });
     } catch (err) {
       handlerError(reply, err);
     }

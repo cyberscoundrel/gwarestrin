@@ -39,14 +39,19 @@ test("an unsure answer is held one level higher and flagged for a person", () =>
   assert.equal(p.review.to, "floor");
 });
 
-test("an update with no answer leaves the entry where it is", () => {
-  assert.equal(place(map, { origin: "floor", verdict: undefined, existing: "floor", floor: "floor" }).home, "floor");
+test("an update with no answer is admin-only until checked, and its recheck never goes below where it was (R11.11)", () => {
+  const p = place(map, { origin: "floor", verdict: undefined, existing: "ops", floor: "floor" });
+  assert.equal(p.home, "org");
+  assert.equal(p.ungraded, true);
+  assert.equal(p.keep, "ops");
 });
 
-test("an update never widens, and only a sure verdict restricts it further", () => {
+test("an update never widens; a sure verdict restricts it further, an unsure one holds it higher and flags it", () => {
   assert.equal(place(map, { origin: "floor", verdict: sure("floor"), existing: "ops", floor: "floor" }).home, "ops");
   assert.equal(place(map, { origin: "floor", verdict: sure("org"), existing: "ops", floor: "floor" }).home, "org");
-  assert.equal(place(map, { origin: "floor", verdict: unsure("org"), existing: "ops", floor: "floor" }).home, "ops");
+  const p = place(map, { origin: "floor", verdict: unsure("ops"), existing: "floor", floor: "floor" });
+  assert.equal(p.home, "ops");
+  assert.equal(p.review.to, "floor");
 });
 
 test("the derived-data floor bounds every placement, the unchecked one included", () => {

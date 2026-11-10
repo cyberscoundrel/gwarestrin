@@ -203,6 +203,8 @@ export function startIngest(p) {
  *
  * NEEDS A RULING (record 9): the tool's `home` argument is gone, so an agent can't start a record anywhere
  * else; a person moves a section afterwards with set_home, as before.
+ * NEEDS A RULING (record 12): with no position chosen at the switch (a person's own token, or a thread pushed
+ * without one), the record starts at the identity's default write home, its deepest held position.
  */
 export function recordHome(identity, scope) {
   const chosen = threadPosition(identity);
@@ -288,6 +290,7 @@ const fileReason = (file) => `the file ${file} was uploaded on record`;
  * A file uploaded on record (R11.12: a file uploaded on record is a record and gets a worker): its text is the
  * record, stored as it is and chunked into sections. Nothing condenses it. Title: the one given, else the file
  * name. The same file sent again by the same person is the same record.
+ * NEEDS A RULING (record 13): "the same" is the same person, home, title and text.
  *
  * NEEDS A RULING (record 4): only text is taken (a PDF or an office file must be turned into text first), and a
  * file is not condensed.
