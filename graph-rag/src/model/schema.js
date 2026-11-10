@@ -93,7 +93,7 @@ export const TYPES = {
     doc: "an instance to a class it is an instance of; one edge per class",
     from: ["Entity"],
     to: ["Entity:class"],
-    properties: { added_by: "STRING", at: "STRING" },
+    properties: { added_by: "STRING", at: "STRING", home: "STRING" }, // home: what states the link (instances.js linkHome)
     indexes: [],
   },
   DEPENDS_ON: {
@@ -101,7 +101,7 @@ export const TYPES = {
     doc: "an instance to the instance it depends on (R1); visible only to someone who sees both ends (R11)",
     from: ["Entity"],
     to: ["Entity"],
-    properties: { stated_as: "STRING", stated_by: "STRING", source: "STRING", note: "STRING", stated_at: "STRING", valid_from: "STRING", valid_until: "STRING" },
+    properties: { stated_as: "STRING", stated_by: "STRING", source: "STRING", note: "STRING", stated_at: "STRING", valid_from: "STRING", valid_until: "STRING", home: "STRING" },
     indexes: [],
   },
   ABOUT: {

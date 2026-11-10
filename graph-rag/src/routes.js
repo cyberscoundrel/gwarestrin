@@ -21,6 +21,7 @@ import { tighteningRunning } from "./tightening.js";
 import { createServer } from "./server.js";
 import { isOffRecord, OFF_RECORD_REFUSAL } from "./record-state.js";
 import { registerClassRoutes } from "./routes-classes.js";
+import { withDiscoveryRole } from "./classes.js";
 
 /** ---- http ---- */
 export const app = express();
@@ -45,6 +46,7 @@ app.post("/mcp", async (req, res) => {
   });
   res.on("close", () => transport.close());
   try {
+    await withDiscoveryRole(identity); // a discovery part's worker is held to its run's tools (classes.js)
     await createServer(identity).connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
