@@ -5,7 +5,7 @@ version, and none will be until the user has read it. After that, the smallest v
 that can run on real models is built.
 
 **How to read it.** Every decided statement is the user's: quoted, or marked with
-its ruling, R1 to R9 (`~/reviews/design-rulings.md`). "Earlier" marks the rulings
+its ruling, R1 to R10 (`~/reviews/design-rulings.md`). "Earlier" marks the rulings
 that came before those nine, listed at the top of the same file. Anything else is
 in [Open](#open) and is not decided. The two [proposals](#proposals-from-the-assistant-not-rulings)
 at the end are the assistant's.
@@ -133,6 +133,17 @@ source writes. There are no audit nodes (R9).
 - The continuous briefing agent per profile comes after the first real batch. Briefing
   content is treated as data and sanitized (R7).
 
+> "the workers will make low stakes decisions and minimally make requests of the
+> orchestrator instead of resolving, and when it does resolve the record to storage in
+> whatever media the orchestrator can evaluate what it said about what it did"
+
+- Workers decide low-stakes matters themselves. Beyond that, they make requests of the
+  orchestrator instead of resolving, and keep those requests few (R10).
+- When a worker resolves a record to storage, in any medium, it gives an account of
+  what it did, and the orchestrator evaluates that account (R10).
+- So when no existing class fits, the worker requests one from the orchestrator and
+  does not resolve that piece itself (R10).
+
 ## Discovery
 
 > "a discovery process that evaluates a corpus of information and historical records
@@ -188,12 +199,18 @@ first real batch (R4).
 
 None of this is decided.
 
-1. **What a "piece" of a record is (R2).** Claims are gone but each piece still gets an
-   outcome. Who divides a section, and whether the division is stored, decides what
-   the filing log can count.
-2. **No existing class fits (R5, R7).** Workers use existing classes and the
-   orchestrator decides new ones. Whether a worker asks the orchestrator, holds the
-   piece or keeps it decides how often filing stalls.
+1. **What a piece of a record is (R2). The assistant's proposal, to approve or reject:**
+   a piece is simply whatever one filing-log entry covers. A section saying a job moved
+   machines and a customer wants fifty more parts by Friday is two entries, because they
+   go to two places. The worker decides the split while filing, and nothing is stored to
+   divide sections.
+2. **Where low stakes ends (R10). The assistant's proposal, to approve or reject:** low
+   stakes is anything reversible and confined to its own record: relating to existing
+   instances, Kept, and Held questions to the recorder. High stakes is anything that
+   shapes other records or can't easily be undone: new classes or subclasses, and
+   conflicts with a source. Also proposed: the orchestrator checks a worker's account
+   against the source itself rather than taking the account's word, since a model can
+   misreport what it did.
 3. **Who runs discovery (R7).** Only the orchestrator and workers mint (R7), yet discovery
    creates classes. It needs saying whether discovery is those two agents running read-only.
 4. **Kept, later (R2).** Whether anything goes back when a class or source appears for
