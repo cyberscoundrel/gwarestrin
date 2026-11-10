@@ -119,6 +119,7 @@ export async function relateInstance(args, scope, actor) {
   const cls = await visibleClass(args.class ?? "", scope);
   if (!cls) throw bad("class", `no class ${args.class} that you can see`, 404);
   if (cls.status === "retired") throw bad("class", `${cls.name} was retired by a person`);
+  if (cls.mirror) throw bad("class", `${cls.name} mirrors a position from authentik (R6): its people come from there`);
   const key = args.key ? String(args.key).trim() : null;
   if (key && !parseKey(key)) throw bad("key", "a record key is system:table:row");
   let node = await findInstance({ instance: args.instance, key, name: key ? null : args.name }, scope);

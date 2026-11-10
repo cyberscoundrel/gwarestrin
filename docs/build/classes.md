@@ -257,3 +257,29 @@ it.
 - The orchestrator's channel for a person's corrections (plan item 12).
 - The web panel (out of scope for the first run).
 - `connection-digest.ts` is unchanged.
+
+## The reviewer's items on ba583bc (`~/reviews/build-build-base-ba583bc.md`)
+
+- **Item 5, stages.** `normalizeClass` now refuses stages on a class that isn't under commitment. It checks
+  against the tree it is given, the seeded classes by default. A parent the tree doesn't know is refused,
+  since it can't be decided. The store checks against the stored tree. The tests fail on ba583bc's
+  `model/classes.js` and pass now.
+- **Item 11, names per home.**
+  - The `_class_key` index is now NOTUNIQUE; this is in the wiring commit, in `model/schema.js` and
+    `model-schema.test.js`.
+  - Uniqueness per home is checked in code, against the classes the writer sees only, so a refusal never
+    names a hidden class.
+  - Two classes of one name are told apart as `name@home`, and only for a reader who sees both.
+  - This replaces BUILD.md's choice #1 ("unique in the organization"), which is the integrator's file to
+    update.
+  - A database made before this keeps its old unique index. R8 starts the new version on an empty graph.
+- **Item 7, the mirror under agent.**
+  - Each position is a class under agent, nested as the positions are.
+  - The token map's people are instances of their positions' classes (`authentik:user:<user>`).
+  - The orchestrator and the Graph worker profile are instances of agent.
+  - It is a one-way sync, rerun whenever the position map or the token map reloads. A position that
+    leaves the map is retired, and a position someone no longer holds loses its edge.
+  - The orchestrator and corrections can't change mirrored classes or add people to them.
+  - NEEDS A RULING: the mirror is homed at everyone (`MIRROR_HOME`), and the agent instances are the
+    smallest set (`AI_AGENTS`).
+- **Item 8.** `EVIDENCE_KINDS` and the refusal of a retired parent are now marked NEEDS A RULING.

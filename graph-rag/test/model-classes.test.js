@@ -235,3 +235,64 @@ test("the tree report lists every class under its parents with what a person che
   assert.match(text, /evidence: table mssql:dbo_Order/);
   assert.match(text, /^ {2}- decision/m);
 });
+
+// ---- the reviewer's items on ba583bc: 5 (stages), 11 (names per home), 7 (the mirror under agent) ----
+
+test("a class not under commitment can't have stages: normalizeClass refuses them (R11, item 5)", () => {
+  assert.throws(() => normalizeClass({ name: "trucks", parents: ["resource"], home: "ops", stages: ["parked", "driving"] }), /only a class under commitment has stages/);
+  assert.deepEqual(normalizeClass({ name: "inspections", parents: ["event", "commitment"], home: "ops", stages: ["due"] }).stages, ["due"], "one parent under commitment is enough");
+  assert.deepEqual(normalizeClass({ name: "rush jobs", parents: ["jobs"], home: "floor", stages: ["rushed"] }, { index }).stages, ["rushed"]);
+  assert.throws(() => normalizeClass({ name: "rush jobs", parents: ["jobs"], home: "floor", stages: ["rushed"] }), /isn't in the class tree given/);
+  assert.throws(() => normalizeClass({ name: "big machines", parents: ["machines"], home: "floor", stages: ["x"] }, { index }), /only a class under commitment/);
+});
+
+test("a name is taken per home, and a class the writer can't see neither blocks it nor is named (item 11)", () => {
+  const hidden = { ...normalizeClass({ name: "warehouse", parents: ["resource"], home: "org" }), status: "active" };
+  const atFloor = normalizeClass({ name: "Warehouse", parents: ["resource"], home: "floor" });
+  // another home: a different class, whoever writes
+  assert.doesNotThrow(() => model.assertCreatable(atFloor, [hidden]));
+  // the same home: refused, to a writer who sees it
+  assert.throws(() => model.assertCreatable({ ...atFloor, home: "org" }, [hidden]), /exists already at that home/);
+  // a writer that can't see org: even a retired class there is invisible to it, and no error names it
+  const retired = { ...hidden, status: "retired" };
+  const sees = (h) => h !== "org";
+  assert.doesNotThrow(() => model.assertCreatable(atFloor, [retired], { sees }));
+  try {
+    model.assertCreatable({ ...atFloor, home: "org" }, [retired, hidden], { sees });
+  } catch (e) {
+    assert.fail(`named a class the writer can't see: ${e.message}`);
+  }
+  assert.equal(model.NAMES_UNIQUE, "per home");
+  assert.deepEqual(model.parseClassRef("Warehouse@floor"), { key: "warehouse", home: "floor" });
+  assert.deepEqual(model.parseClassRef("leased building"), { key: "leased_building", home: null });
+});
+
+test("positions are mirrored as classes under agent, nested as the positions are, people as their instances (R6)", () => {
+  const got = model.positionClasses(positions);
+  assert.deepEqual(got.map((c) => [c.key, c.parents]), [
+    ["top_of_the_organization", ["agent"]],
+    ["operations", ["top_of_the_organization"]],
+    ["production_floor", ["operations"]],
+  ]);
+  assert.ok(got.every((c) => c.home === "everyone" && c.position));
+  const people = model.peopleInstances(positions, [
+    { user: "alice", positions: ["ops"] },
+    { user: "bob", positions: ["floor", "ops"] },
+    { user: "bob/agent:floor", positions: ["floor"] },
+    { user: "nobody", positions: ["gone"] },
+  ]);
+  assert.deepEqual(people.map((p) => [p.key, p.classes]), [
+    ["authentik:user:alice", ["operations"]],
+    ["authentik:user:bob", ["production_floor", "operations"]],
+  ]);
+  // the mirror is a tree under agent the model accepts
+  const idx = classIndex(got.map((c) => normalizeClass(c, { positions })));
+  assert.deepEqual(primitivesOf("production_floor", idx), ["agent"]);
+});
+
+test("the AI agents are instances under agent: the orchestrator and the Graph worker profile (R1)", () => {
+  assert.deepEqual(model.AI_AGENTS.map((a) => [a.name, a.classes]), [
+    ["Orchestrator", ["agent"]],
+    ["Graph worker", ["agent"]],
+  ]);
+});

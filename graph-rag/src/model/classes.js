@@ -21,17 +21,30 @@ export const PRIMITIVES = ["agent", "commitment", "event", "resource"];
 export const CLASS_STATUSES = ["active", "retired"];
 /** who states a dependency (R1) */
 export const STATED_AS = ["person", "record", "agent"];
-/** what a piece of evidence for a class is; rows are cited by key, never copied */
+/**
+ * what a piece of evidence for a class is; rows are cited by key, never copied.
+ * NEEDS A RULING (evidence kinds): R11 lists evidence among what a class holds and names no kinds.
+ * Smallest choice: this closed list of five, which home from evidence (R11) knows how to read.
+ */
 export const EVIDENCE_KINDS = ["table", "columns", "rows", "notes", "correction"];
 
 /** a class name as an identity: "Leased building", "leased_building" and "Leased-Building" are one class */
 export const classKey = snakeCase;
 
 /**
- * NEEDS A RULING (class names): a name is unique in the organization (by `classKey`), whatever the
- * homes. Smallest reversible choice: two homes can't each hold their own class of one name.
+ * NEEDS A RULING (class names): a name is unique per home (by `classKey`), not in the whole organization.
+ * Classes are scoped by home (earlier ruling), so a name taken at a home a writer can't see must neither
+ * block it nor tell it that the class exists (the reviewer's item 11 on ba583bc). Two classes of one name
+ * at different homes are different classes; where a reader sees both, each is named `name@home`.
  */
-export const NAMES_UNIQUE = true;
+export const NAMES_UNIQUE = "per home";
+
+/** "warehouse@ops" -> { key: "warehouse", home: "ops" }; "warehouse" -> { key: "warehouse", home: null } */
+export function parseClassRef(ref) {
+  const s = String(ref ?? "").trim();
+  const at = s.lastIndexOf("@");
+  return at > 0 ? { key: classKey(s.slice(0, at)), home: s.slice(at + 1).trim() || null } : { key: classKey(s), home: null };
+}
 
 /** one piece of evidence: { kind, ref?, note? } where ref is a table, a record key or a section id */
 export function normalizeEvidence(raw, field = "evidence") {
@@ -49,7 +62,7 @@ export function normalizeEvidence(raw, field = "evidence") {
  * checks the home. Parents are names; whether they exist and close no cycle is `assertParents`.
  * A primitive is a root and has no parents; every other class has at least one parent.
  */
-export function normalizeClass(raw, { positions } = {}) {
+export function normalizeClass(raw, { positions, index } = {}) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ShapeError("class", "must be an object");
   if (!nonEmpty(raw.name)) throw new ShapeError("name", "needs a name");
   const name = clip(raw.name, 80);
@@ -74,6 +87,14 @@ export function normalizeClass(raw, { positions } = {}) {
   if (!Array.isArray(evidence)) throw new ShapeError("evidence", "must be a list");
   const stages = raw.stages === undefined || raw.stages === null ? [] : raw.stages;
   if (!Array.isArray(stages) || stages.some((s) => !nonEmpty(s))) throw new ShapeError("stages", "must be a list of stage names");
+  // stages belong to commitment classes only (R11): checked against the tree (`index`, the seeded classes
+  // when none is given); a parent the tree doesn't know leaves it undecidable, so it is refused
+  if (stages.length && !root) {
+    const tree = index ?? classIndex([]);
+    const unknown = parentKeys.filter((p) => !tree.has(p));
+    if (unknown.length) throw new ShapeError("stages", `can't tell whether ${name} is under commitment: ${unknown.join(", ")} isn't in the class tree given`);
+    if (!mayHaveStages(key, new Map([...tree, [key, { key, parents: parentKeys, status: "active" }]]))) throw new ShapeError("stages", "only a class under commitment has stages (R11)");
+  }
   if (raw.rows_are_nodes !== undefined && typeof raw.rows_are_nodes !== "boolean") throw new ShapeError("rows_are_nodes", "must be true or false");
   const status = raw.status === undefined || raw.status === null ? "active" : String(raw.status);
   if (!CLASS_STATUSES.includes(status)) throw new ShapeError("status", `must be one of ${CLASS_STATUSES.join(", ")}`);
@@ -163,6 +184,8 @@ export function assertParents(key, parents, index) {
   for (const p of list) {
     const c = index.get(p);
     if (!c) throw new ShapeError("parents", `no class ${p}`);
+    // NEEDS A RULING (a retired parent): R11 says only that a retired class never returns on its own.
+    // Smallest choice: nothing new goes under it either.
     if (c.status === "retired") throw new ShapeError("parents", `${p} is retired`);
     if (p === key || below.has(p)) throw new ShapeError("parents", `${p} is ${p === key ? "the class itself" : "below it"}: a cycle`);
   }
@@ -387,15 +410,17 @@ export const unrelated = (cls) => new Set((cls.corrections ?? []).filter((c) => 
  * on its own)? `classes` are every stored class with their corrections applied. Throws ShapeError naming
  * what it collides with: a retired class by name or table, a class a person renamed, or one that exists.
  * NEEDS A RULING (what "the same class" is on a rerun): smallest choice, the same name (classKey) or the
- * same record table.
+ * same record table. A name is taken per home (NAMES_UNIQUE), and only classes the writer sees (`sees(home)`)
+ * are checked, so a refusal never names a class it can't see.
  */
-export function assertCreatable(cls, classes) {
-  for (const c of classes) {
+export function assertCreatable(cls, classes, { sees = () => true } = {}) {
+  // a class the writer can't see neither blocks it nor is named to it (NAMES_UNIQUE: per home)
+  for (const c of classes.filter((x) => sees(x.home))) {
     const sameName = c.key === cls.key;
     const sameTable = Boolean(cls.record_table && c.record_table && c.record_table.toLowerCase() === cls.record_table.toLowerCase());
     if ((sameName || sameTable) && c.status === "retired") throw new ShapeError(sameName ? "name" : "record_table", `${c.name} was retired by a person: it never returns on its own`);
     if (formerKeys(c).includes(cls.key)) throw new ShapeError("name", `a person renamed ${cls.name} to ${c.name}: use ${c.name}`);
-    if (sameName) throw new ShapeError("name", `${c.name} exists already`);
+    if (sameName && (!cls.home || c.home === cls.home)) throw new ShapeError("name", `${c.name} exists already${cls.home ? " at that home" : ""}`);
   }
 }
 
@@ -497,3 +522,63 @@ export function treeReport(index, { counts = new Map(), homeName = (h) => h } = 
   if (retired.length) lines.push("", "Retired by a person:", ...retired.map((c) => `- ${c.name}`));
   return lines.join("\n");
 }
+
+/* ---------------------------------------------------------------------------------------------------
+ * Mirrored under agent: positions as classes with people as their instances (R6: "Positions are
+ * mirrored as classes under agent with people as instances (one-way sync from authentik, which keeps
+ * granting access)"), and the AI agents as instances (R1: "The AI agents are instances under agent").
+ * Only the sync writes these; the orchestrator and corrections leave them alone.
+ * ------------------------------------------------------------------------------------------------- */
+
+/**
+ * NEEDS A RULING (where the mirror is seen): smallest choice, everyone. Position names are already shown to
+ * everyone wherever a home is named, and a position's class nested under its parent's would otherwise be
+ * raised to the root by strictest-wins (R9), hiding everyone's own position from them.
+ */
+export const MIRROR_HOME = EVERYONE;
+/** the record-key system the mirror's instances are keyed under: what the one-way sync reads from */
+export const MIRROR_SYSTEM = "authentik";
+
+/** the positions of a parsed position map as classes, parents first: the root's under agent, each other under its parent's */
+export function positionClasses(map) {
+  const out = [];
+  const keyOf = (id) => classKey(map.positions[id].name);
+  const queue = [map.root];
+  const seen = new Set();
+  while (queue.length) {
+    const id = queue.shift();
+    if (seen.has(id) || !map.positions[id]) continue;
+    seen.add(id);
+    const parent = map.positions[id].parent;
+    out.push({ name: clip(map.positions[id].name, 80), key: keyOf(id), parents: [parent && map.positions[parent] ? keyOf(parent) : "agent"], home: MIRROR_HOME, position: id, description: nonEmpty(map.positions[id].description) ? clip(map.positions[id].description, 1000) : null });
+    for (const [kid, p] of Object.entries(map.positions)) if (p.parent === id) queue.push(kid);
+  }
+  return out;
+}
+
+/**
+ * The people who hold positions, as instances of those positions' classes: `people` is [{ user, positions }]
+ * (the token map's people; agents, whose names carry a slash, are left out). Keyed `authentik:user:<user>`.
+ */
+export function peopleInstances(map, people) {
+  const out = [];
+  for (const p of people ?? []) {
+    const user = String(p?.user ?? "").trim();
+    if (!user || user.includes("/")) continue;
+    const held = (p.positions ?? []).filter((id) => map.positions[id]);
+    if (!held.length) continue;
+    out.push({ name: user, key: `${MIRROR_SYSTEM}:user:${user}`, classes: [...new Set(held.map((id) => classKey(map.positions[id].name)))], home: MIRROR_HOME });
+  }
+  return out;
+}
+
+/**
+ * The AI agents as instances under agent (R1).
+ * NEEDS A RULING (which AI agents): smallest choice, the plan's: one instance for the orchestrator and one per
+ * agent profile graph-rag knows of, the Graph worker profile its workers, handlers and liaison run from; not
+ * one per thread, since threads don't last.
+ */
+export const AI_AGENTS = [
+  { name: "Orchestrator", key: "graph-rag:agent:orchestrator", classes: ["agent"], home: MIRROR_HOME },
+  { name: "Graph worker", key: "graph-rag:agent:graph-worker", classes: ["agent"], home: MIRROR_HOME },
+];

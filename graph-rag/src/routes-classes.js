@@ -16,16 +16,16 @@ import { z } from "zod";
 import { homeName } from "./positions.js";
 import { positionMap, resolveIdentity, scopeOf } from "./scope.js";
 import { canEditPolicy } from "./org-policy.js";
-import { allClasses, correctClass, createClass, examinedTables, instanceCounts, markDiscoveryEntry, recordExamined, runOf, startRun, updateClass, visibleClasses } from "./classes.js";
+import { allClasses, treeIndex, correctClass, createClass, examinedTables, instanceCounts, markDiscoveryEntry, recordExamined, runOf, startRun, updateClass, visibleClasses } from "./classes.js";
 import { addDependency, readDependencies, relateInstance } from "./instances.js";
 import { connectionHome, discoveryBrief, discoveryPartBrief, loadHistory, newTables, readHistory } from "./discovery.js";
-import { classIndex, treeReport } from "./model/classes.js";
+import { treeReport } from "./model/classes.js";
 
 const text = (v) => ({ content: [{ type: "text", text: JSON.stringify(v) }] });
 
 /** a class as a tool shows it: no record ids, no corrections' authors */
 const show = (c) => ({
-  name: c.name,
+  name: c.ref ?? c.name,
   parents: c.parents,
   home: homeName(positionMap, c.home),
   description: c.description,
@@ -34,6 +34,7 @@ const show = (c) => ({
   stages: c.stages,
   evidence: c.evidence,
   ...(c.status === "retired" ? { retired: true } : {}),
+  ...(c.mirror ? { mirrors: c.mirror.startsWith("position:") ? "a position (authentik)" : "an AI agent" } : {}),
   ...(c.corrections?.length ? { corrected_by_a_person: [...new Set(c.corrections.map((x) => x.kind))] } : {}),
 });
 
@@ -229,7 +230,7 @@ export function registerClassRoutes(app) {
     if (!admin(req, res)) return;
     void (async () => {
       const all = await allClasses();
-      return treeReport(classIndex(all), { counts: await instanceCounts(), homeName: (h) => homeName(positionMap, h) });
+      return treeReport(treeIndex(all), { counts: await instanceCounts(), homeName: (h) => homeName(positionMap, h) });
     })().then((report) => res.type("text/plain").send(report), (e) => httpError(res, e));
   });
   /** a person's correction (R11): { kind, value?, instance?, reason? } */
