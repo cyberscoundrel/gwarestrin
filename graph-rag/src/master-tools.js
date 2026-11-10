@@ -2,11 +2,11 @@
  * The master (pool.master), its handlers and the liaison: batches of sections, signals, starting and
  * settling workers, and the MCP registration of their tools.
  *
- * The master's job is dispatch (docs/ORGANIZATION-MODEL.md, "The worker's job"): it groups the sections of
- * a batch into workers and gives each its level. It writes no brief: a worker's brief is composed from
- * the graph at claim time (worker-pool.js), as the section's people see it. What the master is told of a
- * section is its id, where it is seen from and the shape of its claims, never a title or a text (the
- * ux-av leak: titles from a root brief copied into floor notes).
+ * The master is the orchestrator's start: the most privileged agent, it reads batches and starts workers (R7).
+ * It writes no brief: a worker's brief is composed from the graph at claim time (worker-pool.js), as the
+ * section's people see it. What the master is told of a section is its id and where it is seen from, never a
+ * title or a text (the ux-av leak: titles from a root brief copied into floor notes). The filing stream owns
+ * this module and gives the orchestrator its class decisions, its check of workers' accounts and requests.
  */
 import { randomUUID } from "node:crypto";
 import { effectiveHome, homeName, moveKind } from "./positions.js";
@@ -16,7 +16,6 @@ import { adbCommand, adbQuery, RID_RE } from "./db.js";
 import { positionMap } from "./scope.js";
 import { approvePending, rejectPending } from "./write.js";
 import { answerQuestions, enqueue, JOB_ID_RE, listProposals, listQuestions, proposalLands, resumeThread, worker } from "./worker-pool.js";
-import { sectionFacts } from "./triage.js";
 
 /**
  * ---- the master (pool.master): a long-running thread dispatches batches of
@@ -65,27 +64,11 @@ export async function masterStatus() {
   return { on: !!worker.pool.master && worker.pool.poolSize > 0, handlers, maxHandlers: worker.pool.maxHandlers, halted: handlers >= worker.pool.maxHandlers, intake, signals };
 }
 
-/**
- * What the master is told of one section: its id, where it is seen from, and the shape of its claims
- * (from the intake payload when triage computed it, else from the graph now). No title, no text.
- */
-export async function sectionForMaster(rid, p = {}) {
+/** What the master is told of one section: its id and where it is seen from. No title, no text. */
+export async function sectionForMaster(rid) {
   const row = (await adbQuery(`SELECT _home, _kind FROM ${rid}`).catch(() => []))[0];
   if (!row) return null;
-  const shape = p.claims !== undefined ? p : (await sectionFacts(rid).catch(() => null)) ?? {};
-  const facts = shape.facts ?? shape;
-  return {
-    rid: String(rid),
-    home: homeName(positionMap, row._home),
-    kind: row._kind ?? "entry",
-    claims: Number(facts.claims ?? 0),
-    unresolved: Number(facts.unresolved ?? 0),
-    conflicts: Number(facts.conflicts ?? 0),
-    keyed: Number(facts.keyed ?? 0),
-    classes: shape.classes ?? [],
-    attributes: shape.attributes ?? [],
-    ...(p.triage ? { triage: p.triage } : {}),
-  };
+  return { rid: String(rid), home: homeName(positionMap, row._home), kind: row._kind ?? "entry" };
 }
 
 /** a batch closes at batchSize sections or when its oldest has waited batchMinutes; not while halted */
@@ -101,7 +84,7 @@ export async function batchTick() {
   for (const r of rows) {
     const p = JSON.parse(r.payload || "{}");
     taken.push(r.id);
-    const s = RID_RE.test(String(p.rid)) ? await sectionForMaster(p.rid, p) : null;
+    const s = RID_RE.test(String(p.rid)) ? await sectionForMaster(p.rid) : null;
     if (!s) continue; // gone since it was recorded
     sections.push(s);
   }
@@ -119,7 +102,7 @@ export async function batchTick() {
  * The master starts a worker on sections (by id): a review job whose brief is composed at claim time.
  * The sections must be seen from one position (one worker per position: its reads of one would hold
  * its writes to another); the brief is checked again when claimed. Its level of work (which model runs
- * it): the master's call, else the highest triage level among its sections, else an investigation.
+ * it): the master's call, else an investigation.
  */
 async function masterStartWorker(args, identity) {
   const rids = [...new Set((args.sections ?? []).map((s) => String(s).trim()))].slice(0, 25);
@@ -135,13 +118,7 @@ async function masterStartWorker(args, identity) {
   }
   const distinct = [...new Set(homes.values())];
   if (distinct.length > 1) throw new Error(`the sections are seen from different positions (${distinct.map((h) => homeName(positionMap, h)).join(", ")}): one worker per position`);
-  let level = Number(args.level) || 0;
-  if (!level) {
-    for (const r of rids) {
-      const t = (await adbQuery("SELECT level FROM Triage WHERE rid = :r ORDER BY created_at DESC LIMIT 1", { r }).catch(() => []))[0];
-      level = Math.max(level, Number(t?.level ?? 0));
-    }
-  }
+  const level = Number(args.level) || 0;
   const label = `${rids.length} section${rids.length === 1 ? "" : "s"} at ${homeName(positionMap, distinct[0])}`;
   const job = await enqueue(
     "review",
@@ -273,11 +250,10 @@ export function registerMasterTools(server, { identity }) {
   server.tool(
     "start_worker",
     `Start a worker on sections of a batch (by id). Group sections seen from the same position that share
-a subject, an instance or a class; sections seen from different positions never share a worker. The
-worker's brief is composed from the graph as its sections' people see it: you write none. level picks
-the model it runs on: 1 a quick check (one claim against one row), 2 an investigation (several claims,
-an unresolved subject, a conflict), 3 a broad matter (default: the highest triage level among its
-sections). You get a signal when it's done or stopped.`,
+an instance or a class; sections seen from different positions never share a worker. The worker's brief
+is composed from the graph as its sections' people see it: you write none. level picks the model it runs
+on: 1 a quick check, 2 an investigation (the default), 3 a broad matter. You get a signal when it's done
+or stopped.`,
     {
       sections: z.array(z.string().max(40)).min(1).max(25),
       minutes: z.number().int().min(5).max(180).optional(),
@@ -287,7 +263,7 @@ sections). You get a signal when it's done or stopped.`,
   );
   server.tool(
     "worker_status",
-    "A worker's situation: its status, sections (by id, with the shape of their claims), report, changes, and the questions and proposals it's waiting on.",
+    "A worker's situation: its status, sections (by id), report, changes, and the questions and proposals it's waiting on.",
     { job: z.string() },
     async (args) => ({ content: [{ type: "text", text: JSON.stringify(await workerSituation(args.job)) }] }),
   );

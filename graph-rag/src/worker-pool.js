@@ -2,37 +2,23 @@
  * The graph worker's job queue and the pool of threads (see pool.js): claiming, finishing and resuming threads,
  * their questions and proposals, the change log, and the worker's settings and status.
  *
- * Under the organization model (docs/ORGANIZATION-MODEL.md, "The worker's job") a thread's unit of work is a
- * document section with its claims: the brief hands it the section, the claims, each claim's subject
- * (resolved to an instance, or not), and the prior state of each subject (the latest claims on the same
- * attribute), and nothing outside the floor of the section's people. The brief is a read, recorded like any
- * other (floor.js `recordReads`), so it bounds the worker's writes.
- *
- * Claims are CLAIMS edges (model/schema.js) from the section to the subject thing. The Condenser's record
- * path (ingest.js recordClaims) resolves the subject as any mention is (linker.js recordSubject) and mints
- * only what admission allows. A claim with no thing for its subject (several things it could be, or
- * content inside the claim) points back at its section, with the subject as written in a `subject`
- * property (JSON): the contract has no shape for an unresolved subject, and this is the one read here.
- * resolve_subject (worker-tools.js) re-points the edge at the thing.
+ * A thread's unit of work is a record's sections at one home (R11: a record whose sections have different homes
+ * is split by home, one worker per home). Its brief holds nothing its sections' people can't see (R7), and is a
+ * read recorded like any other (floor.js `recordReads`), so it bounds the worker's writes. The filing stream
+ * owns this module and builds filing on it (model/filing.js, model/brief.js).
  */
 import { randomUUID } from "node:crypto";
-import { effectiveHome, EVERYONE, homeName, moveKind, visibleHomes } from "./positions.js";
+import { effectiveHome, EVERYONE, homeName, moveKind } from "./positions.js";
 import { checkBriefFloor, POOL_DEFAULTS, poolSettings, resumeBrief, taskBrief, taskThreadBrief } from "./pool.js";
 import { EMBED_MODEL, health, log, loops, WORKER_DAILY_CALLS, WORKER_MODEL, WORKER_TIMEOUT_MS } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.js";
 import { chat } from "./models.js";
 import { recordReads } from "./floor.js";
 import { entriesByUser, positionMap, SCOPED } from "./scope.js";
-import { jobMentions, seenThing, thingLookup } from "./linker.js";
-import { resolveSubject } from "./resolve.js";
-import { recordTriageOutcome, triageStats } from "./triage.js";
 import { emitSignal, MASTER, masterStatus, openItems } from "./master-tools.js";
-import { ensureAuditSchema } from "./audit.js";
 import { describeEntry } from "./data-entry.js";
-import { statements, TYPES } from "./model/schema.js";
-import { draftFromSurvey } from "./routes-discovery.js";
 
-/** ---- the graph worker: a job queue and loop (things and their links; see things.js) ---- */
+/** ---- the graph worker: a job queue and loop ---- */
 
 // the worker's settings come from the admin's "Graph worker" profile (PUT /api/worker)
 export let worker = { enabled: true, model: "", instructions: "", profile: null, pool: { ...POOL_DEFAULTS }, updated_by: null, updated_at: null };
@@ -46,9 +32,6 @@ export function setWorker(next) {
   worker = next;
 }
 
-/** the kinds of change a reconciliation thread makes (what the triage outcome counts) */
-export const RECONCILE_CHANGES = ["confirm", "conflict", "resolve", "need_met", "data_entry"];
-
 export async function ensureWorkerSchema() {
   await adbCommand("CREATE DOCUMENT TYPE Job IF NOT EXISTS").catch(() => {});
   for (const prop of ["id", "kind", "job_key", "payload", "status", "run_after", "created_at", "updated_at", "error"]) {
@@ -57,7 +40,7 @@ export async function ensureWorkerSchema() {
   for (const prop of ["attempts", "priority"]) await adbCommand(`CREATE PROPERTY Job.${prop} IF NOT EXISTS INTEGER`).catch(() => {});
   await adbCommand("CREATE INDEX IF NOT EXISTS ON Job (job_key) NOTUNIQUE").catch(() => {});
   await adbCommand("CREATE INDEX IF NOT EXISTS ON Job (status) NOTUNIQUE").catch(() => {});
-  for (const prop of ["_thing_type", "_norm", "_mentions_at"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  for (const prop of ["_norm"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   for (const prop of ["_homes", "_alias_norms", "_keys"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS LIST`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_norm) NOTUNIQUE`).catch(() => {});
   for (const prop of ["agent_id", "summary", "lease_until", "claimed_at", "changes"]) await adbCommand(`CREATE PROPERTY Job.${prop} IF NOT EXISTS STRING`).catch(() => {});
@@ -67,19 +50,9 @@ export async function ensureWorkerSchema() {
     await adbCommand(`CREATE PROPERTY WorkerQuestion.${prop} IF NOT EXISTS STRING`).catch(() => {});
   }
   await adbCommand("CREATE INDEX IF NOT EXISTS ON WorkerQuestion (job_id) NOTUNIQUE").catch(() => {});
-  await adbCommand("CREATE EDGE TYPE ABOUT IF NOT EXISTS").catch(() => {});
   await adbCommand("CREATE EDGE TYPE RELATES IF NOT EXISTS").catch(() => {});
   for (const prop of ["rel", "evidence", "job", "at"]) await adbCommand(`CREATE PROPERTY RELATES.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._task_by IF NOT EXISTS STRING`).catch(() => {});
-  await adbCommand("CREATE PROPERTY ABOUT.role IF NOT EXISTS STRING").catch(() => {});
-  // the organization model's shapes the worker reads and writes: classes, instances, claims (the contract's DDL,
-  // idempotent), the unresolved subject on a claim, conflicts between claims, and the audit trail
-  for (const sql of statements({ CommitmentClass: TYPES.CommitmentClass, Entity: TYPES.Entity, CLAIMS: TYPES.CLAIMS })) await adbCommand(sql).catch(() => {});
-  await adbCommand("CREATE PROPERTY CLAIMS.subject IF NOT EXISTS STRING").catch(() => {});
-  await adbCommand("CREATE DOCUMENT TYPE ClaimConflict IF NOT EXISTS").catch(() => {});
-  for (const prop of ["id", "subject", "attribute", "claim_a", "claim_b", "found_by", "job", "at", "status", "note"]) await adbCommand(`CREATE PROPERTY ClaimConflict.${prop} IF NOT EXISTS STRING`).catch(() => {});
-  await adbCommand("CREATE INDEX IF NOT EXISTS ON ClaimConflict (subject, attribute) NOTUNIQUE").catch(() => {});
-  await ensureAuditSchema();
   // a crash mid-job leaves it running: it runs again (threads keep their lease: their workspace may still run them)
   await adbCommand("UPDATE Job SET status = 'pending' WHERE status = 'running' AND kind <> 'review'").catch(() => {});
   try {
@@ -118,132 +91,6 @@ export async function workerCall(messages) {
   if (workerUsage.calls >= Number(WORKER_DAILY_CALLS)) throw Object.assign(new Error("the worker's daily budget is used up"), { later: true });
   workerUsage.calls++;
   return chat(workerModel(), messages, Number(WORKER_TIMEOUT_MS));
-}
-
-/** ---- claims as the worker sees them (CLAIMS edges; see the header) ---- */
-
-const CLAIM_FIELDS = "id, kind, class, attribute, value, value_num, valid_from, valid_until, recorded_at, recorded_by, closed_by, _home, subject";
-
-/** a stored claim as data: the edge's properties, its subject (the thing, or what was written when unresolved), where it lives */
-export function shapeClaim(row, sectionRid) {
-  const dst = String(row.dst ?? "");
-  const src = String(row.src ?? sectionRid ?? "");
-  const resolved = RID_RE.test(dst) && dst !== src;
-  let written = null;
-  try {
-    written = row.subject ? JSON.parse(row.subject) : null;
-  } catch {
-    written = { name: String(row.subject) };
-  }
-  return {
-    id: row.id,
-    edge: String(row.erid ?? ""),
-    section: src,
-    kind: row.kind,
-    class: row.class,
-    attribute: row.attribute,
-    value: row.value,
-    value_num: row.value_num ?? null,
-    valid_from: row.valid_from,
-    valid_until: row.valid_until ?? null,
-    recorded_at: row.recorded_at,
-    recorded_by: row.recorded_by,
-    closed_by: row.closed_by ?? null,
-    home: row._home ?? null,
-    resolved,
-    thing: resolved ? dst : null,
-    subject: written ?? (resolved ? { key: null, name: null } : { key: null, name: null }),
-  };
-}
-
-/** the claims a section makes */
-export async function claimsOfSection(rid) {
-  if (!RID_RE.test(String(rid))) return [];
-  const rows = await adbQuery(`SELECT @rid AS erid, @out AS src, @in AS dst, ${CLAIM_FIELDS} FROM (SELECT expand(outE('CLAIMS')) FROM ${rid})`).catch(() => []);
-  return rows.map((r) => shapeClaim(r, String(rid)));
-}
-
-/** one claim by its id, or null */
-export async function claimById(id) {
-  if (typeof id !== "string" || !id.trim()) return null;
-  const row = (await adbQuery(`SELECT @rid AS erid, @out AS src, @in AS dst, ${CLAIM_FIELDS} FROM CLAIMS WHERE id = :id LIMIT 1`, { id: id.trim() }).catch(() => []))[0];
-  return row ? shapeClaim(row) : null;
-}
-
-/** the claims on one attribute of a thing (from any section), newest valid_from first, at most `limit` */
-export async function claimsOnAttribute(thingRid, attribute, { limit = 20 } = {}) {
-  if (!RID_RE.test(String(thingRid))) return [];
-  const rows = await adbQuery(`SELECT @rid AS erid, @out AS src, @in AS dst, ${CLAIM_FIELDS} FROM (SELECT expand(inE('CLAIMS')) FROM ${thingRid}) WHERE attribute = :a ORDER BY valid_from DESC LIMIT ${Math.floor(limit)}`, { a: attribute }).catch(() => []);
-  return rows.map((r) => shapeClaim(r));
-}
-
-/** where a claim is seen from: its own home, else its section's */
-async function claimHome(c) {
-  if (c.home) return effectiveHome(positionMap, c.home);
-  const s = RID_RE.test(c.section) ? (await adbQuery(`SELECT _home FROM ${c.section}`).catch(() => []))[0] : null;
-  return effectiveHome(positionMap, s?._home);
-}
-
-/**
- * The prior state of a claim's subject on its attribute, as the people at `floor` see it: the latest
- * claims from other sections, each with where it lives. Claims above the floor are left out: the brief
- * holds nothing its worker's people can't see.
- */
-export async function priorState(claim, floor, { limit = 5 } = {}) {
-  if (!claim.resolved) return [];
-  const vis = positionMap ? visibleHomes(positionMap, [effectiveHome(positionMap, floor)]) : null;
-  const out = [];
-  for (const c of await claimsOnAttribute(claim.thing, claim.attribute, { limit: 20 })) {
-    if (c.id === claim.id || c.section === claim.section) continue;
-    const home = await claimHome(c);
-    if (vis !== null && !vis.has(home)) continue;
-    out.push({ ...c, home, home_name: homeName(positionMap, home) });
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-/**
- * Resolve a claim's subject to an existing thing. With the Admission stream's resolve.js present, its
- * `resolveSubject` decides (by key, by confirmed class and name, by alias, by embedding; the graph behind
- * a lookup built here) and a key no instance holds comes back as { mint } for the worker to make on
- * purpose. Without it: by record key, else by name (one thing of that name, whatever its type). Null
- * when there is none, or several. Nothing is minted here.
- */
-/**
- * The confirmed classes a resolution runs against (the Discovery stream's confirm flow writes them as
- * CommitmentClass rows, status 'confirmed'): the linker's `confirmedClassList` when it exports one (the
- * Admission stream's, cached a minute), else the rows themselves; the organization's stored list
- * (OrgPolicy, scope 'classes') only where neither has any. `db` and `linker` are injectable for tests.
- */
-export async function confirmedClassesFor({ db = { adbQuery }, linker } = {}) {
-  const mod = linker ?? (await import("./linker.js").catch(() => null));
-  if (typeof mod?.confirmedClassList === "function") {
-    const list = await mod.confirmedClassList().catch(() => []);
-    if (Array.isArray(list) && list.length) return list;
-  }
-  const rows = await db.adbQuery("SELECT name, description, stages, record_table, status, confirmed_by FROM CommitmentClass WHERE status = 'confirmed'").catch(() => []);
-  if (rows.length) return rows.map((r) => ({ name: r.name, description: r.description ?? "", stages: Array.isArray(r.stages) ? r.stages : [], record_table: r.record_table ?? null, status: "confirmed", ...(r.confirmed_by ? { confirmed_by: r.confirmed_by } : {}) }));
-  const row = (await db.adbQuery("SELECT json FROM OrgPolicy WHERE scope = 'classes' LIMIT 1").catch(() => []))[0];
-  try {
-    const stored = row?.json ? JSON.parse(row.json) : [];
-    return Array.isArray(stored) ? stored : Array.isArray(stored?.classes) ? stored.classes : [];
-  } catch {
-    return [];
-  }
-}
-
-export async function resolveSubjectStub(subject, home) {
-  if (!subject) return null;
-  const classes = await confirmedClassesFor();
-  const r = await resolveSubject(subject, { classes, lookup: thingLookup(home) }).catch(() => null);
-  // (a key reaches a thing this home can't see: the caller gets its id, and nothing it would have to be able to see)
-  if (r?.rid && r.how !== "none") {
-    const hidden = !seenThing(r.thing ?? {}, home);
-    return { rid: String(r.rid), hidden, label: hidden ? null : (r.thing?.label ?? r.thing?.name ?? subject.name ?? null), _thing_type: hidden ? null : (r.thing?._thing_type ?? null), _homes: hidden ? [] : (r.thing?._homes ?? []) };
-  }
-  if (r?.mint) return { mint: r.mint };
-  return null;
 }
 
 /** ---- the worker pool (see pool.js): one agent thread per section, run by the admin's workspace ---- */
@@ -287,60 +134,21 @@ export async function actsForOf(sectionRid) {
   return d.recorded_by ? { person: d.recorded_by, position: d.recorded_position } : null;
 }
 
-/**
- * What a thread is told about one section: the section itself (its document's record, its text), its
- * claims with their subjects, and the prior state of each resolved subject as the section's people see it.
- */
+/** What a thread is told about one section: the section itself, its document's record and its text. */
 export async function sectionForBrief(rid) {
   const row = (await adbQuery(`SELECT FROM ${rid}`).catch(() => []))[0];
   if (!row?.name) return null;
   const home = effectiveHome(positionMap, row._home);
-  const claims = await claimsOfSection(rid);
-  const subjects = [];
-  for (const c of claims) {
-    if (c.resolved) {
-      const t = (await adbQuery(`SELECT label, _thing_type, _class, _keys, _homes FROM ${c.thing}`).catch(() => []))[0];
-      if (t && !seenThing(t, home)) subjects.push({ claim: c.id, resolved: true, rid: c.thing, label: null, type: null, class: c.class, keys: [], note: "this subject is homed where this section's people can't see it" });
-      else subjects.push({ claim: c.id, resolved: true, rid: c.thing, label: t?.label ?? null, type: t?._thing_type ?? null, class: t?._class ?? c.class, keys: Array.isArray(t?._keys) ? t._keys : [] });
-    } else {
-      subjects.push({ claim: c.id, resolved: false, written: c.subject });
-    }
-  }
-  const prior = [];
-  for (const c of claims) for (const p of await priorState(c, home)) prior.push({ claim: c.id, ...p });
   return {
     rid: String(rid),
     kind: row._kind ?? "entry",
-    // names the linker could resolve to nothing (linker.js `_unresolved`): a worker or a person decides
-    unresolved_names: unresolvedNames(row._unresolved),
     name: row.name,
     heading: row.heading ?? null,
     text: String(row.text_identity ?? "").slice(0, 4000),
     home,
     home_name: homeName(positionMap, home),
     document: await documentOf(rid, row),
-    claims,
-    subjects,
-    prior,
   };
-}
-
-/** an entry's `_unresolved` (JSON the linker stores: a list of mentions, or of names) as [{ name, type, role }] */
-export function unresolvedNames(raw) {
-  if (raw === null || raw === undefined || raw === "") return [];
-  let list = raw;
-  if (typeof raw === "string") {
-    try {
-      list = JSON.parse(raw);
-    } catch {
-      return [];
-    }
-  }
-  if (!Array.isArray(list)) list = Array.isArray(list?.unresolved) ? list.unresolved : [];
-  return list
-    .map((m) => (typeof m === "string" ? { name: m, type: null, role: null } : m && typeof m === "object" && m.name ? { name: String(m.name), type: m.type ?? null, role: m.role ?? null, ...(m.key ? { key: m.key } : {}) } : null))
-    .filter(Boolean)
-    .slice(0, 25);
 }
 
 /** the root tenant's user (the admin whose workspace runs the threads), or null when it can't be told */
@@ -373,8 +181,8 @@ function levelRoom(groups) {
 
 /**
  * The admin's workspace claims up to `limit` threads to run: due review jobs, highest priority first,
- * within the day's budget. Each comes with its brief (a first start: its sections, claims, subjects and
- * prior state, checked against the floor) or its resume message (an answered question, a decided
+ * within the day's budget. Each comes with its brief (a first start: its sections and their record,
+ * checked against the floor) or its resume message (an answered question, a decided
  * proposal) and the thread's agent if it has one. A brief that would carry anything above the worker's
  * floor is refused here, and the job fails with the reason: no worker ever sees it.
  */
@@ -460,11 +268,10 @@ export async function claimThreads(limit, groups) {
   return { threads: out };
 }
 
-/** a thread's label for the rail: its claims' classes and attributes, never a title or text */
+/** a thread's label for the rail: how many sections and where, never a title or text */
 export function labelFor(sections) {
-  const parts = [...new Set(sections.flatMap((s) => s.claims.map((c) => `${c.class}/${c.attribute}`)))];
-  const n = sections.reduce((a, s) => a + s.claims.length, 0);
-  return `${parts.slice(0, 2).join(", ") || "no claims"}${parts.length > 2 ? ` +${parts.length - 2}` : ""} (${n} claim${n === 1 ? "" : "s"})`;
+  const homes = [...new Set(sections.map((s) => s.home_name ?? s.home).filter(Boolean))];
+  return `${sections.length} section${sections.length === 1 ? "" : "s"}${homes.length ? ` at ${homes.join(", ")}` : ""}`;
 }
 
 /** a thread's agent (recorded when the workspace makes it); the brief it was sent counts as its read */
@@ -537,10 +344,6 @@ export async function finishThread(jobId, { status, summary, outage }) {
   const sections = [...new Set([payload.rid, ...(Array.isArray(payload.sections) ? payload.sections : [])].filter((r) => RID_RE.test(String(r))))];
   if (next === "done") for (const r of sections) await adbCommand(`UPDATE ${r} SET _reviewed_at = :now`, "sql", { now }).catch(() => {});
   // the master hears how its worker ended: done, or stopped (waiting on a decision, or failed for good)
-  if (payload.parent === MASTER && sections.length && !payload.task && (next === "done" || next === "waiting" || next === "failed")) {
-    const meaningful = JSON.parse((await adbQuery("SELECT changes FROM Job WHERE id = :id", { id: jobId }))[0]?.changes || "[]").filter((c) => RECONCILE_CHANGES.includes(c.kind)).length;
-    await recordTriageOutcome(sections, { job: jobId, status: next, changes: meaningful, stopped: next !== "done" });
-  }
   if (payload.parent === MASTER && (next === "done" || next === "waiting" || next === "failed")) {
     const title = payload.label ?? payload.task?.title ?? "a worker";
     if (next === "done") await emitSignal("done", { job_id: jobId, data: { title, summary: String(summary ?? "").slice(0, 2000) } });
@@ -548,8 +351,6 @@ export async function finishThread(jobId, { status, summary, outage }) {
   }
   // a task's report stays on its task entry (what the survey found, for the admin and later tasks)
   if (payload.task && RID_RE.test(String(payload.rid)) && summary) await adbCommand(`UPDATE ${payload.rid} SET text_state = :sum`, "sql", { sum: String(summary).slice(0, 6000) }).catch(() => {});
-  // a finished survey's report is the first discovery pass: its table lines and class tags become drafts for a person
-  if (payload.task && next === "done") await draftFromSurvey(payload.task.title, summary).catch((e) => log.warn(`survey drafts: ${String(e?.message ?? e).slice(0, 200)}`));
   return { status: next };
 }
 
@@ -713,8 +514,8 @@ export async function createTask({ title, brief, minutes, parent, from, by, audi
   return { task: name, job };
 }
 
-// the jobs graph-rag runs itself (review jobs are threads: the admin's workspace runs them)
-const JOBS = { mentions: jobMentions };
+// the jobs graph-rag runs itself (review jobs are threads: the admin's workspace runs them); none since the linker went (R4)
+const JOBS = {};
 
 /** a thread whose workspace went quiet past its lease runs again (three times at most) */
 export async function expireLeases() {
@@ -743,6 +544,7 @@ export async function workerTick() {
   try {
     const now = new Date().toISOString();
     const kinds = Object.keys(JOBS).map((k) => `'${k}'`).join(", ");
+    if (!kinds) return;
     const due = await adbQuery(`SELECT id, kind, payload, attempts FROM Job WHERE status = 'pending' AND kind IN [${kinds}] AND run_after <= :now ORDER BY priority DESC, created_at ASC LIMIT 3`, { now });
     for (const job of due) {
       const claimed = await adbCommand("UPDATE Job SET status = 'running', updated_at = :now WHERE id = :id AND status = 'pending'", "sql", { now, id: job.id });
@@ -779,19 +581,14 @@ export async function workerStatus() {
   const questions = await adbQuery("SELECT count(*) AS n FROM WorkerQuestion WHERE status = 'open'").catch(() => []);
   const proposals = await adbQuery("SELECT count(*) AS n FROM PendingWrite WHERE status = 'pending' AND job_id IS NOT NULL").catch(() => []);
   const things = await adbQuery(`SELECT count(*) AS n FROM ${ENTITY_LABEL} WHERE _kind = 'thing'`).catch(() => []);
-  const conflicts = await adbQuery("SELECT count(*) AS n FROM ClaimConflict WHERE status = 'open'").catch(() => []);
-  const audited = await adbQuery("SELECT outcome, count(*) AS n FROM AuditEvent GROUP BY outcome").catch(() => []);
   const failed = await adbQuery("SELECT kind, error, updated_at FROM Job WHERE status = 'failed' ORDER BY updated_at DESC LIMIT 5").catch(() => []);
   return {
     ...worker,
     model: workerModel() || null,
     threads: { ...Object.fromEntries(threads.map((c) => [c.status, Number(c.n)])), today: await threadsToday() },
     master: await masterStatus().catch(() => null),
-    triage: await triageStats().catch(() => null),
     open_questions: Number(questions[0]?.n ?? 0),
     open_proposals: Number(proposals[0]?.n ?? 0),
-    open_conflicts: Number(conflicts[0]?.n ?? 0),
-    data_entries: Object.fromEntries(audited.map((a) => [a.outcome, Number(a.n)])),
     jobs: Object.fromEntries(counts.map((c) => [c.status, Number(c.n)])),
     things: Number(things[0]?.n ?? 0),
     today: { calls: workerUsage.day === new Date().toISOString().slice(0, 10) ? workerUsage.calls : 0, budget: Number(WORKER_DAILY_CALLS) },
