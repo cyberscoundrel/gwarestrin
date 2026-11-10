@@ -152,7 +152,8 @@ What a person corrected stays as they set it, and a retired class can't be chang
       "relate_instance",
       `Relate an instance to a class that exists, making the instance when it doesn't: by its record key (system:table:row), its record
 id, or its name. A row of a class whose rows stay in the source gets a node only when the graph must say something the source can't:
-give that reason. An instance a person took out of a class isn't put back. It never lands lower than what you have read.`,
+give that reason. An instance a person took out of a class isn't put back. A new instance never lands lower than what you have read;
+the relation is seen where the record that states it is (source: its id), else where you write from.`,
       {
         class: z.string().min(1).max(80),
         key: z.string().max(300).optional(),
@@ -160,6 +161,7 @@ give that reason. An instance a person took out of a class isn't put back. It ne
         name: z.string().max(200).optional(),
         reason: z.string().max(600).optional(),
         notes: z.array(z.string().max(120)).max(20).optional(),
+        source: z.string().max(40).optional(),
       },
       async (args) => text(await relateInstance(args, await readAs(args), await writer())),
     );

@@ -36,3 +36,21 @@ test("a discovery part's worker, by its token's claim, relates instances and rea
   const master = names({ user: "admin/master:1", role: { kind: "master" } });
   for (const t of ["create_class", "update_class", "relate_instance", "add_dependency", "start_discovery_worker"]) assert.ok(master.includes(t), t);
 });
+
+test("a worker on a discovery part's entry acts in its run though its token carries no claim (re-review of c1323a3, non-blocking 3)", async () => {
+  const { withDiscoveryRole } = await import("../src/classes.js");
+  const parts = { "#7:1": { run: "run-1", home: "floor" } };
+  const partOf = async (rid) => parts[rid] ?? null;
+  const part = await withDiscoveryRole({ user: "admin/worker:1", role: { kind: "worker", job: "j", entry: "#7:1" } }, { partOf });
+  assert.deepEqual(part.role, { kind: "worker", job: "j", entry: "#7:1", discovery: true, run: "run-1" });
+  // its tools follow: a part's, listed
+  const got = [];
+  registerClassTools({ tool: (name) => void got.push(name) }, { identity: part, scope: { homes: null }, need: () => {} });
+  assert.ok(got.includes("relate_instance") && got.includes("read_history"));
+  // a filing worker's entry isn't a part: nothing changes; nor for the orchestrator or a person
+  const filing = await withDiscoveryRole({ user: "admin/worker:2", role: { kind: "worker", job: "j", entry: "#7:2" } }, { partOf });
+  assert.equal(filing.role.discovery, undefined);
+  const master = await withDiscoveryRole({ user: "admin/master:1", role: { kind: "master" } }, { partOf });
+  assert.deepEqual(master.role, { kind: "master" });
+  assert.equal((await withDiscoveryRole({ user: "alice" }, { partOf })).role, undefined);
+});
