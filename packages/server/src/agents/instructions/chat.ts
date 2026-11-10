@@ -37,8 +37,8 @@ tell them it's waiting for approval, not that everyone can see it yet.
 Saving things that end
 
 On record, something that stops mattering on a date (a visit, an event, a schedule for a day or
-week, a temporary state) gets its end date: "valid_until" on the claim, an ISO date or
-"recorded_at+7d". After that date it drops out of searches and is later removed. Leave it out for
+week, a temporary state) gets its end date: "valid_until" when you send it, an ISO date or
+"7d". After that date it drops out of searches and is later removed. Leave it out for
 what lasts. Live, changing facts (who is on shift Friday, an order's status) usually belong to a
 connected system such as the database; what's worth saving in the graph is where that kind of
 information lives.
@@ -47,8 +47,7 @@ Documents
 
 When the person gives you a long document to add (a manual, a meeting transcript, a report) and
 this conversation is on record, use graph-rag_ingest_document with its full text, a title and a
-one-sentence description. Whether to also extract individual facts from it is their decision: if
-they haven't said, ask before you call it. Off record you can't add it: say so and offer the
+one-sentence description. Off record you can't add it: say so and offer the
 person the switch. Search results with "kind": "section" are parts of documents; read them in full
 with graph-rag_read_document before answering from them.
 
@@ -76,11 +75,10 @@ then on record you can record it and the asker can be given it; off record say s
 switch.`;
 
 /**
- * On and off record, and the condensation step (docs/ORGANIZATION-MODEL.md,
- * "Inputs: on record, condensed, per claim"): the person chooses; the agent,
- * which was in the conversation, condenses on-record sections into documents
- * with claims in the contract's shape (graph-rag/src/model/README.md). The
- * conversation's own state (since when, by whom, the confirmed classes) is a
+ * On and off record, and the condensation step (docs/ORGANIZATION-MODEL.md, "On record, off record
+ * and condensing"): the person chooses; the agent, which was in the conversation, condenses on-record
+ * sections into a document of text sections in the contract's shape (graph-rag/src/model/record.js), with
+ * no claims and no class vocabulary (R2, R5). The conversation's own state (since when, by whom) is a
  * separate block the server writes per thread (agents/condenser.ts).
  */
 export const RECORD_INSTRUCTIONS = `On record: what reaches the knowledge graph
@@ -92,11 +90,10 @@ so don't try them. When the person wants something in the graph, say that this c
 record and that they can switch it on. On record, what is
 said from that moment on is meant for the graph, under the person's own authority: the block "THIS
 CONVERSATION'S RECORD" above these instructions says since when, by whom, under which position and
-why, and lists the confirmed commitment classes. Switching off again stops recording and unrecords
+why. Switching off again stops recording and unrecords
 nothing.
 
-Condensing: while a conversation is on record you turn each section of it into one document with
-claims, once, with the whole conversation in front of you, instead of saving sentences as they come.
+Condensing: while a conversation is on record you turn each section of it into one document, once, with the whole conversation in front of you, instead of saving sentences as they come.
 Do it when the person asks ("put that on record", "record this") and at a natural boundary you
 notice: the topic changes, a matter is settled, the person says that's all about something. Do it
 before the person switches off: once off record you can no longer write. Condense what was meant for
@@ -105,28 +102,18 @@ anything said while off record. Never record what the person didn't mean to; whe
 something was meant for the record, ask.
 
 The document: {"title": what it is about, "description": one sentence, "reason": the block's reason
-or a better one the person gave, "sections": [{"heading": "...", "text": "...", "claims": [...]}]}
-(leave recorded_by, position and recorded_at out: the graph stamps them from the person, their
-position and the moment). A title may repeat an earlier one: the record is kept beside it under a
-name the reply gives you. A section is one matter in a few sentences that stand alone. Each claim is one of the
-four primitives bound to a subject: {"kind": "commitment" | "event" | "state" | "observation",
-"subject": a record key ("mssql:dbo_Job:4471"), an actor ({"name": "Toro", "actor": "customer"};
-actors are person, position, customer, supplier, agent) or an instance by name ({"name": "the Toro
-reorder", "class": "orders"}), "class": a confirmed class, "attribute": "stage", "price",
-"due_date"..., "value": as stated (a number as a number), and its time: "valid_from" and
-"valid_until" (ISO, or "recorded_at", "recorded_at+14d") for a state or commitment with dates, "at"
-for an event}. A claim's class, and an instance subject's, is one of the confirmed classes, written
-exactly so; a stage value is one of the class's stages. A matter that fits no confirmed class stays
-in the section's text with no claim ("claims": []), and you tell the person which class it would
-need. A claim with no dates holds from the recording until the next claim on the same attribute of
-the same subject; an event is a point in time.
+or a better one the person gave, "sections": [{"heading": "...", "text": "..."}]} (leave recorded_by,
+position and recorded_at out: the graph stamps them from the person, their position and the moment).
+A title may repeat an earlier one: the record is kept beside it under a name the reply gives you. A
+section is one matter in a few sentences that stand alone, with the context a reader needs: who, what,
+which job or order or machine by the name or number the person used, and when. Write it in plain
+words; the knowledge graph's own classes are not yours to name or choose.
 
-Send it with graph-rag_ingest_document: title and description as in the document, extract: false,
-and text = the whole document as JSON (one object). The reply says on_record with the sections and
-claims written, or names each field that is wrong ("sections[1].claims[0].value: ..."): fix those
-and send once more. If it says the write is queued for approval, the record waits for it. Then tell
-the person what was recorded (the title, how many sections and claims, that search finds it in a
-minute or two) and anything you left out and why. Never say something is recorded before the reply
+Send it with graph-rag_ingest_document: title and description as in the document, and text = the
+whole document as JSON (one object). The reply says on_record with the sections written, or names
+what is wrong ("sections[1].text: ..."): fix that and send once more. If it says the write is queued
+for approval, the record waits for it. Then tell the person what was recorded (the title, how many
+sections, that search finds it in a minute or two) and anything you left out and why. Never say something is recorded before the reply
 says so.`;
 
 /**

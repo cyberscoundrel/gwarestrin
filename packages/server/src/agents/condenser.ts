@@ -1,38 +1,23 @@
 /**
- * The condenser's server side (docs/ORGANIZATION-MODEL.md, "Inputs: on
- * record, condensed, per claim"). The condensing itself is done by the
- * person's own chat agent, which was in the conversation: this module keeps
- * what that agent needs to do it and what the app shows the person.
+ * The condenser's server side. The condensing itself is done by the person's own chat agent, which was in
+ * the conversation: whole sections of an on-record conversation condensed into a summary document with relevant
+ * context (R2: the condensed document and its sections are the record). The chat agent and the condenser deal in
+ * text, not class vocabulary (R5): no class list and no claims reach the agent from here. This module keeps
  *
- *  - the thread's on/off-record state (ThreadRecordState) and its transitions:
- *    off by default; the person switches it on (from now, under their
- *    position, for a reason) and may switch it off again, which stops further
- *    recording and unrecords nothing
- *  - the block the agent reads at every turn (<home>/on-record.md, injected
- *    by the graph-context extension): the state, and the confirmed
- *    commitment classes its claims may name
- *  - the confirmed classes, read from graph-rag as this instance: the
- *    Discovery stream's listing (GET /api/discovery/classes), or the raw
- *    read through the MCP tools where the token is the root's
- *  - a document the agent recorded, recognized in its tool events, so the
- *    thread view can count them
+ *  - the thread's on/off-record state (ThreadRecordState) and its transitions: off by default; the person
+ *    switches it on (from now, under their position, for a reason) and may switch it off again, which stops
+ *    further recording and unrecords nothing
+ *  - the block the agent reads at every turn (<home>/on-record.md, injected by the graph-context extension)
+ *  - a document the agent recorded, recognized in its tool events, so the thread view can count them
+ *
+ * The record stream owns this module.
  */
 import { rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ThreadRecordState } from "@gwarestrin/shared";
-import { McpHttpClient } from "../analyze/mcp-client.js";
 
 /** read by graph-context at every turn, beside standing-instructions.md */
 export const RECORD_FILE = "on-record.md";
-
-/** a confirmed commitment pattern, as CommitmentClass rows hold it (graph-rag/src/model/schema.js) */
-export interface ConfirmedClass {
-  name: string;
-  description?: string | null | undefined;
-  stages: string[];
-  record_table: string | null;
-  attributes?: string[] | undefined;
-}
 
 /** a conversation's thread id: its session file's name (no directory, no extension) */
 export function threadIdOf(sessionFile: string | null | undefined): string | null {
@@ -83,17 +68,17 @@ const when = (iso: string | null) => (iso ? `${iso.slice(0, 10)} ${iso.slice(11,
  * The block the agent reads at every turn while a conversation is or was on
  * record; "" when it never was (the file is then removed: the standing
  * instructions already say what off record means). It states the record
- * (who, position, reason, since when, how many documents so far), what to do
- * about it, and the confirmed classes the claims may name.
+ * (who, position, reason, since when, how many documents so far) and what to do
+ * about it.
  */
-export function recordContext(state: ThreadRecordState, classes: ConfirmedClass[] | null): string {
+export function recordContext(state: ThreadRecordState): string {
   if (!state.ever) return "";
   const out: string[] = ["On record"];
   const record = `${state.by ?? "the person"} put it on record${state.position ? ` under the position ${state.position}` : ""}, reason: "${state.reason ?? "not given"}"`;
   if (state.on) {
     out.push(
       "",
-      `This conversation is ON RECORD since ${when(state.since)}: ${record}. What is said here from that moment on is meant for the organization's knowledge graph: condense each section of it into a document with claims (see "On record" in your workspace instructions), at a natural boundary or when the person asks. Use these values in the document: recorded_by "${state.by ?? ""}"${state.position ? `, position "${state.position}"` : ""}, reason as above unless the person gives a better one.`,
+      `This conversation is ON RECORD since ${when(state.since)}: ${record}. What is said here from that moment on is meant for the organization's knowledge graph: condense each section of it into a document with the context a reader needs (see "On record" in your workspace instructions), at a natural boundary or when the person asks. Use these values in the document: recorded_by "${state.by ?? ""}"${state.position ? `, position "${state.position}"` : ""}, reason as above unless the person gives a better one.`,
     );
   } else {
     out.push(
@@ -102,38 +87,7 @@ export function recordContext(state: ThreadRecordState, classes: ConfirmedClass[
     );
   }
   out.push("", state.documents ? `Documents recorded from this conversation so far: ${state.documents}${state.condensed_at ? ` (the last at ${when(state.condensed_at)})` : ""}.` : "Nothing has been recorded from this conversation yet.");
-  if (state.on) {
-    out.push("", ...classesBlock(classes));
-  }
   return out.join("\n");
-}
-
-/** decision 2: what the agent does about a matter no confirmed class covers, once its section is on record */
-const PROPOSE_CLASS =
-  'When it is a pattern of commitments you expect to recur, propose a class for a person with graph-rag_propose_class (name, its stages, why, and document: the doc_id the record reply named), and tell the person. Nothing maps onto it until an admin confirms it in Organization settings, and a class is never made from one occurrence: a draft from one section waits for a second, so propose it again when the pattern comes up again.';
-
-/** the confirmed classes as a list the agent can copy class names from, or what to do when there are none or they couldn't be read */
-export function classesBlock(classes: ConfirmedClass[] | null): string[] {
-  if (classes === null) {
-    return [
-      "The confirmed commitment classes couldn't be read right now. Put sections on record with claims only on classes you know are confirmed; a claim naming an unconfirmed class is refused with its field named, and you resend without it.",
-    ];
-  }
-  if (classes.length === 0) {
-    return [`The graph has no confirmed commitment classes yet, so no claim can name one: put each section on record with no claims (claims: []). It is stored and searchable, and the grader judges who sees it. ${PROPOSE_CLASS}`];
-  }
-  return [
-    "Confirmed commitment classes (a claim's class, and an instance subject's, must be one of these, written exactly so):",
-    ...classes.map((c) => {
-      const parts = [c.description ? `: ${c.description}` : ""];
-      if (c.stages.length) parts.push(`; stages ${c.stages.join(" → ")}`);
-      if (c.record_table) parts.push(`; records in ${c.record_table} (an instance's key is ${c.record_table}:<row key>)`);
-      if (c.attributes?.length) parts.push(`; attributes ${c.attributes.join(", ")}`);
-      return `- ${c.name}${parts.join("")}`;
-    }),
-    "",
-    `A matter that fits none of these stays in its section's text with no claim. The section is stored and the grader judges who sees it. ${PROPOSE_CLASS}`,
-  ];
 }
 
 /** write the block for the agent (the host copy; the manager pushes it into an OpenShell sandbox); "" removes the file */
@@ -143,83 +97,11 @@ export async function writeRecordContext(home: string, text: string): Promise<vo
   else await rm(file, { force: true });
 }
 
-/** what fetchConfirmedClasses reaches the graph with; replaceable in tests */
-export interface ClassSources {
-  /** graph-rag's HTTP app (the Discovery stream's listing lives there) */
-  fetch?: typeof fetch;
-  /** the MCP tools, for the root-only raw read */
-  client?: Pick<McpHttpClient, "callTool">;
-}
-
-/** one row of either source as a ConfirmedClass, or null when it has no name */
-function asClass(r: unknown): ConfirmedClass | null {
-  if (!r || typeof r !== "object") return null;
-  const row = r as Record<string, unknown>;
-  if (typeof row.name !== "string" || !row.name) return null;
-  const list = (v: unknown) => (Array.isArray(v) ? v.map(String) : []);
-  const attributes = list(row.attributes);
-  return {
-    name: row.name,
-    description: typeof row.description === "string" ? row.description : null,
-    stages: list(row.stages),
-    record_table: typeof row.record_table === "string" ? row.record_table : null,
-    ...(attributes.length ? { attributes } : {}),
-  };
-}
-
-/**
- * The confirmed classes, as this instance. First the Discovery stream's
- * listing, GET /api/discovery/classes?status=confirmed on graph-rag's HTTP
- * app (same token as /mcp, open to any identity that can read, so a
- * person's agent below the root sees them too); when that route isn't there
- * or fails, the raw read through query_graph, which only the root's token may
- * make. Null when neither answers (the agent is then told the classes
- * couldn't be read, never given an empty list by mistake).
- */
-export async function fetchConfirmedClasses(mcpUrl: string, token: string | undefined, sources: ClassSources = {}): Promise<ConfirmedClass[] | null> {
-  return (await fromDiscovery(mcpUrl, token, sources.fetch ?? globalThis.fetch)) ?? (await fromQueryGraph(sources.client ?? new McpHttpClient(mcpUrl, token)));
-}
-
-/** graph-rag's HTTP base is the MCP URL's (the knowledge proxies resolve their paths the same way) */
-export function discoveryClassesUrl(mcpUrl: string): string {
-  return new URL("/api/discovery/classes?status=confirmed", mcpUrl).toString();
-}
-
-async function fromDiscovery(mcpUrl: string, token: string | undefined, fetchFn: typeof fetch | undefined): Promise<ConfirmedClass[] | null> {
-  if (!fetchFn) return null;
-  try {
-    const res = await fetchFn(discoveryClassesUrl(mcpUrl), {
-      headers: { accept: "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) return null;
-    const body = (await res.json()) as { classes?: unknown };
-    if (!Array.isArray(body.classes)) return null;
-    return body.classes.filter((c) => !c || typeof c !== "object" || (c as { status?: unknown }).status === undefined || (c as { status?: unknown }).status === "confirmed").map(asClass).filter((c): c is ConfirmedClass => c !== null);
-  } catch {
-    return null;
-  }
-}
-
-async function fromQueryGraph(client: Pick<McpHttpClient, "callTool">): Promise<ConfirmedClass[] | null> {
-  try {
-    const text = await client.callTool("query_graph", {
-      language: "sql",
-      query: "SELECT name, description, stages, record_table FROM CommitmentClass WHERE status = 'confirmed' ORDER BY name LIMIT 200",
-    });
-    const parsed = JSON.parse(text) as { rows?: unknown[]; error?: string };
-    if (!Array.isArray(parsed.rows)) return null;
-    return parsed.rows.map(asClass).filter((c): c is ConfirmedClass => c !== null);
-  } catch {
-    return null;
-  }
-}
-
 /**
  * A document the agent put on record, seen in its tool events: the end of a
  * graph-rag ingest call whose result says on_record. Null for anything else.
  */
-export function condensedFromEvent(event: Record<string, unknown> & { type: string }): { doc_id: string; sections: number | null; claims: number | null } | null {
+export function condensedFromEvent(event: Record<string, unknown> & { type: string }): { doc_id: string; sections: number | null } | null {
   if (event.type !== "tool_execution_end" || event.isError) return null;
   const result = event.result;
   const texts: string[] = [];
@@ -236,9 +118,9 @@ export function condensedFromEvent(event: Record<string, unknown> & { type: stri
     const m = /\{[\s\S]*\}/.exec(t);
     if (!m) continue;
     try {
-      const r = JSON.parse(m[0]) as { on_record?: unknown; doc_id?: unknown; sections?: unknown; claims?: unknown };
+      const r = JSON.parse(m[0]) as { on_record?: unknown; doc_id?: unknown; sections?: unknown };
       if (r.on_record === true && typeof r.doc_id === "string") {
-        return { doc_id: r.doc_id, sections: typeof r.sections === "number" ? r.sections : null, claims: typeof r.claims === "number" ? r.claims : null };
+        return { doc_id: r.doc_id, sections: typeof r.sections === "number" ? r.sections : null };
       }
     } catch {
       /* not this text */

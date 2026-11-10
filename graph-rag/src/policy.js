@@ -2,7 +2,7 @@
 // (Organization settings in the app). Stored in ArcadeDB by graph-rag, which
 // enforces it; environment variables only provide the defaults.
 import { DEFAULT_TOPICS } from "./grading.js";
-import { staleAuthorities, validatePolicy as validateAuthorityMap } from "./model/authority.js";
+import { staleAuthorities, validatePolicy as validateAuthorityMap } from "./model/class-map.js";
 
 /** @typedef {{
  *   maxGrantDays: number,          // longest a share may last (non-standing)
@@ -54,7 +54,7 @@ function topicList(v) {
   return out;
 }
 
-/** no rule for any class: the grader judges every section (a claim with no rule settles nothing) */
+/** no entry for any class: every source write is Proposed (R11: a class missing from the map) */
 export const EMPTY_AUTHORITY_MAP = Object.freeze({ classes: {}, attributes: {} });
 
 /**

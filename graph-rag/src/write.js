@@ -3,11 +3,8 @@
  * entries (setHome), raw commands, and the executors an approval runs (merge, fold, delete, typed update).
  */
 import { randomUUID } from "node:crypto";
-import { canSee, commonAncestor, effectiveHome, heldPositions, homeName, moveKind } from "./positions.js";
-import { authorityOf, claimHome, decide } from "./model/authority.js";
-import { claimKeys } from "./placement.js";
+import { canSee, effectiveHome, heldPositions, homeName, moveKind } from "./positions.js";
 import { chooseValidity, parseValidUntil } from "./extent.js";
-import { normalize } from "./things.js";
 import { firstJob } from "./pool.js";
 import { changedCount, changedNothing, countingCommand } from "./rawcount.js";
 import { log } from "./context.js";
@@ -15,92 +12,63 @@ import { adbCommand, adbQuery, ensureFullText, ensureIndex, ENTITY_LABEL, esc, k
 import { embedBatch } from "./models.js";
 import { homeFilter, isPerson, positionId, positionMap, SCOPED } from "./scope.js";
 import { identityText, publicProps } from "./search.js";
-import { askAboutPlacement, claimsFollowEntry, claimsOfEntry, derivedFloor, heldNote, placeEntities, workerWriteFloor } from "./floor.js";
+import { askAboutPlacement, derivedFloor, heldNote, placeEntities, workerWriteFloor } from "./floor.js";
 import { policy } from "./org-policy.js";
 import { dropWaitingShares, refreshGrants, resolveWaitingShares, storeGrant } from "./sharing.js";
 import { ASSERTIONS, meetAssertion } from "./requests.js";
 import { docStore, startIngest } from "./ingest.js";
-import { aboutOnce, ENTRY_KINDS, thingSeenFrom } from "./linker.js";
+import { aboutOnce, ENTRY_KINDS, instanceSeenFrom, normalize } from "./instances.js";
 import { settleDocument } from "./document-home.js";
-import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, worker, workerModel } from "./worker-pool.js";
+import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, worker } from "./worker-pool.js";
 
 /**
- * The write-or-propose decision, made the one way at every site (docs/ORGANIZATION-MODEL.md,
- * "Proposals": an agent proposes when it lacks authority to commit). Built on the contract's
- * authority.decide over the policy's authority map and the position tree; the derived-data floor
- * and today's site rules (queued writers, a worker's raw commands, widening, an entry a person
- * placed) are folded in, so a site needs no test of its own.
+ * The write-or-propose decision for graph writes, made the one way at every site. The single
+ * authority-over-a-class rule is dropped (R6): the class map chooses only Filed or Proposed for a source
+ * write (model/class-map.js filedOrProposed). What stays are the derived-data floor and the site rules:
+ * queued writers, a worker's raw commands, widening, and an entry a person placed.
  *
- *   decideWrite(identity, { kind, cls, attribute, claims, lives }, ctx)
- *     kind       upsert | rehome | grant | merge | fold | delete_entry | typed_update | command | ingest | backfill | data_entry
- *                (any other kind takes the class rule, queuing and ctx.propose alone. data_entry is decided here
- *                for the person the agent acts for, whose reads aren't the agent's: the agent's floor bounds what
- *                reaches a source system just as it bounds the graph, and worker-tools.js applies it to enter_data.
- *                The lift below applies to upsert, typed_update and ingest only)
- *     cls, attribute   the commitment class and attribute the write bears on (null: residue, no class)
- *     claims     instead of one class: the claims the write carries (the strictest decides)
- *     lives      where the entry lives (its home) for a write to an existing entry; undefined for a new one
- *   ctx: origin  the writer's resolved position for a new write (resolveWriteHome)
- *        propose the caller asked for a proposal
- *        to      a rehome's target (widening is always a person's call)
+ *   decideWrite(identity, { kind, lives }, ctx)
+ *     kind    upsert | rehome | grant | merge | fold | delete_entry | typed_update | command | ingest | backfill
+ *             (the lift below applies to upsert, typed_update and ingest only)
+ *     lives   where the entry lives (its home) for a write to an existing entry; undefined for a new one
+ *   ctx: origin    the writer's resolved position for a new write (resolveWriteHome)
+ *        propose   the caller asked for a proposal
+ *        to        a rehome's target (widening is always a person's call)
  *        placedBy  who placed the entry (a person's placement is theirs to change)
- *        reason  the caller's reason, kept in the proposal
- *        policy, positions  the authority map and position tree to decide over (default: the live ones;
- *                given, the decision is pure: tests and other streams' stubs)
+ *        reason    the caller's reason, kept in the proposal
+ *        positions the position tree to decide over (default: the live one; given, the decision is pure)
  *
- *   -> { action: direct | propose | hidden, floor, home, reason, authority, lift }
- *     action   direct: write it; propose: queue it, homed at `home` (queueWrite's `home`), the authority
- *              position when a class rule put it there; hidden: the writer is on another branch than the
- *              authority: queue it held at the common ancestor (`home`), where someone with authority over
- *              both sides decides
- *     floor    the lowest home the written data may get: the derived floor raised to the claims' authority
- *     lift     the derived floor would hold a content write above where the entry lives (worker tools say so)
+ *   -> { action: direct | propose, floor, home, reason, lift }
+ *     floor   the lowest home the written data may get (the derived floor)
+ *     home    where a proposal is homed (queueWrite's `home`): where the entry lives, else the origin
+ *     lift    the derived floor would hold a content write above where the entry lives (worker tools say so)
  * Unscoped deployments: direct, unless the identity's writes are queued or the caller asked to propose.
  */
-export function decideWrite(identity, { kind, cls = null, attribute = null, claims, lives } = {}, ctx = {}) {
+export function decideWrite(identity, { kind, lives } = {}, ctx = {}) {
   const queued = identity?.caps?.write === "queued";
   const reasons = [];
   const map = ctx.positions ?? positionMap;
-  const rules = ctx.policy ?? policy.authorityMap;
   if ((!SCOPED && !ctx.positions) || !map) {
     if (queued) reasons.push("this identity's writes are queued");
     if (ctx.propose) reasons.push("proposed on purpose");
-    return { action: reasons.length ? "propose" : "direct", floor: undefined, home: undefined, reason: reasons.join("; "), authority: null, lift: null };
+    return { action: reasons.length ? "propose" : "direct", floor: undefined, home: undefined, reason: reasons.join("; "), lift: null };
   }
   const at = lives === undefined ? undefined : effectiveHome(map, lives);
   const origin = ctx.origin === undefined ? at : effectiveHome(map, ctx.origin);
-  // the rule, per class, by position alone (a queued writer's standing is still its position's; queuing
-  // is a reason of its own below): with several claims the strictest answer and the highest authority decide
-  const keys = claims ? claimKeys(claims) : cls || attribute ? [{ class: cls, attribute }] : [];
-  const standing = { ...identity, caps: undefined };
-  let ruling = "direct";
-  let authority = null;
-  for (const k of keys) {
-    const r = decide(standing, k.class, k.attribute, rules, map);
-    if (r === "hidden" || (r === "propose" && ruling === "direct")) ruling = r;
-    const a = authorityOf(rules, k.class, k.attribute);
-    if (a) authority = commonAncestor(map, [...(authority ? [authority] : []), map.positions[a] ? a : map.root]);
-  }
-  const named = keys.filter((k) => authorityOf(rules, k.class, k.attribute)).map((k) => (k.class && k.attribute ? `${k.class}/${k.attribute}` : k.class ?? k.attribute));
-  if (ruling !== "direct") reasons.push(ruling === "hidden" ? `${named.join(", ")}: authority lies with ${homeName(map, authority)}, on another branch` : `authority over ${named.join(", ")} lies with ${homeName(map, authority)}`);
   // the derived floor bounds content writes to an existing entry; a lift means a proposal, never a silent move
   const content = ["upsert", "typed_update", "ingest"].includes(kind);
   const { lift } = content && at !== undefined && map === positionMap ? workerWriteFloor(identity, at) : { lift: null };
   if (lift) reasons.push(`what this identity read in the last ${policy.derivedWindowHours} hours reaches fewer people than ${homeName(map, at)} does`);
-  // today's site rules, which the rule keeps
   if (queued) reasons.push("this identity's writes are queued");
   if (ctx.propose) reasons.push("proposed on purpose");
   if (kind === "command" && identity?.role?.kind === "worker") reasons.push("a worker's raw command is always a proposal");
   const widen = kind === "rehome" && ctx.to !== undefined && at !== undefined && moveKind(map, at, ctx.to) === "widen";
   if (widen) reasons.push("widening who sees it is a person's call");
   if (ctx.placedBy && !isPerson(identity)) reasons.push(`${ctx.placedBy} placed it: moving it is a person's decision`);
-  const action = ruling === "hidden" ? "hidden" : reasons.length || ruling === "propose" ? "propose" : "direct";
-  // where the data may land, and where a proposal is homed (who reviews it)
+  const action = reasons.length ? "propose" : "direct";
   const base = origin ?? at;
-  const derived = base === undefined ? undefined : lift ? lift.floor : map === positionMap ? derivedFloor(identity, base) : base;
-  const floorAt = base === undefined ? undefined : commonAncestor(map, [derived, ...(authority ? [claimHome(map, base, authority)] : [])]);
-  const home = action === "hidden" ? floorAt : authority && ruling !== "direct" ? claimHome(map, base ?? authority, authority) : (at ?? origin);
-  return { action, floor: floorAt, home, reason: reasons.join("; "), authority, lift };
+  const floor = base === undefined ? undefined : lift ? lift.floor : map === positionMap ? derivedFloor(identity, base) : base;
+  return { action, floor, home: at ?? origin, reason: reasons.join("; "), lift };
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
@@ -144,14 +112,10 @@ export async function upsertEntities({ entities, home, floor, regrade_floor, wri
     // awaiting grading: what it needs to be graded again (regradeTick); graded now: no longer awaiting
     const ungradedSql = place?.ungraded
       ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: regrade_floor ?? floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString(), ...(typeof e._text === "string" ? { text: e._text.slice(0, 6000) } : {}) }))}'`
-      : place?.graded || place?.claims // graded now, or settled by its claims: no longer awaiting
+      : place?.graded // graded now: no longer awaiting
         ? ", n.`_ungraded` = null"
         : "";
-    // placed by its claims: which classes and attributes, and whose authority put it there (claimsOfEntry reads it back)
-    const claimSql = place?.claims
-      ? `, n.\`_claim_classes\` = '${esc(JSON.stringify(place.claims.map(({ class: c, attribute, authority }) => ({ class: c, attribute, authority }))))}', n.\`_authority\` = ${place.authority ? `'${esc(place.authority)}'` : "null"}`
-      : "";
-    const placeSql = place ? `, n.\`_home\` = '${esc(place.home)}', n.\`_grade\` = '${esc(place.note)}'${ungradedSql}${claimSql}` : "";
+    const placeSql = place ? `, n.\`_home\` = '${esc(place.home)}', n.\`_grade\` = '${esc(place.note)}'${ungradedSql}` : "";
     // server-set fields (documents, sections); never from a caller (tool schemas drop them)
     const systemSql = Object.entries(e._system && typeof e._system === "object" ? e._system : {})
       .filter(([k, v]) => /^_[a-z][a-z0-9_]*$/.test(k) && ["string", "number"].includes(typeof v))
@@ -161,8 +125,6 @@ export async function upsertEntities({ entities, home, floor, regrade_floor, wri
     const stored = (
       await adbQuery(`SELECT @rid AS rid, _home, _valid_until, _valid_by FROM ${ENTITY_LABEL} WHERE name = :name${home === undefined ? "" : " AND _origin = :origin"} LIMIT 1`, { name: e.name, origin: home })
     )[0];
-    // an update that moves an entry takes its claims along
-    if (stored && place && stored._home !== place.home) await claimsFollowEntry(String(stored.rid), place.home);
     const validity = chooseValidity(
       parseValidUntil(e.valid_until, writtenAt),
       stored ? { valid_until: stored._valid_until ?? null, valid_by: stored._valid_by ?? null } : undefined,
@@ -215,14 +177,10 @@ export async function upsertEntities({ entities, home, floor, regrade_floor, wri
         void adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: jobs[i].name, origin: home })
           .then(async (rows) => {
             if (!rows[0]) return;
-            // the graph worker finds what it's about (in the background): the
-            // one-call linking, or a thread; what a thread wrote only gets linked
+            // a worker's thread or the master's next batch (pool.js firstJob); what a worker wrote starts nothing
             const rid = String(rows[0].rid);
-            const kind = from_worker ? "mentions" : firstJob(worker.pool);
-            // with a master: linked first (when there's a linking model), then into the next batch
-            const toMaster = !from_worker && worker.pool.master && worker.pool.poolSize > 0;
-            if (toMaster && !workerModel()) await enqueue("intake", { rid }, { key: `intake:${rid}` }).catch(() => {});
-            else await enqueue(kind, { rid, ...(from_worker ? { from_worker: true } : {}), ...(toMaster ? { intake: true } : {}) }, { key: `${kind}:${rid}` }).catch(() => {});
+            const kind = from_worker ? null : firstJob(worker.pool);
+            if (kind) await enqueue(kind, { rid }, { key: `${kind}:${rid}` }).catch(() => {});
             await meetAssertion(String(rows[0].rid), vec);
           })
           .catch((e) => log.warn(`meeting questions for ${jobs[i].name}: ${String(e).slice(0, 120)}`));
@@ -360,8 +318,8 @@ export async function setHome({ entities, to, reason, propose }, identity, scope
     const move = { rid: String(node.rid), name: ref.name, from: current, to: target };
     const kind = moveKind(positionMap, current, target);
     // one rule: a person placed it (an agent asks), widening (a person's call), a queued writer, a worker
-    // asking on purpose, or the entry's claims lie with an authority the mover lacks
-    const d = decideWrite(identity, { kind: "rehome", lives: current, claims: await claimsOfEntry(String(node.rid)) }, { to: target, propose, placedBy: node._placed_by, reason });
+    // asking on purpose
+    const d = decideWrite(identity, { kind: "rehome", lives: current }, { to: target, propose, placedBy: node._placed_by, reason });
     if (d.action === "direct") {
       results.push({ name: ref.name, ...(await applyRehome({ ...move, ...(isPerson(identity) ? { placedBy: identity.user } : {}) })) });
       if (identity.role?.kind === "worker") await logChange(identity, { kind: "move", detail: `"${ref.name}" up to ${homeName(positionMap, target)}`, ...(reason ? { reason: String(reason).slice(0, 300) } : {}) });
@@ -378,7 +336,6 @@ export async function setHome({ entities, to, reason, propose }, identity, scope
     results.push({
       name: ref.name,
       [kind === "widen" ? "widening" : "restricting"]: true,
-      ...(d.authority ? { authority: homeName(positionMap, d.authority) } : {}),
       ...(await queueWrite({ kind: "rehome", payload: JSON.stringify(move), user: identity.user, home: d.home ?? current, ...proposalFields(identity, reason ?? (d.reason || undefined)) })),
     });
   }
@@ -394,13 +351,12 @@ async function applyRehome({ rid, name, from, to, placedBy }) {
   // a person's move is recorded: a worker can't move the entry again without asking (setHome)
   if (placedBy) await adbCommand(`UPDATE ${rid} SET _home = :to, _placed_by = :who, _placed_at = :at`, "sql", { to, who: placedBy, at: new Date().toISOString() });
   else await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
-  await claimsFollowEntry(rid, to);
   // a document's title goes with its most restricted section (document-home.js); moving the entry itself is where it now belongs
   if (rows[0]._kind === "document") await adbCommand(`UPDATE ${rid} SET _doc_base = :to`, "sql", { to });
   if (rows[0]._doc_id) await settleDocument(rows[0]._doc_id).catch((e) => log.warn(`document ${rows[0]._doc_id} not settled after a move: ${String(e).slice(0, 160)}`));
   // seen from its new home: so are the things it's about
   const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
-  for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to, { from }).catch(() => {});
+  for (const a of about) if (RID_RE.test(String(a.dst))) await instanceSeenFrom(String(a.dst), to, { from }).catch(() => {});
   log.info(`entity ${name} rehomed ${homeName(positionMap, from)} -> ${homeName(positionMap, to)}`);
   return { moved: true, from: homeName(positionMap, from), to: homeName(positionMap, to) };
 }
@@ -418,7 +374,7 @@ export async function foldEntries({ keep, drop }) {
     const dst = String(e.dst);
     if (!RID_RE.test(dst)) continue;
     await aboutOnce(keep, dst, e.role ?? "mentions");
-    await thingSeenFrom(dst, home, { from: effectiveHome(positionMap, d._home) });
+    await instanceSeenFrom(dst, home, { from: effectiveHome(positionMap, d._home) });
     moved++;
   }
   await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE @rid = ${drop}`);
