@@ -26,7 +26,7 @@ test("new types come before their properties; Entity is only extended", () => {
   assert.ok(!list.some((s) => /CREATE (VERTEX|EDGE|DOCUMENT) TYPE Entity\b/.test(s)), "Entity exists already");
   for (const t of ["SUBCLASS_OF", "INSTANCE_OF", "DEPENDS_ON", "ABOUT"]) assert.ok(list.includes(`CREATE EDGE TYPE ${t} IF NOT EXISTS`), t);
   for (const t of ["FilingEntry", "WorkerRequest"]) assert.ok(list.includes(`CREATE DOCUMENT TYPE ${t} IF NOT EXISTS`), t);
-  assert.ok(list.includes("CREATE INDEX IF NOT EXISTS ON Entity (_class_key) UNIQUE"), "class names are unique");
+  assert.ok(list.includes("CREATE INDEX IF NOT EXISTS ON Entity (_class_key) NOTUNIQUE"), "class names are looked up, and unique per home in code, not in the whole organization");
 });
 
 test("what the rulings removed is not declared", () => {

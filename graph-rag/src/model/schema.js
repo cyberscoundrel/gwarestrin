@@ -66,6 +66,7 @@ export const TYPES = {
       _status: "STRING", // active | retired (R11: a retired class never returns on its own)
       _corrections: "STRING", // a class: JSON, the people's corrections kept on it (classes.js, R11)
       _run: "STRING", // a class or instance a discovery run wrote: the run's id, so a run can be undone whole
+      _mirror: "STRING", // a class or instance the store mirrors: position:<id> (R6) or an AI agent's key (R1); only the sync changes it
       _discovery_run: "STRING", // a task entry that is a part of a discovery run (its worker is held to the discovery tools)
       _on_record: "BOOLEAN", // a document: a person put it on record
       _recorded_by: "STRING",
@@ -73,7 +74,9 @@ export const TYPES = {
       _record_position: "STRING", // where its sections start (R11)
       _record_reason: "STRING",
     },
-    indexes: [{ properties: ["_class_key"], unique: true }],
+    // names are unique per home (classes.js NAMES_UNIQUE), checked in code: a unique index would refuse a
+    // class at one home because of a same-named class at a home the writer can't see, and say so
+    indexes: [{ properties: ["_class_key"], unique: false }],
   },
   SUBCLASS_OF: {
     kind: "edge",
