@@ -399,3 +399,6 @@ F1 to F17 stand as phase 0 set them, except where noted. Each is marked `NEEDS A
   failed and every write was Held. The column is `row_before` now, and a unit test checks the stored names.
 - **Still waiting:** the classes branch, for `create_instance` and `state_dependency` to call its `relateInstance`
   and `addDependency`.
+- **BriefLog holds the message as sent.** At the integrator's request, `brief` also carries `why` and the rendered
+  `message`, computed before the row is written, so the leak scan covers everything the worker receives. `why` is
+  set only by code (`refileKept`'s fixed text); no orchestrator tool passes free text into it.

@@ -527,11 +527,14 @@ test("an instance holding the key that the audience can't see is refused, not re
 test("every brief is logged as sent (BriefLog, for the leak gate), and one that can't be logged is refused", async () => {
   const composed = await composeFilingBrief({ record: "doc-1", home: "floor", sections: ["#71:3"] }, { db: graphDb({ docHome: "ops" }), positions: map, sources: {}, entries: async () => [] });
   const seen = [];
-  const row = await logBrief({ record: "doc-1", worker: "job-1", composed }, { adbCommand: async (sql, _l, params) => (seen.push([sql, params]), [{ count: 1 }]) });
+  const message = taskBrief({ ...composed, why: "re-filing: a class may fit now" });
+  const row = await logBrief({ record: "doc-1", worker: "job-1", composed, why: "re-filing: a class may fit now", message }, { adbCommand: async (sql, _l, params) => (seen.push([sql, params]), [{ count: 1 }]) });
   assert.match(seen[0][0], /^INSERT INTO BriefLog SET id = :id, record = :record, audience = :audience, worker = :worker, brief = :brief, dropped = :dropped, at = :at$/);
   assert.deepEqual([row.record, row.audience, row.worker], ["doc-1", "floor", "job-1"]);
   const logged = JSON.parse(row.brief);
-  assert.deepEqual(Object.keys(logged).sort(), ["audience", "classes", "dependencies", "instances", "record", "refile", "sections", "sources"]);
+  assert.deepEqual(Object.keys(logged).sort(), ["audience", "classes", "dependencies", "instances", "message", "record", "refile", "sections", "sources", "why"]);
+  assert.equal(logged.message, message, "the message exactly as the worker gets it");
+  assert.match(row.brief, /re-filing: a class may fit now/, "the why it carries is logged too");
   assert.equal(logged.sections[0].rid, "#71:3");
   assert.doesNotMatch(row.brief, /ZEBRA/, "the log holds what the worker got, nothing above it");
   assert.deepEqual(JSON.parse(row.dropped), composed.dropped);
