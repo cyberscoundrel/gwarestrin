@@ -61,7 +61,7 @@ test("cached a minute; forgetSources reads again", async () => {
 test("the test declaration: home everyone (test configuration only), the synthetic names in the guard, only the writable tables", () => {
   const d = testDeclaration();
   assert.equal(d.read.home, "everyone");
-  assert.deepEqual(d.commit.guard, { server: SERVER, database: DATABASE });
+  assert.deepEqual(d.commit.guard, { server: SERVER, database: DATABASE, login: "gwsynth_write" });
   assert.deepEqual(d.commit.tables.sort(), Object.keys(WRITABLE).map(entityOf).sort());
   assert.equal(writable({ ...d, commit: { ...d.commit, actions: ["create", "update"] } }, "dbo_Customer"), false);
 });

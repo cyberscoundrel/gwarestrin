@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dabTool } from "../e2e/fake-dab-core.mjs";
-import { applyProposedEntry, approvingPerson, assertWritable, checkGuard, columnFor, commitRow, createRow, DAB_CALLS, describeEntry, describeSource, enterData, findRows, forgetAuthorityPolicy, forgetPrimaryKeys, forgetSources, getRow, mcpToolCall, odata, primaryKeyFrom, rowsOf, sameValue, sourceClient, standingOf } from "../src/data-entry.js";
+import { applyProposedEntry, approvingPerson, assertWritable, checkGuard, clientFor, columnFor, commitRow, createRow, DAB_CALLS, describeEntry, describeSource, enterData, findRows, forgetAuthorityPolicy, forgetPrimaryKeys, forgetSources, getRow, mcpToolCall, odata, primaryKeyFrom, rowsOf, sameValue, sourceClient, standingOf } from "../src/data-entry.js";
 import { normalizeSource } from "../src/model/sources.js";
 import { classIndex } from "../src/model/classes.js";
 import { parsePositionMap } from "../src/positions.js";
@@ -263,7 +263,7 @@ const harness = (extra = {}) => {
   const log = journal();
   return { queued, dab, log, opts: { db: extra.db ?? policyDb(fakeDb()), fetch: dab.fetch, positions: map, queue, proposal, people: lookup, journal: log } };
 };
-const entry = (over = {}) => ({ actsFor: { person: "bob", position: "floor" }, by: "admin/agent:w1", key: "mssql:dbo_Job:4471", fields: { Status: "done" }, cls: "jobs", reason: "the note says so", ...over });
+const entry = (over = {}) => ({ actsFor: { person: "bob", position: "floor" }, by: "admin/agent:w1", key: "mssql:dbo_Job:4471", fields: { Status: "done" }, before: { Status: "running" }, cls: "jobs", reason: "the note says so", ...over });
 
 test("Filed: the recorder holds the position the map names for the class, so the row is written through the write endpoint", async () => {
   const h = harness();
@@ -336,14 +336,14 @@ test("a transport error is settled by reading the row back: filed when it landed
   assert.deepEqual([l.outcome, l.status], ["held", "unreachable"]);
   assert.equal(lost.log.entries[0].status, "unreachable");
   const refused = harness({ dab: fakeDab([{ Job: 4471, Status: "a" }, { Job: 4472, Status: "b" }], { failWrite: true }) });
-  const r = await enterData(entry(), refused.opts);
+  const r = await enterData(entry({ before: { Status: "a" } }), refused.opts);
   assert.deepEqual([r.outcome, r.status], ["held", "refused"]);
   assert.match(r.why, /permission denied/);
   assert.equal(refused.log.entries[0].status, "refused");
 });
 
 test("approving a proposal: only a person holding the map's position for the class, as they stand now; a class missing from the map, a person at the root", async () => {
-  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, class: "orders", by: "w", acts_for: { person: "bob", position: "floor" }, reason: "r" };
+  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, before: { Quantity: 1 }, class: "orders", by: "w", acts_for: { person: "bob", position: "floor" }, reason: "r" };
   const attempt = async (approver, over = {}) => {
     forgetPrimaryKeys();
     forgetAuthorityPolicy();
@@ -487,10 +487,10 @@ test("R2 Held, never overwrite: a row that moved since the worker read it is not
   const moved = await commitRow({ key: "mssql:dbo_Job:4471", fields: { Priority: 1 }, before: { Priority: 3 } }, on(dab, { journal: log }));
   assert.deepEqual([moved.status, moved.filing, moved.row.Priority], ["moved", "held", 5]);
   assert.match((await commitRow({ key: "mssql:dbo_Job:4471", fields: { Priority: 1, Status: "x" }, before: { Priority: 5 } }, on(dab, { journal: log }))).why, /doesn't name Status/);
-  const already = await commitRow({ key: "mssql:dbo_Job:4471", fields: { Priority: 5 } }, on(dab, { journal: log }));
+  const already = await commitRow({ key: "mssql:dbo_Job:4471", fields: { Priority: 5 }, before: { Priority: 5 } }, on(dab, { journal: log }));
   assert.deepEqual([already.status, already.filing], ["already", "filed"]);
-  assert.equal((await commitRow({ key: "mssql:dbo_Job:1", fields: { Priority: 1 } }, on(dab, { journal: log }))).status, "not_found");
-  assert.deepEqual(log.entries, [], "nothing begun: nothing was attempted");
+  assert.equal((await commitRow({ key: "mssql:dbo_Job:1", fields: { Priority: 1 }, before: { Priority: 5 } }, on(dab, { journal: log }))).status, "not_found");
+  assert.deepEqual(log.entries.map((e) => e.status), ["written"], "only the row already holding it is logged (as written, with nothing sent); the moved and missing ones were never attempted");
   assert.ok(!dab.calls.some((c) => c.name === "update_record"));
 });
 
@@ -536,14 +536,14 @@ test("R9: a subclass with no map entry of its own takes its parent's, on the liv
   assert.equal((await enterData(entry({ cls: "rush jobs" }), { ...without.opts, index: null })).outcome, "proposed", "without the tree, a class with no entry of its own is Proposed");
   forgetPrimaryKeys();
   const dab = fakeDab([{ Job: 4471, Quantity: 1 }, { Job: 4472, Quantity: 2 }]);
-  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, class: "rush jobs", by: "w", acts_for: { person: "dana", position: "floor" }, reason: "r" };
+  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, before: { Quantity: 1 }, class: "rush jobs", by: "w", acts_for: { person: "dana", position: "floor" }, reason: "r" };
   const approved = await applyProposedEntry(payload, "p9", "bob", { db: policyDb(fakeDb()), fetch: dab.fetch, people: lookup, positions: map, journal: journal(), index });
   assert.equal(approved.outcome, "filed");
   assert.equal(dab.rows[0].Quantity, 700);
 });
 
 test("an approved proposal is written only with a filing-log entry, which names the approval for the Filed entry; with no log, nothing is written", async () => {
-  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, class: "jobs", by: "w", acts_for: { person: "dana", position: "floor" }, reason: "r", piece: { document: "d1", section: 2 } };
+  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, before: { Quantity: 1 }, class: "jobs", by: "w", acts_for: { person: "dana", position: "floor" }, reason: "r", piece: { document: "d1", section: 2 } };
   forgetPrimaryKeys();
   const dab = fakeDab([{ Job: 4471, Quantity: 1 }, { Job: 4472, Quantity: 2 }]);
   const log = journal();
@@ -565,4 +565,116 @@ test("the write path reads the declaration (model/sources.js writable): a table 
   assert.match(r.reason, /not writable/);
   assert.equal(h.dab.rows[0].Status, "running");
   assert.ok(!h.dab.calls.some((c) => c.name === "update_record"));
+});
+
+// ---- the review of c1eaf39 ----
+
+test("S-B1: the names filing imports load, and sourcesConfig answers { [system]: { read, write } } from the declarations", async () => {
+  const m = await import("../src/data-entry.js");
+  for (const name of ["clientFor", "DAB_CALLS", "enterData", "mcpToolCall", "rowsOf", "sameValue", "sourcesConfig"]) assert.ok(m[name] !== undefined, name);
+  forgetSources();
+  assert.deepEqual(await m.sourcesConfig(policyDb(fakeDb()), { ttlMs: 0 }), { mssql: { read: "http://fake/read", write: "http://fake/write" } });
+  forgetSources();
+  const ro = fakeDb();
+  ro.policyRows = (params, sql) => (sql.includes("'sources'") ? [{ json: JSON.stringify([{ ...DECL, commit: { via: "none" } }]) }] : []);
+  assert.deepEqual(await m.sourcesConfig(ro, { ttlMs: 0 }), { mssql: { read: "http://fake/read", write: null } });
+});
+
+test("S-B2: a write tool is never sent twice: a 5xx after a session exists is unreachable, and the write is settled by reading the row back", async () => {
+  const sent = [];
+  let session = null;
+  const f = async (url, init) => {
+    const body = JSON.parse(init.body);
+    if (body.method === "tools/call") sent.push(body.params.name);
+    const reply = (status, result) => ({ ok: status === 200, status, headers: { get: (h) => (h === "mcp-session-id" ? (session ??= "s") : null) }, text: async () => JSON.stringify({ jsonrpc: "2.0", id: body.id, result }) });
+    if (body.method === "initialize") return reply(200, {});
+    return reply(502, null);
+  };
+  for (const tool of ["create_record", "update_record"]) {
+    sent.length = 0;
+    await assert.rejects(mcpToolCall("http://proxy/mcp", tool, { entity: "dbo_Job" }, { fetch: f }), (e) => e.transport === true);
+    assert.deepEqual(sent, [tool], `${tool} sent once`);
+  }
+  sent.length = 0;
+  await assert.rejects(mcpToolCall("http://proxy/mcp", "read_records", { entity: "dbo_Job" }, { fetch: f }), (e) => e.transport === true);
+  assert.deepEqual(sent, ["read_records"], "a 5xx is not a lost session: a read is not repeated either");
+  // a create the source made but whose answer was lost: one row, one attempt, the attempt left unknown (Held)
+  forgetPrimaryKeys();
+  const dab = shop();
+  const lossy = async (url, init) => {
+    const body = JSON.parse(init.body);
+    const res = await dab.fetch(url, init);
+    if (body.params?.name === "create_record") return { ok: false, status: 502, headers: { get: () => null }, text: async () => "bad gateway" };
+    return res;
+  };
+  const log = journal();
+  const r = await createRow({ system: "mssql", table: "dbo_Maintenance", data: { Description: "x", Status: "Open" } }, { fetch: lossy, sources: declared(), journal: log });
+  assert.deepEqual([r.status, r.filing], ["unknown", "held"]);
+  assert.equal(dab.calls.filter((c) => c.name === "create_record").length, 1);
+  assert.equal(dab.tables.dbo_Maintenance.rows.length, 3, "one row made, not two");
+  assert.deepEqual(log.entries.map((e) => e.status), ["unknown"]);
+});
+
+test("R11.6, R11.9: a source read is for an audience, and the connection's home must be one it sees; the root's connection is the root's alone", async () => {
+  forgetPrimaryKeys();
+  const dab = shop();
+  const rootHomed = declared(); // no home declared: the root
+  const opsHomed = declared({ read: { ...DECL.read, home: "ops" } });
+  const everyone = declared({ read: { ...DECL.read, home: "everyone" } });
+  const as = (sources, audience) => ({ fetch: dab.fetch, sources, audience, positions: map });
+  assert.equal((await getRow("mssql:dbo_Job:4471", as(rootHomed, "org"))).status, "found");
+  const above = await getRow("mssql:dbo_Job:4471", as(rootHomed, "floor"));
+  assert.deepEqual([above.status, above.filing, above.row], ["refused", "held", undefined]);
+  assert.match(above.why, /above this audience/);
+  assert.equal((await getRow("mssql:dbo_Job:4471", as(opsHomed, "ops"))).status, "found");
+  assert.equal((await getRow("mssql:dbo_Job:4471", as(opsHomed, "floor"))).status, "refused", "floor doesn't see what ops does");
+  assert.equal((await findRows({ system: "mssql", table: "dbo_Employee", column: "First_Name", value: "Diep" }, as(opsHomed, "floor"))).status, "refused");
+  assert.equal((await describeSource("mssql", as(opsHomed, "everyone"))).status, "refused");
+  assert.equal((await findRows({ system: "mssql", table: "dbo_Employee", column: "First_Name", value: "Diep" }, as(everyone, "floor"))).status, "ambiguous");
+  assert.equal((await describeSource("mssql", as(everyone, "everyone"))).status, "found");
+  const sent = dab.calls.length;
+  await getRow("mssql:dbo_Job:4471", as(rootHomed, "floor"));
+  assert.equal(dab.calls.length, sent, "nothing is read from a source above the audience");
+  assert.equal((await getRow("mssql:dbo_Job:4471", as(rootHomed, "nobody"))).status, "refused", "an audience that is no position sees nothing");
+});
+
+test("review: clientFor is read only; the guard's view is pinned and its login checked; a guarded write names its tables", async () => {
+  const { client } = await clientFor("mssql:dbo_Job:4471", { sources: declared(), fetch: shop().fetch });
+  assert.equal(client.canWrite, false);
+  const pinned = normalizeSource({ ...DECL, commit: { ...DECL.commit, guard: { ...DECL.commit.guard, entity: "dbo_Job" } } });
+  assert.match((await checkGuard(pinned, { fetch: shop().fetch })).why, /must be read through dbo_GwConnectionIdentity/);
+  const withLogin = (login) => normalizeSource({ ...DECL, commit: { ...DECL.commit, guard: { ...DECL.commit.guard, login } } });
+  assert.equal((await checkGuard(withLogin("gwsynth_write"), { fetch: shop().fetch })).ok, true);
+  assert.match((await checkGuard(withLogin("gw_admin"), { fetch: shop().fetch })).why, /as gwsynth_write, not the declared gw_admin/);
+  forgetPrimaryKeys();
+  const any = await commitRow({ key: "mssql:dbo_Job:4471", fields: { Priority: 1 }, before: { Priority: 5 } }, { fetch: shop().fetch, sources: declared({ commit: { ...DECL.commit, tables: null } }), journal: journal() });
+  assert.equal(any.status, "refused");
+  assert.match(any.why, /names no tables/);
+});
+
+test("review: an update must say what the worker read; a row already holding the value is still logged, so an approval gets its Filed entry", async () => {
+  forgetPrimaryKeys();
+  const dab = shop();
+  const log = journal();
+  const blind = await commitRow({ key: "mssql:dbo_Job:4471", fields: { Priority: 1 } }, on(dab, { journal: log }));
+  assert.equal(blind.status, "refused");
+  assert.match(blind.why, /before/);
+  const already = await commitRow({ key: "mssql:dbo_Job:4471", fields: { Priority: 5 }, before: { Priority: 5 }, piece: { pending_id: "p1" } }, on(dab, { journal: log }));
+  assert.equal(already.status, "already");
+  assert.deepEqual(log.entries.map((e) => [e.status, e.piece?.pending_id, e.note]), [["written", "p1", "the row already held it: nothing was sent"]]);
+  assert.ok(!dab.calls.some((c) => c.name === "update_record"));
+});
+
+test("review: approving needs a position map, and a person, never an agent", async () => {
+  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, before: { Quantity: 1 }, class: "jobs", by: "w", acts_for: { person: "dana", position: "floor" }, reason: "r" };
+  const run = (approver, positions = map) => {
+    forgetPrimaryKeys();
+    const dab = fakeDab([{ Job: 4471, Quantity: 1 }, { Job: 4472, Quantity: 2 }]);
+    return applyProposedEntry(payload, "p1", approver, { db: policyDb(fakeDb()), fetch: dab.fetch, people: lookup, positions, journal: journal(), index: null }).then((r) => ({ r, dab }), (e) => ({ threw: e.message, dab }));
+  };
+  const noMap = await run("admin", null);
+  assert.match(noMap.threw, /no position map/);
+  assert.equal(noMap.dab.rows[0].Quantity, 1);
+  assert.match((await run("admin/agent:orchestrator")).threw, /an agent can't approve/);
+  assert.equal((await run("bob")).r.outcome, "filed");
 });

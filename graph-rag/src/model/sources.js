@@ -8,7 +8,8 @@
 // that can read that table". NEEDS A RULING (which home a connection has): smallest choice, null, meaning the
 // root, the strictest, until a person declares one. A test configuration may declare "everyone".
 // `commit.guard` is what the write connection must say it holds before any write: { server, database }, read
-// through `entity` (default dbo_GwConnectionIdentity, test-sql/README.md). Without one, nothing is written.
+// through `entity` (only dbo_GwConnectionIdentity passes, test-sql/README.md), and `login` when declared. Without
+// one, nothing is written.
 //
 // `system` is the first part of a record key (`mssql` in mssql:dbo_Job:4471). A source that is not
 // writable makes a clear piece Proposed (R2).
@@ -41,7 +42,9 @@ function guard(raw) {
   if (raw === undefined || raw === null) return null;
   if (typeof raw !== "object" || Array.isArray(raw)) throw new ShapeError("commit.guard", "must be { server, database }");
   for (const k of ["server", "database"]) if (!nonEmpty(raw[k])) throw new ShapeError(`commit.guard.${k}`, "needs the name the write connection must hold");
-  return { server: String(raw.server).trim(), database: String(raw.database).trim(), entity: nonEmpty(raw.entity) ? String(raw.entity).trim() : GUARD_ENTITY };
+  const out = { server: String(raw.server).trim(), database: String(raw.database).trim(), entity: nonEmpty(raw.entity) ? String(raw.entity).trim() : GUARD_ENTITY };
+  if (nonEmpty(raw.login)) out.login = String(raw.login).trim();
+  return out;
 }
 
 /** one declaration, normalized; throws ShapeError naming the field */

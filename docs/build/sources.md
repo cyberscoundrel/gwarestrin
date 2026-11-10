@@ -263,7 +263,34 @@ Every choice marked `NEEDS A RULING` in this stream's files:
 | `model/sources.js` | A source write may create and update, never delete (BUILD.md 11) |
 | `data-entry.js` | The read side is reachable and the write side is not: Held (item 1) |
 | `data-entry.js` | A write whose result can't be told: Held, with its log entry `unknown` (item 2) |
-| `data-entry.js` | The caller may narrow the tables a worker reads, and no rule narrows them here (item 5) |
+| `data-entry.js` | Which tables of one connection an audience may read beyond the connection's own home: a caller may pass `tables`, and no rule narrows them here. Audience by the connection's home is enforced (R11.6, R11.9) |
+| `data-entry.js` | A table of fewer than two rows can't have its key learned through DAB 2.0.12, so it is refused |
 | `data-entry.js` | Composite keys are refused (item 6) |
 | `data-entry.js` | A recorder who left or moved: `refused`, recorded as Held by filing (BUILD.md 12) |
 | `data-entry.js` | A proposal on a class missing from the map is approved by a person at the root (BUILD.md 13) |
+
+## The review of c1eaf39
+
+Both blocking findings are fixed:
+- **S-B1.** `sourcesConfig` is exported again. It answers `{ [system]: { read, write } }` from the declarations, and
+  a test loads every name filing imports.
+- **S-B2.** A write tool is never sent twice. Only a 404, or a 400 that names the session, counts as a lost session,
+  and even then a write is reported unreachable, not repeated. `commitRow` reads the row back, and `createRow`
+  leaves its entry `unknown` (Held).
+
+The audience mark is narrowed. `getRow`, `findRows` and `describeSource` take `audience` (a position, or
+everyone) and `positions`. Nothing is read from a connection whose home that audience can't see (R11.6, R11.9). The
+only part left open is narrowing tables within one connection.
+
+Non-blocking items:
+
+| # | Item | Done |
+|---|---|---|
+| 1 | `clientFor` | Read only |
+| 2 | The guard | Only `dbo_GwConnectionIdentity` counts. A declared `login` is checked; the test declaration pins `gwsynth_write`. A write side that names no tables writes nothing |
+| 3 | Approval with no position map | Refused |
+| 4 | Small tables | Now marked as needing a ruling |
+| 5 | "Already" | Begins and settles a `written` entry, with nothing sent |
+| 7 | Agents as approvers | Refused |
+| 8 | `before` | Required for every update |
+| 9 | `liveIndex` | Still calls the classes stream's `allClasses()`, which seeds missing classes. Left for the integrator: classes exports no read that doesn't seed |

@@ -97,7 +97,7 @@ export function testDeclaration({ read = "http://dab-read:5000/mcp", write = "ht
       via: "dab-mcp",
       url: write,
       tables: ["dbo_Job", "dbo_Job_Operation", "dbo_Work_Center", "dbo_Sales_Order", "dbo_Purchase_Order", "dbo_Maintenance"],
-      guard: { server, database },
+      guard: { server, database, login: "gwsynth_write" },
     },
   };
 }

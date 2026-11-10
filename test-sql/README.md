@@ -46,7 +46,7 @@ three scripts runs a second, independent copy.
   "read":   { "via": "dab-mcp", "url": "http://dab-read:5000/mcp", "home": "everyone" },
   "commit": { "via": "dab-mcp", "url": "http://dab-write:5000/mcp",
               "tables": ["dbo_Job", "dbo_Job_Operation", "dbo_Work_Center", "dbo_Sales_Order", "dbo_Purchase_Order", "dbo_Maintenance"],
-              "guard": { "server": "gwsynth-sql", "database": "GwSynthMfg" } } }
+              "guard": { "server": "gwsynth-sql", "database": "GwSynthMfg", "login": "gwsynth_write" } } }
 ```
 
 `home: "everyone"` is for test configuration only, so the first run can file at every level (the coordinator's
@@ -57,8 +57,9 @@ returns this declaration.
 
 Before every write, the write adapter (`graph-rag/src/data-entry.js`) reads `dbo_GwConnectionIdentity` through the
 write DAB. That view selects `@@SERVERNAME`, `DB_NAME()` and `SUSER_SNAME()`, which are computed on the write login's
-own connection when it is read. The adapter refuses unless the server and database are the declared `guard` names. A
-database without the view cannot pass, and neither can a declaration without a guard.
+own connection when it is read. The adapter refuses unless the server, database and (when declared) login are the
+declared `guard` names. Only that view counts, a database without it cannot pass, and neither can a declaration
+without a guard or one whose write side names no tables.
 
 ## A restored copy (later)
 

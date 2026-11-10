@@ -38,8 +38,8 @@ import { filedOrProposed, validatePolicy } from "./model/class-map.js";
 import { classIndex } from "./model/classes.js";
 import { isoDate, snakeCase } from "./model/text.js";
 import { parseKey, parseTable } from "./model/schema.js";
-import { writable as declaredWritable } from "./model/sources.js";
-import { commonAncestor, defaultHome, EVERYONE, heldPositions } from "./positions.js";
+import { GUARD_ENTITY, writable as declaredWritable } from "./model/sources.js";
+import { canSee, commonAncestor, defaultHome, EVERYONE, heldPositions } from "./positions.js";
 import { authorityMap } from "./policy.js";
 import { forgetSources, loadSources } from "./sources.js";
 
@@ -73,6 +73,16 @@ const liveJournal = async () => (await import("./filing.js").catch(() => null))?
 
 export { forgetSources };
 
+/**
+ * Where each declared source is read and written, in the older shape { [system]: { read, write } } (write null when
+ * the declaration takes no writes). Filing's source lookups and briefs read this; the declarations themselves are
+ * sources.js loadSources.
+ */
+export async function sourcesConfig(db = realDb, opts = {}) {
+  const decls = await loadSources(db, opts);
+  return Object.fromEntries(Object.entries(decls).map(([system, d]) => [system, { read: d.read.url, write: d.commit.via === "none" ? null : d.commit.url }]));
+}
+
 /** ---- DAB over MCP (streamable HTTP) ---- */
 
 /** the tool calls as DAB 2.0.12 serves them (checked against a running instance's tools/list) */
@@ -94,6 +104,8 @@ export function odata(v, type) {
 }
 
 const sessions = new Map(); // url -> mcp-session-id
+/** the tools that change a source: never sent twice, whatever the answer (a lost answer is settled by reading back) */
+const WRITE_TOOLS = new Set(["create_record", "update_record", "delete_record", "execute_entity"]);
 
 /** the source couldn't be reached (a network error, a timeout, a server error): nothing it says is known */
 const unreachableError = (message, extra = {}) => Object.assign(new Error(message), { transport: true, ...extra });
@@ -121,7 +133,9 @@ export async function mcpToolCall(url, name, args, { fetch: f = globalThis.fetch
     if (sid) sessions.set(url, sid);
     const text = await res.text();
     if (!res.ok) {
-      const e = Object.assign(new Error(`${name}: ${res.status} ${text.slice(0, 200)}`), { status: res.status, staleSession: Boolean(session) });
+      // only an answer that says the session is gone is a lost session: a 5xx may come after the source acted
+      const lost = Boolean(session) && (res.status === 404 || (res.status === 400 && /session/i.test(text)));
+      const e = Object.assign(new Error(`${name}: ${res.status} ${text.slice(0, 200)}`), { status: res.status, staleSession: lost });
       if (res.status >= 500 || res.status === 404) e.transport = true;
       throw e;
     }
@@ -139,9 +153,11 @@ export async function mcpToolCall(url, name, args, { fetch: f = globalThis.fetch
   try {
     msg = await rpc("tools/call", { name, arguments: args }, 2);
   } catch (e) {
-    // a restarted server forgets its sessions: one fresh handshake, then the call once more
+    // a restarted server forgets its sessions: one fresh handshake, then the call once more; never a write, which
+    // is reported unreachable and settled by its caller reading the row back
     if (!e.staleSession) throw e;
     sessions.delete(url);
+    if (WRITE_TOOLS.has(name)) throw Object.assign(e, { transport: true });
     await handshake();
     msg = await rpc("tools/call", { name, arguments: args }, 2);
   }
@@ -223,6 +239,8 @@ export function sourceClient(system, urls, opts = {}) {
   const call = (url, c) => mcpToolCall(url, c.name, c.args, opts);
   const primaryKey = async (table, keyColumn, url = urls.read) => {
     const { pk } = await firstPageOf(url, table, call);
+    // NEEDS A RULING (tables of fewer than two rows): DAB 2.0.12 names a table's key only in the next-page cursor,
+    // and describe_entities names no fields, so such a table can be neither read by key nor written: refused
     if (!pk) throw new Error(`the primary key of ${system}:${table} can't be learned from the source (it pages by key, and this table has no second row to page to): refused rather than guessed`);
     if (pk.length !== 1) throw new Error(`${system}:${table} has a composite primary key (${pk.map((c) => c.name).join(", ")}): a record key names one column, so the row can't be determined`);
     if (keyColumn && keyColumn !== pk[0].name) throw new Error(`${keyColumn} is not the primary key of ${system}:${table}; the row is keyed by ${pk[0].name}`);
@@ -289,11 +307,24 @@ const answer = (status, rest = {}) => ({ status, filing: FILING[status] ?? (["fo
 const failed = (e, rest = {}) => answer(statusOf(e), { why: String(e?.message ?? e).slice(0, 300), ...rest });
 
 /** the declaration for a system, and a refusal when there is none or the table isn't one the caller allows */
-async function declared(system, table, { db = realDb, sources, tables } = {}) {
+/**
+ * The declaration for a system, and a refusal when there is none, when the connection's home is above the
+ * `audience` read for (R11.6: a worker sees only its audience; R11.9: a table's data takes the home of the
+ * connection that reads it), or when the table isn't one the caller allows. `audience` is a position, or
+ * everyone; `positions` the position map (the live one when not given). Nothing is read from a source above it.
+ * NEEDS A RULING (narrowing tables within one connection): a caller may pass `tables`; no rule here says which
+ * tables of a connection an audience may read beyond the connection's own home.
+ */
+async function declared(system, table, { db = realDb, sources, tables, audience, positions } = {}) {
   const decl = (sources ?? (await loadSources(db, { ttlMs: 0 })))[system] ?? null;
   if (!decl) return { refusal: answer("refused", { why: `no connected source called ${system}` }) };
-  // NEEDS A RULING (audience and source reads, R7): the caller may narrow the tables a worker reads; no rule
-  // narrows them here.
+  if (audience !== undefined) {
+    positions ??= await livePositions();
+    if (!positions) return { refusal: answer("refused", { why: "no position map is loaded, so no audience can be told what it sees" }) };
+    const known = audience === EVERYONE || Boolean(positions.positions?.[audience]);
+    const home = decl.read.home ?? positions.root;
+    if (!known || !canSee(positions, [audience], home)) return { refusal: answer("refused", { why: `${system} is read at ${home}, which is above this audience (${audience ?? "none"}): nothing is read` }) };
+  }
   if (table && tables && !tables.includes(table)) return { refusal: answer("refused", { why: `${system}:${table} is not among the tables this read may see` }) };
   return { decl };
 }
@@ -391,6 +422,7 @@ export async function checkGuard(decl, { fetch: f } = {}) {
   if (!decl || decl.commit?.via === "none") return answer("not_writable", { ok: false, why: `${decl?.system ?? "this source"} takes no writes` });
   const g = decl.commit.guard;
   if (!g) return answer("refused", { ok: false, why: `no guard is declared for ${decl.system}'s write connection, so nothing is written through it` });
+  if (g.entity !== GUARD_ENTITY) return answer("refused", { ok: false, why: `the guard must be read through ${GUARD_ENTITY}, the view that computes the connection's names, not ${g.entity}` });
   let rows;
   try {
     rows = rowsOf(await mcpToolCall(decl.commit.url, "read_records", { entity: g.entity, first: 2 }, f ? { fetch: f } : {}));
@@ -402,6 +434,7 @@ export async function checkGuard(decl, { fetch: f } = {}) {
   if (!sameName(server, g.server) || !sameName(database, g.database)) {
     return answer("refused", { ok: false, server, database, why: `the write connection holds ${server ?? "?"}/${database ?? "?"}, not the declared ${g.server}/${g.database}: nothing is written` });
   }
+  if (g.login && !sameName(login, g.login)) return answer("refused", { ok: false, server, database, why: `the write connection is logged in as ${login ?? "?"}, not the declared ${g.login}: nothing is written` });
   return { status: "ok", ok: true, server, database, login: login ?? null };
 }
 
@@ -426,6 +459,7 @@ async function writeGate(system, table, action, opts) {
   const { decl, refusal } = await declared(system, table, opts);
   if (refusal) return { refusal };
   if (!declaredWritable(decl, table, action)) return { refusal: answer("not_writable", { why: `${system} takes no ${action} on ${table}` }) };
+  if (!decl.commit.tables) return { refusal: answer("refused", { why: `${system}'s write side names no tables, so it may not write any: declare the tables it writes` }) };
   const journal = opts.journal === undefined ? await liveJournal() : opts.journal;
   if (!journal || typeof journal.begin !== "function" || typeof journal.settle !== "function") return { refusal: answer("refused", { why: "there is no filing log to record the write in, so nothing is written" }) };
   const guard = await checkGuard(decl, opts);
@@ -456,17 +490,22 @@ export async function commitRow({ key, fields, before = null, piece = null }, op
     return failed(e, { key: k.key });
   }
   const now = pick(hit.row, Object.keys(fields));
-  if (before) {
+  if (!before || typeof before !== "object") return answer("refused", { key: k.key, why: "before: what was read in the columns written is needed, so a row that moved is never written over" });
+  {
     const missing = Object.keys(fields).filter((c) => !(c in before));
     if (missing.length) return answer("refused", { key: k.key, why: `before must say what was read in every column written; it doesn't name ${missing.join(", ")}` });
     if (!holds(hit.row, before)) return answer("moved", { key: k.key, row: hit.row, why: "the row no longer holds what was read: nothing is written over it" });
   }
-  if (holds(hit.row, fields)) return answer("already", { key: k.key, before: now, after: fields });
   let id;
   try {
     id = await journal.begin({ system: k.system, table: k.table, key: k.key, action: "update", fields, before: now, piece });
   } catch (e) {
     return answer("refused", { key: k.key, why: `the filing log couldn't record the attempt, so nothing is written: ${String(e?.message ?? e).slice(0, 200)}` });
+  }
+  // the row already holds it: nothing is sent, and the log still says so, so the piece gets its Filed entry
+  if (holds(hit.row, fields)) {
+    const settled = await settle(journal, id, "written", { after: fields, note: "the row already held it: nothing was sent" });
+    return answer("already", { key: k.key, before: now, after: fields, log_id: id, ...(settled ? {} : { log_unsettled: true }) });
   }
   try {
     const result = await client.writeRow(k.table, hit, fields);
@@ -535,7 +574,8 @@ export async function clientFor(key, { db = realDb, fetch: f, sources } = {}) {
   if (!k) throw new Error(`not a record key (system:table:row): ${key}`);
   const decl = (sources ?? (await loadSources(db, { ttlMs: 0 })))[k.system];
   if (!decl) throw new Error(`no connected source called ${k.system}`);
-  return { client: sourceClient(k.system, { read: decl.read.url, write: decl.commit.via === "none" ? null : decl.commit.url }, f ? { fetch: f } : {}), key: k, declaration: decl };
+  // read only: every write goes through commitRow or createRow (the declaration, the journal, the guard)
+  return { client: sourceClient(k.system, { read: decl.read.url, write: null }, f ? { fetch: f } : {}), key: k, declaration: decl };
 }
 
 /** ---- columns and values (pure) ---- */
@@ -691,7 +731,8 @@ const asEntry = (r) => (r.filing === "filed" ? { outcome: "filed", ...r } : { ou
 
 /** an approver must hold the authority the map names for the class, as they stand now; a map that can't be read leaves it to the root */
 async function assertApproverHolds(p, person, entry, { positions, db, index }) {
-  if (!positions) return;
+  // R11.7: a person with authority for the class approves, and without a map nobody can be shown to hold it
+  if (!positions) throw new Error("not applied: no position map is loaded, so nobody can be shown to hold the authority");
   const standing = standingOf({ person, position: null }, entry, positions);
   if (!standing.ok) throw new Error(`not applied: ${standing.why}`);
   const map = await authorityMapFor({ positions, db }).catch(() => null);
@@ -716,6 +757,7 @@ export async function applyProposedEntry(payload, pendingId, approver, { db = re
   const k = parseKey(p.key);
   if (!k) throw new Error(`not a record key: ${p.key}`);
   positions ??= await livePositions();
+  if (/\/agent:/.test(String(approver ?? ""))) throw new Error("not applied: an agent can't approve a data entry; a person with authority for the class does (R11.7)");
   const authorized_by = approvingPerson(approver);
   if (!authorized_by) throw new Error("not applied: an approved entry needs the person who approved it");
   const entry = await (people ?? (await livePeople()))(authorized_by);
