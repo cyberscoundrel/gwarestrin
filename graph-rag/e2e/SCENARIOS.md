@@ -55,18 +55,17 @@ Everything `run.mjs` has, by name, on one object:
 | `entry(name)` | `{ rid, name, _home, _grade, _ungraded, _mentions_at }` of an entry, or undefined |
 | `thing(label)` | `{ rid, name }` of a thing by its label |
 | `job(rid, kind = "mentions")` | the latest Job row whose payload names the rid |
-| `unresolved(name)` | what the linker left unresolved on an entry (`_unresolved`, parsed; `[]` when nothing) |
 | `until(label, fn, timeoutMs = 240000)` | polls `fn` every 3 s until it returns truthy; throws with `label` |
 | `check(cond, message)` | throws `message` when `cond` is falsy |
 | `save(who, name, text)` | `upsert_entities` of one note with that identity text |
 | `delegated(claims)`, `workerToken(entryRid, job?)`, `handlerToken(job)` | delegated tokens as the admin's workspace signs them (a worker thread, a handler) |
 | `randomUUID()` | node's |
-| `fixtures.read(name)`, `fixtures.url(name)`, `fixtures.dir` | `graph-rag/test/fixtures/` (`classes.json`, `policy.json`, `positions.json`, `oracle-sixty.json`, `conversations/oracle-sixty.batch.json`) |
-| `srcUrl(rel)` | a URL into `graph-rag/src/` for a read-only `import()` of a module (`srcUrl("model/claims.js")`); a static `import ... from "../src/model/claims.js"` works too |
+| `fixtures.read(name)`, `fixtures.url(name)`, `fixtures.dir` | `graph-rag/test/fixtures/` (`classes.json`, `policy.json`, `positions.json`, `oracle-sixty.json` (the 62 notes, test input only: R9), |
+| `srcUrl(rel)` | a URL into `graph-rag/src/` for a read-only `import()` of a module (`srcUrl("model/schema.js")`); a static `import ... from "../src/model/schema.js"` works too |
 | `e2eDir` | this directory's path |
 
 The runner mounts the whole `graph-rag` checkout read-only at `/gr`, so
-relative imports from a scenario file (`../src/model/claims.js`,
+relative imports from a scenario file (`../src/model/schema.js`,
 `../test/fixtures/...`) resolve as they do on the host.
 
 After each scenario `run.mjs` clears every fake-model override (`/__ok` for

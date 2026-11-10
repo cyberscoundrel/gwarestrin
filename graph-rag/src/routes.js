@@ -20,8 +20,6 @@ import { canEditPolicy, policy, policyDefaults, policyMeta, savePolicy } from ".
 import { tighteningRunning } from "./tightening.js";
 import { createServer } from "./server.js";
 import { isOffRecord, OFF_RECORD_REFUSAL } from "./record-state.js";
-import { registerDiscoveryRoutes } from "./routes-discovery.js";
-import { registerQueryRoutes } from "./tools-queries.js";
 
 /** ---- http ---- */
 export const app = express();
@@ -33,11 +31,6 @@ app.use((req, res, next) => {
   if (identity && isOffRecord(identity)) return res.status(403).json({ error: OFF_RECORD_REFUSAL });
   next();
 });
-
-// ---- the Discovery stream's route group: drafted commitment classes, confirmed or retired by a person at the root ----
-registerDiscoveryRoutes(app);
-// ---- the Queries stream's route group: GET /api/state/current|as-of|conflicts|history|needs ----
-registerQueryRoutes(app);
 
 app.post("/mcp", async (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);
@@ -336,7 +329,8 @@ app.post("/api/worker/backfill", (req, res) => {
   if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root runs a backfill" });
   void (async () => {
     const kind = firstJob(worker.pool);
-    const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE ${kind === "mentions" ? "_mentions_at" : "_reviewed_at"} IS NULL AND embed_identity IS NOT NULL${ASSERTIONS}${liveClause()} ORDER BY updated_at DESC LIMIT 500`);
+    if (!kind) return { queued: 0, note: "the pool has no threads" };
+    const rows = await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _reviewed_at IS NULL AND embed_identity IS NOT NULL${ASSERTIONS}${liveClause()} ORDER BY updated_at DESC LIMIT 500`);
     for (const r of rows) await enqueue(kind, { rid: String(r.rid) }, { key: `${kind}:${r.rid}` });
     return { queued: rows.length };
   })().then((r) => res.json(r), (e) => httpError(res, e));

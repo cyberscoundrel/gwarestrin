@@ -30,11 +30,7 @@ import { ensureWorkerSchema, expireLeases, PROPOSED_NOTE, wakeIdleWaiting, worke
 import { registerWorkerTools, workerUpsert } from "./worker-tools.js";
 import { registerRecordTools } from "./record-tools.js";
 import { gateOffRecordTools, isOffRecord, loadThreadRecords, OFF_RECORD_REFUSAL, registerThreadRecordRoute } from "./record-state.js";
-import { registerDiscoveryTools } from "./routes-discovery.js";
 import { statements as modelStatements } from "./model/schema.js";
-import { ensureDiscoverySchema } from "./routes-discovery.js";
-import { registerQueryTools } from "./tools-queries.js";
-import { ensureTriageSchema } from "./triage.js";
 import { batchTick, ensureMasterSchema, registerHandlerTools, registerLiaisonTools, registerMasterTools } from "./master-tools.js";
 import { ensurePruneSchema, pruneExpired, pruneSink } from "./pruning.js";
 import { ensurePolicySchema, loadPolicy, policy } from "./org-policy.js";
@@ -111,8 +107,6 @@ write may be held for an admin (you read what they can't see): use it only when 
       include_expired: z.boolean().optional(),
       facets: z.array(z.string()).optional(),
       k: z.number().int().min(1).max(32).optional(),
-      // as of a date: a hit bearing claims is kept only while one of its claims was in force then (state.js)
-      as_of: z.string().optional(),
       temporal_filter: z
         .object({
           property: z.string(),
@@ -124,7 +118,7 @@ write may be held for an admin (you read what they can't see): use it only when 
     async (args) => {
       need("read");
       const read = [];
-      const result = await searchGraph(args, await readScope(args), read, { demand: !role, ownEntry: identity.role?.entry ?? null });
+      const result = await searchGraph(args, await readScope(args), read, { ownEntry: identity.role?.entry ?? null });
       recordReads(identity, read);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     },
@@ -167,22 +161,6 @@ ${facetDoc}`,
             properties: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
             facets: z.record(z.string()).optional(),
             valid_until: z.string().optional(),
-            // the claims an entry carries (model/README.md): it is then placed by their authority (placeByClaims), never graded
-            claims: z
-              .array(
-                z
-                  .object({
-                    kind: z.string(),
-                    class: z.string().optional(),
-                    attribute: z.string(),
-                    value: z.unknown(),
-                    subject: z.unknown().optional(),
-                    valid_from: z.string().optional(),
-                    valid_until: z.string().optional(),
-                  })
-                  .passthrough(),
-              )
-              .optional(),
           }),
         )
         .max(64),
@@ -199,9 +177,8 @@ ${facetDoc}`,
         return v === undefined ? e : { ...e, valid_until: v.valid_until ?? "lasting" };
       });
       // fixed at request time: what the requester read, not the approver
-      // the one write-or-propose rule (write.js decideWrite, MAP.md): the claims' authority, the derived floor and
-      // the identity's queuing decide; a proposal is homed where whoever holds the authority reviews it
-      const d = decideWrite(identity, { kind: "upsert", claims: entities.flatMap((e) => e.claims ?? []) }, { origin: home });
+      // the one write-or-propose rule for graph writes (write.js decideWrite): the derived floor and the identity's queuing
+      const d = decideWrite(identity, { kind: "upsert" }, { origin: home });
       const write = { entities, home, floor: d.floor ?? derivedFloor(identity, home), written_at: new Date(now).toISOString(), ...writerOf(identity) };
       if (d.action !== "direct") {
         const pending = await queueWrite({ kind: "upsert", payload: JSON.stringify(write), user: identity.user, home: d.home ?? home });
@@ -264,17 +241,12 @@ homes you can see).`,
     `Add a long document (a manual, a meeting transcript, a report) to the knowledge graph. Give
 its full text, a short title and a one-sentence description. The text is kept in the document
 store; the graph gets the document's entry and one searchable section per page or so, each filed
-where it belongs (a sensitive part may be filed higher than the rest).
-extract is required, true or false: true also pulls focused facts (specifications, decisions,
-action items with dates) out of the text into the graph, each linked to its section; false keeps
-only the document and its sections. It's the person's decision: if they haven't said, ask them
-("Should I also pull the individual facts out of it?") before calling this. valid_until works as
-in upsert_entities. Re-ingesting the same title replaces the document.`,
+where it belongs (a sensitive part may be filed higher than the rest). valid_until works as in
+upsert_entities. Re-ingesting the same title replaces the document.`,
     {
       title: z.string().min(3).max(200),
       description: z.string().min(3).max(500),
       text: z.string().min(20),
-      extract: z.boolean(),
       ...(SCOPED ? { home: z.string().optional() } : {}),
       valid_until: z.string().optional(),
     },
@@ -286,11 +258,9 @@ in upsert_entities. Re-ingesting the same title replaces the document.`,
 
   if (SCOPED) server.tool(
     "about_thing",
-    `Everything you can see about one thing: a person, customer, supplier, machine, part, order,
-place, project or team, by name (aliases work: "Toro Co." finds Toro). The graph worker links
-statements to the things they mention in the background, so newly saved entries appear here after
-a minute or so. Use it for "what do we know about X" questions, and to find related entries after
-a search.${role === "worker" ? " Like search_graph, it shows what your entry's people see; beyond: true shows everything, and then what you write may be held for an admin." : ""}`,
+    `Everything you can see about one instance (a person, a customer, a machine, a building), by name
+(aliases work: "Toro Co." finds Toro): the sections about it. Use it for "what do we know about X"
+questions, and to find related entries after a search.${role === "worker" ? " Like search_graph, it shows what your entry's people see; beyond: true shows everything, and then what you write may be held for an admin." : ""}`,
     { name: z.string().min(2), ...(role === "worker" ? { beyond: z.boolean().optional() } : {}) },
     async (args) => {
       need("read");
@@ -298,17 +268,12 @@ a search.${role === "worker" ? " Like search_graph, it shows what your entry's p
     },
   );
 
-  // ---- the Queries stream's tools: current state, state as of a date, conflicts, history, open needs (tools-queries.js) ----
-  if (SCOPED) registerQueryTools(server, { identity, need, readScope, role });
 
   // ---- a graph worker thread's own tools (one queue entry: its entry) ----
   if (SCOPED && role === "worker") registerWorkerTools(server, { identity, scope, need });
 
   // ---- a person's chat agent puts a condensed section of an on-record thread on record (record-tools.js) ----
   if (SCOPED && writable && !role) registerRecordTools(server, { identity, scope, need });
-
-  // ---- a worker or a person's chat agent proposes a commitment class for a person to confirm (routes-discovery.js) ----
-  if (SCOPED && writable && (role === "worker" || !role)) registerDiscoveryTools(server, { identity, need });
 
   // ---- the master's tools: start workers, settle stops, hand the rest to the operator ----
   if (SCOPED && role === "master") registerMasterTools(server, { identity });
@@ -483,11 +448,9 @@ async function boot() {
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_home) NOTUNIQUE`).catch(() => {});
   for (const prop of ["_origin", "_grade", "_valid_until", "_valid_by", "_ungraded", "_placed_by", "_placed_at", "_written_by"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (name, _origin) NOTUNIQUE`).catch(() => {});
-  // the organization model's types (model/schema.js): CommitmentClass, SourceRef, AuditEvent, the CLAIMS,
-  // REFERS_TO and WROTE edges and the on-record marker on Entity; idempotent DDL, run at every start
+  // the organization model's types (model/schema.js): classes on Entity, SUBCLASS_OF, INSTANCE_OF, DEPENDS_ON,
+  // ABOUT, the filing log and workers' requests, and the on-record marker; idempotent DDL, run at every start
   for (const sql of modelStatements()) await adbCommand(sql).catch((e) => log.warn(`model schema: ${sql}: ${String(e).slice(0, 120)}`));
-  // the Discovery stream's extra class properties (attributes, reasons) and its event log
-  await ensureDiscoverySchema().catch((e) => log.warn(`discovery schema: ${String(e).slice(0, 120)}`));
   if (SCOPED && positionMap) {
     // entities from before origins: their origin is where they are (legacy, unhomed ones: the root)
     await adbCommand(`UPDATE ${ENTITY_LABEL} SET _origin = _home WHERE _origin IS NULL AND _home IS NOT NULL`).catch((e) => log.warn(`origin migration: ${e}`));
@@ -518,7 +481,6 @@ async function boot() {
     void loops.run("re-homing", settleTightening);
     setInterval(() => void loops.run("re-homing", settleTightening), 10_000);
     await ensureMasterSchema();
-    await ensureTriageSchema();
     setInterval(() => void loops.run("batches", batchTick), 30_000);
     log.info(`graph worker: ${worker.enabled && workerModel() ? `on (${workerModel()}${worker.profile ? `, from profile ${worker.profile}` : ""})` : "off"}`);
     if (!docStore) log.warn(`DOC_STORE=${DOC_STORE} isn't a known store: documents can't be ingested`);

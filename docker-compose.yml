@@ -195,9 +195,9 @@ services:
       # semantic grading of new writes (litellm model alias; empty = off).
       # Entity text goes to whatever this routes to: keep it local for real data.
       GRADER_MODEL: grader
-      # the graph worker's model calls a day (the one-call linking step)
+      # the graph worker's model calls a day
       WORKER_DAILY_CALLS: ${WORKER_DAILY_CALLS:-300}
-      # triage of saved entries by a Jev-style decision model (empty key = no triage).
+      # a Jev-style decision model for the typed check per section (R4; empty key = none yet).
       # Entry text goes to the decision model's host: keep it local for real data.
       DECISION_API_KEY: ${OPENROUTER_API_KEY:-}
       DECISION_MODEL: ${DECISION_MODEL:-~typesafe/jev-latest}

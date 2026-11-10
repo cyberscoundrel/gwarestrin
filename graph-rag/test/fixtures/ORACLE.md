@@ -1,10 +1,11 @@
 # The sixty-note oracle
 
-Sixty real notes from the ux batches (plus the two PO 78912 notes added at
-the cross-check, 62 in all), each hand-classified against the four
-primitives in [ORGANIZATION-MODEL.md](../../../docs/ORGANIZATION-MODEL.md)
-("The contract (serial step one)", item 1). The fixture is
-[oracle-sixty.json](oracle-sixty.json); every stream must handle all sixty.
+**No longer the acceptance standard (R9).** The 62 notes stay as test input; the first real run is judged on
+filing outcomes and tree quality ([ORGANIZATION-MODEL.md](../../../docs/ORGANIZATION-MODEL.md)). The claims,
+classes and placements recorded per note below are the earlier design's and are history: atomic claims went
+with R2. The fixture is [oracle-sixty.json](oracle-sixty.json).
+
+Sixty real notes from the ux batches (plus the two PO 78912 notes added at the cross-check, 62 in all).
 
 ## Where the notes come from
 

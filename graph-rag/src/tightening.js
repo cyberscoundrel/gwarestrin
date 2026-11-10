@@ -1,7 +1,10 @@
 /**
- * An authority rule tightens over what is already written (docs/ORGANIZATION-MODEL.md, decision 5): every
- * entry holding a claim the rule now covers moves to the stricter home, its text with it, so plain reads
- * stop showing the sentence the claim came from. Loosening moves nothing.
+ * Re-homing (R6): when a class map entry tightens, sections related to instances of that class move to the
+ * stricter home (the user's words: "Re-home sections"). Loosening moves nothing.
+ * NEEDS A RULING (re-homing reach): smallest choice, the class's own instances only, by its class-level
+ * entry; instances of its subclasses, and per-column entries, move nothing here.
+ *
+ * The record stream owns this module.
  *
  * Each change to the map is a PolicyChange row that stays `pending` until every entry it covers is done,
  * so a restart picks it up where the graph stands. Finding what to move is a query over what the map
@@ -10,12 +13,11 @@
  * shows up as a difference from the last map a change recorded.
  */
 import { ancestors, commonAncestor, effectiveHome, EVERYONE, homeName } from "./positions.js";
-import { authorityRule, claimHome, tightens } from "./model/authority.js";
+import { tightens } from "./model/class-map.js";
 import { canonical } from "./documents.js";
 import { log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
-import { claimsFollowEntry } from "./floor.js";
-import { thingSeenFrom } from "./linker.js";
+import { instanceSeenFrom } from "./instances.js";
 import { EMPTY_AUTHORITY_MAP } from "./policy.js";
 import { loadPolicy, policy, policyMeta, serialized } from "./org-policy.js";
 import { positionMap, SCOPED } from "./scope.js";
@@ -68,34 +70,32 @@ function homesLeft(from, to) {
 }
 
 const thingsOf = async (rid) => {
-  const out = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('CLAIMS', 'ABOUT')) FROM ${rid})`);
+  const out = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`);
   return [...new Set(out.map((e) => String(e.dst)).filter((d) => RID_RE.test(d) && d !== rid))];
 };
 
-/** a thing stops being seen from a home once no statement there is about it (it follows the statements, things.js) */
+/** an instance stops being seen from a home once no section there is about it (R11: visible wherever a section about it is) */
 async function thingLeaves(thing, left, except) {
   if (!left.length) return;
   const row = (await adbQuery(`SELECT _homes FROM ${thing}`))[0];
   const homes = Array.isArray(row?._homes) ? row._homes : [];
   if (!left.some((h) => homes.includes(h))) return;
-  const edges = await adbQuery(`SELECT _home FROM (SELECT expand(inE('CLAIMS')) FROM ${thing})`);
   const entries = await adbQuery(`SELECT @rid AS rid, _home FROM (SELECT expand(in('ABOUT')) FROM ${thing})`);
-  const held = new Set([...edges.map((e) => e._home), ...entries.filter((e) => String(e.rid) !== except).map((e) => e._home)].map((h) => effectiveHome(positionMap, h)));
+  const held = new Set(entries.filter((e) => String(e.rid) !== except).map((e) => effectiveHome(positionMap, e._home)));
   const keep = homes.filter((h) => !left.includes(h) || held.has(h));
   if (keep.length !== homes.length) await adbCommand(`UPDATE ${thing} SET _homes = :homes`, "sql", { homes: keep });
 }
 
 /**
- * One entry up: its claims and the things they are about first, its own home last. Until that last
+ * One entry up: the instances it is about first, its own home last. Until that last
  * write it still counts as not moved, so a restart does the whole of it again. What waits for the
  * grader goes on waiting from its new home (regradeTick compares with `held`).
  */
 async function raise(row, to, note) {
   const rid = String(row.rid);
   const from = effectiveHome(positionMap, row._home);
-  await claimsFollowEntry(rid, to);
   for (const thing of await thingsOf(rid)) {
-    await thingSeenFrom(thing, to);
+    await instanceSeenFrom(thing, to);
     await thingLeaves(thing, homesLeft(from, to), rid);
   }
   let waiting = null;
@@ -126,54 +126,44 @@ async function documentFollows(section, to, note) {
   await raise(doc, homes.reduce((a, b) => (depth(b) > depth(a) ? b : a)), `${note}; none of its sections is left below that`);
 }
 
-/** every entry holding a claim this change tightened, with the claims' class and attribute */
-async function entriesTightened(prev, next) {
-  const tight = (k) => tightens(prev, next, k.class ?? null, k.attribute ?? null, positionMap);
+/** a map with only its class-level entries: what re-homing reads (R6: a map from classes to positions) */
+const classLevel = (m) => ({ classes: Object.fromEntries(Object.entries(m?.classes ?? {}).filter(([, r]) => r?.authority).map(([k, r]) => [k, { authority: r.authority }])) });
+
+/** every section related to an instance of a class whose entry this change tightened: rid -> [{ class, authority }] */
+async function sectionsTightened(prev, next) {
+  const [before, after] = [classLevel(prev), classLevel(next)];
   const found = new Map();
-  const add = (rid, k) => found.set(rid, [...(found.get(rid) ?? []), { class: k.class ?? null, attribute: k.attribute ?? null }]);
-  const keys = (await adbQuery(`SELECT class, attribute FROM CLAIMS GROUP BY class, attribute LIMIT ${NO_LIMIT}`)).filter(tight);
-  for (const k of keys) {
-    const field = (name) => (k[name] === null || k[name] === undefined ? `${name} IS NULL` : `${name} = :${name}`);
-    const rows = await adbQuery(`SELECT @out AS src FROM CLAIMS WHERE ${field("class")} AND ${field("attribute")} LIMIT ${NO_LIMIT}`, { class: k.class, attribute: k.attribute });
-    for (const r of rows) add(String(r.src), k);
-  }
-  // written but with no CLAIMS edge yet (an ingest still running): the summary its write stored
-  for (const r of await adbQuery(`SELECT @rid AS rid, _claim_classes FROM ${ENTITY_LABEL} WHERE _claim_classes IS NOT NULL LIMIT ${NO_LIMIT}`)) {
-    let list = [];
-    try {
-      list = JSON.parse(r._claim_classes);
-    } catch {
-      /* unreadable: its edges were counted above */
+  for (const key of Object.keys(after.classes)) {
+    if (!tightens(before, after, key, null, positionMap)) continue;
+    const named = after.classes[key].authority;
+    const authority = positionMap.positions[named] ? named : positionMap.root;
+    const cls = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _class_key = :k LIMIT 1`, { k: key }))[0];
+    if (!cls) continue;
+    const instances = await adbQuery(`SELECT @rid AS rid FROM (SELECT expand(in('INSTANCE_OF')) FROM ${cls.rid}) LIMIT ${NO_LIMIT}`);
+    for (const i of instances) {
+      const sections = await adbQuery(`SELECT @rid AS rid FROM (SELECT expand(in('ABOUT')) FROM ${i.rid}) WHERE _kind = 'section' LIMIT ${NO_LIMIT}`);
+      for (const s of sections) found.set(String(s.rid), [...(found.get(String(s.rid)) ?? []), { class: key, authority }]);
     }
-    for (const k of Array.isArray(list) ? list.filter((c) => c && tight(c)) : []) add(String(r.rid), k);
   }
   return found;
 }
 
-/** go through one change: returns how many entries it raised */
+/** go through one change: returns how many sections it raised */
 async function applyChange(change) {
   const [prev, next] = [mapIn(change.prev_json), mapIn(change.next_json)];
   const stamp = `tightened by ${change.changed_by} on ${String(change.changed_at).slice(0, 10)}`;
   let moved = 0;
-  for (const [rid, keys] of await entriesTightened(prev, next)) {
+  for (const [rid, keys] of await sectionsTightened(prev, next)) {
     if (!RID_RE.test(rid)) continue;
     const row = (await adbQuery(`SELECT @rid AS rid, name, _home, _doc_id, _ungraded, _placed_at FROM ${rid} WHERE name IS NOT NULL`))[0];
     // a person placed it after this rule changed: their call stands
     if (!row || (row._placed_at && row._placed_at > change.changed_at)) continue;
     const from = effectiveHome(positionMap, row._home);
-    const homes = keys.map((k) => ({ ...k, home: claimHome(positionMap, from, authorityRule(next, k.class, k.attribute)?.authority ?? null) }));
-    const to = commonAncestor(positionMap, homes.map((h) => h.home));
-    if (to === from) {
-      await claimsFollowEntry(rid, to);
-      continue;
-    }
-    const by = homes.find((h) => h.home === to);
-    const note = `raised to ${homeName(positionMap, to)}: the rule ${authorityRule(next, by.class, by.attribute).field} now covers ${[by.class, by.attribute].filter(Boolean).join("/")}, ${stamp}`;
-    // what was extracted from it says the same things, and is homed no lower than it
-    for (const fact of await adbQuery(`SELECT @rid AS rid, name, _home, _ungraded FROM (SELECT expand(in('SOURCED_FROM')) FROM ${rid})`)) {
-      const above = commonAncestor(positionMap, [fact._home, to]);
-      if (above !== effectiveHome(positionMap, fact._home)) await raise(fact, above, note);
-    }
+    // the stricter home: the lowest position at or above both where it is and every tightened class's position
+    const to = commonAncestor(positionMap, [from, ...keys.map((k) => k.authority)]);
+    if (to === from) continue;
+    const by = keys.find((k) => commonAncestor(positionMap, [from, k.authority]) === to) ?? keys[0];
+    const note = `raised to ${homeName(positionMap, to)}: the map now puts ${by.class} at ${homeName(positionMap, by.authority)}, ${stamp}`;
     await documentFollows(row, to, note);
     await raise(row, to, note);
     moved++;
@@ -189,7 +179,7 @@ async function workThrough() {
     if (!change) return;
     const moved = await applyChange(change);
     await adbCommand(`UPDATE ${change.rid} SET rehome_status = 'done', rehome_moved = :moved, rehome_done_at = :at`, "sql", { moved: String(moved), at: new Date().toISOString() });
-    if (moved) log.info(`authority rule tightened by ${change.changed_by}: ${moved} entries re-homed`);
+    if (moved) log.info(`class map tightened by ${change.changed_by}: ${moved} sections re-homed`);
   }
 }
 

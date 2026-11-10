@@ -15,14 +15,10 @@
 //
 // NEAR edges (need -> assertion, { score, state }) record the meetings; they
 // show in traversal only to those who see both ends, like every edge.
-// A need is a commitment with the sign flipped (docs/ORGANIZATION-MODEL.md): a request for an
-// information-delivery event nobody has promised yet. So a question that names a thing and an
-// attribute is a state query first (parseStateQuestion; requests.js answers it from state.js when a
-// claim exists, with no model call), and the embedding meeting above is for every other question.
+// Questions stay as one kind of need (R9). Organizational needs, unfulfilled commitments with dependency
+// edges, are instances of commitment classes (model/classes.js), not entries here.
 // Pure functions; the server stores needs and edges and runs the searches.
 import { ancestors } from "./positions.js";
-import { normalize } from "./things.js";
-import { parseKey, recordKey } from "./model/schema.js";
 
 /** how close an assertion must be to a need to count as a meeting */
 export const MATCH_MIN = 0.55;
@@ -97,7 +93,7 @@ export function askerView(need, edges, now = Date.now()) {
     need.status === "proposed" || need.status === "joined" || need.status === "withdrawn"
       ? need.status
       : need.status === "met"
-        ? "answered" // met by a claim the asker sees (a state query): nobody was asked
+        ? "answered" // met: nobody else needed asking
         : ended
           ? "expired"
           : shared.length
@@ -180,152 +176,5 @@ export function groupView(views) {
     entries: list,
     posted: list.length === 0,
     expires_at: views.map((v) => v.expires_at).filter(Boolean).sort().at(-1) ?? null,
-  };
-}
-
-/** ---- needs as commitments with the sign flipped ---- */
-
-/** words that never name a thing on their own */
-const STOP = new Set(
-  "what whats which who whose when where why how is are was were be been being do does did has have had can could will would should the a an of at on in for to by from with about into as and or but not no if then than so its it this that these those there here any some all each every my our your their his her them they we you i me us s still yet now currently current latest right please tell know show give me find out whats".split(
-    " ",
-  ),
-);
-const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const KEY_IN_TEXT = /[a-z0-9_-]{1,40}:[^\s:]{1,120}:[^\s]{1,160}/gi;
-
-const CURRENT = "(?:(?:current|latest) )?";
-const OPEN = `^(?:what|which) (?:is )?(?:the )?${CURRENT}`;
-const NOW = "(?: (?:right now|now|currently|today|at present|at the moment))?";
-const IN_PLACE = "(?: (?:currently|now))?(?: (?:at|on|in|for))?";
-
-/**
- * The questions an attribute's current value answers, over a normalized question. Nothing else is
- * answered from state: a question that doesn't fit one of these whole reaches the embedding path
- * and an owner. This is an allow list on purpose. A list of words that disqualify a question ("was",
- * "ever", "has"...) is always one word short; here a tense, a plural, an "all", a "can" or a second
- * question simply fits no shape, or leaves words in `thing` that aren't the thing's (namesOnly).
- *   what is the stage of job 4471 / what stage of job 4471
- *   what stage is job 4471 at / which machine is job 4471 on
- *   stage of job 4471 / current stage job 4471
- *   what is job 4471 stage (what's job 4471's stage)
- * The attribute is singular: a plural asks for several values, and state gives one.
- */
-const shapes = (attr) => [
-  `${OPEN}${attr} (?:of|for|on) (?<thing>.+?)${NOW}$`,
-  `^(?:what|which) ${CURRENT}${attr} is (?<thing>.+?)${IN_PLACE}${NOW}$`,
-  `^${attr} (?:of|for) (?<thing>.+?)${NOW}$`,
-  `^(?:current|latest) ${attr}(?: (?:of|for))? (?<thing>.+?)${NOW}$`,
-  `${OPEN}(?<thing>.+?) ${attr}${NOW}$`,
-];
-
-/** the part of a normalized question naming what it asks about, when it asks for this attribute's current value; null when it doesn't fit */
-function askedAbout(norm, attribute) {
-  const attr = attribute.split("_").filter(Boolean).map(escapeRe).join(" ");
-  if (!attr) return null;
-  for (const shape of shapes(attr)) {
-    const thing = new RegExp(shape).exec(norm)?.groups?.thing?.replace(/^(?:the|a|an) /, "");
-    if (thing) return thing;
-  }
-  return null;
-}
-
-/**
- * Is `about` (the words a question names its subject with) only this thing: every word is in its
- * name, one of its keys or its class? Words left over mean the question is about something else or
- * something more ("the key to rack Z1", "job 4471 and who ran it", "job 4471 in 2024"). Pure; `thing`
- * is { name, keys, class }.
- */
-export function namesOnly(about, thing) {
-  const words = new Set();
-  for (const w of normalize(thing.name ?? "").split(" ")) words.add(w);
-  for (const k of thing.keys ?? []) for (const w of normalize(k).split(" ")) words.add(w);
-  for (const w of normalize(thing.class ?? "").split(" ")) words.add(w);
-  const known = (w) => words.has(w) || words.has(w.replace(/s$/, "")) || words.has(w.replace(/es$/, "")) || words.has(`${w}s`);
-  return String(about).split(" ").filter(Boolean).every(known);
-}
-
-/**
- * A question read as a state query: the attribute it asks for (one the graph's claims use, the
- * longest that fits winning: "pay rate" before "pay"), `about` (the words naming its subject, for
- * namesOnly once the thing is known) and the things those words may be, as subject references for
- * state.js (`{ key }` or `{ name }`): record keys written out, "job 4471"-style row numbers turned
- * into the record key of every class with a record table (`classes`: [{ name, record_table }]) and
- * kept as names too, and every run of one to three words that does not start or end on a stop word.
- * Null when the question isn't one of the shapes an attribute's current value answers (shapes):
- * then it is for the embedding path and an owner.
- */
-export function parseStateQuestion(question, { attributes = [], classes = [] } = {}) {
-  const text = String(question ?? "").replace(/['’]s\b/g, "");
-  const norm = normalize(text);
-  if (!norm) return null;
-  const longestFirst = [...attributes].map((a) => String(a ?? "")).sort((a, b) => b.split("_").length - a.split("_").length || b.length - a.length);
-  let attribute = null;
-  let about = null;
-  for (const a of longestFirst) {
-    about = askedAbout(norm, a);
-    if (about) {
-      attribute = a;
-      break;
-    }
-  }
-  if (!attribute) return null;
-  const attrWords = new Set(attribute.split("_"));
-  const subjects = [];
-  const seen = new Set();
-  const push = (s) => {
-    const k = s.key ? `key|${s.key}` : `name|${s.name}`;
-    if (seen.has(k) || subjects.length >= 40) return;
-    seen.add(k);
-    subjects.push(s);
-  };
-  for (const m of text.match(KEY_IN_TEXT) ?? []) if (parseKey(m)) push({ key: m });
-  const tokens = about.split(" ").filter(Boolean);
-  tokens.forEach((t, i) => {
-    if (!/^\d{2,}$/.test(t)) return;
-    // a row number: that row in every class's record table, and the words around it as names
-    for (const cls of classes) {
-      const k = recordKey(cls, t);
-      if (k) push({ key: k });
-    }
-    if (i > 0 && !STOP.has(tokens[i - 1]) && !attrWords.has(tokens[i - 1])) push({ name: `${tokens[i - 1]} ${t}` });
-    push({ name: t });
-  });
-  for (let i = 0; i < tokens.length; i++) {
-    for (let n = 1; n <= 3 && i + n <= tokens.length; n++) {
-      const gram = tokens.slice(i, i + n);
-      if (STOP.has(gram[0]) || STOP.has(gram.at(-1)) || gram.every((w) => attrWords.has(w))) continue;
-      if (gram.some((w) => attrWords.has(w)) && n > 1) continue;
-      push({ name: gram.join(" ") });
-    }
-  }
-  return { attribute, subjects, about };
-}
-
-/**
- * A need in the shape of a commitment claim (model/README.md), so open needs and open commitments
- * list together: the asker is the party owed, nobody owes yet, the question is what is owed, the
- * interval runs from the asking to when the need closes. `need` as requests.js loads it.
- */
-export function needAsCommitment(need) {
-  const asked = need.questions?.[0]?.at ?? null;
-  return {
-    id: need.qid,
-    kind: "commitment",
-    class: "need",
-    attribute: "answer",
-    value: need.question,
-    value_num: null,
-    subject: { key: null, name: need.asker, class: null, actor: "person", scope: null },
-    owed_to: need.asker,
-    owed_by: null,
-    valid_from: asked,
-    valid_until: need.open_until ?? null,
-    recorded_at: asked,
-    recorded_by: need.asker,
-    section: null,
-    status: need.status,
-    asked: need.asked ?? 1,
-    ...(need.home ? { home: need.home } : {}),
   };
 }
