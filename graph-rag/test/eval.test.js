@@ -100,7 +100,12 @@ test("positions: a holder sees its home and below, and everyone; strictest is ne
   assert.equal(widest(POSITIONS, ["org", "everyone"]), "everyone");
 });
 
-const entry = (over) => normalizeEntry({ id: over.id ?? "e1", outcome: "kept", record: "#1:0", section: "#2:0", home: "ops", piece: "p", recorder: "alice", worker: "w", ...over });
+/** a filing entry as the contract takes it: a Filed piece names its class and carries an account, a Kept one its instances (model/filing.js) */
+const entry = (over) => {
+  const outcome = over.outcome ?? "kept";
+  const contract = outcome === "filed" ? { class: "job", account: "wrote it" } : outcome === "kept" ? { instances: ["#9:9"] } : {};
+  return normalizeEntry({ id: over.id ?? "e1", outcome, record: "#1:0", section: "#2:0", home: "ops", piece: "p", recorder: "alice", worker: "w", ...contract, ...over });
+};
 
 test("row gate: a change with a Filed entry naming its columns passes; any other change, or a delete, fails", () => {
   const before = dataset();

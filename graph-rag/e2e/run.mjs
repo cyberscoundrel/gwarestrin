@@ -246,11 +246,14 @@ await scenario("a worker cannot read above its audience by any tool it is offere
   // and writes that find nothing. A new tool fails this until it's sorted and, if it reads or finds, checked.
   const offered = await listTools(w);
   // list_classes and read_dependencies: the classes stream's (routes-classes.js), read through this audience
-  const READS = ["search_graph", "about_thing", "read_document", "schema_graph", "list_classes", "read_dependencies"];
-  const FINDS = ["set_home"];
+  // resolve_name: the filing stream's read of instances and source rows (worker-tools.js)
+  const READS = ["search_graph", "about_thing", "read_document", "schema_graph", "list_classes", "read_dependencies", "resolve_name"];
+  // writes that find what they act on by name, id or key: each must neither reveal nor touch what the audience can't see
+  const FINDS = ["set_home", "file_to_source", "hold_piece", "keep_piece", "create_instance", "relate_section", "state_dependency"];
   // execute_graph: a worker's raw command is always a proposal for an admin (write.js), never run for it;
-  // upsert_entities: refused for a worker (it writes no entries); raise_question: asks, reads nothing back
-  const NEITHER = ["upsert_entities", "raise_question", "execute_graph"];
+  // upsert_entities: refused for a worker (it writes no entries); raise_question, request, give_account: ask or
+  // account, reading nothing back; section_key: stores a row's key on the worker's own section
+  const NEITHER = ["upsert_entities", "raise_question", "execute_graph", "request", "give_account", "section_key"];
   const unknown = offered.filter((t) => ![...READS, ...FINDS, ...NEITHER].includes(t));
   check(!unknown.length, `a worker tool this scenario doesn't sort into reads or not: ${unknown.join(", ")}`);
   check(!offered.includes("query_graph"), `no raw reads for a worker: ${offered.join(", ")}`);
@@ -294,6 +297,48 @@ await scenario("a worker cannot read above its audience by any tool it is offere
     check(r.error && r.error.replace(name, "X") === missing.error.replace("e2e-a9 no such entry", "X"), `set_home on ${name} answers as for no entry: ${JSON.stringify(r).slice(0, 200)} vs ${JSON.stringify(missing).slice(0, 200)}`);
   }
   check((await entry("e2e-a4 vellichor ops plan"))?._home === POS.ops, "the Operations entry did not move");
+  // the filing tools, as a filing worker at the floor (a record on record there, and its job, as the filing stream's
+  // own scenarios make one): for each tool that finds its target, something only the top sees answers exactly as
+  // something that doesn't exist does, and nothing is written
+  const fdoc = `e2e-aud-${randomUUID().slice(0, 8)}`;
+  const fnow = new Date().toISOString();
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${fdoc} title', _kind = 'document', _doc_id = '${fdoc}', _home = 'floor', _origin = 'floor', _on_record = true, _recorded_by = 'bob', _record_position = 'floor', _record_reason = 'e2e', updated_at = '${fnow}'` });
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${fdoc} §1', _kind = 'section', _doc_id = '${fdoc}', _section = 0, _home = 'floor', _origin = 'floor', _written_by = 'bob', text_identity = 'The vellichor bench is ready.', updated_at = '${fnow}'` });
+  const fsec = String((await sql(`SELECT @rid AS rid FROM Entity WHERE name = '${fdoc} §1' AND _kind = 'section'`))[0].rid);
+  const fjob = randomUUID();
+  const fpayload = JSON.stringify({ rid: fsec, sections: [fsec], record: fdoc, home: "floor", parent: "master", label: "e2e audience" }).replace(/'/g, "\\'");
+  await tool("admin", "execute_graph", { language: "sql", command: `INSERT INTO Job SET id = '${fjob}', kind = 'review', job_key = 'file:${fdoc}:floor', payload = '${fpayload}', status = 'running', attempts = 0, priority = 0, created_at = '${fnow}', updated_at = '${fnow}'` });
+  const fw = workerToken(fsec, fjob);
+  // a class only the top sees, and one everyone sees that the top-only crew is an instance of
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = 'e2e_aud_team', _kind = 'class', _class_key = 'e2e_aud_team', _class_name = 'e2e_aud_team', _home = 'everyone', _origin = 'everyone', _rows_are_nodes = true, _status = 'active'` });
+  const team = (await sql("SELECT @rid AS rid FROM Entity WHERE _kind = 'class' AND _class_key = 'e2e_aud_team'"))[0];
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE EDGE INSTANCE_OF FROM ${crew.rid} TO ${team.rid} SET added_by = 'e2e'` });
+  const NONE_RID = "#9999:9999";
+  const blur = (r, ...xs) => xs.reduce((t, x) => t.split(String(x)).join("X"), JSON.stringify(r?.error ?? r));
+  const same = async (name, args, hidden, missing, probe) => {
+    const a = await tool(fw, name, args(hidden));
+    const b = await tool(fw, name, args(missing));
+    // (a reply may echo the id or key it was given; what counts is that it answers as for one that doesn't exist)
+    check(!leaked(a) && !/vellichor crew|vellichor raise/i.test(JSON.stringify(a)), `${name} shows nothing above the audience: ${JSON.stringify(a).slice(0, 300)}`);
+    check(blur(a, hidden) === blur(b, missing), `${name}: something above the audience answers as nothing does (${blur(a, hidden).slice(0, 200)} vs ${blur(b, missing).slice(0, 200)})`);
+    if (probe) check(await probe(), `${name} touched nothing above the audience`);
+  };
+  const r0 = await tool(fw, "resolve_name", { name: "vellichor crew" });
+  check(!JSON.stringify(r0).includes(String(crew.rid)) && !/vellichor crew/i.test(JSON.stringify(r0.instances ?? r0.results ?? [])), `resolve_name shows no instance above the audience: ${JSON.stringify(r0).slice(0, 300)}`);
+  const aboutCrew = async () => (await sql(`SELECT in('ABOUT').size() AS n FROM ${crew.rid}`))[0]?.n === 0;
+  const depsOfBench = async () => (await sql(`SELECT out('DEPENDS_ON').size() AS n FROM ${bench.rid}`))[0]?.n === 1;
+  const noEntry = async () => !(await sql(`SELECT id FROM FilingEntry WHERE record = '${fdoc}' AND instances CONTAINS '${crew.rid}'`)).length;
+  // (control) the same call with an instance the floor sees goes through, so the refusals below are the audience's
+  const seenOk = await tool(fw, "relate_section", { section: fsec, instance: String(bench.rid) });
+  check(!seenOk.error, `relate_section to an instance the floor sees works: ${JSON.stringify(seenOk).slice(0, 200)}`);
+  await same("relate_section", (x) => ({ section: fsec, instance: x }), String(crew.rid), NONE_RID, aboutCrew);
+  await same("keep_piece", (x) => ({ section: fsec, piece: "the bench is ready", instances: [x] }), String(crew.rid), NONE_RID, noEntry);
+  await same("state_dependency", (x) => ({ section: fsec, from: String(bench.rid), to: x, stated_as: "agent" }), String(crew.rid), NONE_RID, depsOfBench);
+  await same("hold_piece", (x) => ({ section: fsec, piece: "which bench", question: "which bench do you mean?", class: x }), "vellichor_raise_class", "e2e_no_such_class");
+  await same("file_to_source", (x) => ({ section: fsec, piece: "the bench is ready", said: "writing it", class: x, key: "mssql:dbo_Work_Center:SAW", fields: { Status: "Up" } }), "vellichor_raise_class", "e2e_no_such_class");
+  const made = await tool(fw, "create_instance", { section: fsec, name: "vellichor crew", class: "e2e_aud_team" });
+  check(!JSON.stringify(made).includes(String(crew.rid)), `create_instance doesn't reuse an instance above the audience: ${JSON.stringify(made).slice(0, 300)}`);
+  check(await aboutCrew(), "and the top-only instance gains no section");
   // over HTTP: a worker's token reads nothing at all, whatever the route
   for (const path of ["/api/entities", "/api/grants", "/api/requests", "/api/positions", "/api/queue", "/api/policy", "/api/worker", "/api/pruned"]) {
     const r = await fetch(`${GRAPH}${path}`, { headers: { authorization: `Bearer ${w}` } });

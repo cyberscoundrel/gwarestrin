@@ -95,6 +95,21 @@ export default [
       const query = strictQuery(ctx);
       const empty = await collectGraph(query);
       for (const k of ["entries", "requests", "briefs", "documents", "sections", "classes", "instances"]) check(Array.isArray(empty[k]), `${k} read`);
+      // the reader meets the writer: the filing stream's scenarios (run before this file) left FilingEntry rows, and
+      // the capacity scenario's claims left BriefLog rows; each parses into the shape the report scores
+      const { OUTCOMES, normalizeEntry } = await import(ctx.srcUrl("model/filing.js"));
+      check(empty.entries.length > 0, "the filing log has entries to read");
+      for (const e of empty.entries) {
+        check(OUTCOMES.includes(e.outcome) && Array.isArray(e.instances), `entry ${e.id}: ${JSON.stringify(e).slice(0, 200)}`);
+        if (e.outcome !== "kept") check(e.target && typeof e.target === "object" && e.target.table, `entry ${e.id} has its target parsed: ${JSON.stringify(e.target)}`);
+        if (e.outcome === "filed") check(typeof e.account?.said === "string", `a Filed entry ${e.id} has its account: ${JSON.stringify(e.account)}`);
+        normalizeEntry(e); // as the contract takes it, or this throws naming the field
+      }
+      check(empty.briefs.length > 0, "the brief log has briefs to scan");
+      for (const b of empty.briefs) {
+        const sent = JSON.parse(b.text);
+        check(b.audience && sent.audience === b.audience && typeof sent.message === "string" && sent.message.length > 0, `brief ${b.id} holds its audience and the message as sent: ${String(b.text).slice(0, 200)}`);
+      }
       // marker-3: alice's Operations matter; recorded through the record path as her on-record agent
       const seed = Number.parseInt(ctx.randomUUID().slice(0, 6), 16);
       const { records, markers } = markerRecords(seed);
