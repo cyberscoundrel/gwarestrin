@@ -194,8 +194,8 @@ None of this is decided.
 2. **No existing class fits (R5, R7).** Workers use existing classes and the
    orchestrator decides new ones. Whether a worker asks the orchestrator, holds the
    piece or keeps it decides how often filing stalls.
-3. **Who runs discovery (R7).** "Nothing mints except these two", yet discovery creates
-   classes. It needs saying whether discovery is those two agents running read-only.
+3. **Who runs discovery (R7).** Only the orchestrator and workers mint (R7), yet discovery
+   creates classes. It needs saying whether discovery is those two agents running read-only.
 4. **Kept, later (R2).** Whether anything goes back when a class or source appears for
    Kept data, and how often counts as recurring. Without this, Kept can only grow.
 5. **Where a section starts (R6).** The check only raises a home, so the starting home
@@ -262,7 +262,7 @@ everything reviewed in those parts has to be reviewed again.
 
 ### B. The smallest version that runs on real models
 
-**It answers:** "The goal is to see how well models handle this" (R5).
+**It answers:** "basically what i want to see is how well models can handle this" (R5).
 
 **Built:** class nodes with several parents, the instance edge, the orchestrator's class
 decisions, a worker that files a record with the four outcomes, the filing log, briefs,
