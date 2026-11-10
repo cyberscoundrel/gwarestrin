@@ -3,9 +3,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { z } from "zod";
-import { documentShape, RECORD_TOOL, registerRecordTools } from "../src/record-tools.js";
+import { documentShape, FILE_TOOL, RECORD_TOOL, registerRecordTools } from "../src/record-tools.js";
+import { recordHome } from "../src/ingest.js";
 import { prepareRecord, recordId } from "../src/documents.js";
-import { applyThreadRecord, gateOffRecordTools, isOffRecord, OFF_RECORD_TOOLS } from "../src/record-state.js";
+import { applyThreadRecord, gateOffRecordTools, isOffRecord, OFF_RECORD_TOOLS, threadPosition } from "../src/record-state.js";
 
 test("the record stamp: who, where and when are the server's, whatever the document says", () => {
   const raw = { title: "T", recorded_by: "admin", position: "org", recorded_at: "2020-01-01T00:00:00Z", reason: "r", sections: [{ text: "x" }] };
@@ -61,8 +62,11 @@ test("off record, a tool no one has classified is refused at the call; a read is
 test("record_document registers with a name the harness recognizes and a document schema in the contract's shape", () => {
   const tools = [];
   registerRecordTools({ tool: (name, description, shape, handler) => tools.push({ name, description, shape, handler }) }, { identity: {}, scope: {}, need: () => {} });
-  assert.equal(tools.length, 1);
+  assert.equal(tools.length, 2);
   assert.equal(tools[0].name, RECORD_TOOL);
+  assert.equal(tools[1].name, FILE_TOOL);
+  assert.equal(tools[0].shape.home, undefined, "an agent cannot start a record anywhere but its person's position (R11.5)");
+  assert.doesNotMatch(tools[0].description, /claim|class/i, "no claims and no class vocabulary (R2, R5)");
   assert.match(tools[0].name, /condens|on_record|record_document/);
   assert.match(tools[0].description, /On record/);
   const schema = z.object(tools[0].shape);
@@ -80,4 +84,39 @@ test("record_document takes text sections; a section carrying claims is refused,
   const ok = prepareRecord({ title: "Note", reason: "r", sections: [{ text: "Press 3 is down.", heading: null }] }, { recorded_by: "bob", position: "floor", now: Date.parse("2026-11-04T12:00:00Z") });
   assert.equal(ok.sections[0].text, "Press 3 is down.");
   assert.throws(() => prepareRecord({ title: "T", reason: "r", recorded_by: "bob", position: "floor", sections: [{ text: "x", claims: [] }] }, {}), /sections\[0\]\.claims/);
+});
+
+test("off record, neither record tool is a read: both are refused at the call (R11.12)", () => {
+  assert.ok(!OFF_RECORD_TOOLS.has(RECORD_TOOL));
+  assert.ok(!OFF_RECORD_TOOLS.has(FILE_TOOL));
+  assert.ok(!OFF_RECORD_TOOLS.has("ingest_document"));
+});
+
+test("record_file takes a file's name and its whole text, and nothing about where it goes", () => {
+  const tools = [];
+  registerRecordTools({ tool: (name, description, shape, handler) => tools.push({ name, description, shape, handler }) }, { identity: {}, scope: {}, need: () => {} });
+  const schema = z.object(tools.find((t) => t.name === FILE_TOOL).shape);
+  assert.ok(schema.safeParse({ file: "handover.md", text: "# Handover\n\nJob 4471 is running on CNC 2." }).success);
+  assert.equal(schema.safeParse({ text: "no name" }).success, false, "a file has a name");
+  assert.equal(tools.find((t) => t.name === FILE_TOOL).shape.home, undefined);
+});
+
+test("the position a thread was put on record under is known while it is on record, and only for a chat agent", () => {
+  const chat = { agent: "pos-1", key: "bob/agent:pos-1", caps: { write: "direct" } };
+  applyThreadRecord("bob", "pos-1", { on: true, thread: "t", position: "floor" });
+  assert.equal(threadPosition(chat), "floor");
+  applyThreadRecord("bob", "pos-1", { on: false, thread: "t", position: "floor" });
+  assert.equal(threadPosition(chat), null, "off record: no position");
+  applyThreadRecord("bob", "pos-1", { on: true, thread: "t" });
+  assert.equal(threadPosition(chat), null, "none given");
+  assert.equal(threadPosition({ user: "bob", caps: {} }), null, "a person's own token has no thread");
+});
+
+test("a record starts at the position the person chose, only when it is one they hold (R11.5)", () => {
+  const chat = { agent: "pos-2", key: "bob/agent:pos-2", caps: { write: "direct" } };
+  applyThreadRecord("bob", "pos-2", { on: true, thread: "t", position: "floor" });
+  assert.equal(recordHome(chat, { held: ["floor", "ops"], writeHome: "ops" }), "floor");
+  // a position they don't hold is not where the record starts (in this unscoped test process the default is none)
+  assert.notEqual(recordHome(chat, { held: ["ops"], writeHome: undefined }), "floor");
+  applyThreadRecord("bob", "pos-2", { on: false, thread: "t" });
 });

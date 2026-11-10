@@ -3,11 +3,11 @@
  * the worker lift), grading, and where each entity of a write is placed (placement.js decides).
  */
 import { commonAncestor, effectiveHome, EVERYONE, homeName, visibleHomes } from "./positions.js";
-import { gradingPrompt, parseVerdicts } from "./grading.js";
+import { askWith, checkEntities, decisionConfig } from "./check.js";
 import { applyFloor, floorLifts, place as placeOne } from "./placement.js";
-import { GRADER_MODEL, GRADER_TIMEOUT_MS, health, log } from "./context.js";
+import * as context from "./context.js";
+import { health, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
-import { modelPost } from "./models.js";
 import { positionMap, SCOPED } from "./scope.js";
 import { decideWrite, queueWrite } from "./write.js";
 import { instanceSeenFrom } from "./instances.js";
@@ -137,35 +137,54 @@ export const liftRefusal = (name, lift) =>
   `Not written: "${name}" lives at ${homeName(positionMap, lift.home)}, but in the last ${policy.derivedWindowHours} hours you read entries at ${lift.read.join(", ") || homeName(positionMap, lift.floor)} that people there can't see, so this write would be held at ${homeName(positionMap, lift.floor)} instead. Either leave the entry as it is, or write it again with propose: true and a reason that says what it rests on: an admin then decides whether it's written at ${homeName(positionMap, lift.home)}.`;
 
 /**
- * One grading call (chunks of up to 16 entities). Per entity: a verdict,
- * null when the grader answered but not usably (a person reviews), or
- * undefined when it couldn't be reached (the entity is graded again later).
+ * The check's calls for one write (check.js): per entity a verdict, or undefined when there is no answer.
+ * Unconfigured, switched off (policy.gradingEnabled) or paused after failures is no answer too: whatever it
+ * writes waits admin-only until the check answers (R11.11). A failure pauses the decision model (health), so
+ * an outage costs one call, not one per section.
  */
-export async function gradeBatch(origin, entities, writtenAt = Date.now()) {
-  const out = [];
-  for (let i = 0; i < entities.length; i += 16) {
-    const chunk = entities.slice(i, i + 16);
-    const { messages, byLabel } = gradingPrompt(positionMap, origin, chunk, writtenAt, policy.restrictedTopics);
-    let text;
-    try {
-      text = (await modelPost(GRADER_MODEL, "/chat/completions", { messages, temperature: 0 }, Number(GRADER_TIMEOUT_MS))).choices?.[0]?.message?.content ?? "";
-    } catch (e) {
-      // unreached: held where it can't widen anything, and graded again when the grader is back (regradeTick)
-      if (!e.outage) log.warn(`grading failed (entities held until graded): ${String(e).slice(0, 160)}`);
-    }
-    out.push(...(text === undefined ? chunk.map(() => undefined) : parseVerdicts(text, byLabel, positionMap, origin, chunk.map((e) => e.name), writtenAt, policy.restrictedTopics)));
-  }
+async function checkBatch(origin, entities) {
+  const config = decisionConfig(context);
+  if (!checkReady() || health.down("decisions")) return entities.map(() => undefined);
+  let failed = false;
+  const out = await checkEntities(positionMap, origin, entities, {
+    topics: policy.restrictedTopics,
+    threshold: policy.gradingConfidence,
+    ask: async (req) => (failed || health.down("decisions") ? null : askWith(config)(req)),
+    onError: (e, ent) => {
+      failed = true;
+      if (!health.fail("decisions", e, e.status)) log.warn(`check of ${ent.name} gave no answer (admin-only until checked): ${String(e?.message ?? e).slice(0, 160)}`);
+    },
+  });
+  if (!failed && out.some((v) => v !== undefined)) health.ok("decisions");
   return out;
 }
 
-/** the end date the grader judged: an unsure verdict means lasting, none leaves it be */
+/** the check is on and can be asked (else every write waits admin-only and nothing rechecks) */
+export function checkReady() {
+  const c = decisionConfig(context);
+  return Boolean(policy.gradingEnabled && c.url && c.key && c.model);
+}
+
 /**
- * Where each entity of a scoped write lands (placement.js decides). `origin` is the writer's resolved
- * position (provenance); an existing entity is (name, origin). The grader judges each one and may only
- * restrict it (the record stream replaces it with the restrict-only typed check per section, R4). Without
- * a grader: new entities at the origin, existing ones where they are.
+ * The language-model grader is gone (R4: the language-model fallback goes), and with it the end dates it
+ * judged. Kept for requests.js, which asked it how long a question matters: it now always gives no answer,
+ * so a question lasts as long as it is open. (The integrator can drop that call.)
  */
-export async function placeEntities(entities, origin, floor, writtenAt = Date.now()) {
+export async function gradeBatch(_origin, entities) {
+  return entities.map(() => undefined);
+}
+
+/**
+ * Where each entity of a scoped write lands. `origin` is the writer's resolved position (provenance: a
+ * section starts at the position of the person who put it on record, R11.5); an existing entity is (name,
+ * origin). Each one is checked once (check.js), and the check only restricts (R4); `floor` (what the writer
+ * read) holds it no lower than that (R11.13). No answer: admin-only until checked (R11.11).
+ *
+ * NEEDS A RULING (record 11): R4 says once per section; every entity written through upsertEntities is
+ * checked the same way here, sections or not (the restrict-only side). Nothing at the root or for everyone
+ * is checked: nothing is above it to restrict to.
+ */
+export async function placeEntities(entities, origin, floor) {
   const existing = await Promise.all(
     entities.map((e) =>
       adbQuery(`SELECT _home, _ungraded FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin LIMIT 1`, { name: e.name, origin }).then((rows) =>
@@ -174,116 +193,88 @@ export async function placeEntities(entities, origin, floor, writtenAt = Date.no
     ),
   );
   const at = (i) => existing[i]?.home;
-  const grading = Boolean(GRADER_MODEL) && policy.gradingEnabled;
-  if (!grading) return entities.map((_, i) => applyFloor(positionMap, { home: at(i) ?? origin, note: "not graded (grading off)" }, origin, floor));
-  // written for everyone: graded from the top for its end date only (everyone isn't a position to describe)
-  const verdicts = await gradeBatch(origin === EVERYONE ? positionMap.root : origin, entities, writtenAt);
   if (origin === EVERYONE || origin === positionMap.root) {
-    // for everyone on purpose, or at the root with nothing above it: graded for its end date only
-    const note = origin === EVERYONE ? "for everyone" : "at the root";
-    return entities.map((_, i) => ({ ...applyFloor(positionMap, { home: at(i) ?? origin, note }, origin, floor), until: graderUntil(verdicts[i]) }));
+    const note = origin === EVERYONE ? "for everyone" : "at the root: nothing above it to restrict to";
+    return entities.map((_, i) => ({ ...applyFloor(positionMap, { home: at(i) ?? origin, note }, origin, floor), graded: true }));
   }
+  const verdicts = await checkBatch(origin, entities);
   return entities.map((_, i) => {
     const p = placeOne(positionMap, {
       origin,
       verdict: verdicts[i],
-      graded: verdicts[i] !== undefined,
-      existing: at(i),
-      // still awaiting grading: this write's grading settles it like a new one
-      awaiting: existing[i]?.awaiting && verdicts[i] !== undefined,
+      // still waiting for its check: this write's answer settles it like a new one
+      existing: existing[i]?.awaiting && verdicts[i] !== undefined ? undefined : at(i),
       floor,
-      threshold: policy.gradingConfidence,
     });
-    return { ...p, graded: verdicts[i] !== undefined, until: graderUntil(verdicts[i]) };
+    return { ...p, graded: verdicts[i] !== undefined };
   });
 }
 
-const graderUntil = (v) => (v ? (v.confidence >= policy.gradingConfidence ? v.until : null) : undefined);
+/** the check as an identity: an agent with no position, whose every write is a proposal */
+const CHECK_IDENTITY = { user: "graph-rag check", caps: { write: "queued" }, positions: [], agent: true };
 
-/** the grader as an identity: an agent with no position, whose every write is a proposal */
-const GRADER_IDENTITY = { user: "graph-rag grader", caps: { write: "queued" }, positions: [], agent: true };
-
-/** grading's proposals go to a person: release lower, or review an unsure call */
+/** an unsure check is flagged to a person: a proposal to bring the entry back to its origin (R11.11) */
 export async function askAboutPlacement(rid, name, p) {
-  const ask = p.release ?? p.review;
+  const ask = p.review;
   if (!ask) return;
-  // the grader never moves anything itself: the rule says propose (a queued identity, widening)
-  const d = decideWrite(GRADER_IDENTITY, { kind: "rehome", lives: p.home }, { to: ask.to, reason: ask.reason });
-  if (d.action === "direct") return log.warn(`grading proposal for ${name} not queued: the rule allowed it directly (never expected)`);
+  // the check never moves anything lower itself: the rule says propose (a queued identity, widening)
+  const d = decideWrite(CHECK_IDENTITY, { kind: "rehome", lives: p.home }, { to: ask.to, reason: ask.reason });
+  if (d.action === "direct") return log.warn(`check proposal for ${name} not queued: the rule allowed it directly (never expected)`);
   await queueWrite({
     kind: "rehome",
     payload: JSON.stringify({ rid, name, from: p.home, to: ask.to, reason: ask.reason }),
-    user: GRADER_IDENTITY.user,
+    user: CHECK_IDENTITY.user,
     home: d.home,
-  }).catch((err) => log.warn(`grading proposal for ${name} not queued: ${String(err).slice(0, 120)}`));
+  }).catch((err) => log.warn(`check proposal for ${name} not queued: ${String(err).slice(0, 120)}`));
 }
 
 /**
- * Entries written while the grader couldn't be reached wait one level up,
- * marked _ungraded. When the grader answers again they're graded as when
- * they were written and placed by the same rules (placement.js): no person
- * has to move them back. One that someone moved meanwhile stays where they
- * put it.
+ * Entries the check gave no answer for wait admin-only, marked _ungraded ({ origin, floor, held, written_at,
+ * text }). Once the decision model answers they are checked as when they were written and placed by the same
+ * rules: no person has to move them. One that someone moved meanwhile stays where they put it. A document's
+ * title follows its sections (R11.13).
  */
 export async function regradeTick() {
-  if (!SCOPED || !positionMap || !GRADER_MODEL || !policy.gradingEnabled || health.down(`model:${GRADER_MODEL}`)) return;
-  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _kind, _doc_id, _ungraded, _valid_by FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL LIMIT 16`);
-  const waiting = [];
+  if (!SCOPED || !positionMap || !checkReady() || health.down("decisions")) return;
+  const rows = await adbQuery(`SELECT @rid AS rid, name, _home, _kind, _doc_id, _ungraded, heading FROM ${ENTITY_LABEL} WHERE _ungraded IS NOT NULL LIMIT 16`);
   for (const r of rows) {
+    const rid = String(r.rid);
     let w = null;
     try {
       w = JSON.parse(r._ungraded);
     } catch {
-      /* unreadable: nothing to grade from */
+      /* unreadable: nothing to check from */
     }
     // its origin is gone from the tree: it stays where it waits (no lower home to return to)
-    if (w && positionMap.positions[w.origin]) waiting.push({ ...r, w });
-    else await adbCommand(`UPDATE ${r.rid} SET _ungraded = null`);
-  }
-  const byOrigin = Map.groupBy(waiting, (r) => `${r.w.origin}|${r.w.written_at}`);
-  for (const group of byOrigin.values()) {
-    // a document before its sections: a section is homed no lower than its document, as the document now stands
-    group.sort((a, b) => Number(b._kind === "document") - Number(a._kind === "document"));
-    const { origin, written_at } = group[0].w;
-    const entities = [];
-    for (const r of group) {
-      const full = (await adbQuery(`SELECT FROM ${r.rid}`))[0] ?? {};
-      // a section's whole text was kept with what it waits on (its stored facet is a preview)
-      entities.push({ name: r.name, facets: Object.fromEntries(Object.keys(full).filter((k) => k.startsWith("text_") && full[k]).map((k) => [k.slice(5), full[k]])), ...(typeof r.w.text === "string" ? { _text: r.w.text } : {}) });
+    if (!w || !positionMap.positions[w.origin]) {
+      await adbCommand(`UPDATE ${rid} SET _ungraded = null`);
+      continue;
     }
-    const verdicts = await gradeBatch(origin, entities, Date.parse(written_at) || Date.now());
-    if (verdicts.some((v) => v === undefined)) return; // still unreachable: next time
-    for (const [i, r] of group.entries()) {
-      const rid = String(r.rid);
-      if (effectiveHome(positionMap, r._home) !== r.w.held) {
-        // someone moved it while it waited: their call stands
-        await adbCommand(`UPDATE ${rid} SET _ungraded = null`);
-        continue;
-      }
-      // a section waits for its document, then stays no lower than where it settled
-      let docHome = [];
-      if (r._kind === "section" && r._doc_id) {
-        const doc = (await adbQuery(`SELECT _home, _doc_base, _ungraded FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: r._doc_id }))[0];
-        if (doc?._ungraded) continue;
-        // the document's own grade: its _home has been raised to this very section's while it waits (document-home.js)
-        if (doc) docHome = [effectiveHome(positionMap, doc._doc_base ?? doc._home)];
-      }
-      const p = placeOne(positionMap, { origin, verdict: verdicts[i], floor: commonAncestor(positionMap, [r.w.floor ?? origin, ...docHome]), threshold: policy.gradingConfidence });
-      const until = graderUntil(verdicts[i]);
-      // the grader's end date, unless its writer gave one
-      const validSql = until !== undefined && r._valid_by !== "writer" ? ", _valid_until = :until, _valid_by = 'grader'" : "";
-      // raised by a tightened rule while it waited, and the grader adds nothing: the rule is still why it is here
-      const note = r.w.raised && p.home === r.w.held ? r.w.raised : p.note;
-      await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null${validSql}`, "sql", { home: p.home, note, until });
-      // a document's title goes with its most restricted section: its graded home or a section's has changed
-      if (r._kind === "document") await adbCommand(`UPDATE ${rid} SET _doc_base = :home`, "sql", { home: p.home });
-      if (r._doc_id) await settleDocument(r._doc_id).catch((e) => log.warn(`document ${r._doc_id} not settled after grading: ${String(e).slice(0, 160)}`));
-      if (p.home !== r.w.held) {
-        const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
-        for (const a of about) if (RID_RE.test(String(a.dst))) await instanceSeenFrom(String(a.dst), p.home, { from: r.w.held }).catch(() => {});
-      }
-      await askAboutPlacement(rid, r.name, p);
-      log.info(`graded ${r.name} after waiting: ${homeName(positionMap, p.home)} (${p.note})`);
+    if (effectiveHome(positionMap, r._home) !== w.held) {
+      // someone moved it while it waited: their call stands
+      await adbCommand(`UPDATE ${rid} SET _ungraded = null`);
+      continue;
     }
+    const full = (await adbQuery(`SELECT FROM ${rid}`))[0] ?? {};
+    const entity = {
+      name: r.name,
+      facets: Object.fromEntries(Object.keys(full).filter((k) => k.startsWith("text_") && full[k]).map((k) => [k.slice(5), full[k]])),
+      ...(typeof w.text === "string" ? { _text: w.text } : {}),
+      ...(r.heading ? { properties: { heading: r.heading } } : {}),
+    };
+    const [verdict] = await checkBatch(w.origin, [entity]);
+    if (verdict === undefined) return; // still no answer: next time
+    const p = placeOne(positionMap, { origin: w.origin, verdict, floor: w.floor ?? w.origin });
+    // raised by a tightened rule while it waited: it stays no lower than the rule put it
+    const home = w.raised ? commonAncestor(positionMap, [p.home, w.held]) : p.home;
+    const note = w.raised && home === w.held ? w.raised : p.note;
+    await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null`, "sql", { home, note });
+    if (r._doc_id) await settleDocument(r._doc_id).catch((e) => log.warn(`document ${r._doc_id} not settled after its check: ${String(e).slice(0, 160)}`));
+    if (home !== w.held) {
+      const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
+      for (const a of about) if (RID_RE.test(String(a.dst))) await instanceSeenFrom(String(a.dst), home, { from: w.held }).catch(() => {});
+    }
+    await askAboutPlacement(rid, r.name, { ...p, home });
+    log.info(`checked ${r.name} after waiting: ${homeName(positionMap, home)} (${note})`);
   }
 }
