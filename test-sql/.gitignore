@@ -1,0 +1,4 @@
+# generated passwords (up.sh): never committed, never printed
+.env.gwsynth
+# rendered DAB configs and backups made by the scripts
+.run/
