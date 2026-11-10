@@ -374,6 +374,100 @@ only, with model access arranged with the user (no key or password typed here). 
 at least two setups, three runs each, with the gates on. R11's one open question, which
 database and which models, is the user's to answer first.
 
+## 5. Phase 3: how a run runs
+
+Only on the coordinator's word, against the synthetic database only (it stands in for R11.15, which is open).
+
+```bash
+graph-rag/eval/run.sh --models fake                                               # the dry run
+graph-rag/eval/run.sh --models real --env-file ~/gwsynth-models.env --setup A --run 1
+```
+
+**What one run does** (`eval/run.sh`, `eval/driver/run.mjs`):
+1. Starts its own fresh copy of the synthetic database (compose project `gwsynth-eval`: a new database each run;
+   the sources stream's `gwsynth` is never touched), a throwaway ArcadeDB, a graph-rag built from this checkout,
+   and the fake model routes, all on a private network.
+2. Generates the records (the 62 notes and the seeded marker records) and dumps the source through the read side,
+   after the test-source guard confirms the synthetic names.
+3. Discovery: graph-rag starts a run (`POST /api/classes/discovery`) and the orchestrator works its brief with
+   discovery's tools and the connection's read tools; parts it starts are claimed like any thread.
+4. Sets the class map from M0 by each class's source table (I-2), sizes the pool and turns the orchestrator on.
+5. Seeds the records through the guarded seeder (it refuses unless graph-rag's live guard names the synthetic
+   database), batch by batch, while the driver plays the workspace's pool: the orchestrator's turns on its signals,
+   one worker per claimed thread with the brief graph-rag composed, each finished or failed as the workspace does,
+   and a resumed thread going on with its own conversation.
+6. Dumps the source again, writes `usage.json`, and runs `filing-report.mjs`: `report.md`, `tree.md`,
+   `report.json`, `snapshot.json`, with `driver.log` (every tool call: names and arguments, never a key).
+
+**The driver stands in for the workspace** (packages/server `graph-pool.ts`): the same HTTP calls in the same
+order, the same tokens (signed with this run's own delegation key), the real instruction texts
+(`worker.ts`, `master.ts`, wrapped as `graph-roles.ts` wraps them), the briefs graph-rag composes, and tools
+named as the agents see them. It is not pi's agent runtime: its context handling and retries are the driver's own
+(I-19).
+
+**Models.** `--models fake` is a fixed, naive policy per role that exercises every tool path and reads nothing
+a report scores: a dry run proves the wiring and says nothing about how models do. `--models real` runs the
+setup's orchestrator and worker models over any OpenAI-compatible endpoint (`eval/driver/models.mjs`), with no
+sampling parameter and no forced tool choice (current Claude models reject both). graph-rag's typed check uses the
+decision model from the same env file. Embeddings stay the harness's word-hash vectors (I-18).
+
+**The env file** is the user's, on the host (template: `graph-rag/eval/models.env.example`). `run.sh` refuses
+to start when it is missing or names no key; it checks the names with `grep -q` and passes the file by path to
+`docker --env-file`. No value is read into the script's output, printed, logged or copied.
+
+### The dry run (fake models, 2026-11-10)
+
+`graph-rag/eval/run.sh --models fake --seed 42`, end to end against a fresh copy of the synthetic database:
+discovery made one class per table (12, all mapped by M0), the orchestrator started a worker for each of the 68
+records (62 notes and 6 marker records), every worker filed and gave its account, the orchestrator checked each
+account and recorded its verdict, and the report was written. No thread failed.
+
+- **Gates:** rows changed only with a Filed entry, PASS (one row changed: `Job:3260356` Status, ux-z01's Filed
+  write, its account true and agreed by the orchestrator); leaks, PASS (68 briefs scanned, all 8 markers stored, none
+  misplaced).
+- **Against the labels:** of 75 pieces, 10 exact, 6 accepted, 46 wrong, 13 missing. These are the fake's numbers:
+  it holds nearly everything, keeps nothing (its discovery seeds no instance) and writes only a stated shipment. They
+  show the scoring runs, not how a model does.
+- **Found and fixed on the way** (`docs/INTEGRATION.md`): the connection's home set twice (`DAB_READ_HOME`,
+  `CONNECTION_HOMES`), the filing log's record id, a resumed worker's conversation, and two report bugs (a must-not
+  line blaming another note's legitimate write, and the orchestrator's agreements left out of the account line).
+
+### For the user: what a real run needs
+
+Create `~/gwsynth-models.env` on the host (template: `graph-rag/eval/models.env.example`), `chmod 600`, and fill:
+
+| Variable | What | Assumed provider |
+|---|---|---|
+| `EVAL_AGENT_API_KEY` | the key the orchestrator and workers run on | OpenRouter (one key reaches several vendors' models; any OpenAI-compatible endpoint works with `EVAL_AGENT_BASE_URL`) |
+| `EVAL_AGENT_BASE_URL` | optional; default `https://openrouter.ai/api/v1` | |
+| `EVAL_SETUP_A_ORCHESTRATOR`, `EVAL_SETUP_A_WORKER` | setup A's two models, as the endpoint names them | the user's choice |
+| `EVAL_SETUP_B_ORCHESTRATOR`, `EVAL_SETUP_B_WORKER` | setup B's two models | the user's choice |
+| `DECISION_API_KEY` | the typed check's decision model, read by graph-rag | OpenRouter's decisions API with Jev (graph-rag's default `DECISION_URL` and `DECISION_MODEL`); may be the same OpenRouter key |
+| `DECISION_URL`, `DECISION_MODEL` | optional overrides | |
+
+R4 also asks for a locally served decision model on the same sections; that comparison is a second check run, not
+wired yet.
+
+**Rough size and cost** (estimated, not measured on a real model). Measured in the dry run: a worker request carries
+about 6k tokens before its history (tool definitions about 17k characters, instructions 4.6k, the brief 2.2k on
+average, 3k at most), an orchestrator request about 5.5k. Assumed for a real model: about 12 requests per worker
+thread with history growing to an average of 9k tokens a request, the orchestrator about 70 turns of 4 requests at
+7k, discovery about 30 requests at 20k. Per run: workers about 7.5M input and 0.35M output tokens; orchestrator and
+discovery about 2.5M input and 0.25M output; the typed check one decision call per section, about 70 small calls.
+That is about 10M input and 0.6M output tokens per run, and 60M and 3.6M for two setups of three runs. With no
+prompt caching (the upper bound; caching through the endpoint can cut input cost several-fold), at Anthropic's
+first-party prices (input / output per million: Opus 5.5 $4 / $20, Sonnet 5.5 $2 / $10, Haiku 5.5 $0.10 / $0.50):
+
+| Setup | Per run | Three runs |
+|---|--:|--:|
+| Opus 5.5 orchestrator, Sonnet 5.5 workers | about $35 | about $105 |
+| Sonnet 5.5 orchestrator, Haiku 5.5 workers | about $8 | about $25 |
+| Sonnet 5.5 for both | about $26 | about $78 |
+
+Any other model: three runs cost about 3 × (orchestrator: 2.5M × input price + 0.25M × output price; workers: 7.5M ×
+input price + 0.35M × output price). Add the endpoint's own fee, and the decision model's price, neither of which is
+known here. The estimate may be off by a factor of two either way: real models may take more or fewer turns.
+
 ## Choices needing a ruling
 
 1. **S0** is retired: the labels are judged against the sources stream's synthetic database
@@ -401,6 +495,13 @@ database and which models, is the user's to answer first.
     aq07 and au04 say something changed; ag03 and al04 state what the row already holds.
 13. **`BriefLog`**, a document type added to the contract so the leak gate sees every brief as
     sent. The filing stream writes it.
+14. **I-18, embeddings in a real run** stay the harness's word-hash vectors: search quality is not what is
+    measured, and it saves a provider.
+15. **I-19, the driver for the workspace**: the evaluation runs agents from a script, not pi's runtime in the
+    workspace's microVMs; the instructions, briefs, tools and HTTP calls are the same, the agent loop is the driver's.
+16. **I-20, no operator in a run**: a stopped worker handed to the operator (a handler) is left and counted; no
+    Proposed piece is approved during a run (the labels assume so).
+17. **I-21, the discovery digest** is left empty: the orchestrator lists the tables itself, as the brief allows.
 
 The current list, with the contract's own, is in [INTEGRATION.md](../INTEGRATION.md).
 

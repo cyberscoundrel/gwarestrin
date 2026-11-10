@@ -98,7 +98,22 @@ export default [
       // the reader meets the writer: the filing stream's scenarios (run before this file) left FilingEntry rows, and
       // the capacity scenario's claims left BriefLog rows; each parses into the shape the report scores
       const { OUTCOMES, normalizeEntry } = await import(ctx.srcUrl("model/filing.js"));
-      check(empty.entries.length > 0, "the filing log has entries to read");
+      // this scenario writes an entry of its own through the filing stream's tool (a Held piece from a floor filing job,
+      // made as that stream's scenarios make one), so the check stands when only this file runs
+      const fdoc = `e2e-seam-${ctx.randomUUID().slice(0, 8)}`;
+      const fnow = new Date().toISOString();
+      await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${fdoc} title', _kind = 'document', _doc_id = '${fdoc}', _home = 'floor', _origin = 'floor', _on_record = true, _recorded_by = 'bob', _record_position = 'floor', _record_reason = 'e2e', updated_at = '${fnow}'` });
+      await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${fdoc} §1', _kind = 'section', _doc_id = '${fdoc}', _section = 0, _home = 'floor', _origin = 'floor', _written_by = 'bob', text_identity = 'A job shipped; which one?', updated_at = '${fnow}'` });
+      const fsec = String((await ctx.sql(`SELECT @rid AS rid FROM Entity WHERE name = '${fdoc} §1' AND _kind = 'section'`))[0].rid);
+      const fjob = ctx.randomUUID();
+      const fpayload = JSON.stringify({ rid: fsec, sections: [fsec], record: fdoc, home: "floor", parent: "master", label: "e2e seam" }).replace(/'/g, "\\'");
+      await ctx.tool("admin", "execute_graph", { language: "sql", command: `INSERT INTO Job SET id = '${fjob}', kind = 'review', job_key = 'file:${fdoc}:floor', payload = '${fpayload}', status = 'running', attempts = 0, priority = 0, created_at = '${fnow}', updated_at = '${fnow}'` });
+      const held = await ctx.tool(ctx.workerToken(fsec, fjob), "hold_piece", { section: fsec, piece: "a job shipped", question: "Which job shipped?", table: "mssql:dbo_Job" });
+      check(held.outcome === "held" && typeof held.entry === "string", `the filing tool wrote a Held entry: ${JSON.stringify(held).slice(0, 200)}`);
+      const read = await collectGraph(query);
+      empty.entries = read.entries;
+      if (!empty.briefs.length) empty.briefs = read.briefs;
+      check(empty.entries.some((e) => e.id === held.entry && e.record === fdoc), `the reader finds it by its document id: ${JSON.stringify(empty.entries.slice(-2)).slice(0, 300)}`);
       for (const e of empty.entries) {
         check(OUTCOMES.includes(e.outcome) && Array.isArray(e.instances), `entry ${e.id}: ${JSON.stringify(e).slice(0, 200)}`);
         if (e.outcome !== "kept") check(e.target && typeof e.target === "object" && e.target.table, `entry ${e.id} has its target parsed: ${JSON.stringify(e.target)}`);

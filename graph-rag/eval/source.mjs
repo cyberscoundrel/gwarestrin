@@ -112,6 +112,7 @@ export function accountResults(changes, entries, { before = null } = {}) {
       unverifiableFields: count("result", "unverifiable"),
       silent: items.filter((i) => !i.saysRow).length,
       omitted: omitted.length,
+      agreed: count("check", "agreed"),
       caught: count("check", "caught"),
       missed: count("check", "missed"),
       falseAlarm: count("check", "false-alarm"),

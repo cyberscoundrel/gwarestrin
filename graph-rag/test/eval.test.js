@@ -197,7 +197,11 @@ test("outcomes: must-not lines catch a change, a write to a table, a link to the
   const rules = s.mustNot.map((m) => `${m.note} ${m.rule}`);
   assert.ok(rules.includes("ux-aa07 linked mssql:dbo_Employee:NGDT"));
   assert.ok(rules.includes('ux-z04 minted "ux-z04"'), "an instance one of its own sections is about");
-  assert.ok(rules.includes("ux-w11 changed mssql:dbo_Job:4471"));
+  assert.ok(rules.includes("ux-w11 changed mssql:dbo_Job:4471 (no Filed entry accounts for it)"));
+  // another note's Filed write to the row is not this note's wrong action (ux-z01 writes 3260356; note 13 must not)
+  const z01 = entry({ id: "z", record: "#10:9", outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:3260356", fields: { Status: "Shipped" } } });
+  const both = scoreOutcomes(NOTES.filter((x) => ["ux-note 13", "ux-z01"].includes(x.id)), [z01], { noteOf: (r) => (r === "#10:9" ? "ux-z01" : null), changes: [{ key: "mssql:dbo_Job:3260356", kind: "updated", columns: ["Status"] }] });
+  assert.deepEqual(both.mustNot, [], "z01's legitimate write is nobody's wrong action");
   assert.ok(!rules.some((r) => r.includes("Retired")), "a whole word: 'tire' isn't in 'Retired'");
   assert.ok(!rules.some((r) => r.includes("spare tire")), "an instance no section of the note is about doesn't count against it");
 });

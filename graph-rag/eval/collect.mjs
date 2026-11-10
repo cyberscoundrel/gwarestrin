@@ -54,7 +54,9 @@ export async function collectGraph(query, { records = [] } = {}) {
   for (const r of records) {
     const d = documents.find((x) => (x._doc_title === r.document.title || x.name === r.document.title) && (!x._recorded_by || x._recorded_by === r.person));
     if (d) {
+      // the filing log names a record by its document id; sections and edges by the document's record id
       noteOf[rid(d.rid)] = r.note;
+      if (d._doc_id) noteOf[d._doc_id] = r.note;
       recordIds[r.note] = rid(d.rid);
     }
   }

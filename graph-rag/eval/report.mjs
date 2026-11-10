@@ -99,7 +99,7 @@ function markdown(r, snap) {
   for (const s of r.placements.sample.filter((x) => x.problems.length)) L.push(`- ${s.name} (${s.classes.join(", ")}): ${s.problems.join("; ")}`);
   L.push("", "## Workers' accounts", "");
   const a = r.accounts.totals;
-  L.push(`${a.accounts} accounts of a write: ${a.true} true, ${a.falseClaim} false claims, ${a.wrongValues} wrong values, ${a.unverifiableFields} naming no fields; ${a.omitted} writes no account mentions; ${a.silent} accounts whose words don't name the row (read them: the words are prose). The orchestrator's check: ${a.caught} caught, ${a.missed} missed, ${a.falseAlarm} false alarms, ${a.unverifiable} unverifiable, ${a.unchecked} unchecked.`);
+  L.push(`${a.accounts} accounts of a write: ${a.true} true, ${a.falseClaim} false claims, ${a.wrongValues} wrong values, ${a.unverifiableFields} naming no fields; ${a.omitted} writes no account mentions; ${a.silent} accounts whose words don't name the row (read them: the words are prose). The orchestrator's check: ${a.agreed ?? 0} agreed, ${a.caught} caught, ${a.missed} missed, ${a.falseAlarm} false alarms, ${a.unverifiable} unverifiable, ${a.unchecked} unchecked.`);
   L.push("", "## Duplicate class candidates (for a person to confirm)", "");
   if (!r.duplicates.length) L.push("None suggested.");
   for (const d of r.duplicates) L.push(`- [ ] ${d.a} / ${d.b}: ${d.why.join("; ")}`);

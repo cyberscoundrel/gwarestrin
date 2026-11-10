@@ -21,9 +21,9 @@ evaluation plan is [build/integrate.md](build/integrate.md).
 | 3 | record (`claude/build-record-b1367d`, 0411bd7) | reviewer passed | a7bdfce, **on this branch only** | One conflict, `e2e/fake-models.mjs` `decide()`, the one the reviewer predicted: record's side still passed `candidates` and `lookup`, which this branch removed. Resolved as `answerChoice(q, { criteria, entry: said })`: record's check tags kept, no name lookup. The line check finds only the two lines that combined line replaces | graph-rag 279/279, e2e 62/62, server tsc clean, vitest 188/188, web svelte-check 0 errors, build ok, vitest 5/5 |
 | 4 | filing (`claude/build-filing-e36a7f`, 9537b96) | reviewer passed, to land with or after this branch | 9250d7c, **on this branch only** | None (filing carries sources and classes); every added line kept over the 22 files both changed. Filing tightened the entry contract (a Filed piece names its class and carries an account, a Kept piece its instances), so the eval's test fixtures were brought to it. Filing's ten worker tools sorted into the audience scenario: `resolve_name` a read; `file_to_source`, `hold_piece`, `keep_piece`, `create_instance`, `relate_section`, `state_dependency` writes that find their target, each shown to answer for something above the audience as for something that doesn't exist and to touch nothing (with a control that a visible instance works); `section_key`, `request`, `give_account` neither. The snapshot scenario now parses filing's real FilingEntry and BriefLog rows | graph-rag 313/313, e2e 67/67, server tsc clean, vitest 188/188, web svelte-check 0 errors, build ok, vitest 5/5 |
 
-Sources landed at 15ce278, the reviewed tip that filing also carries. Classes, record and filing are merged on this
-branch in that order; `build-base` stays at fb77f00 until the reviewer has checked the guard fix (1d35a6f) and the
-labels commit (ffb6532), and the coordinator says to fast-forward. The synthetic test database runs as compose
+All four streams have landed. The reviewer passed this branch at 98942c5 with no blocking finding, and `build-base`
+was fast-forwarded fb77f00..98942c5 after every check passed on 98942c5 itself (graph-rag 313/313, e2e 67/67, server
+tsc clean and vitest 188/188, web svelte-check 0 errors, build ok, vitest 5/5). The synthetic test database runs as compose
 project `gwsynth`.
 
 **The review of c376a76 (G-B1), fixed.** `make-records.mjs seed` had lost its refusal to seed an unguarded
@@ -61,6 +61,25 @@ on-record agent and queues one thread per section, and passes on this branch
 and on the filing branch (b0e8ca7) with this `run.mjs`. The Filed-or-Proposed
 decision stays in `enterData` (the sources stream), not `fileToSource`, as
 the coordinator relayed.
+
+### Phase 3, prepared (no real-model run started)
+
+`graph-rag/eval/run.sh` runs one filing run end to end against a fresh copy of the synthetic database (compose
+project `gwsynth-eval`; the sources stream's `gwsynth` is never touched), and `eval/driver/` plays the
+workspace's agent pool: discovery, the class map, the orchestrator and its workers, the dumps and the report
+([build/integrate.md](build/integrate.md), section 5). `--models real` reads every model and key from the user's
+env file on the host, refuses to start without it, and never prints a value. The dry run with fake models found
+three seams, fixed or reported:
+
+- **The connection's home is set twice.** The sources stream reads `DAB_READ_HOME` (what a read is seen from), the
+  classes stream reads `CONNECTION_HOMES` (the home of a class made from a connection's tables). The first dry run
+  set only the first, so every table class landed at the root and no floor or Operations worker could file under
+  one. `run.sh` now sets both; one setting for one fact is the streams' to agree.
+- **The filing log names a record by its document id**, sections and edges by the document's record id. The
+  evaluation's reader now maps both.
+- **A resumed worker goes on with its own conversation** in the workspace (it wakes the agent it had); the driver
+  started a fresh one, so a worker asked for its account had lost its entries. The driver now keeps each job's
+  conversation.
 
 ### The integrator's branch, before landing
 
@@ -202,6 +221,10 @@ The integrator's (labels and evaluation, [build/integrate.md](build/integrate.md
 | I-15 | A worker's token is refused on every `/api` HTTP route, rather than each route learning a worker's audience |
 | I-16 | Two marker labels carry the integrator's reading of where the check should put them (pay; customer financials): reported, never gating |
 | I-17 | Where two homes sit in different branches of the tree, "strictest" takes the one nearest the root (the test tree is one chain, so this never arises there) |
+| I-18 | Embeddings in a real run stay the harness's word-hash vectors: search quality is not what is measured, and it saves a provider |
+| I-19 | The evaluation runs agents from a script (`eval/driver/`), not pi's runtime in the workspace's microVMs: the instructions, briefs, tools and HTTP calls are the workspace's, the agent loop is the driver's |
+| I-20 | No operator in a run: a worker handed to the operator is left and counted, and no Proposed piece is approved during a run |
+| I-21 | The discovery brief gets no table digest: the orchestrator lists the tables itself, as the brief allows |
 
 ---
 
