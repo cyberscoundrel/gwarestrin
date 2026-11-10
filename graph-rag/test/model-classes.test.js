@@ -205,6 +205,7 @@ test("a transactional row gets a node only for what the source can't hold (R3)",
   assert.equal(model.mayMakeNode(orders, { key: "mssql:dbo_Order:9001", dependency: true }).ok, true);
   assert.equal(model.mayMakeNode(orders, { key: "mssql:dbo_Order:9001", reason: "the graph must say it waits on a permit" }).ok, true);
   assert.equal(model.mayMakeNode(index.get("machines"), { key: "mssql:dbo_Work_Center:CNC1" }).ok, true);
+  assert.equal(model.mayMakeNode(index.get("machines"), { key: "mssql:dbo_Job:7" }).ok, true, "rows are nodes: any key");
   assert.equal(model.mayMakeNode(index.get("warehouse"), { key: null }).ok, true);
 });
 
@@ -246,25 +247,40 @@ test("a class not under commitment can't have stages: normalizeClass refuses the
   assert.throws(() => normalizeClass({ name: "big machines", parents: ["machines"], home: "floor", stages: ["x"] }, { index }), /only a class under commitment/);
 });
 
-test("a name is taken per home, and a class the writer can't see neither blocks it nor is named (item 11)", () => {
-  const hidden = { ...normalizeClass({ name: "warehouse", parents: ["resource"], home: "org" }), status: "active" };
-  const atFloor = normalizeClass({ name: "Warehouse", parents: ["resource"], home: "floor" });
-  // another home: a different class, whoever writes
-  assert.doesNotThrow(() => model.assertCreatable(atFloor, [hidden]));
-  // the same home: refused, to a writer who sees it
-  assert.throws(() => model.assertCreatable({ ...atFloor, home: "org" }, [hidden]), /exists already at that home/);
-  // a writer that can't see org: even a retired class there is invisible to it, and no error names it
-  const retired = { ...hidden, status: "retired" };
+test("a class name is unique in the organization: a rerun can't make again a class a person re-homed (review C-B3)", () => {
+  // the orchestrator made it from a floor note; a person moved it to ops; a rerun computes the floor again
+  const moved = { ...normalizeClass({ name: "warehouse", parents: ["resource"], home: "ops" }), corrections: [model.normalizeCorrection({ kind: "home", value: "ops", by: "admin" }, { positions })] };
+  const rerun = normalizeClass({ name: "Warehouse", parents: ["resource"], home: "floor" });
+  assert.throws(() => model.assertCreatable(rerun, [moved]), /exists already/);
+  assert.equal(model.NAMES_UNIQUE, true);
+});
+
+test("a class the writer can't see still takes its name, and the refusal never names it (item 11)", () => {
+  const hidden = { ...normalizeClass({ name: "Board Succession", parents: ["commitment"], home: "org" }), corrections: [] };
   const sees = (h) => h !== "org";
-  assert.doesNotThrow(() => model.assertCreatable(atFloor, [retired], { sees }));
+  let message = null;
   try {
-    model.assertCreatable({ ...atFloor, home: "org" }, [retired, hidden], { sees });
+    model.assertCreatable(normalizeClass({ name: "board succession", parents: ["commitment"], home: "floor" }), [hidden], { sees });
   } catch (e) {
-    assert.fail(`named a class the writer can't see: ${e.message}`);
+    message = e.message;
   }
-  assert.equal(model.NAMES_UNIQUE, "per home");
-  assert.deepEqual(model.parseClassRef("Warehouse@floor"), { key: "warehouse", home: "floor" });
-  assert.deepEqual(model.parseClassRef("leased building"), { key: "leased_building", home: null });
+  assert.ok(message, "refused: names are unique in the organization");
+  assert.doesNotMatch(message, /Board Succession/, "it doesn't repeat the hidden class's own name");
+  assert.doesNotMatch(message, /org|retired|renamed/, "nor where it is or what became of it");
+  // a renamed hidden class's old name: taken, unnamed
+  const renamed = { ...hidden, name: "Exit plan", key: "exit_plan", corrections: [model.normalizeCorrection({ kind: "rename", value: "Exit plan", from: "Board Succession", by: "admin" })] };
+  assert.throws(() => model.assertCreatable(normalizeClass({ name: "board succession", parents: ["commitment"], home: "floor" }), [renamed], { sees }), (e) => !/Exit plan/.test(e.message));
+});
+
+test("a row of another table isn't a class's row: no node through the wrong class (R3, review non-blocking 8)", () => {
+  assert.equal(model.mayMakeNode(index.get("orders"), { key: "mssql:dbo_Invoice:9" }).ok, false);
+});
+
+test("the tree report keeps the subclasses of a retired class, marked (R5, review non-blocking 5)", () => {
+  const idx = classIndex([...fixture.map((c) => (c.key === "leased_building" ? { ...c, status: "retired" } : c))]);
+  const text = model.treeReport(idx);
+  assert.match(text, /- leased building \[retired by a person\]/);
+  assert.match(text, /- warehouse/);
 });
 
 test("positions are mirrored as classes under agent, nested as the positions are, people as their instances (R6)", () => {
@@ -295,4 +311,13 @@ test("the AI agents are instances under agent: the orchestrator and the Graph wo
     ["Orchestrator", ["agent"]],
     ["Graph worker", ["agent"]],
   ]);
+});
+
+test("a new instance with no evidence lives at its writer's home, not the root, so the writer finds it again (review C-B4)", async () => {
+  const { instanceHome } = await import("../src/instances.js");
+  const ctx = { positions, connectionHome: (s) => ({ e2econn: null, open: "everyone" })[s] ?? null, noteHome: (n) => ({ n1: "floor" })[n] ?? null };
+  assert.equal(instanceHome({ writer: "floor" }, ctx), "floor");
+  assert.equal(instanceHome({ home: "ops", key: "open:dbo_Bin:1", writer: "floor" }, ctx), "ops", "a section's home, given by the caller, wins (R11.8)");
+  assert.equal(instanceHome({ key: "open:dbo_Bin:1", writer: "floor" }, ctx), "everyone");
+  assert.equal(instanceHome({ notes: ["n1", "gone"], writer: "floor" }, ctx), "org", "a note the writer can't see counts as the root's");
 });

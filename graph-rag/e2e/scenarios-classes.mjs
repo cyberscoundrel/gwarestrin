@@ -68,6 +68,19 @@ const classNamed = async (ctx, token, name) => (await classes(ctx, token)).find(
 
 export default [
   {
+    name: "concurrent first reads of the class tree seed each root once, and a class can be made after (review C-B1)",
+    run: async (ctx) => {
+      const m = master(ctx);
+      const rs = await Promise.all(Array.from({ length: 6 }, () => ctx.tool(m, "list_classes", {})));
+      ctx.check(rs.every((r) => !r.error), `every read answered: ${rs.map((r) => r.error).filter(Boolean)}`);
+      const rows = await ctx.sql("SELECT _class_key AS k, count(*) AS n FROM Entity WHERE _kind = 'class' GROUP BY _class_key");
+      ctx.check(rows.length >= 6 && rows.every((r) => Number(r.n) === 1), `one copy of each: ${JSON.stringify(rows.filter((r) => Number(r.n) !== 1))}`);
+      const edges = await ctx.sql("SELECT @out AS o, @in AS i, count(*) AS n FROM SUBCLASS_OF GROUP BY @out, @in");
+      ctx.check(edges.every((e) => Number(e.n) === 1), "each parent edge once");
+      say(await ctx.tool(m, "create_class", { name: `${P} race depot`, parents: ["resource"], evidence: [{ kind: "notes", note: "x" }] }), "a class after the race");
+    },
+  },
+  {
     name: "an empty graph starts with the four primitives, and decision and action under event (R1)",
     run: async (ctx) => {
       const list = await classes(ctx, master(ctx));
@@ -96,7 +109,9 @@ export default [
       ctx.check(!chat.some((t) => /class|instance|dependenc/.test(t)), `a chat token lists no class tools: ${chat.filter((t) => /class/.test(t))}`);
       const w = ctx.workerToken((await ctx.save("bob", `${P}-worker-entry`, "a note for a worker")).rid ?? (await ctx.entry(`${P}-worker-entry`)).rid);
       const names = await toolNames(ctx, w);
-      ctx.check(names.includes("relate_instance") && !names.includes("create_class"), "a worker relates, never creates");
+      ctx.check(names.includes("list_classes") && !names.includes("create_class"), "a worker reads the tree, never creates a class");
+      // its instances and dependencies are filing's tools, which call instances.js (review C-B7): none here
+      ctx.check(!names.includes("relate_instance") && !names.includes("add_dependency"), `no second instance or dependency tool: ${names.filter((t) => /relate_instance|add_dependency/.test(t))}`);
     },
   },
   {
@@ -137,6 +152,12 @@ export default [
       // the orchestrator can't change what the person pinned
       ctx.check((await ctx.tool(token, "update_class", { name: `${P} pallet`, add_evidence: [{ kind: "table", ref: "e2econn:dbo_Pallet" }] })).class, "adding evidence is still allowed");
       ctx.check((await http(ctx, "bob", "/api/classes")).classes.every((c) => c.name !== `${P} pallet`), "the pinned home holds against new evidence");
+      // a rerun with the same evidence doesn't make it again where the person moved it from (review C-B3)
+      const rerun = await ctx.tool(token, "create_class", { name: `${P} pallet`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }] });
+      ctx.check(/exists already/.test(rerun.error ?? ""), `the re-homed class isn't made again: ${JSON.stringify(rerun).slice(0, 200)}`);
+      const n = (await ctx.sql(`SELECT count(*) AS n FROM Entity WHERE _kind = 'class' AND _class_key = '${P.replace(/-/g, "_")}_pallet'`))[0]?.n;
+      ctx.check(Number(n) === 1, `one class of that name: ${n}`);
+      ctx.check((await http(ctx, "bob", "/api/classes")).classes.every((c) => c.name !== `${P} pallet`), "bob still doesn't see it");
       // retired: never made again, by name or by its table
       await http(ctx, "admin", `/api/classes/${encodeURIComponent(`${P} ledger`)}/corrections`, { method: "POST", body: JSON.stringify({ kind: "retire" }) });
       const again = await ctx.tool(token, "create_class", { name: `${P} Ledger`, parents: ["commitment"], evidence: [{ kind: "table", ref: "e2econn:dbo_Ledger" }] });
@@ -188,7 +209,7 @@ export default [
       ctx.check(floor.depends_on.length === 1 && floor.depends_on[0].to === insp.instance, `the floor sees only the edge whose ends it sees: ${JSON.stringify(floor).slice(0, 300)}`);
       ctx.check(!JSON.stringify(floor).includes("insurer"), "nor the name at the other end");
       const blind = await ctx.tool(w, "add_dependency", { from: lift.instance, to: secret.instance });
-      ctx.check(blind.error, "a worker can't state a dependency on what it can't see");
+      ctx.check(blind.error, "a filing worker states dependencies with filing's tool, not this one");
     },
   },
   {
@@ -227,21 +248,77 @@ export default [
     },
   },
   {
-    name: "a class name is taken per home: the same name at a home the writer can't see blocks nothing and is never named (the reviewer's item 11)",
+    name: "a class name is unique in the organization: the same name from other evidence is refused, and a rerun makes nothing twice",
     run: async (ctx) => {
       const m = master(ctx);
       const note = await floorEntry(ctx, `${P}-depot-note`, "the depot opens at six");
       say(await ctx.tool(m, "create_class", { name: `${P} depot`, parents: ["resource"], evidence: [{ kind: "table", ref: "e2econn:dbo_Depot" }] }), "at the root");
-      say(await ctx.tool(m, "create_class", { name: `${P} Depot`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }] }), "the same name at the floor is another class");
-      const bob = (await http(ctx, "bob", "/api/classes")).classes.filter((c) => c.name.toLowerCase().startsWith(`${P} depot`));
-      ctx.check(bob.length === 1 && bob[0].name === `${P} Depot`, `bob sees one depot, named plainly, nothing about the other: ${JSON.stringify(bob)}`);
-      const both = (await classes(ctx, m)).filter((c) => c.name.toLowerCase().startsWith(`${P} depot`));
-      ctx.check(both.length === 2 && both.every((c) => c.name.includes("@")), `the orchestrator sees both, each with its home: ${both.map((c) => c.name)}`);
-      const which = await ctx.tool(m, "update_class", { name: `${P} depot`, description: "x" });
-      ctx.check(/say which/.test(which.error ?? ""), "an ambiguous name is refused, naming only what the caller sees");
-      say(await ctx.tool(m, "update_class", { name: `${P} depot@${ctx.POS.floor}`, description: "the floor's depot" }), "a ref with its home");
-      const again = await ctx.tool(m, "create_class", { name: `${P} depot`, parents: ["resource"], evidence: [{ kind: "table", ref: "e2econn:dbo_Depot2" }] });
-      ctx.check(/exists already at that home/.test(again.error ?? ""), "the same name at the same home is refused");
+      const again = await ctx.tool(m, "create_class", { name: `${P} Depot`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }] });
+      ctx.check(/exists already/.test(again.error ?? ""), `refused: ${JSON.stringify(again).slice(0, 200)}`);
+      const n = (await ctx.sql(`SELECT count(*) AS n FROM Entity WHERE _kind = 'class' AND _class_key = '${P.replace(/-/g, "_")}_depot'`))[0]?.n;
+      ctx.check(Number(n) === 1, "one class of that name");
+      ctx.check(!(await http(ctx, "bob", "/api/classes")).classes.some((c) => c.name.toLowerCase() === `${P} depot`), "bob sees no depot: it is the root's");
+    },
+  },
+  {
+    name: "an instance or a dependency never lands lower than what its writer read (R11.13; review C-B2)",
+    run: async (ctx) => {
+      const m = master(ctx);
+      // the orchestrator reads the tree, root classes and all: what it writes now is floored at the root
+      say(await ctx.tool(m, "create_class", { name: `${P} acquisition`, parents: ["commitment"], evidence: [{ kind: "table", ref: "e2econn:dbo_Deal" }] }), "a root class");
+      say(await ctx.tool(m, "list_classes", {}), "read the tree");
+      const bob = String((await ctx.sql("SELECT @rid AS rid FROM Entity WHERE _kind = 'thing' AND _keys CONTAINS 'authentik:user:bob'"))[0]?.rid);
+      const alice = String((await ctx.sql("SELECT @rid AS rid FROM Entity WHERE _kind = 'thing' AND _keys CONTAINS 'authentik:user:alice'"))[0]?.rid);
+      say(await ctx.tool(m, "create_class", { name: `${P} site`, parents: ["resource"], evidence: [{ kind: "notes", ref: (await floorEntry(ctx, `${P}-site-note`, "the north site")).rid }] }), "a floor class");
+      // citing an everyone-homed instance as its "note" can't widen it either: an instance isn't a note
+      const r = say(await ctx.tool(m, "relate_instance", { class: `${P} site`, name: `${P} Northwind acquisition target`, notes: [bob] }), "relate");
+      const row = (await ctx.sql(`SELECT _home, _homes FROM ${r.instance}`))[0];
+      ctx.check(row._home === ctx.POS.org, `at the root, where what it read is: ${JSON.stringify(row)}`);
+      const seen = await ctx.tool("bob", "about_thing", { name: `${P} Northwind acquisition target` });
+      ctx.check(Array.isArray(seen.things) && seen.things.length === 0, `bob doesn't find it: ${JSON.stringify(seen).slice(0, 200)}`);
+      const dep = await ctx.tool(m, "add_dependency", { from: bob, to: alice, stated_as: "record", note: "e2e SECRET: bob is let go once alice takes over" });
+      ctx.check(/isn't written/.test(dep.error ?? ""), `a dependency everyone would see is refused: ${JSON.stringify(dep).slice(0, 200)}`);
+      const w = ctx.workerToken((await floorEntry(ctx, `${P}-site-note`, "the north site")).rid);
+      ctx.check(!JSON.stringify(await ctx.tool(w, "read_dependencies", { instance: bob })).includes("let go"), "nothing of it reaches the floor");
+    },
+  },
+  {
+    name: "a discovery part's worker reads as its part's home, and relating the same individual twice makes one node (review C-B5, C-B4)",
+    run: async (ctx) => {
+      const { token, run: id } = await discovery(ctx);
+      say(await ctx.tool(token, "create_class", { name: `${P} payroll`, parents: ["commitment"], evidence: [{ kind: "table", ref: "e2econn:dbo_Pay" }] }), "a root class");
+      const note = await floorEntry(ctx, `${P}-bin-note`, "bins are counted at shift change");
+      say(await ctx.tool(token, "create_class", { name: `${P} bin`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }] }), "a floor class");
+      const r = say(await ctx.tool(token, "start_discovery_worker", { part: "the floor's notes about bins", home: ctx.POS.floor }), "a notes part at the floor");
+      const rid = String((await ctx.sql(`SELECT @rid AS rid FROM Entity WHERE _kind = 'task' AND _discovery_run = '${id}' AND _discovery_home = '${ctx.POS.floor}' ORDER BY @rid DESC LIMIT 1`))[0]?.rid);
+      const w = ctx.delegated({ r: "worker", j: r.job, e: rid, d: id });
+      const names = await toolNames(ctx, w);
+      ctx.check(names.includes("relate_instance") && !names.includes("search_graph") && !names.includes("about_thing"), `only tools that read as the part: ${names}`);
+      const seen = say(await ctx.tool(w, "list_classes", {}), "list").classes.map((c) => c.name);
+      ctx.check(seen.includes(`${P} bin`) && !seen.includes(`${P} payroll`), "it sees the floor's class, not the root's");
+      const a = say(await ctx.tool(w, "relate_instance", { class: `${P} bin`, name: `${P} bin 12` }), "once");
+      const b = say(await ctx.tool(w, "relate_instance", { class: `${P} bin`, name: `${P} bin 12` }), "twice");
+      ctx.check(a.created && !b.created && a.instance === b.instance, `reused: ${JSON.stringify([a, b])}`);
+      const nodes = await ctx.sql(`SELECT @rid AS rid, _home FROM Entity WHERE _kind = 'thing' AND _norm = '${P.replace(/-/g, " ")} bin 12'`);
+      ctx.check(nodes.length === 1 && nodes[0]._home === ctx.POS.floor, `one node, at the part's home: ${JSON.stringify(nodes)}`);
+      const k1 = await ctx.tool(w, "relate_instance", { class: `${P} bin`, key: "e2econn:dbo_Bin:12", name: `${P} bin twelve` });
+      const k2 = await ctx.tool(w, "relate_instance", { class: `${P} bin`, key: "e2econn:dbo_Bin:12", name: `${P} bin twelve` });
+      const byKey = await ctx.sql("SELECT count(*) AS n FROM Entity WHERE _kind = 'thing' AND _keys CONTAINS 'e2econn:dbo_Bin:12'");
+      ctx.check(Number(byKey[0]?.n) === 1, `one node per key, whatever the second call says: ${JSON.stringify([k1, k2]).slice(0, 300)}`);
+    },
+  },
+  {
+    name: "a class's evidence is shown only where the reader sees it (review C-B6)",
+    run: async (ctx) => {
+      const m = master(ctx);
+      const note = await floorEntry(ctx, `${P}-gate-note`, "the gate is locked at ten");
+      // a floor note and a root table: the floor note supports it on its own, so the class is the floor's (R11.9)
+      say(await ctx.tool(m, "create_class", { name: `${P} gate`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }, { kind: "table", ref: "e2econn:dbo_Secret_Gate", note: "e2e board minutes: the gate closes for good" }] }), "a class");
+      const bob = (await http(ctx, "bob", "/api/classes")).classes.find((c) => c.name === `${P} gate`);
+      ctx.check(bob, "bob sees the class");
+      ctx.check(bob.evidence.length === 1 && bob.evidence[0].ref === note.rid, `only the note he could read: ${JSON.stringify(bob.evidence)}`);
+      const top = (await http(ctx, "admin", "/api/classes")).classes.find((c) => c.name === `${P} gate`);
+      ctx.check(top.evidence.length === 2, "the admin sees all of it");
     },
   },
   {

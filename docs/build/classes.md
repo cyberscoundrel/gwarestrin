@@ -283,3 +283,49 @@ it.
   - NEEDS A RULING: the mirror is homed at everyone (`MIRROR_HOME`), and the agent instances are the
     smallest set (`AI_AGENTS`).
 - **Item 8.** `EVIDENCE_KINDS` and the refusal of a retired parent are now marked NEEDS A RULING.
+
+## The review of 4bd1154 (`~/reviews/build-build-classes-17566f-4bd1154.md`)
+
+Each fix has a test that fails at 4bd1154. The unit tests ran against that commit's source, and the replay
+scenarios ran there with and without the race scenario, which otherwise breaks everything after it.
+
+| Finding | Fix |
+|---|---|
+| C-B1, the seeding race | Seeding runs one at a time, and the unique index on `_class_key` is back. Fixed rows are found by their unique key, and new instance nodes by a token only they have (`_mint`) |
+| C-B2, the write floor | The one homing rule in `instances.js` (below), then `writeFloor`: never below what the writer read (`floor.js derivedFloor`) nor below its own record. An INSTANCE_OF or DEPENDS_ON edge to existing nodes is refused when it would be seen lower than that floor. A "note" cited as evidence counts only if it is an entry the writer sees. Reads through the class tools count as reads |
+| C-B3, a rerun undoing a re-home | Class names are unique in the organization again (coordinator's decision). A hidden class's name is never repeated in a refusal |
+| C-B4, duplicate instances | A new instance with no evidence lives at its writer's home, not the root. Keys are deduplicated across the whole graph; a node for a row held above the writer is refused without naming it (NEEDS A RULING). Names are deduplicated under the class, among what the writer sees |
+| C-B5, discovery parts unscoped | Built: each part is created at one home, the connection's (none: the root) or the one the orchestrator gives for notes. Its worker's class tools read as that home (`partScope`), and the gate gives it no graph search tools, which read as a record's audience |
+| C-B6, evidence shown above the reader | Only evidence the reader sees is shown (`visibleEvidence`). A free note without a ref is the root's |
+| C-B7, the seam with filing | Filing workers get only `list_classes` and `read_dependencies` here. `relateInstance` and `addDependency` are the one implementation, which filing's `create_instance` and `state_dependency` should call, passing the section's home |
+
+**The one homing rule for a new instance:**
+1. `opts.home`, when the caller gives it: a filing worker passes its section's home (R11.8).
+2. Otherwise, evidence: a key takes its connection's home; notes take the strictest home among those the
+   writer sees.
+3. Otherwise, the writer's own home: a discovery part's home, or a worker's record's home. The
+   orchestrator's is the root.
+
+The write floor then applies to whichever was chosen.
+
+**Also fixed from the review's non-blocking items:**
+- 3: the part brief and the gate name filing's `request`.
+- 4: a parents correction can't leave stages on a class that is no longer under commitment.
+- 5: the tree report keeps a retired class's subclasses and marks the retired class.
+- 6: a person who left loses their position edges, and a position whose parent isn't mirrored isn't
+  mirrored either.
+- 8, partly: a key from another table is refused, `add_evidence` is refused on a retired class, and the
+  `_run` text is corrected. Newly marked NEEDS A RULING:
+  - a connection with no home;
+  - `CORRECTION_KINDS`;
+  - the mirror's people at everyone.
+- 9: the index and its text agree again.
+- 10: the trivial test is replaced.
+
+**Still open from the review:**
+- Non-blocking 2: nothing mints the `d` claim yet. `graph-token.ts` belongs to the integrator, and it must
+  add `d` for the orchestrator in a run and for part workers, whose entries carry `_discovery_run`.
+  Without the claim, a part worker gets only the reads, and the entry check refuses everything else.
+- A part worker can still read every connection on the source side. Limiting it to its own connection is
+  the server's job (`scaffold.ts`).
+- Only a person at the root may correct (non-blocking 8). Still unmarked.

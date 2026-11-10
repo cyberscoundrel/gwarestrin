@@ -108,5 +108,11 @@ test("the discovery brief names no class beyond the seeded ones, and says the ru
   for (const word of ["jobs", "warehouse", "leased building", "hires", "purchase order", "work center"]) assert.doesNotMatch(b.split("----------")[2], new RegExp(`\\b${word}\\b`, "i"), word);
   const p = discovery.discoveryPartBrief({ run: "r1", part: "the tables dbo_Lease and dbo_Site", connection: "mssql" });
   assert.match(p, /you never create a class/);
-  assert.match(p, /graph-rag_request_class/);
+  assert.match(p, /graph-rag_request \(kind "class"\)/, "filing's request tool, kind class: the one a worker has");
+});
+
+test("a discovery part's worker gets only tools that read as its part's home: not the graph's search, which reads as a record's audience (review C-B5)", () => {
+  const server = discovery.gateDiscoveryTools(fakeServer(), { role: { kind: "worker", entry: "#9:1", job: "j", discovery: true, run: "r1" } });
+  for (const name of ["search_graph", "read_document", "about_thing", "list_classes", "relate_instance", "read_history", "request", "create_class", "start_discovery_worker"]) server.tool(name, {}, async () => "ok");
+  assert.deepEqual([...server.tools.keys()].sort(), ["list_classes", "read_history", "relate_instance", "request"]);
 });

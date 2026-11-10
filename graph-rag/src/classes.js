@@ -3,7 +3,8 @@
  * model/classes.js for the shapes). A class is an Entity with `_kind: 'class'`, scoped by `_home` like any
  * node (earlier ruling), so every read filter that covers entities covers it. Its parents are SUBCLASS_OF
  * edges (R9: several allowed). Its home is worked out here from its evidence (R11), never chosen by a model,
- * and is no wider than any parent's (R9, strictest wins).
+ * and is no wider than any parent's (R9, strictest wins). A name is unique in the organization
+ * (model/classes.js NAMES_UNIQUE), held by the database's unique index on `_class_key`.
  *
  * Who may do what (R5, R7): the orchestrator creates and changes classes; nothing else does (no chat agent,
  * no condenser, no worker). A person corrects (R11), and a correction is kept on the class and respected by
@@ -13,7 +14,7 @@
  */
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { entriesByUser, positionMap } from "./scope.js";
-import { effectiveHome, EVERYONE } from "./positions.js";
+import { effectiveHome, EVERYONE, visibleHomes } from "./positions.js";
 import { connectionHome, noteHome } from "./discovery.js";
 import {
   AI_AGENTS,
@@ -23,12 +24,12 @@ import {
   assertUnpinned,
   classIndex,
   classKey,
+  evidenceSystem,
   homeFromEvidence,
   mayHaveStages,
   normalizeClass,
   normalizeCorrection,
   normalizeEvidence,
-  parseClassRef,
   peopleInstances,
   pinned,
   positionClasses,
@@ -50,16 +51,12 @@ const json = (v, fallback) => {
   }
 };
 
-/**
- * A stored row as a class. `key` is its name as an identity; `id` is what the tree is indexed by: the key,
- * or `key@home` when another class has the same name at another home (NAMES_UNIQUE: per home).
- */
+/** a stored row as a class */
 function shape(r) {
   return {
     rid: String(r.rid),
     name: r._class_name,
     key: r._class_key,
-    id: r._class_key,
     parents: [],
     home: r._home ?? positionMap?.root ?? null,
     description: r._description ?? null,
@@ -77,51 +74,53 @@ function shape(r) {
 /** a 400 with the field it is about */
 const refuse = (e) => Object.assign(e instanceof ShapeError ? e : new ShapeError("class", String(e?.message ?? e)), { status: 400 });
 
-/** the ids of classes sharing a name are `name@home`; the rest are their key */
-function withIds(list) {
-  const count = new Map();
-  for (const c of list) count.set(c.key, (count.get(c.key) ?? 0) + 1);
-  return list.map((c) => ({ ...c, id: count.get(c.key) > 1 ? `${c.key}@${c.home}` : c.key }));
-}
+/** the tree as model/classes.js reads it */
+export const treeIndex = (all) => classIndex(all);
 
-/** the tree as model/classes.js reads it: indexed by id, parents as ids */
-export const treeIndex = (all) => classIndex(all.map((c) => ({ ...c, key: c.id })));
-
-/** every stored class with its parents (ids), unscoped (the store's own view; reads go through visibleClasses) */
+/** every stored class with its parents, unscoped (the store's own view; reads go through visibleClasses) */
 async function storedClasses() {
-  const list = withIds((await adbQuery(`SELECT ${COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'class'`)).map(shape));
-  const idOf = new Map(list.map((c) => [c.rid, c.id]));
+  const list = (await adbQuery(`SELECT ${COLS} FROM ${ENTITY_LABEL} WHERE _kind = 'class'`)).map(shape);
+  const keyOf = new Map(list.map((c) => [c.rid, c.key]));
   for (const e of await adbQuery("SELECT @out AS o, @in AS i FROM SUBCLASS_OF")) {
     const child = list.find((c) => c.rid === String(e.o));
-    const parent = idOf.get(String(e.i));
+    const parent = keyOf.get(String(e.i));
     if (child && parent && !child.parents.includes(parent)) child.parents.push(parent);
   }
+  const nameOf = new Map(list.map((c) => [c.key, c.name]));
+  for (const c of list) c.parent_names = c.parents.map((k) => nameOf.get(k) ?? k);
   return list;
 }
 
-/** write a class row the store makes itself (seeded or mirrored), and its parent edges; returns its rid */
+const isDuplicate = (e) => /duplicat|unique|already/i.test(String(e?.message ?? e));
+
+/**
+ * Write a class row the store makes itself (seeded or mirrored) and its parent edges; returns its rid. The
+ * unique index on `_class_key` refuses a second copy, so two requests seeding at once leave one, and the rid
+ * is found by the key, which only that one has.
+ */
 async function writeFixed(c, { mirror = null, ridOf }) {
   await adbCommand(
     `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'class', _class_name = :name, _class_key = :key, _home = :home, _origin = :home, _description = :description, _evidence = '[]', _rows_are_nodes = false, _stages = [], _status = 'active', _corrections = '[]', _mirror = :mirror, _written_by = 'seed'`,
     "sql",
     { name: c.name, key: c.key, home: c.home, description: c.description ?? null, mirror },
-  );
-  const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _class_key = :key AND _home = :home ORDER BY @rid DESC LIMIT 1`, { key: c.key, home: c.home }))[0]?.rid);
+  ).catch((e) => {
+    if (!isDuplicate(e)) throw e; // another request wrote it first: its edges are its own
+  });
+  const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _class_key = :key`, { key: c.key }))[0]?.rid);
   ridOf.set(c.key, rid);
-  for (const p of c.parents) if (ridOf.get(p)) await adbCommand(`CREATE EDGE SUBCLASS_OF FROM ${rid} TO ${ridOf.get(p)} SET added_by = 'seed', at = :at`, "sql", { at: new Date().toISOString() });
+  const have = new Set((await adbQuery(`SELECT @in AS i FROM SUBCLASS_OF WHERE @out = ${rid}`)).map((e) => String(e.i)));
+  for (const p of c.parents) if (ridOf.get(p) && !have.has(ridOf.get(p))) await adbCommand(`CREATE EDGE SUBCLASS_OF FROM ${rid} TO ${ridOf.get(p)} SET added_by = 'seed', at = :at`, "sql", { at: new Date().toISOString() });
   return rid;
 }
 
-/** write the seeded classes that are missing (the four roots, decision and action under event: R1), parents first */
-async function seedMissing(have) {
-  const ridOf = new Map(have.filter((c) => SEEDED_KEYS.includes(c.key)).map((c) => [c.key, c.rid]));
-  let made = false;
-  for (const c of seedClasses()) {
-    if (ridOf.has(c.key)) continue;
-    await writeFixed(c, { ridOf });
-    made = true;
-  }
-  return made;
+let seeding = null;
+/** write the seeded classes that are missing (the four roots, decision and action under event: R1), parents first; one at a time */
+function seedMissing(have) {
+  seeding ??= (async () => {
+    const ridOf = new Map(have.filter((c) => SEEDED_KEYS.includes(c.key)).map((c) => [c.key, c.rid]));
+    for (const c of seedClasses()) if (!ridOf.has(c.key)) await writeFixed(c, { ridOf });
+  })().finally(() => (seeding = null));
+  return seeding;
 }
 
 /* ---- the mirror under agent: positions as classes, people and the AI agents as instances (R6, R1) ---- */
@@ -131,14 +130,15 @@ let mirroring = null;
 
 /** a mirrored instance: found by its key, made at the mirror's home when missing; returns its rid */
 async function mirrorInstance({ name, key, home }) {
-  const found = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }))[0];
+  const find = async () => (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k ORDER BY @rid LIMIT 1`, { k: key }))[0];
+  const found = await find();
   if (found) return String(found.rid);
   await adbCommand(
     `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :name, _norm = :norm, _kind = 'thing', _keys = [:k], _home = :home, _homes = [:home], _origin = :home, _mirror = :k, _written_by = 'seed'`,
     "sql",
     { name, norm: String(name).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim(), k: key, home },
   );
-  return String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }))[0]?.rid);
+  return String((await find()).rid);
 }
 
 /** an instance belongs to exactly these mirrored classes (one-way: what authentik no longer grants goes) */
@@ -151,7 +151,8 @@ async function mirrorEdges(rid, classRids, mirroredRids) {
 /**
  * One-way sync from the position map and the token map's people (R6: authentik keeps granting access; this
  * only mirrors it), and the AI agents (R1). Positions become classes under agent, nested as the positions
- * are; people become instances of their positions' classes; a position that left the map is retired.
+ * are; people become instances of their positions' classes; a position that left the map is retired, and a
+ * person who left loses their positions' edges.
  */
 export async function syncMirror() {
   if (!positionMap) return { classes: 0, people: 0 };
@@ -161,12 +162,20 @@ export async function syncMirror() {
   const byMirror = new Map(have.filter((c) => c.mirror).map((c) => [c.mirror, c]));
   const ridOf = new Map(have.filter((c) => SEEDED_KEYS.includes(c.key)).map((c) => [c.key, c.rid]));
   const wanted = positionClasses(map);
+  const skipped = new Set();
   for (const p of wanted) {
     const tag = `position:${p.position}`;
     const cur = byMirror.get(tag);
+    // a position whose parent couldn't be mirrored isn't mirrored either: it would become a fifth root
+    if (!ridOf.get(p.parents[0]) && !cur) {
+      skipped.add(p.key);
+      console.warn(`[graph-rag] position ${p.position} isn't mirrored: its parent position isn't`);
+      continue;
+    }
     if (!cur) {
-      if (have.some((c) => c.key === p.key && c.home === p.home && !c.mirror)) {
-        console.warn(`[graph-rag] position ${p.position} isn't mirrored: a class called ${p.name} exists at ${p.home}`);
+      if (have.some((c) => c.key === p.key && !c.mirror)) {
+        skipped.add(p.key);
+        console.warn(`[graph-rag] position ${p.position} isn't mirrored: a class called ${p.name} exists`);
         continue;
       }
       await writeFixed(p, { mirror: tag, ridOf });
@@ -188,16 +197,22 @@ export async function syncMirror() {
   const mirroredRids = new Set(positionRid.values());
   const persons = peopleInstances(map, [...people.values()]);
   for (const person of persons) await mirrorEdges(await mirrorInstance(person), person.classes.map((k) => positionRid.get(k)).filter(Boolean), mirroredRids);
+  // a person who left the token map keeps their node (sections may be about them) but holds no position
+  const keys = new Set(persons.map((p) => p.key));
+  for (const r of await adbQuery(`SELECT @rid AS rid, _mirror FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _mirror LIKE 'authentik:user:%'`)) if (!keys.has(r._mirror)) await mirrorEdges(String(r.rid), [], mirroredRids);
   const agentRid = have.find((c) => c.key === "agent")?.rid;
   for (const a of AI_AGENTS) await mirrorEdges(await mirrorInstance(a), agentRid ? [agentRid] : [], new Set(agentRid ? [agentRid] : []));
   mirrored = { map, people };
-  return { classes: wanted.length, people: persons.length, agents: AI_AGENTS.length };
+  return { classes: wanted.length - skipped.size, people: persons.length, agents: AI_AGENTS.length };
 }
 
 /** every class, seeded ones written first if missing (an empty graph starts with them: R3, R8), the mirror kept current */
 export async function allClasses() {
   let have = await storedClasses();
-  if (!SEEDED_KEYS.every((k) => have.some((c) => c.key === k)) && (await seedMissing(have))) have = await storedClasses();
+  if (!SEEDED_KEYS.every((k) => have.some((c) => c.key === k))) {
+    await seedMissing(have);
+    have = await storedClasses();
+  }
   if (positionMap && (mirrored.map !== positionMap || mirrored.people !== entriesByUser)) {
     mirroring ??= syncMirror()
       .catch((e) => console.warn(`[graph-rag] mirror: ${String(e).slice(0, 200)}`))
@@ -215,52 +230,68 @@ export function seesHome(scope, home) {
   return at === EVERYONE || scope.homes.has(at) || Boolean(scope.granted?.homes?.has(at));
 }
 
-/**
- * The classes a reader sees, as the tree: a class above the reader is not in it, nor named as a parent.
- * Each carries `ref`, how this reader names it: its name, or `name@home` when the reader sees two of that
- * name. Nothing in a ref tells a reader that a class exists where it can't see.
- */
+/** the classes a reader sees, as the tree: a class above the reader is not in it, nor named as a parent */
 export async function visibleClasses(scope, { retired = false } = {}) {
   const all = await allClasses();
   const seen = all.filter((c) => seesHome(scope, c.home) && (retired || c.status !== "retired"));
-  const count = new Map();
-  for (const c of seen) count.set(c.key, (count.get(c.key) ?? 0) + 1);
-  const refOf = new Map(seen.map((c) => [c.id, count.get(c.key) > 1 ? `${c.name}@${c.home}` : c.name]));
-  return seen.map((c) => ({ ...c, ref: refOf.get(c.id), parents: c.parents.filter((p) => refOf.has(p)).map((p) => refOf.get(p)) }));
+  const nameOf = new Map(seen.map((c) => [c.key, c.name]));
+  return seen.map((c) => {
+    const parents = c.parents.filter((p) => nameOf.has(p));
+    return { ...c, parents, parent_names: parents.map((p) => nameOf.get(p)) };
+  });
 }
+
+/** the one class a name names among `list`: a 404 ShapeError when none */
+export function resolveClass(ref, list, field = "class") {
+  const key = classKey(ref);
+  const hit = list.find((c) => c.key === key);
+  if (!hit) throw Object.assign(new ShapeError(field, `no class ${ref} that you can see`), { status: 404 });
+  return hit;
+}
+
+/** one class a reader sees, by name or key; null when there is none it can see */
+export async function visibleClass(name, scope) {
+  const key = classKey(name);
+  return (await visibleClasses(scope, { retired: true })).find((c) => c.key === key) ?? null;
+}
+
+/** an entry that counts as a note: a record, a section, an entry (not a class, an instance or a task) */
+const NOTE_KINDS = new Set([null, undefined, "document", "section", "entry"]);
 
 /**
- * The one class a ref names among `list` (`name` or `name@home`): a ShapeError when none, or when several
- * and the ref doesn't say which (naming only those in `list`, which the caller sees).
+ * The home-from-evidence context: connection homes from CONNECTION_HOMES; a note's home from the history,
+ * or, for a graph rid, the home of that entry when it is a note `scope` sees. A rid the caller can't see,
+ * or one that isn't a note (an instance, a class), counts as the root's: fail upward (review C-B2).
  */
-export function resolveClass(ref, list, field = "class") {
-  const { key, home } = parseClassRef(ref);
-  const hits = list.filter((c) => c.key === key && (!home || c.home === home));
-  if (!hits.length) throw Object.assign(new ShapeError(field, `no class ${ref} that you can see`), { status: 404 });
-  if (hits.length > 1) throw Object.assign(new ShapeError(field, `${hits.length} classes called ${hits[0].name}: say which, as ${hits.map((c) => `${hits[0].name}@${c.home}`).join(" or ")}`), { status: 400 });
-  return hits[0];
-}
-
-/** one class a reader sees, by name, key or `name@home`; null when there is none it can see */
-export async function visibleClass(name, scope) {
-  try {
-    return resolveClass(name, await visibleClasses(scope, { retired: true }));
-  } catch (e) {
-    if (e.status === 404) return null;
-    throw e;
+export async function evidenceContext(evidence, scope = null) {
+  const homes = new Map();
+  const refs = [...new Set((evidence ?? []).filter((e) => e.kind === "notes" && RID_RE.test(String(e.ref ?? ""))).map((e) => e.ref))];
+  if (refs.length) {
+    for (const r of await adbQuery(`SELECT @rid AS rid, _home, _kind FROM [${refs.join(",")}]`).catch(() => [])) {
+      const ok = NOTE_KINDS.has(r._kind ?? null) && (!scope || seesHome(scope, r._home));
+      homes.set(String(r.rid), ok ? effectiveHome(positionMap, r._home) : positionMap.root);
+    }
   }
-}
-
-/** the home-from-evidence context: connection homes from CONNECTION_HOMES, notes from the history or a section's home */
-export async function evidenceContext(evidence) {
-  const sections = new Map();
-  const refs = (evidence ?? []).filter((e) => e.kind === "notes" && RID_RE.test(String(e.ref ?? ""))).map((e) => e.ref);
-  if (refs.length) for (const r of await adbQuery(`SELECT @rid AS rid, _home FROM [${refs.join(",")}]`).catch(() => [])) sections.set(String(r.rid), r._home ?? positionMap.root);
   return {
     positions: positionMap,
     connectionHome: (system) => connectionHome(system),
-    noteHome: (ref) => (sections.has(ref) ? effectiveHome(positionMap, sections.get(ref)) : noteHome(ref, positionMap)),
+    noteHome: (ref) => (RID_RE.test(String(ref)) ? homes.get(String(ref)) ?? positionMap.root : noteHome(ref, positionMap)),
   };
+}
+
+/**
+ * The evidence of a class a reader may be shown: each item whose own home the reader sees (a table's or a
+ * row's connection, a note's home). A free note with no ref has no home of its own, so only the root sees it
+ * (review C-B6: evidence wider than its class is how a class gets wide, R11.9, and must not show above).
+ */
+export async function visibleEvidence(evidence, scope) {
+  if (!scope || scope.homes === null) return evidence ?? [];
+  const ctx = await evidenceContext(evidence);
+  return (evidence ?? []).filter((e) => {
+    if (e.kind === "notes") return e.ref ? seesHome(scope, ctx.noteHome(e.ref) ?? positionMap.root) : false;
+    const system = evidenceSystem(e);
+    return system ? seesHome(scope, connectionHome(system) ?? positionMap.root) : false;
+  });
 }
 
 /** the home a class has of its own: a person's correction, else its evidence (R11); seeded and mirrored keep theirs */
@@ -278,21 +309,21 @@ async function ownHome(c) {
 export async function settleHomes() {
   const all = await allClasses();
   const own = new Map();
-  for (const c of all) own.set(c.id, await ownHome(c));
+  for (const c of all) own.set(c.key, await ownHome(c));
   const homes = treeHomes(treeIndex(all), (c) => own.get(c.key) ?? positionMap.root, positionMap);
   const moved = [];
   for (const c of all) {
-    const to = homes.get(c.id);
+    const to = homes.get(c.key);
     if (to && to !== c.home) {
       await adbCommand(`UPDATE ${c.rid} SET _home = :h, _origin = :h`, "sql", { h: to });
-      moved.push({ class: c.id, from: c.home, to });
+      moved.push({ class: c.key, from: c.home, to });
     }
   }
   return moved;
 }
 
 async function linkParents(rid, parents, all, by) {
-  const ridOf = new Map(all.map((c) => [c.id, c.rid]));
+  const ridOf = new Map(all.map((c) => [c.key, c.rid]));
   const at = new Date().toISOString();
   for (const p of parents) await adbCommand(`CREATE EDGE SUBCLASS_OF FROM ${rid} TO ${ridOf.get(p)} SET added_by = :who, at = :at`, "sql", { who: by, at });
 }
@@ -305,10 +336,9 @@ const stageList = (stages) => normalizeClass({ name: "x", parents: ["commitment"
 
 /**
  * The orchestrator creates a class (R5, R7). Its home comes from its evidence and its parents, never from
- * the caller (R11, R9). Parents are refs (`name`, or `name@home` when two share a name). Refused, naming the
- * field: a name a class has at the same home (NAMES_UNIQUE: per home), a class a person retired or renamed
- * (R11), parents that don't exist or close a cycle, stages on a class not under commitment (R11).
- * `actor`: { user, run? }. Returns the class as stored.
+ * the caller (R11, R9). Refused, naming the field: a name a class has anywhere (NAMES_UNIQUE), a class a
+ * person retired or renamed (R11), parents that don't exist or close a cycle, stages on a class not under
+ * commitment (R11). `actor`: { user, run? }. Returns the class as stored.
  */
 export async function createClass(input, actor) {
   const all = await allClasses();
@@ -316,28 +346,30 @@ export async function createClass(input, actor) {
   let cls;
   let home;
   try {
-    const parentIds = (Array.isArray(input.parents) ? input.parents : []).map((p, i) => resolveClass(p, all, `parents[${i}]`).id);
-    // the shape first (parents and stages are checked against the stored tree below)
-    cls = normalizeClass({ ...input, parents: ["agent"], stages: [], home: positionMap.root, status: "active" }, { positions: positionMap });
+    const parents = (Array.isArray(input.parents) ? input.parents : []).map((p, i) => resolveClass(p, all, `parents[${i}]`).key);
+    cls = normalizeClass({ ...input, parents, stages: [], home: positionMap.root, status: "active" }, { positions: positionMap });
     if (SEEDED_KEYS.includes(cls.key)) throw new ShapeError("name", `${cls.name} is one of the seeded classes (R1)`);
-    const tmp = `${cls.key}@new`;
-    cls.parents = assertParents(tmp, parentIds, index);
-    const trial = new Map([...index, [tmp, { ...cls, key: tmp }]]);
+    assertCreatable(cls, all);
+    cls.parents = assertParents(cls.key, cls.parents, index);
+    const trial = classIndex([...all, cls]);
     cls.stages = input.stages?.length ? stageList(input.stages) : [];
-    if (cls.stages.length && !mayHaveStages(tmp, trial)) throw new ShapeError("stages", "only a class under commitment has stages (R11)");
+    if (cls.stages.length && !mayHaveStages(cls.key, trial)) throw new ShapeError("stages", "only a class under commitment has stages (R11)");
     const own = homeFromEvidence(cls.evidence, await evidenceContext(cls.evidence));
-    home = treeHomes(trial, (c) => (c.key === tmp ? own : c.home), positionMap).get(tmp);
-    // the orchestrator sees every home; a writer that didn't would be checked only against what it sees
-    assertCreatable({ ...cls, home }, all);
+    home = treeHomes(trial, (c) => (c.key === cls.key ? own : c.home), positionMap).get(cls.key);
   } catch (e) {
     throw refuse(e);
   }
-  await adbCommand(
-    `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'class', _class_name = :name, _class_key = :key, _home = :home, _origin = :home, _description = :description, _evidence = :evidence, _rows_are_nodes = :nodes, _record_table = :table, _stages = :stages, _status = 'active', _corrections = '[]', _run = :run, _written_by = :who`,
-    "sql",
-    { name: cls.name, key: cls.key, home, description: cls.description, evidence: JSON.stringify(cls.evidence), nodes: cls.rows_are_nodes, table: cls.record_table, stages: cls.stages, run: actor.run ?? null, who: actor.user },
-  );
-  const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _class_key = :key AND _home = :home ORDER BY @rid DESC LIMIT 1`, { key: cls.key, home }))[0]?.rid);
+  try {
+    await adbCommand(
+      `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'class', _class_name = :name, _class_key = :key, _home = :home, _origin = :home, _description = :description, _evidence = :evidence, _rows_are_nodes = :nodes, _record_table = :table, _stages = :stages, _status = 'active', _corrections = '[]', _run = :run, _written_by = :who`,
+      "sql",
+      { name: cls.name, key: cls.key, home, description: cls.description, evidence: JSON.stringify(cls.evidence), nodes: cls.rows_are_nodes, table: cls.record_table, stages: cls.stages, run: actor.run ?? null, who: actor.user },
+    );
+  } catch (e) {
+    if (isDuplicate(e)) throw refuse(new ShapeError("name", `${cls.name} exists already`)); // made meanwhile by another call
+    throw e;
+  }
+  const rid = String((await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _class_key = :key`, { key: cls.key }))[0]?.rid);
   await linkParents(rid, cls.parents, all, actor.user);
   return (await allClasses()).find((c) => c.rid === rid) ?? { ...cls, rid, home, run: actor.run ?? null };
 }
@@ -358,10 +390,13 @@ export async function updateClass(name, patch, actor) {
     const touch = (field) => assertUnpinned(cur, field);
     if (patch.add_parents?.length) {
       touch("parents");
-      const ids = patch.add_parents.map((p, i) => resolveClass(p, all, `add_parents[${i}]`).id);
-      parents = assertParents(cur.id, [...cur.parents, ...ids], index).filter((p) => !cur.parents.includes(p));
+      const keys = patch.add_parents.map((p, i) => resolveClass(p, all, `add_parents[${i}]`).key);
+      parents = assertParents(cur.key, [...cur.parents, ...keys], index).filter((p) => !cur.parents.includes(p));
     }
-    if (patch.add_evidence?.length) sets._evidence = JSON.stringify([...cur.evidence, ...patch.add_evidence.map((e, i) => normalizeEvidence(e, `add_evidence[${i}]`))]);
+    if (patch.add_evidence?.length) {
+      touch("evidence"); // a retired class takes no more evidence
+      sets._evidence = JSON.stringify([...cur.evidence, ...patch.add_evidence.map((e, i) => normalizeEvidence(e, `add_evidence[${i}]`))]);
+    }
     const plain = { name: cur.name, parents: ["agent"], home: cur.home };
     if (patch.description !== undefined) {
       touch("description");
@@ -378,7 +413,7 @@ export async function updateClass(name, patch, actor) {
     if (patch.stages !== undefined) {
       touch("stages");
       sets._stages = stageList(patch.stages);
-      if (sets._stages.length && !mayHaveStages(cur.id, index)) throw new ShapeError("stages", "only a class under commitment has stages (R11)");
+      if (sets._stages.length && !mayHaveStages(cur.key, index)) throw new ShapeError("stages", "only a class under commitment has stages (R11)");
     }
   } catch (e) {
     throw refuse(e);
@@ -402,9 +437,15 @@ export async function correctClass(name, raw, person) {
   try {
     c = normalizeCorrection({ ...raw, by: person, from: cur.name }, { positions: positionMap });
     if (fixedClass(cur) && (cur.mirror || c.kind !== "description")) throw new ShapeError("class", `${fixedClass(cur)}${cur.mirror ? "" : ": only its description changes"}`);
-    if (c.kind === "rename" && classKey(c.value) !== cur.key && all.some((x) => x.key === classKey(c.value) && x.home === cur.home)) throw new ShapeError("value", `a class called ${c.value} exists already at that home`);
-    if (c.kind === "parents") c.value = assertParents(cur.id, c.value.map((p, i) => resolveClass(p, all, `value[${i}]`).id), index);
-    if (c.kind === "stages" && c.value.length && !mayHaveStages(cur.id, index)) throw new ShapeError("value", "only a class under commitment has stages (R11)");
+    if (c.kind === "rename" && classKey(c.value) !== cur.key && all.some((x) => x.key === classKey(c.value))) throw new ShapeError("value", `a class called ${c.value} exists already`);
+    if (c.kind === "parents") {
+      c.value = assertParents(cur.key, c.value.map((p, i) => resolveClass(p, all, `value[${i}]`).key), index);
+      // stages stay only on a class still under commitment (R11): moving it out takes a stages correction first
+      const trial = classIndex(all.map((x) => (x.key === cur.key ? { ...x, parents: c.value } : x)));
+      const stages = pinned(cur.corrections).stages ?? cur.stages;
+      if (stages.length && !mayHaveStages(cur.key, trial)) throw new ShapeError("value", `${cur.name} has stages, and only a class under commitment has them (R11): correct its stages to none first`);
+    }
+    if (c.kind === "stages" && c.value.length && !mayHaveStages(cur.key, index)) throw new ShapeError("value", "only a class under commitment has stages (R11)");
   } catch (e) {
     throw refuse(e);
   }
@@ -427,11 +468,11 @@ export async function correctClass(name, raw, person) {
   return { class: (await allClasses()).find((x) => x.rid === cur.rid), correction: c, moved };
 }
 
-/** instances per class id (for the tree report) */
+/** instances per class key (for the tree report) */
 export async function instanceCounts() {
   const rows = await adbQuery("SELECT @in AS c, count(*) AS n FROM INSTANCE_OF GROUP BY @in").catch(() => []);
-  const idOf = new Map((await allClasses()).map((c) => [c.rid, c.id]));
-  return new Map(rows.map((r) => [idOf.get(String(r.c)), Number(r.n)]).filter(([k]) => k));
+  const keyOf = new Map((await allClasses()).map((c) => [c.rid, c.key]));
+  return new Map(rows.map((r) => [keyOf.get(String(r.c)), Number(r.n)]).filter(([k]) => k));
 }
 
 /* ---- discovery runs (R9: reruns and new tables count as discovery) ---- */
@@ -461,19 +502,47 @@ export async function recordExamined(run, system, tables) {
 }
 
 const discoveryEntries = new Map();
-/** is this entry a part of a discovery run (a task entry marked with its run): the run's id, or null */
-export async function discoveryRunOf(rid) {
+/**
+ * Is this entry a part of a discovery run (a task entry marked with its run): `{ run, home }`, the home being
+ * the one its worker reads as (one worker per evidence home), or null.
+ */
+export async function discoveryPartOf(rid) {
   if (!RID_RE.test(String(rid ?? ""))) return null;
   if (discoveryEntries.has(rid)) return discoveryEntries.get(rid);
-  const run = (await adbQuery(`SELECT _discovery_run FROM ${rid}`).catch(() => []))[0]?._discovery_run ?? null;
-  discoveryEntries.set(rid, run);
-  return run;
+  const r = (await adbQuery(`SELECT _discovery_run, _discovery_home FROM ${rid}`).catch(() => []))[0];
+  const part = r?._discovery_run ? { run: r._discovery_run, home: r._discovery_home ?? positionMap?.root ?? null } : null;
+  discoveryEntries.set(rid, part);
+  return part;
+}
+/** the run of a discovery part entry, or null */
+export const discoveryRunOf = async (rid) => (await discoveryPartOf(rid))?.run ?? null;
+
+/** mark a task entry as a part of a run read as `home`, so its worker is held to the discovery tools and that home */
+export async function markDiscoveryEntry(rid, run, home) {
+  await adbCommand(`UPDATE ${rid} SET _discovery_run = :run, _discovery_home = :home`, "sql", { run, home });
+  discoveryEntries.set(rid, { run, home });
 }
 
-/** mark a task entry as a part of a run, so its worker is held to the discovery tools */
-export async function markDiscoveryEntry(rid, run) {
-  await adbCommand(`UPDATE ${rid} SET _discovery_run = :run`, "sql", { run });
-  discoveryEntries.set(rid, run);
+/**
+ * Make the task entry of a discovery part, marked, and its job; returns { rid, job }. createTask (filing's)
+ * doesn't return the entry, so it is found by its title among the task entries no part has claimed, newest
+ * first; the title carries the run and the part, so two parts share it only when the orchestrator repeats one.
+ */
+export async function createPartTask({ title, brief, minutes, by, run, home, level = 2 }) {
+  const { createTask } = await import("./worker-pool.js"); // lazily: worker-pool reaches the MCP server
+  const r = await createTask({ title, brief, minutes, by, audience: home === EVERYONE ? EVERYONE : undefined, level });
+  const rid = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'task' AND name = :n AND _discovery_run IS NULL ORDER BY @rid DESC LIMIT 1`, { n: r.task }))[0]?.rid;
+  if (!rid) throw new Error("the part's task entry wasn't found");
+  await markDiscoveryEntry(String(rid), run, home);
+  return { ...r, rid: String(rid) };
+}
+
+/** the scope a discovery part's worker reads with: what the people of its home see (R11.6, one worker per home) */
+export function partScope(home) {
+  if (!positionMap) return { homes: null, root: false };
+  const at = effectiveHome(positionMap, home);
+  const homes = at === EVERYONE ? new Set([EVERYONE]) : visibleHomes(positionMap, [at]);
+  return homes === null ? { homes: null, root: true, writeHome: at } : { homes, root: false, writeHome: at };
 }
 
 /** the run an identity acts in: the orchestrator's claim, or its worker entry's mark; null outside a run */
@@ -482,3 +551,4 @@ export async function runOf(identity) {
   if (identity?.role?.kind === "worker") return discoveryRunOf(identity.role.entry);
   return null;
 }
+

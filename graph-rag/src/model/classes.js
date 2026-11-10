@@ -32,19 +32,13 @@ export const EVIDENCE_KINDS = ["table", "columns", "rows", "notes", "correction"
 export const classKey = snakeCase;
 
 /**
- * NEEDS A RULING (class names): a name is unique per home (by `classKey`), not in the whole organization.
- * Classes are scoped by home (earlier ruling), so a name taken at a home a writer can't see must neither
- * block it nor tell it that the class exists (the reviewer's item 11 on ba583bc). Two classes of one name
- * at different homes are different classes; where a reader sees both, each is named `name@home`.
+ * NEEDS A RULING (class names): a name is unique in the organization (by `classKey`), whatever the homes.
+ * Only the orchestrator creates classes, and it sees every home, so a name taken elsewhere tells it nothing
+ * it can't see; a writer that sees less is told only that the name is taken, never which class has it.
+ * (Per-home names were tried and undone: they let a rerun re-create a re-homed class, duplicated the roots
+ * under a race, and made a class map entry ambiguous; review of 4bd1154, C-B1 and C-B3.)
  */
-export const NAMES_UNIQUE = "per home";
-
-/** "warehouse@ops" -> { key: "warehouse", home: "ops" }; "warehouse" -> { key: "warehouse", home: null } */
-export function parseClassRef(ref) {
-  const s = String(ref ?? "").trim();
-  const at = s.lastIndexOf("@");
-  return at > 0 ? { key: classKey(s.slice(0, at)), home: s.slice(at + 1).trim() || null } : { key: classKey(s), home: null };
-}
+export const NAMES_UNIQUE = true;
 
 /** one piece of evidence: { kind, ref?, note? } where ref is a table, a record key or a section id */
 export function normalizeEvidence(raw, field = "evidence") {
@@ -339,6 +333,10 @@ export function treeHomes(index, own, positions) {
  * on the class it corrects; what it set is pinned, and nothing but another correction changes it.
  * ------------------------------------------------------------------------------------------------- */
 
+/**
+ * NEEDS A RULING (correction kinds): R11 says corrections are stored and names none. Smallest choice: one
+ * per field a class holds (R11.14), plus retire, restore and taking an instance out of a class.
+ */
 export const CORRECTION_KINDS = ["retire", "restore", "rename", "parents", "home", "rows_are_nodes", "description", "stages", "record_table", "unrelate"];
 /** the field each pinning correction sets */
 export const PINS = { rename: "name", parents: "parents", home: "home", rows_are_nodes: "rows_are_nodes", description: "description", stages: "stages", record_table: "record_table" };
@@ -410,17 +408,21 @@ export const unrelated = (cls) => new Set((cls.corrections ?? []).filter((c) => 
  * on its own)? `classes` are every stored class with their corrections applied. Throws ShapeError naming
  * what it collides with: a retired class by name or table, a class a person renamed, or one that exists.
  * NEEDS A RULING (what "the same class" is on a rerun): smallest choice, the same name (classKey) or the
- * same record table. A name is taken per home (NAMES_UNIQUE), and only classes the writer sees (`sees(home)`)
- * are checked, so a refusal never names a class it can't see.
+ * same record table, wherever the class now lives: a person's re-homing never lets a rerun make it again.
+ * A class the writer can't see (`sees(home)`) still takes its name, but the refusal never names it.
  */
 export function assertCreatable(cls, classes, { sees = () => true } = {}) {
-  // a class the writer can't see neither blocks it nor is named to it (NAMES_UNIQUE: per home)
-  for (const c of classes.filter((x) => sees(x.home))) {
+  for (const c of classes) {
     const sameName = c.key === cls.key;
+    // a class the writer can't see blocks the name, and is never named to it (NAMES_UNIQUE)
+    if (!sees(c.home)) {
+      if (sameName || formerKeys(c).includes(cls.key)) throw new ShapeError("name", `the name ${cls.name} is taken`);
+      continue;
+    }
     const sameTable = Boolean(cls.record_table && c.record_table && c.record_table.toLowerCase() === cls.record_table.toLowerCase());
     if ((sameName || sameTable) && c.status === "retired") throw new ShapeError(sameName ? "name" : "record_table", `${c.name} was retired by a person: it never returns on its own`);
     if (formerKeys(c).includes(cls.key)) throw new ShapeError("name", `a person renamed ${cls.name} to ${c.name}: use ${c.name}`);
-    if (sameName && (!cls.home || c.home === cls.home)) throw new ShapeError("name", `${c.name} exists already${cls.home ? " at that home" : ""}`);
+    if (sameName) throw new ShapeError("name", `${c.name} exists already`);
   }
 }
 
@@ -454,7 +456,8 @@ export function applyCorrections(cls) {
 export function mayMakeNode(cls, { key = null, dependency = false, reason = null } = {}) {
   if (!cls.record_table || cls.rows_are_nodes) return { ok: true };
   const k = parseKey(key);
-  if (k && `${k.system}:${k.table}`.toLowerCase() !== cls.record_table.toLowerCase()) return { ok: true };
+  // a row of another table isn't this class's row: what governs it is that table's class (R3)
+  if (k && `${k.system}:${k.table}`.toLowerCase() !== cls.record_table.toLowerCase()) return { ok: false, reason: `${key} isn't a row of ${cls.name}'s table (${cls.record_table})` };
   if (dependency) return { ok: true, why: "a dependency the source can't hold" };
   if (nonEmpty(reason)) return { ok: true, why: clip(reason, 300) };
   return { ok: false, reason: `${cls.name}'s rows stay in ${cls.record_table}, and a section stores the key: a row gets a node only when the graph must say something the source can't hold (a dependency, or give the reason)` };
@@ -504,7 +507,7 @@ export function timeline(items, deps) {
  */
 export function treeReport(index, { counts = new Map(), homeName = (h) => h } = {}) {
   const lines = [];
-  const kids = (key) => [...index.values()].filter((c) => c.parents.includes(key) && c.status !== "retired").sort((a, b) => a.key.localeCompare(b.key));
+  const kids = (key) => [...index.values()].filter((c) => c.parents.includes(key)).sort((a, b) => a.key.localeCompare(b.key));
   const walk = (c, depth, via) => {
     const n = counts.get(c.key) ?? 0;
     const facts = [
@@ -513,7 +516,7 @@ export function treeReport(index, { counts = new Map(), homeName = (h) => h } = 
       `${n} instance${n === 1 ? "" : "s"}`,
       c.parents.length > 1 ? `also under ${c.parents.filter((p) => p !== via).join(", ")}` : null,
     ].filter(Boolean);
-    lines.push(`${"  ".repeat(depth)}- ${c.name} (${facts.join("; ")})`);
+    lines.push(`${"  ".repeat(depth)}- ${c.name}${c.status === "retired" ? " [retired by a person]" : ""} (${facts.join("; ")})`);
     for (const e of c.evidence ?? []) lines.push(`${"  ".repeat(depth + 1)}evidence: ${e.kind}${e.ref ? ` ${e.ref}` : ""}${e.note ? `: ${e.note}` : ""}`);
     for (const k of kids(c.key)) walk(k, depth + 1, c.key);
   };
@@ -531,9 +534,11 @@ export function treeReport(index, { counts = new Map(), homeName = (h) => h } = 
  * ------------------------------------------------------------------------------------------------- */
 
 /**
- * NEEDS A RULING (where the mirror is seen): smallest choice, everyone. Position names are already shown to
- * everyone wherever a home is named, and a position's class nested under its parent's would otherwise be
- * raised to the root by strictest-wins (R9), hiding everyone's own position from them.
+ * NEEDS A RULING (where the mirror is seen): smallest choice, everyone, for the positions' classes and for the
+ * people as their instances alike. Position names are already shown to everyone wherever a home is named, and
+ * a position's class nested under its parent's would otherwise be raised to the root by strictest-wins (R9).
+ * That also makes who holds which position visible to everyone, which no ruling says; homing each person at
+ * their own position is the other choice.
  */
 export const MIRROR_HOME = EVERYONE;
 /** the record-key system the mirror's instances are keyed under: what the one-way sync reads from */

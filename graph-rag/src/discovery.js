@@ -95,7 +95,7 @@ export function reportDigest(report) {
  * and any other is refused at the call (gateDiscoveryTools).
  * ------------------------------------------------------------------------------------------------- */
 
-/** every graph tool a discovery identity may use: reads, the class tree and instances. Nothing else. */
+/** every graph tool the orchestrator in a discovery run may use: reads, the class tree and instances. Nothing else. */
 export const DISCOVERY_TOOLS = new Set([
   // reads
   "search_graph",
@@ -115,8 +115,15 @@ export const DISCOVERY_TOOLS = new Set([
   "start_discovery_worker",
   "worker_status",
   "answer_worker",
-  "request_class",
 ]);
+
+/**
+ * What a worker on a part of a discovery run may use: only tools that read as its part's home (R11.6, one worker
+ * per evidence home; routes-classes.js scopes them), instances, and its requests of the orchestrator (filing's
+ * `request`, kind "class"). The graph's own search tools read as a worker's record's audience, which a part
+ * has none of, so a part doesn't get them.
+ */
+export const DISCOVERY_PART_TOOLS = new Set(["list_classes", "read_dependencies", "read_history", "new_tables", "relate_instance", "add_dependency", "record_examined", "request", "raise_question"]);
 
 export const DISCOVERY_REFUSAL = "discovery is read-only: this tool isn't one a discovery run has (R11)";
 
@@ -134,10 +141,11 @@ export const isDiscoveryRole = (identity) => identity?.role?.discovery === true;
  */
 export function gateDiscoveryTools(server, identity, { isDiscoveryEntry = async () => false } = {}) {
   const register = server.tool.bind(server);
+  const worker = identity?.role?.kind === "worker";
+  const allowed = worker ? DISCOVERY_PART_TOOLS : DISCOVERY_TOOLS;
   server.tool = (name, ...rest) => {
-    if (DISCOVERY_TOOLS.has(name)) return register(name, ...rest);
-    if (isDiscoveryRole(identity)) return undefined; // never listed
-    if (identity?.role?.kind !== "worker" || !identity.role.entry) return register(name, ...rest);
+    if (isDiscoveryRole(identity)) return allowed.has(name) ? register(name, ...rest) : undefined; // never listed
+    if (!worker || !identity.role.entry || DISCOVERY_PART_TOOLS.has(name)) return register(name, ...rest);
     const handler = rest.pop();
     return register(name, ...rest, async (...args) => {
       if (await isDiscoveryEntry(identity.role.entry)) throw new Error(DISCOVERY_REFUSAL);
@@ -149,8 +157,9 @@ export function gateDiscoveryTools(server, identity, { isDiscoveryEntry = async 
 
 /**
  * The home of the connection that reads a system (R11). Read from CONNECTION_HOMES, JSON
- * `{ "<system>": "<position id or everyone>" }`. A connection with no home counts as the root (the
- * coordinator's ruling on the stream's plan, item 2): `null` here, which homeFromEvidence reads as the root.
+ * `{ "<system>": "<position id or everyone>" }`.
+ * NEEDS A RULING (a connection with no home): smallest choice, it counts as the root (this stream's plan,
+ * item 2, which the coordinator accepted; no owner ruling): `null` here, which homeFromEvidence reads as the root.
  */
 export function connectionHomes(raw = process.env.CONNECTION_HOMES) {
   if (!raw) return {};
@@ -270,6 +279,6 @@ export function discoveryPartBrief({ run, part, connection = null, notes = null 
     ...(connection ? [`Connection: ${connection}`] : []),
     ...(notes ? [`History: ${notes}`] : []),
     "----------",
-    "Read this part with your read tools only; nothing outside the graph changes. List the classes (graph-rag_list_classes) and relate the lasting individuals you find to them with graph-rag_relate_instance and their record keys. When no class fits, ask the orchestrator for one with graph-rag_request_class and leave those individuals; you never create a class. Record the tables you examined with graph-rag_record_examined. Finish with a short report: what you read, what you related, what you asked for.",
+    "Read this part with your read tools only; nothing outside the graph changes. List the classes (graph-rag_list_classes) and relate the lasting individuals you find to them with graph-rag_relate_instance and their record keys. When no class fits, ask the orchestrator for one with graph-rag_request (kind \"class\") and leave those individuals; you never create a class. Record the tables you examined with graph-rag_record_examined. Finish with a short report: what you read, what you related, what you asked for.",
   ].join("\n");
 }
