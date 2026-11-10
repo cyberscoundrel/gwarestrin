@@ -329,3 +329,29 @@ The write floor then applies to whichever was chosen.
 - A part worker can still read every connection on the source side. Limiting it to its own connection is
   the server's job (`scaffold.ts`).
 - Only a person at the root may correct (non-blocking 8). Still unmarked.
+
+## The re-review of c1323a3 (`~/reviews/build-build-classes-17566f-c1323a3.md`)
+
+- **C2-B1, links floored by everything read.** Replaced by the coordinator's decision, taken from R11.8 and
+  R11.9 and pending the user, and marked so in `instances.js linkHome`.
+  - A link (INSTANCE_OF or DEPENDS_ON) is homed at the strictest of its two ends and the home of the record
+    or evidence that states it.
+  - The edge stores that evidence's home in `home`: the caller's section home, else the cited `source` or
+    notes (one the writer can't see counts as the root's), else the writer's own home.
+  - A reader must see both ends and the edge's home.
+  - The floor check stays on text an agent writes: a new instance's name, and a dependency's note, which
+    raises the link to what the writer read.
+  - So the orchestrator relating from a floor record makes a floor link, and from an admin-only record an
+    admin-only one. A new instance the orchestrator names still lands at its floor, the root once it has
+    read the tree.
+- **Non-blocking 3, the discovery claim.** A real part's worker now gets its tools. `withDiscoveryRole`
+  (`classes.js`) runs on every MCP request in `routes.js` and gives a worker on a marked part entry its
+  run's role, so no token claim is needed. The orchestrator's own discovery claim is still not minted
+  (`graph-token.ts`).
+- **Non-blocking 1.** A part citing a record it can't see is refused, rather than making a node it couldn't
+  find again.
+- **Still open:**
+  - 2: a row held above the writer is confirmed to exist (marked NEEDS A RULING).
+  - 4: a part has no record, so filing's `request` refuses its class requests.
+  - 5: only a person at the root may correct.
+  - 6: `new_tables` shows a part what other runs examined.

@@ -116,8 +116,34 @@ export async function writeFloor(identity, base, { given = false } = {}) {
   return strictestHome(positionMap, homes);
 }
 
-/** is every home this would be seen from at or above the floor (nothing seen lower than what was read) */
-const notBelow = (floor, homes) => homes.every((h) => strictestHome(positionMap, [h, floor]) === effectiveHome(positionMap, h));
+/**
+ * The home of a link, an INSTANCE_OF or DEPENDS_ON edge: the strictest of its two ends and the home of the
+ * record or evidence that states it. Decided by the coordinator from R11.8 and R11.9, pending the user (the
+ * re-review of c1323a3, C2-B1, found that flooring a link by everything its writer read leaves the orchestrator,
+ * which reads everything, able to relate nothing below the root). The ends are checked when the link is read
+ * (a reader must see both); the edge stores the evidence's home: `home` (the section a filing worker files
+ * from), else the records it cites (`refs`, a record the writer can't see counting as the root's), else the
+ * writer's own home. Text the writer puts on the link (a note) is still floored by what it read (R11.13).
+ */
+export async function linkHome(identity, scope, { home = null, refs = [], note = null } = {}) {
+  let h;
+  if (home) h = effectiveHome(positionMap, home);
+  else if (refs.length) {
+    const ctx = await evidenceContext(refs.map((ref) => ({ kind: "notes", ref })), scope);
+    h = strictestHome(positionMap, refs.map((r) => ctx.noteHome(r) ?? positionMap.root));
+  } else h = await writerHome(identity);
+  if (note && identity) h = strictestHome(positionMap, [h, derivedFloor(identity, h) ?? h]);
+  return h;
+}
+
+/** the cited records a reader can't see: a new node isn't made from them, where its writer couldn't find it again */
+async function unseenRefs(refs, scope) {
+  const rids = [...new Set(refs.filter((r) => RID_RE.test(String(r))))];
+  if (!rids.length) return [];
+  const rows = await adbQuery(`SELECT @rid AS rid, _home, _homes, _kind FROM [${rids.join(",")}]`).catch(() => []);
+  const seen = new Set(rows.filter((r) => seesNode(scope, r)).map((r) => String(r.rid)));
+  return rids.filter((r) => !seen.has(r));
+}
 
 /**
  * Where a new instance lives (the rule above). `ctx` is evidenceContext's (connection and note homes).
@@ -197,20 +223,18 @@ export async function relateInstance(args, scope, actor, opts = {}) {
     const ok = mayMakeNode(cls, { key, dependency: args.dependency === true, reason: args.reason });
     if (!ok.ok) throw bad("key", ok.reason);
     if (!key && !args.name) throw bad("name", "an instance needs its record key or its name");
+    if ((await unseenRefs(args.notes ?? [], scope)).length) throw bad("notes", "you cite a record you can't see: an instance is made only from what you can read");
     const ctx = await evidenceContext((args.notes ?? []).map((ref) => ({ kind: "notes", ref })), scope);
     const base = instanceHome({ key, notes: args.notes ?? [], home: opts.home ?? null, writer: await writerHome(identity) }, ctx);
     const home = identity ? await writeFloor(identity, base, { given: Boolean(opts.home) }) : base;
     node = await makeNode({ key, name: args.name, home, run: actor.run, by: actor.user });
     created = true;
-  } else if (identity) {
-    const floor = await writeFloor(identity, opts.home ?? effectiveHome(positionMap, cls.home), { given: Boolean(opts.home) });
-    const edgeHomes = homesOf(node).map((h) => strictestHome(positionMap, [h, cls.home]));
-    if (!(await instanceOf(node.rid, cls.rid)) && !notBelow(floor, edgeHomes)) throw bad("instance", "you read what people who'd see this relation can't: it isn't written (R11.13)");
   }
   const edge = normalizeInstanceEdge({ instance: node.rid, class: cls.key, added_by: actor.user });
   const had = await instanceOf(node.rid, cls.rid);
-  if (!had) await adbCommand(`CREATE EDGE INSTANCE_OF FROM ${node.rid} TO ${cls.rid} SET added_by = :who, at = :at`, "sql", { who: edge.added_by, at: edge.at });
-  return { instance: node.rid, name: node.label ?? node.name, class: cls.key, created, related: !had };
+  const home = await linkHome(identity, scope, { home: opts.home, refs: args.source ? [args.source] : (args.notes ?? []) });
+  if (!had) await adbCommand(`CREATE EDGE INSTANCE_OF FROM ${node.rid} TO ${cls.rid} SET added_by = :who, at = :at, home = :home`, "sql", { who: edge.added_by, at: edge.at, home });
+  return { instance: node.rid, name: node.label ?? node.name, class: cls.key, created, related: !had, ...(had ? {} : { link_home: home }) };
 }
 
 /** one end of a dependency: an instance the caller sees, or a row's node made for it (R3: a dependency the source can't hold) */
@@ -230,17 +254,13 @@ async function dependencyEnd(end, field, scope, actor, opts) {
 /**
  * State a dependency between two instances (R1): `from` depends on `to`. Both ends must be instances the
  * caller sees; a transactional row's node is made for it, by key (R3). The edge is seen by whoever sees both
- * ends (R11.8), so it is refused when the writer read what some of them can't (R11.13). `actor`: { user,
- * agent?, run?, identity }; `opts.home`: the home a caller files from.
+ * ends and the home of what states it (linkHome; R11.8). `actor`: { user, agent?, run?, identity };
+ * `opts.home`: the home a caller files from.
  */
 export async function addDependency(args, scope, actor, opts = {}) {
   const from = await dependencyEnd(args.from, "from", scope, actor, opts);
   const to = await dependencyEnd(args.to, "to", scope, actor, opts);
-  if (actor.identity) {
-    const seenAt = homesOf(from).flatMap((f) => homesOf(to).map((t) => strictestHome(positionMap, [f, t])));
-    const floor = await writeFloor(actor.identity, opts.home ?? strictestHome(positionMap, seenAt), { given: Boolean(opts.home) });
-    if (!notBelow(floor, seenAt)) throw bad("from", "you read what people who see both ends can't: the dependency isn't written (R11.13)");
-  }
+  const home = await linkHome(actor.identity ?? null, scope, { home: opts.home, refs: args.source && RID_RE.test(String(args.source)) ? [args.source] : [], note: args.note });
   const d = normalizeDependency({
     from: from.rid,
     to: to.rid,
@@ -253,34 +273,38 @@ export async function addDependency(args, scope, actor, opts = {}) {
     valid_until: args.valid_until,
   });
   await adbCommand(
-    `CREATE EDGE DEPENDS_ON FROM ${d.from} TO ${d.to} SET stated_as = :stated_as, stated_by = :stated_by, source = :source, note = :note, stated_at = :stated_at, valid_from = :valid_from, valid_until = :valid_until`,
+    `CREATE EDGE DEPENDS_ON FROM ${d.from} TO ${d.to} SET stated_as = :stated_as, stated_by = :stated_by, source = :source, note = :note, stated_at = :stated_at, valid_from = :valid_from, valid_until = :valid_until, home = :home`,
     "sql",
-    d,
+    { ...d, home },
   );
-  return { dependency: { ...d, from_name: from.label ?? from.name, to_name: to.label ?? to.name } };
+  return { dependency: { ...d, home, from_name: from.label ?? from.name, to_name: to.label ?? to.name } };
 }
 
 /**
  * The dependencies of an instance the caller sees, both ways: only those whose other end it sees too
- * (R11.8: "A dependency edge is visible only to someone who can see both ends"). Nothing says how many it
- * didn't see. What it shows counts as read (R11.13).
+ * (R11.8: "A dependency edge is visible only to someone who can see both ends") and whose own home it sees
+ * (linkHome), and the classes it is an instance of by links the caller sees. Nothing says how many it didn't
+ * see. What it shows counts as read (R11.13). An edge with no home counts as the root's.
  */
 export async function readDependencies({ instance }, scope, identity = null) {
   const node = await findInstance({ instance }, scope);
   if (!node) throw bad("instance", `no instance ${instance} that you can see`, 404);
   const edges = [
-    ...(await adbQuery(`SELECT @out AS src, @in AS dst, stated_as, stated_by, source, note, stated_at, valid_from, valid_until FROM DEPENDS_ON WHERE @out = ${node.rid}`)),
-    ...(await adbQuery(`SELECT @out AS src, @in AS dst, stated_as, stated_by, source, note, stated_at, valid_from, valid_until FROM DEPENDS_ON WHERE @in = ${node.rid}`)),
+    ...(await adbQuery(`SELECT @out AS src, @in AS dst, stated_as, stated_by, source, note, stated_at, valid_from, valid_until, home FROM DEPENDS_ON WHERE @out = ${node.rid}`)),
+    ...(await adbQuery(`SELECT @out AS src, @in AS dst, stated_as, stated_by, source, note, stated_at, valid_from, valid_until, home FROM DEPENDS_ON WHERE @in = ${node.rid}`)),
   ].map(({ src, dst, ...e }) => ({ ...e, from: String(src), to: String(dst) }));
   const ends = [...new Set(edges.flatMap((e) => [e.from, e.to]))];
   const rows = ends.length ? await adbQuery(`SELECT ${NODE} FROM [${ends.join(",")}]`) : [];
   const byRid = new Map(rows.map((r) => [String(r.rid), r]));
   const sees = (rid) => seesNode(scope, byRid.get(rid));
   const label = (rid) => byRid.get(rid)?.label ?? byRid.get(rid)?.name ?? rid;
-  const shown = edges.filter((e) => dependencyVisible(e, sees));
+  const shown = edges.filter((e) => dependencyVisible(e, sees) && seesHome(scope, e.home ?? positionMap.root));
+  const links = await adbQuery(`SELECT @in AS c, home FROM INSTANCE_OF WHERE @out = ${node.rid}`).catch(() => []);
+  const classes = (await allClasses()).filter((c) => seesHome(scope, c.home) && links.some((l) => String(l.c) === c.rid && seesHome(scope, l.home ?? positionMap.root))).map((c) => c.name);
   if (identity) recordReads(identity, shown.flatMap((e) => [e.from, e.to]).flatMap((rid) => homesOf(byRid.get(rid) ?? {})).filter((h) => seesHome(scope, h)));
   return {
     instance: node.rid,
+    classes,
     depends_on: shown.filter((e) => e.from === node.rid).map((e) => ({ ...e, to_name: label(e.to) })),
     depended_on_by: shown.filter((e) => e.to === node.rid).map((e) => ({ ...e, from_name: label(e.from) })),
   };

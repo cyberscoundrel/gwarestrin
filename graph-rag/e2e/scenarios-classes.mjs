@@ -233,7 +233,8 @@ export default [
       ctx.check(rows.length === 1, "the task entry is marked with its run");
       const w = ctx.workerToken(String(rows[0].rid));
       const wrote = await ctx.tool(w, "upsert_entities", { entities: [{ name: `${P}-part-write`, facets: { identity: "x" } }] });
-      ctx.check(/discovery is read-only/.test(wrote.error ?? ""), `refused at the call: ${JSON.stringify(wrote).slice(0, 200)}`);
+      // graph-rag knows the entry is a part: the write tool isn't even listed to it (classes.js withDiscoveryRole)
+      ctx.check(/discovery is read-only|not found/.test(wrote.error ?? ""), `refused: ${JSON.stringify(wrote).slice(0, 200)}`);
       ctx.check(!(await ctx.entry(`${P}-part-write`)), "nothing written");
       ctx.check(!(await ctx.tool(w, "list_classes", {})).error, "it reads the classes");
     },
@@ -276,10 +277,55 @@ export default [
       ctx.check(row._home === ctx.POS.org, `at the root, where what it read is: ${JSON.stringify(row)}`);
       const seen = await ctx.tool("bob", "about_thing", { name: `${P} Northwind acquisition target` });
       ctx.check(Array.isArray(seen.things) && seen.things.length === 0, `bob doesn't find it: ${JSON.stringify(seen).slice(0, 200)}`);
-      const dep = await ctx.tool(m, "add_dependency", { from: bob, to: alice, stated_as: "record", note: "e2e SECRET: bob is let go once alice takes over" });
-      ctx.check(/isn't written/.test(dep.error ?? ""), `a dependency everyone would see is refused: ${JSON.stringify(dep).slice(0, 200)}`);
+      // its note is text it writes: the link is floored at what it read, the root, though both ends are everyone's
+      const dep = say(await ctx.tool(m, "add_dependency", { from: bob, to: alice, stated_as: "record", note: "e2e SECRET: bob is let go once alice takes over" }), "a dependency with a note");
+      ctx.check(dep.dependency.home === ctx.POS.org, `the link is the root's: ${JSON.stringify(dep).slice(0, 200)}`);
       const w = ctx.workerToken((await floorEntry(ctx, `${P}-site-note`, "the north site")).rid);
       ctx.check(!JSON.stringify(await ctx.tool(w, "read_dependencies", { instance: bob })).includes("let go"), "nothing of it reaches the floor");
+    },
+  },
+  {
+    name: "the orchestrator relating things from a floor record makes floor-level links, though it has read the whole tree (coordinator, from R11.8 and R11.9)",
+    run: async (ctx) => {
+      const maker = master(ctx);
+      const note = await floorEntry(ctx, `${P}-crate-note`, "crate 4 waits on the forklift");
+      say(await ctx.tool(maker, "create_class", { name: `${P} crate`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }] }), "a floor class");
+      const crate = say(await ctx.tool(maker, "relate_instance", { class: `${P} crate`, name: `${P} crate 4`, notes: [note.rid] }), "a floor instance");
+      const fork = say(await ctx.tool(maker, "relate_instance", { class: `${P} crate`, name: `${P} crate 5`, notes: [note.rid] }), "another");
+      say(await ctx.tool(maker, "create_class", { name: `${P} stock`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }] }), "a second floor class");
+      // the orchestrator reads the whole tree, root classes included, then relates from the floor record
+      const m = master(ctx);
+      say(await ctx.tool(m, "list_classes", {}), "read the tree");
+      const rel = say(await ctx.tool(m, "relate_instance", { class: `${P} stock`, instance: crate.instance, source: note.rid }), "relate from a floor record");
+      ctx.check(rel.link_home === ctx.POS.floor, `a floor-level link: ${JSON.stringify(rel)}`);
+      const dep = say(await ctx.tool(m, "add_dependency", { from: crate.instance, to: fork.instance, stated_as: "record", source: note.rid }), "a dependency from a floor record");
+      ctx.check(dep.dependency.home === ctx.POS.floor, "the dependency is the floor's");
+      const w = ctx.workerToken(note.rid);
+      const seen = say(await ctx.tool(w, "read_dependencies", { instance: crate.instance }), "the floor reads it");
+      ctx.check(seen.classes.includes(`${P} stock`), `the floor sees the membership: ${JSON.stringify(seen.classes)}`);
+      ctx.check(seen.depends_on.some((d) => d.to === fork.instance), "and the dependency");
+    },
+  },
+  {
+    name: "a link drawn from admin-only evidence stays hidden from the floor, though the floor sees both ends (coordinator, from R11.8 and R11.9)",
+    run: async (ctx) => {
+      const m = master(ctx);
+      const note = await floorEntry(ctx, `${P}-pallet-jack-note`, "the pallet jack is on the floor");
+      await ctx.save("admin", `${P}-board-note`, "board only: the jack and the hoist are both sold with the building");
+      const board = await ctx.entry(`${P}-board-note`);
+      ctx.check(board?._home === ctx.POS.org, `the admin's note is the root's: ${board?._home}`);
+      say(await ctx.tool(m, "create_class", { name: `${P} jack`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }] }), "a floor class");
+      say(await ctx.tool(m, "create_class", { name: `${P} sold asset`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }] }), "another floor class");
+      const jack = say(await ctx.tool(m, "relate_instance", { class: `${P} jack`, name: `${P} jack 1`, notes: [note.rid] }), "a floor instance");
+      const hoist = say(await ctx.tool(m, "relate_instance", { class: `${P} jack`, name: `${P} hoist 1`, notes: [note.rid] }), "another");
+      const rel = say(await ctx.tool(m, "relate_instance", { class: `${P} sold asset`, instance: jack.instance, source: String(board.rid) }), "relate from the board's note");
+      ctx.check(rel.link_home === ctx.POS.org, `the link is the root's: ${JSON.stringify(rel)}`);
+      const dep = say(await ctx.tool(m, "add_dependency", { from: jack.instance, to: hoist.instance, stated_as: "record", source: String(board.rid) }), "a dependency from the board's note");
+      ctx.check(dep.dependency.home === ctx.POS.org, "the dependency is the root's");
+      const floor = say(await ctx.tool(ctx.workerToken(note.rid), "read_dependencies", { instance: jack.instance }), "the floor reads");
+      ctx.check(!floor.classes.includes(`${P} sold asset`) && floor.depends_on.length === 0, `hidden from the floor: ${JSON.stringify(floor).slice(0, 300)}`);
+      const top = say(await ctx.tool(master(ctx), "read_dependencies", { instance: jack.instance }), "the orchestrator reads");
+      ctx.check(top.classes.includes(`${P} sold asset`) && top.depends_on.length === 1, "seen at the root");
     },
   },
   {
@@ -291,7 +337,8 @@ export default [
       say(await ctx.tool(token, "create_class", { name: `${P} bin`, parents: ["resource"], evidence: [{ kind: "notes", ref: note.rid }] }), "a floor class");
       const r = say(await ctx.tool(token, "start_discovery_worker", { part: "the floor's notes about bins", home: ctx.POS.floor }), "a notes part at the floor");
       const rid = String((await ctx.sql(`SELECT @rid AS rid FROM Entity WHERE _kind = 'task' AND _discovery_run = '${id}' AND _discovery_home = '${ctx.POS.floor}' ORDER BY @rid DESC LIMIT 1`))[0]?.rid);
-      const w = ctx.delegated({ r: "worker", j: r.job, e: rid, d: id });
+      // the token the real system mints for a part's thread: no discovery claim (graph-token.ts); graph-rag knows the part
+      const w = ctx.workerToken(rid, r.job);
       const names = await toolNames(ctx, w);
       ctx.check(names.includes("relate_instance") && !names.includes("search_graph") && !names.includes("about_thing"), `only tools that read as the part: ${names}`);
       const seen = say(await ctx.tool(w, "list_classes", {}), "list").classes.map((c) => c.name);
@@ -299,6 +346,11 @@ export default [
       const a = say(await ctx.tool(w, "relate_instance", { class: `${P} bin`, name: `${P} bin 12` }), "once");
       const b = say(await ctx.tool(w, "relate_instance", { class: `${P} bin`, name: `${P} bin 12` }), "twice");
       ctx.check(a.created && !b.created && a.instance === b.instance, `reused: ${JSON.stringify([a, b])}`);
+      // citing a record it can't see makes nothing it couldn't find again (re-review, non-blocking 1)
+      await ctx.save("admin", `${P}-bin-secret`, "board only: the bins are being replaced");
+      const secret = await ctx.entry(`${P}-bin-secret`);
+      const hidden = await ctx.tool(w, "relate_instance", { class: `${P} bin`, name: `${P} bin 99`, notes: [String(secret.rid)] });
+      ctx.check(/can't see/.test(hidden.error ?? ""), `refused: ${JSON.stringify(hidden).slice(0, 200)}`);
       const nodes = await ctx.sql(`SELECT @rid AS rid, _home FROM Entity WHERE _kind = 'thing' AND _norm = '${P.replace(/-/g, " ")} bin 12'`);
       ctx.check(nodes.length === 1 && nodes[0]._home === ctx.POS.floor, `one node, at the part's home: ${JSON.stringify(nodes)}`);
       const k1 = await ctx.tool(w, "relate_instance", { class: `${P} bin`, key: "e2econn:dbo_Bin:12", name: `${P} bin twelve` });

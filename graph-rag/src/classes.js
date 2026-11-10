@@ -18,6 +18,7 @@ import { effectiveHome, EVERYONE, visibleHomes } from "./positions.js";
 import { connectionHome, noteHome } from "./discovery.js";
 import {
   AI_AGENTS,
+  MIRROR_HOME,
   applyCorrections,
   assertCreatable,
   assertParents,
@@ -144,7 +145,8 @@ async function mirrorInstance({ name, key, home }) {
 /** an instance belongs to exactly these mirrored classes (one-way: what authentik no longer grants goes) */
 async function mirrorEdges(rid, classRids, mirroredRids) {
   const have = (await adbQuery(`SELECT @rid AS e, @in AS c FROM INSTANCE_OF WHERE @out = ${rid}`)).map((r) => ({ e: String(r.e), c: String(r.c) }));
-  for (const c of classRids) if (!have.some((h) => h.c === c)) await adbCommand(`CREATE EDGE INSTANCE_OF FROM ${rid} TO ${c} SET added_by = 'seed', at = :at`, "sql", { at: new Date().toISOString() });
+  // the link is the mirror's, seen where the mirror is (instances.js linkHome)
+  for (const c of classRids) if (!have.some((h) => h.c === c)) await adbCommand(`CREATE EDGE INSTANCE_OF FROM ${rid} TO ${c} SET added_by = 'seed', at = :at, home = :home`, "sql", { at: new Date().toISOString(), home: MIRROR_HOME });
   for (const h of have) if (mirroredRids.has(h.c) && !classRids.includes(h.c)) await adbCommand(`DELETE FROM ${h.e}`, "sql");
 }
 
@@ -543,6 +545,19 @@ export function partScope(home) {
   const at = effectiveHome(positionMap, home);
   const homes = at === EVERYONE ? new Set([EVERYONE]) : visibleHomes(positionMap, [at]);
   return homes === null ? { homes: null, root: true, writeHome: at } : { homes, root: false, writeHome: at };
+}
+
+/**
+ * A worker on a discovery part's entry acts in that run, whatever its token says: graph-rag marked the entry
+ * itself (createPartTask), and only the admin's workspace mints worker tokens. Called on every MCP request
+ * before its tools are listed, so a real part's worker gets its tools though no token carries the claim
+ * (the re-review of c1323a3, non-blocking 3). `partOf` is for tests.
+ */
+export async function withDiscoveryRole(identity, { partOf = discoveryPartOf } = {}) {
+  if (identity?.role?.kind !== "worker" || identity.role.discovery) return identity;
+  const part = await partOf(identity.role.entry);
+  if (part?.run) identity.role = { ...identity.role, discovery: true, run: String(part.run) };
+  return identity;
 }
 
 /** the run an identity acts in: the orchestrator's claim, or its worker entry's mark; null outside a run */
