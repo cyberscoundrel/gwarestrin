@@ -65,8 +65,10 @@ export const TYPES = {
       _stages: "LIST", // commitment classes only, optional (R11)
       _status: "STRING", // active | retired (R11: a retired class never returns on its own)
       _corrections: "STRING", // a class: JSON, the people's corrections kept on it (classes.js, R11)
-      _run: "STRING", // a class or instance a discovery run wrote: the run's id, so a run can be undone whole
+      _run: "STRING", // a class or instance a discovery run wrote: the run's id, so what a run wrote can be found
       _mirror: "STRING", // a class or instance the store mirrors: position:<id> (R6) or an AI agent's key (R1); only the sync changes it
+      _mint: "STRING", // an instance: a token only it has, so the store finds the node it just made (instances.js)
+      _discovery_home: "STRING", // a discovery part's task entry: the home its worker reads as (R11.6)
       _discovery_run: "STRING", // a task entry that is a part of a discovery run (its worker is held to the discovery tools)
       _on_record: "BOOLEAN", // a document: a person put it on record
       _recorded_by: "STRING",
@@ -74,9 +76,9 @@ export const TYPES = {
       _record_position: "STRING", // where its sections start (R11)
       _record_reason: "STRING",
     },
-    // names are unique per home (classes.js NAMES_UNIQUE), checked in code: a unique index would refuse a
-    // class at one home because of a same-named class at a home the writer can't see, and say so
-    indexes: [{ properties: ["_class_key"], unique: false }],
+    // a class name is unique in the organization (model/classes.js NAMES_UNIQUE): only the orchestrator, which
+    // sees every home, makes classes; the index also keeps concurrent seeding to one copy of each root
+    indexes: [{ properties: ["_class_key"], unique: true }],
   },
   SUBCLASS_OF: {
     kind: "edge",
