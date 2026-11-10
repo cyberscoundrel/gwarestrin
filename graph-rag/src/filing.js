@@ -167,6 +167,9 @@ export async function liveEnv(over = {}) {
     classes: over.classes ?? { get: (key) => classByKey(key, db) },
     readRow: over.readRow ?? ((key) => readSourceRow(key, { db, fetch: over.fetch })),
     findRows: over.findRows ?? ((...a) => findSourceRows(...a, { db, fetch: over.fetch })),
+    classesForTable: over.classesForTable ?? (async (table) => (await db.adbQuery(`SELECT _class_key AS key, _home AS home FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _record_table = :t AND (_status IS NULL OR _status <> 'retired')`, { t: table }).catch(() => [])).map((r) => ({ key: r.key, home: r.home ?? null }))),
+    // the home of the connection that reads a system; undefined until the sources stream's declarations give it (F-B1)
+    connectionHome: over.connectionHome ?? (() => undefined),
     enter: over.enter ?? ((args, opts = {}) => enterData(args, { db, fetch: over.fetch, positions: over.positions ?? scope.positionMap, people: over.people, policy: over.policy, ...opts })),
     signal: over.signal ?? (async (kind, payload) => (await import("./master-tools.js")).emitSignal(kind, payload)),
     resume: over.resume ?? (async (job, message) => (await import("./worker-pool.js")).resumeThread(job, message)),
@@ -203,6 +206,29 @@ function ownSection(ctx, section) {
 
 /** can this worker's audience see something homed at `home` (R7, R11: a worker sees only its audience) */
 const audienceSees = (env, ctx, home) => !env.positions || canSee(env.positions, [ctx.home], home ?? env.positions.root);
+
+/**
+ * May this worker read a table of a source (R7, R11.6, R11.9)? Its audience must see the home of the connection
+ * that reads it, and the home of every class whose table it is (a class from a table gets the connection's home,
+ * so a class above the audience marks the table as above it). A table no class points at, with no connection home
+ * to go by, counts as the root's. Refused before anything is read, so no row and no value reaches the worker.
+ * NEEDS A RULING (F22): a table some class points at but no visible one, or one with no class at all, is refused.
+ */
+async function assertTableReadable(env, ctx, table) {
+  const t = String(table ?? "").trim();
+  const [system] = t.split(":");
+  const conn = await env.connectionHome(system);
+  if (conn !== undefined && !audienceSees(env, ctx, conn)) throw refuse(`${t} is read through a connection above your audience: hold the piece, or request it of the orchestrator`);
+  const classes = await env.classesForTable(t);
+  if (!classes.length && conn === undefined) throw refuse(`no class you can see records ${t}: request one (graph-rag_request, kind "class")`);
+  if (classes.some((c) => !audienceSees(env, ctx, c.home))) throw refuse(`${t} is above your audience: hold the piece, or request it of the orchestrator`);
+}
+
+/** a worker's read of a row: only from a table its audience may read */
+async function workerRead(env, ctx, key) {
+  await assertTableReadable(env, ctx, tableOf(key));
+  return env.readRow(key);
+}
 
 /** a class this worker may file under: it exists, is in use, and its audience can see it. No worker makes or changes a class (R5, R7) */
 async function visibleClass(env, ctx, name) {
@@ -280,9 +306,11 @@ export async function fileToSource(args, identity, env) {
   const fields = args.fields && typeof args.fields === "object" && !Array.isArray(args.fields) ? args.fields : null;
   if (!fields || !Object.keys(fields).length) throw refuse("fields: the columns to write, with their values");
   const refiled = await refiledFrom(env, ctx, args.refiles);
+  // the row must be in the class's own table: a key elsewhere would read a table the class doesn't vouch for (F-B1)
+  if (!cls.record_table || tableOf(key.key).toLowerCase() !== String(cls.record_table).toLowerCase()) throw refuse(`${key.key} isn't a row of ${cls.key}'s table (${cls.record_table ?? "it has none"}): file it under the class whose table holds it`);
   const target = { table: tableOf(key.key), key: key.key, fields };
   const base = { section, piece, cls: cls.key, target, refiled, account };
-  const read = await env.readRow(key.key);
+  const read = await workerRead(env, ctx, key.key);
   if (read.status === "unreachable") {
     return { outcome: HELD, entry: (await holdEntry(env, ctx, { ...base, question: args.question || `${key.system} couldn't be reached to file this: "${piece}". It waits for you to confirm it once the source is back.`, reason: read.error })).id };
   }
@@ -291,6 +319,8 @@ export async function fileToSource(args, identity, env) {
   }
   const differing = disagreeingColumns(read.row, fields, sameValue);
   if (differing.length) {
+    // the orchestrator's "update" answer to a conflict request: reachable only under the conservative rule, which raises
+    // conflict requests; under R12 (in force) a disagreeing state is Held and asks the recorder, and no request is raised
     const confirmed = await answeredRequest(env, ctx, args.confirmed_update, ["update"]);
     const d = confirmed ? { file: true } : onDisagreement({ says_change: args.says_change === true }, env.rule);
     if (!d.file) {
@@ -382,6 +412,7 @@ export async function requestOrchestrator(args, identity, env) {
   if (!ctx) throw refuse("this thread has no record to file");
   const section = args.section ? ownSection(ctx, args.section) : null;
   const open = (await env.store.requests({ worker: ctx.job, status: "open" })).length;
+  // NEEDS A RULING (F20): R10 keeps requests "to a minimum" and names no number; three open at once is the cap
   if (open >= 3) throw refuse("you already have 3 open requests: file the other pieces, give your account, and end your turn");
   const r = await openRequest(env, ctx, { kind: args.kind, section, question: args.question, suggestion: args.suggestion ?? null });
   return { request: r.id, note: "Sent to the orchestrator. Don't file that piece yourself: carry on with the others, and you're resumed with the answer." };
@@ -425,14 +456,22 @@ async function relate(env, ctx, section, rid, role = "about") {
 }
 
 /** the instance holding a key, or with this name under this class, when one exists */
-async function existingInstance(env, { key, label, cls }) {
+/**
+ * The instance holding a key, or with this name under this class, when one exists that the audience sees (R11.8).
+ * One holding the key that the audience can't see is refused, not reused: relating to it would bring its label
+ * down to this home (review, non-blocking 1). A same-named one it can't see is passed over.
+ */
+async function existingInstance(env, ctx, { key, label, cls }) {
+  const seen = (r) => (Array.isArray(r?._homes) ? r._homes : []).some((h) => h === EVERYONE || audienceSees(env, ctx, h));
   if (key) {
     const hit = (await env.db.adbQuery(`SELECT @rid AS rid, label, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => []))[0];
+    if (hit && !seen(hit)) throw refuse(`${key} is held by an instance your audience can't see: hold the piece, or request it of the orchestrator`);
     if (hit) return hit;
   }
   if (label && cls?.rid) {
-    const hits = await env.db.adbQuery(`SELECT @rid AS rid, label, _homes FROM (SELECT expand(in('INSTANCE_OF')) FROM ${cls.rid}) WHERE _norm = :n LIMIT 1`, { n: normName(label) }).catch(() => []);
-    if (hits[0]) return hits[0];
+    const hits = await env.db.adbQuery(`SELECT @rid AS rid, label, _homes FROM (SELECT expand(in('INSTANCE_OF')) FROM ${cls.rid}) WHERE _norm = :n LIMIT 5`, { n: normName(label) }).catch(() => []);
+    const visible = hits.find(seen);
+    if (visible) return visible;
   }
   return null;
 }
@@ -466,10 +505,10 @@ export async function createInstance(args, identity, env) {
   if (args.key && !key) throw refuse(`key: not system:table:row: ${args.key}`);
   if (key && cls.record_table && tableOf(key) === cls.record_table && !cls.rows_are_nodes) throw refuse(`${cls.key}'s rows stay in the source (R3): store the key on the section (graph-rag_section_key), or state a dependency if the graph must say something the source can't hold`);
   if (key) {
-    const read = await env.readRow(key);
+    const read = await workerRead(env, ctx, key);
     if (read.status !== "ok") throw refuse(read.status === "unreachable" ? `${key}: the source can't be reached to check the row: hold the piece instead` : `${key}: the source has no such row`);
   }
-  const found = await existingInstance(env, { key, label, cls });
+  const found = await existingInstance(env, ctx, { key, label, cls });
   const rid = found ? String(found.rid) : await mintInstance(env, ctx, { label, key, cls, by: identity.user });
   if (found) {
     const linked = await env.db.adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('INSTANCE_OF')) FROM ${rid})`).catch(() => []);
@@ -496,7 +535,7 @@ export async function sectionKey(args, identity, env) {
   const section = ownSection(ctx, args.section);
   const key = parseKey(args.key)?.key;
   if (!key) throw refuse(`key: not system:table:row: ${args.key ?? "(none)"}`);
-  const read = await env.readRow(key);
+  const read = await workerRead(env, ctx, key);
   if (read.status !== "ok") throw refuse(read.status === "unreachable" ? `${key}: the source can't be reached to check the row` : `${key}: the source has no such row`);
   const row = (await env.db.adbQuery(`SELECT _keys FROM ${section}`))[0];
   const keys = Array.isArray(row?._keys) ? row._keys : [];
@@ -509,9 +548,11 @@ async function dependencyEnd(env, ctx, ref, by) {
   if (RID_RE.test(String(ref ?? "").trim())) return (await visibleInstance(env, ctx, ref)).rid;
   const key = parseKey(ref)?.key;
   if (!key) throw refuse(`${ref}: an instance id, or a row's key`);
+  // the row's table must be one the audience may read before anything about it is looked up (F-B1)
+  await assertTableReadable(env, ctx, tableOf(key));
   const held = (await env.db.adbQuery(`SELECT @rid AS rid, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => []))[0];
   if (held) return (await visibleInstance(env, ctx, held.rid)).rid;
-  const read = await env.readRow(key);
+  const read = await workerRead(env, ctx, key);
   if (read.status !== "ok") throw refuse(read.status === "unreachable" ? `${key}: the source can't be reached to check the row` : `${key}: the source has no such row`);
   const table = tableOf(key);
   const cls = (await env.db.adbQuery(`SELECT _class_key AS key FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _record_table = :t AND _status <> 'retired' LIMIT 1`, { t: table }).catch(() => []))[0];
@@ -552,6 +593,7 @@ export async function resolveName(args, identity, env) {
   if (args.table && args.column) {
     const t = String(args.table).split(":");
     if (t.length !== 2) throw refuse("table: system:table");
+    await assertTableReadable(env, ctx, String(args.table).trim());
     source = await env.findRows(t[0], t[1], String(args.column), String(args.name));
   }
   return { instances, ...(source ? { source } : {}), note: source?.status === "unreachable" ? "The source can't be reached: a piece that needs it is Held." : undefined };

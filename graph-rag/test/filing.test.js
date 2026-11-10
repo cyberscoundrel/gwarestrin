@@ -25,7 +25,11 @@ const classes = new Map(
   [
     ...read("classes.json").classes,
     { name: "deliveries", parents: ["commitment"], home: "floor", record_table: "mssql:dbo_Job", rows_are_nodes: false },
-    { name: "people", parents: ["agent"], home: "floor", record_table: "mssql:dbo_Employee", rows_are_nodes: true },
+    { name: "people", parents: ["agent"], home: "floor", record_table: "mssql:dbo_Crew", rows_are_nodes: true },
+    // seen on the floor, its table the jobs table, and no entry in the map
+    { name: "tools", parents: ["resource"], home: "floor", record_table: "mssql:dbo_Job", rows_are_nodes: false },
+    // the reviewer's probe (F-B1): pay sits in an org-level table
+    { name: "payroll", parents: ["agent"], home: "org", record_table: "mssql:dbo_Pay", rows_are_nodes: false },
   ].map((c) => {
     const n = normalizeClass(c, { positions: map });
     return [n.key, { ...n, rid: `#40:${n.key.length}` }];
@@ -34,7 +38,7 @@ const classes = new Map(
 
 /** a fake DAB over fetch: the read-only endpoint and the write-capable one, or none that answers */
 function fakeDab(rows, { down = false } = {}) {
-  const tables = { dbo_Job: { primaryKey: ["Job"], rows }, dbo_Employee: { primaryKey: ["Emp"], rows: [{ Emp: "E1", Name: "Diep" }, { Emp: "E2", Name: "Sam" }] } };
+  const tables = { dbo_Job: { primaryKey: ["Job"], rows }, dbo_Crew: { primaryKey: ["Emp"], rows: [{ Emp: "E1", Name: "Diep" }, { Emp: "E2", Name: "Sam" }] } };
   const calls = [];
   const fetch = async (url, init) => {
     if (down) throw new Error("fetch failed: ECONNREFUSED");
@@ -131,13 +135,16 @@ function setup({ rows = [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472
   const signals = [];
   const resumed = [];
   let n = 0;
+  const h = { found: [] };
   const env = {
     db,
     store,
     positions: map,
     classes: { get: async (k) => classes.get(String(k).toLowerCase()) ?? null },
     readRow: (key) => readSourceRow(key, { db, fetch: dab.fetch }),
-    findRows: async () => ({ status: "ok", rows: [] }),
+    findRows: async (...a) => (h.found.push(a), { status: "ok", rows: [{ Name: "Bob", Pay: 41 }] }),
+    classesForTable: async (table) => [...classes.values()].filter((c) => c.record_table === table).map((c) => ({ key: c.key, home: c.home })),
+    connectionHome: () => undefined,
     // the real decision: data-entry.js over the class map, the recorder as the token map holds them, and the fake DAB
     entered: [],
     enter: (args, opts = {}) => (env.entered.push(args), enterData(args, { ...opts, db, fetch: dab.fetch, positions: map, policy, people: (name) => people[name], queue: async (e) => (queued.push(e), { queued: true, pendingId: `pend-${queued.length}` }) })),
@@ -146,7 +153,7 @@ function setup({ rows = [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472
     now: () => `2026-11-10T00:00:${String(n++).padStart(2, "0")}.000Z`,
     rule,
   };
-  return { env, dab, db, store, queued, signals, resumed };
+  return { env, dab, db, store, queued, signals, resumed, found: h.found };
 }
 
 const piece = (over = {}) => ({ section: "#71:3", piece: "job 4471 is complete", said: "writing Status complete to job 4471", class: "jobs", key: "mssql:dbo_Job:4471", fields: { Status: "complete" }, ...over });
@@ -174,7 +181,7 @@ test("Proposed: the recorder lacks the authority, the class is missing from the 
   assert.equal(h.queued[0].job, undefined, "a Proposed piece is an outcome, not a wait: the proposal names no thread");
   // machines: no map entry (R11: a class missing from the map means Proposed)
   h = setup();
-  r = await fileToSource(piece({ class: "machines" }), identity, h.env);
+  r = await fileToSource(piece({ class: "tools" }), identity, h.env);
   assert.equal(r.outcome, "proposed");
   assert.match(h.store.entries_[0].reason, /names no position/);
   // the source has no write endpoint (R2)
@@ -351,8 +358,8 @@ test("an approved Proposed piece becomes Filed in the log, pointing back; a reje
 test("an instance: a lasting individual under a visible class; a class whose rows stay in the source refuses (R3)", async () => {
   const h = setup();
   await assert.rejects(createInstance({ section: "#71:3", name: "job 4471", class: "jobs", key: "mssql:dbo_Job:4471" }, identity, h.env), /rows stay in the source/);
-  await assert.rejects(createInstance({ section: "#71:3", name: "Nobody", class: "people", key: "mssql:dbo_Employee:E9" }, identity, h.env), /no such row/);
-  const r = await createInstance({ section: "#71:3", name: "Diep", class: "people", key: "mssql:dbo_Employee:E1" }, identity, h.env);
+  await assert.rejects(createInstance({ section: "#71:3", name: "Nobody", class: "people", key: "mssql:dbo_Crew:E9" }, identity, h.env), /no such row/);
+  const r = await createInstance({ section: "#71:3", name: "Diep", class: "people", key: "mssql:dbo_Crew:E1" }, identity, h.env);
   assert.equal(r.created, true);
   assert.ok(h.db.statements.some((s) => s.startsWith("CREATE VERTEX Entity") && s.includes("_kind = 'thing'")));
   assert.ok(h.db.statements.some((s) => s.startsWith("CREATE EDGE INSTANCE_OF")));
@@ -361,7 +368,7 @@ test("an instance: a lasting individual under a visible class; a class whose row
 
 /** ---- briefs, claim gates and the orchestrator's split by home (worker-pool.js, orchestrator.js) ---- */
 
-const { composeFilingBrief, filingJob } = await import("../src/worker-pool.js");
+const { composeFilingBrief, filingJob, logBrief } = await import("../src/worker-pool.js");
 const { startRecordWorkers, startUnstarted } = await import("../src/orchestrator.js");
 const { taskBrief } = await import("../src/pool.js");
 
@@ -485,4 +492,45 @@ test("the sources adapter's held answer (a write that didn't land) is a Held ent
   assert.equal(r.outcome, "held");
   assert.match(h.store.entries_[0].reason, /^moved: the row changed since it was read/);
   assert.equal(h.db.questions[0].of, "bob");
+});
+
+// the reviewer's probe on b0e8ca7 (F-B1): a floor worker reading the pay row of an org-level table
+test("F-B1: a worker reads no table above its audience: resolve_name, file_to_source and a dependency's row are refused before anything is read (R7, R11.6, R11.9)", async () => {
+  const { resolveName, stateDependency } = await import("../src/filing.js");
+  const h = setup();
+  await assert.rejects(resolveName({ name: "Bob", table: "mssql:dbo_Pay", column: "Name" }, identity, h.env), /mssql:dbo_Pay is above your audience/);
+  assert.deepEqual(h.found, [], "the source was never asked");
+  await assert.rejects(resolveName({ name: "Bob", table: "mssql:dbo_Secret", column: "Name" }, identity, h.env), /no class you can see records mssql:dbo_Secret/, "a table no class vouches for counts as the root's");
+  // a key outside its class's own table is refused, so a visible class can't vouch for another table
+  await assert.rejects(fileToSource(piece({ key: "mssql:dbo_Pay:E1", fields: { Pay: 50 } }), identity, h.env), /isn't a row of jobs's table/);
+  await assert.rejects(stateDependency({ section: "#71:3", from: "mssql:dbo_Pay:E1", to: "#80:1", stated_as: "record" }, identity, h.env), /above your audience/);
+  assert.equal(h.dab.calls.filter((c) => c.args?.entity === "dbo_Pay").length, 0, "no pay row was read");
+  assert.equal(h.store.entries_.length, 0);
+  // a connection whose home is above the audience refuses even a table a floor class vouches for (once sources declare homes)
+  h.env.connectionHome = (system) => (system === "mssql" ? "ops" : undefined);
+  await assert.rejects(resolveName({ name: "Bob", table: "mssql:dbo_Job", column: "Name" }, identity, h.env), /connection above your audience/);
+  h.env.connectionHome = () => "floor";
+  assert.equal((await resolveName({ name: "Bob", table: "mssql:dbo_Job", column: "Name" }, identity, h.env)).source.status, "ok");
+});
+
+test("an instance holding the key that the audience can't see is refused, not reused (review, non-blocking 1)", async () => {
+  const h = setup();
+  const q = h.db.adbQuery.bind(h.db);
+  h.db.adbQuery = async (sql, params) => (sql.includes("_keys CONTAINS") ? [{ rid: "#80:9", label: "the payroll", _homes: ["org"] }] : q(sql, params));
+  await assert.rejects(createInstance({ section: "#71:3", name: "Diep", class: "people", key: "mssql:dbo_Crew:E1" }, identity, h.env), /held by an instance your audience can't see/);
+  assert.ok(!h.db.statements.some((st) => st.startsWith("CREATE EDGE ABOUT")), "the section isn't related to it");
+});
+
+test("every brief is logged as sent (BriefLog, for the leak gate), and one that can't be logged is refused", async () => {
+  const composed = await composeFilingBrief({ record: "doc-1", home: "floor", sections: ["#71:3"] }, { db: graphDb({ docHome: "ops" }), positions: map, sources: {}, entries: async () => [] });
+  const seen = [];
+  const row = await logBrief({ record: "doc-1", worker: "job-1", composed }, { adbCommand: async (sql, _l, params) => (seen.push([sql, params]), [{ count: 1 }]) });
+  assert.match(seen[0][0], /^INSERT INTO BriefLog SET id = :id, record = :record, audience = :audience, worker = :worker, brief = :brief, dropped = :dropped, at = :at$/);
+  assert.deepEqual([row.record, row.audience, row.worker], ["doc-1", "floor", "job-1"]);
+  const logged = JSON.parse(row.brief);
+  assert.deepEqual(Object.keys(logged).sort(), ["audience", "classes", "dependencies", "instances", "record", "refile", "sections", "sources"]);
+  assert.equal(logged.sections[0].rid, "#71:3");
+  assert.doesNotMatch(row.brief, /ZEBRA/, "the log holds what the worker got, nothing above it");
+  assert.deepEqual(JSON.parse(row.dropped), composed.dropped);
+  await assert.rejects(logBrief({ record: "doc-1", worker: "job-1", composed }, { adbCommand: async () => { throw new Error("no such type BriefLog"); } }), /couldn't be logged, so it isn't sent/);
 });

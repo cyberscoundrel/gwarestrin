@@ -185,6 +185,7 @@ export function onDisagreement({ says_change = false } = {}, rule = DISAGREEMENT
 /**
  * The columns of `fields` the row already holds a different, non-empty value in (`same`: a value comparison,
  * data-entry.js sameValue). An empty column taking a value is no disagreement: nothing is overwritten.
+ * NEEDS A RULING (F21): R2's "never overwrites" read as "never replaces a value"; an empty column is filled without asking.
  */
 export function disagreeingColumns(row, fields, same = (a, b) => a === b) {
   if (!row || !fields) return [];

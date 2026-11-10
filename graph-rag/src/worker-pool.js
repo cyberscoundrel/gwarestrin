@@ -195,6 +195,8 @@ export async function claimThreads(limit, groups) {
       try {
         composed = await composeFilingBrief(setup.payload);
         homes = checkBriefFloor(positionMap, composed.brief.sections);
+        // every brief is logged before it goes out (the integrator's leak gate scans BriefLog); one that can't be logged isn't sent
+        await logBrief({ record: setup.payload.record, worker: job.id, composed });
       } catch (e) {
         // the brief would show the worker something its sections' people can't see: refused here, never sent
         await adbCommand("UPDATE Job SET status = 'failed', summary = :s, error = :s, updated_at = :now WHERE id = :id", "sql", { s: `brief refused: ${String(e.message).slice(0, 600)}`, now: now.toISOString(), id: job.id });
@@ -298,6 +300,30 @@ export async function composeFilingBrief(payload, { db = { adbQuery }, positions
   const toRefile = [];
   for (const id of Array.isArray(payload.refile) ? payload.refile : []) for (const e of await byId(id)) if (e.record === payload.record && e.home === home) toRefile.push({ entry: e.id, outcome: e.outcome, piece: e.piece, section: e.section });
   return { brief, dropped, dependencies, refile: toRefile };
+}
+
+/**
+ * One BriefLog row per brief sent (model/schema.js BriefLog, the integrator's: a document, outside the graph):
+ * { id, record, audience, worker (the job), brief (JSON: the scoped brief as sent, with the dependencies and the
+ * pieces to re-file that go out with it), dropped (JSON: what scopeBrief left out, counted), at }. Throws when the
+ * row can't be written: the caller refuses the brief.
+ */
+export async function logBrief({ record, worker: job, composed }, db = { adbCommand }) {
+  const row = {
+    id: randomUUID(),
+    record: String(record),
+    audience: String(composed.brief.audience),
+    worker: String(job),
+    brief: JSON.stringify({ ...composed.brief, dependencies: composed.dependencies ?? [], refile: composed.refile ?? [] }),
+    dropped: JSON.stringify(composed.dropped ?? {}),
+    at: new Date().toISOString(),
+  };
+  try {
+    await db.adbCommand("INSERT INTO BriefLog SET id = :id, record = :record, audience = :audience, worker = :worker, brief = :brief, dropped = :dropped, at = :at", "sql", row);
+  } catch (e) {
+    throw new Error(`the brief couldn't be logged, so it isn't sent: ${String(e?.message ?? e).slice(0, 200)}`);
+  }
+  return row;
 }
 
 /** a thread's label for the rail: how many sections and where, never a title or text */

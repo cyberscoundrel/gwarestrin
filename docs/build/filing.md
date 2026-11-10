@@ -344,3 +344,40 @@ F1 to F17 stand as phase 0 set them, except where noted. Each is marked `NEEDS A
    record (`worker-pool.js filingJob`: R4, R11.12), so the claim returns none and the scenario fails. The fix is
    in the scenario, not the gate: make its jobs' `rid` a section of a document with `_on_record = true` (as
    `scenarios-filing.mjs record()` does). This is the one red check on this branch.
+
+## The review of b0e8ca7
+
+- **F-B1 (blocking), source reads ignored the audience.** Every source read a worker makes now goes through
+  `filing.js assertTableReadable` before anything is read: `resolve_name` with a table, `file_to_source`,
+  `create_instance` and `section_key` by key, and a dependency's row. A table is readable when the audience sees
+  the home of every class pointing at it and, once the sources stream's declarations give it, the home of the
+  connection that reads it (`env.connectionHome`, undefined today). A table no class points at, with no connection
+  home, counts as the root's (NEEDS A RULING F22). `file_to_source` refuses a key outside its class's own table.
+  The reviewer's probe is `test/filing.test.js` ("F-B1: a worker reads no table above its audience"), and it
+  fails with the gate turned off. **Still to do:** the connection-home half, when the sources branch is merged:
+  `connectionHome(system)` from its declaration's `read.home`, null meaning the root.
+- **Non-blocking 1, a hidden instance reused.** An instance holding the key that the audience can't see is
+  refused, not reused, and a same-named one it can't see is passed over. This stands until filing's tools call the
+  classes stream's `relateInstance` and `addDependency` (the seam below).
+- **Non-blocking 2, the orchestrator's `update` answer.** It stays dormant under R12, which raises no conflict
+  request. This is now said in the code.
+- **Non-blocking 3 and 4, unmarked choices.** Now marked: the cap of three open requests (F20), and an empty
+  column filled without asking (F21).
+- **The seam with the integrator: BriefLog.** `worker-pool.js logBrief` writes one row per brief in
+  `claimThreads`, after the brief is composed and checked and before it goes out. Fields: `id`, `record`,
+  `audience`, `worker` (the job), `brief`, `dropped`, `at`. `brief` is the scoped brief as sent, plus the
+  dependencies and the pieces to re-file that go out with it. A row that can't be written refuses the brief, as
+  an `assertBrief` failure does. The type is the integrator's (`model/schema.js` on its branch), so this branch
+  declares none: on this branch alone, before that merge, every brief would be refused for want of the type.
+- **The seam with classes.** The classes stream's `relateInstance`, `addDependency` and `findInstance` become the
+  one implementation, and filing's `create_instance` and `state_dependency` call them. Proposed rule, sent to
+  classes: a new node's home is the strictest of its evidence home (a key's connection, else the notes, which for
+  a worker is its own section, else the root) and the writer's floor (a worker's audience home; none for
+  discovery or the orchestrator). Relating the section then adds the worker's home (R11.8). **Still to do:** this
+  waits on the classes branch being on this one.
+
+| Id | The choice built | Where |
+|---|---|---|
+| F20 (new) | At most three open requests per worker | `filing.js requestOrchestrator` |
+| F21 (new) | An empty source column taking a value is no disagreement, so it is filled | `model/filing.js disagreeingColumns` |
+| F22 (new) | A table no class points at, with no connection home yet, is refused to workers | `filing.js assertTableReadable` |
