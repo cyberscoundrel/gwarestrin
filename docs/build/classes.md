@@ -209,3 +209,51 @@ what the code enforces, never on the names the fake chose:
 
 - `routes.js` `/api/worker/survey` passes `audience` as `surveyBrief`'s third argument,
   which `surveyBrief` ignores. This goes away when the brief is rewritten.
+
+## Phase 1: as built (on the contract at ba583bc)
+
+`docs/BUILD.md` assigns this stream `src/discovery.js`, `src/instances.js` and `src/model/classes.js`, and
+reserves `src/classes.js`, `src/routes-classes.js`, `test/classes.test.js` and `e2e/scenarios-classes.mjs` for
+it.
+
+| Ruling | Built | Where |
+|---|---|---|
+| R1, R11.14 | The four roots, plus decision and action under event, are seeded on an empty graph | `model/classes.js seedClasses`, `classes.js allClasses` |
+| R1 | The instance edge (INSTANCE_OF) and dependency edges (DEPENDS_ON) with their times; a timeline from times plus dependency, as a pure function | `instances.js`, `model/classes.js timeline` |
+| R11.8 | A dependency edge is returned only when the reader sees both ends | `instances.js readDependencies` |
+| R11.9 | A class's home is computed from its evidence and is never an argument | `model/classes.js homeFromEvidence`, `classes.js createClass` |
+| R9 | Several parents; the strictest home wins down the tree, and homes are settled again after every change | `model/classes.js treeHomes`, `classes.js settleHomes` |
+| R3 | `rows_are_nodes` on every class. A transactional row gets a node only for a dependency or a stated reason | `model/classes.js mayMakeNode`, `instances.js relateInstance` |
+| R5, R7 | Only the orchestrator creates or changes classes; a worker relates instances; a chat agent gets no class tools | `routes-classes.js registerClassTools` |
+| R11.10 | Corrections are kept on the class and pin what they set; reruns can't bring back a retired class or a renamed one's old name; an instance a person took out of a class isn't related again | `model/classes.js` corrections, `classes.js correctClass`, `POST /api/classes/:name/corrections` |
+| R11.3, R8 | A discovery identity gets only read tools, the class tree and instances. Other tools are never listed for it, and are refused at the call for a worker on a discovery part. Sources stay read-only through the existing `readToolsFrom` | `discovery.js gateDiscoveryTools`, `DISCOVERY_TOOLS` |
+| R8 | The history: old notes from a file, each served only where its home allows | `discovery.js readHistory`, `HISTORY_PATH` |
+| R9 | Each run records the tables it examined; a rerun lists only new ones | `classes.js recordExamined`, `discovery.js newTables`, DiscoveryRun |
+| R5 | The one-page tree report | `model/classes.js treeReport`, `GET /api/classes/report` |
+
+**Wiring in shared files**, in one commit (`Wiring for the integrator…`):
+- `server.js`: the discovery gate, and `registerClassTools`.
+- `routes.js`: `registerClassRoutes`.
+- `delegation.js`: the `d` claim, with a test in `delegation.test.js`.
+- `model/schema.js`: `Entity._corrections`, `_run` and `_discovery_run`, plus the `DiscoveryRun` document type.
+
+**Configuration:**
+- `CONNECTION_HOMES` is JSON, `{ "<system>": "<position or everyone>" }`. A connection without an entry
+  counts as the root.
+- `HISTORY_PATH` points at a JSON list of `{ id, title?, text, home, at? }`.
+
+**Left for other owners:**
+- Running the orchestrator on a discovery run belongs to filing, in `graph-pool.ts` and `instructions/master.ts`.
+  It means:
+  - minting its token with `d: <run>`;
+  - starting it with the brief that `POST /api/classes/discovery` returns;
+  - giving the connections' digests in that request.
+- The worker's `request_class` tool belongs to filing. It is already on the discovery allow-list.
+- Re-homing sections when a class-map entry tightens belongs to record.
+
+**Not built:**
+- The AI agents as instances under agent (R1; plan item 10).
+- A stored time on an instance, so the timeline is a pure function only.
+- The orchestrator's channel for a person's corrections (plan item 12).
+- The web panel (out of scope for the first run).
+- `connection-digest.ts` is unchanged.
