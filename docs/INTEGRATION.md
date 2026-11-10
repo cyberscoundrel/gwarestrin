@@ -16,11 +16,25 @@ evaluation plan is [build/integrate.md](build/integrate.md).
 | # | Branch (tip) | Reviewed | Merge | Conflicts, and what each side kept | Checks |
 |---|---|---|---|---|---|
 | 0 | contract (ba583bc) | coordinator | fast-forward base | none | graph-rag 172/172, e2e 25/25 |
+| 1 | integrator (bac03f1) and sources (`claude/build-sources-000b53`, 15ce278) | reviewer passed both | fb77f00 (`build-base` fast-forwarded ba583bc..fb77f00) | None: the merge was clean, so `git show --cc` shows no resolution. Each side's contribution in the merge has the same patch-id as that branch's own diff from ba583bc, so nothing either side wrote was dropped. Sources needs no wiring call (a library the filing stream calls) | graph-rag 224/224, e2e 28/28 on fb77f00 itself; server tsc clean, vitest 180/180; web svelte-check 0 errors, build ok, vitest 5/5 (no package file differs from what was checked) |
 
-No stream branch has landed yet. Note for the landing: filing merged sources at 15ce278 (af823d0), which is one commit past the sources tip named for landing (c1eaf39: "the review of c1eaf39, both blocking findings fixed"). Sources should land at the reviewed tip that filing carries, or filing brings unreviewed sources commits with it. The order, each once it passes review:
-classes (4bd1154), sources (c1eaf39), record (b076783), then filing at its
-tip then, all onto this branch. The synthetic test database runs as compose
+Sources landed at 15ce278, the reviewed tip that filing also carries. Next, each after its re-review: classes,
+record, then filing (which already carries sources and classes). The synthetic test database runs as compose
 project `gwsynth`.
+
+**After landing 1, on this branch, not yet on `build-base` (for the next review):** c376a76 wires the
+test-source guard. `source-dump.mjs` refuses to read until the connection names the test server and database
+(`dbo_GwConnectionIdentity`); `make-records.mjs seed` drops `--unguarded`, since graph-rag's `checkGuard` runs
+before every source write; the fake source serves the identity view and `e2e.sh` declares the guard names,
+writable tables and read home. All checks pass with it.
+
+**The labels against the synthetic database (gwsynth), before phase 3.** The labels were written against S0, and
+`test-sql/data.mjs` differs: Brightline, HILL and a work center "CNC 1" exist; Job takes updates but no creates;
+Sales_Order, Purchase_Order, Maintenance, Equipment, Job_Operation and Time_Punch exist; there is no Hourly_Rate or
+Qty_Shipped. Run against it, the label check names five problems in ux-aa07, ux-aj02, ux-ak03 and ux-al04, and
+layer 1 (where a piece goes) changes too: a bearing or saw-blade order is a Purchase_Order, coolant and tag-outs
+are Maintenance, a new customer order is a Sales_Order. The labels need redoing against gwsynth's declaration
+before the first real run.
 
 **Prepared for the landing.** The built-in capacity scenario in `run.mjs`
 queued its threads on a plain saved note; on the filing branch a worker takes
