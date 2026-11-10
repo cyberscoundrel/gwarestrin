@@ -245,7 +245,8 @@ await scenario("a worker cannot read above its audience by any tool it is offere
   // every tool a worker is offered, sorted: reads, and writes that find their target by name (both checked here),
   // and writes that find nothing. A new tool fails this until it's sorted and, if it reads or finds, checked.
   const offered = await listTools(w);
-  const READS = ["search_graph", "about_thing", "read_document", "schema_graph"];
+  // list_classes and read_dependencies: the classes stream's (routes-classes.js), read through this audience
+  const READS = ["search_graph", "about_thing", "read_document", "schema_graph", "list_classes", "read_dependencies"];
   const FINDS = ["set_home"];
   // execute_graph: a worker's raw command is always a proposal for an admin (write.js), never run for it;
   // upsert_entities: refused for a worker (it writes no entries); raise_question: asks, reads nothing back
@@ -271,6 +272,19 @@ await scenario("a worker cannot read above its audience by any tool it is offere
     }
   }
   check(!leaked(await tool(w, "schema_graph", {})), "schema_graph names no entry");
+  // a class homed at the top, and a dependency whose far end only the top sees
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = 'vellichor raise class', _kind = 'class', _class_key = 'vellichor_raise_class', _class_name = 'Vellichor raise class', _description = 'raises of 4 percent', _home = '${POS.org}', _status = 'active'` });
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = 'vellichor bench (instance)', label = 'vellichor bench', _kind = 'thing', _norm = 'vellichor bench', _alias_norms = [], _homes = ['${POS.floor}'], _home = '${POS.floor}'` });
+  const bench = (await sql("SELECT @rid AS rid FROM Entity WHERE _kind = 'thing' AND _norm = 'vellichor bench'"))[0];
+  const crew = (await sql("SELECT @rid AS rid FROM Entity WHERE _kind = 'thing' AND _norm = 'vellichor crew'"))[0];
+  await tool("admin", "execute_graph", { language: "sql", command: `CREATE EDGE DEPENDS_ON FROM ${bench.rid} TO ${crew.rid} SET stated_as = 'person', stated_by = 'admin', stated_at = '${new Date().toISOString()}'` });
+  const classes = await tool(w, "list_classes", {});
+  check(!classes.error && !leaked(classes) && !/vellichor raise/i.test(JSON.stringify(classes)), `list_classes shows no class above the audience: ${JSON.stringify(classes).slice(0, 300)}`);
+  // (control) both are there to be shown: the class, and the edge from the floor's instance
+  check((await sql("SELECT count(*) AS n FROM Entity WHERE _kind = 'class' AND _class_key = 'vellichor_raise_class'"))[0]?.n === 1, "the class exists");
+  check((await sql(`SELECT out('DEPENDS_ON').size() AS n FROM ${bench.rid}`))[0]?.n === 1, "the dependency exists");
+  const deps = await tool(w, "read_dependencies", { instance: String(bench.rid) });
+  check(!JSON.stringify(deps).includes(String(crew.rid)) && !/vellichor crew/i.test(JSON.stringify(deps)), `read_dependencies hides an end the audience can't see: ${JSON.stringify(deps).slice(0, 300)}`);
   // set_home: an entry above the audience answers as one that doesn't exist (no existence oracle), and doesn't move
   await save("alice", "e2e-a4 vellichor ops plan", "The vellichor crew moves to second shift in April.");
   check((await entry("e2e-a4 vellichor ops plan"))?._home === POS.ops, "an Operations entry");
