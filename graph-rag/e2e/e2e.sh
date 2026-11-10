@@ -61,7 +61,8 @@ docker run -d --name "$NET-adb" --network "$NET" --network-alias arcadedb \
   "$ADB_IMAGE" >/dev/null
 docker run -d --name "$NET-models" --network "$NET" --network-alias models -v "$PWD/e2e:/e2e:ro" "$NODE" node /e2e/fake-models.mjs >/dev/null
 # the fake source reads eval/s0.mjs, so it gets the checkout (read-only), as the runner does
-docker run -d --name "$NET-source" --network "$NET" --network-alias source -v "$PWD:/gr:ro" "$NODE" node /gr/e2e/fake-source.mjs >/dev/null
+# its rows are test-sql/data.mjs (the synthetic database's own), reached from /gr/eval/s0.mjs as /test-sql
+docker run -d --name "$NET-source" --network "$NET" --network-alias source -v "$PWD:/gr:ro" -v "$PWD/../test-sql:/test-sql:ro" "$NODE" node /gr/e2e/fake-source.mjs >/dev/null
 echo "building graph-rag from this checkout"
 docker build -q -t "$GR_IMAGE" . >/dev/null
 
@@ -84,13 +85,13 @@ docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$C
   -e TOKEN_MAP_PATH=/cfg/tokens.json -e POSITION_MAP_PATH=/cfg/positions.json \
   -e SWEEP_INTERVAL_MS=5000 -e DOC_STORE=fs:/tmp/documents \
   -e DAB_SYSTEM=mssql -e DAB_READ_URL=http://source:5000/mcp -e DAB_WRITE_URL=http://source:5001/mcp \
-  -e DAB_READ_HOME=everyone -e DAB_WRITE_TABLES=dbo_Job,dbo_Work_Center \
+  -e DAB_READ_HOME=everyone -e DAB_WRITE_TABLES=dbo_Job,dbo_Job_Operation,dbo_Work_Center,dbo_Sales_Order,dbo_Purchase_Order,dbo_Maintenance \
   -e DAB_GUARD_SERVER=gr-e2e-fake -e DAB_GUARD_DATABASE=S0Fake \
   "$GR_IMAGE" >/dev/null
 
 status=0
 # the whole checkout, read-only: scenario files reach test/fixtures and src/model through run.mjs
-docker run --rm --network "$NET" -v "$PWD:/gr:ro" "${CLOCK_ENV[@]}" ${CLOCK_SHIFT_DAYS:+-e NODE_OPTIONS="--import /gr/e2e/shift-clock.mjs"} -e ONLY="${ONLY:-}" "$NODE" node /gr/e2e/run.mjs || status=$?
+docker run --rm --network "$NET" -v "$PWD:/gr:ro" -v "$PWD/../test-sql:/test-sql:ro" "${CLOCK_ENV[@]}" ${CLOCK_SHIFT_DAYS:+-e NODE_OPTIONS="--import /gr/e2e/shift-clock.mjs"} -e ONLY="${ONLY:-}" "$NODE" node /gr/e2e/run.mjs || status=$?
 # AFTER: a command run on this host against the live stack (e2e/adapter-check.mts, the agent's real MCP client, is the one that needs it)
 if [ -n "${AFTER:-}" ]; then
   GR_URL="http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$NET-gr"):8000" bash -c "$AFTER" || status=$?

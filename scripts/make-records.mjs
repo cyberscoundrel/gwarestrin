@@ -10,6 +10,9 @@
 //        the labels against the oracle's ids and against a dataset (default S0, graph-rag/eval/s0.mjs; or a
 //        source dump, scripts/source-dump.mjs, of the sources stream's synthetic database); exit 1 on a problem
 //
+//   node scripts/make-records.mjs table
+//        prints the labels as the Markdown table docs/build/integrate.md carries (generated, so they can't drift)
+//
 //   node scripts/make-records.mjs seed <run-dir>/records.json --url http://host:8000 --tokens tokens.json
 //        [--tool record_document] [--only marker-1,ux-m01] [--dry-run]
 //        posts every record, in order, as its person (tokens.json: { user: token } or graph-rag's token map).
@@ -42,7 +45,7 @@ function parseArgs(argv) {
 }
 const usage = (msg) => {
   if (msg) console.error(msg);
-  console.error("usage: make-records.mjs generate --out dir [--seed N]\n       make-records.mjs check [--data dump.json]\n       make-records.mjs seed records.json --url URL --tokens f [--tool name] [--only ids] [--dry-run] [--no-wait]");
+  console.error("usage: make-records.mjs generate --out dir [--seed N]\n       make-records.mjs check [--data dump.json]\n       make-records.mjs table\n       make-records.mjs seed records.json --url URL --tokens f [--tool name] [--only ids] [--dry-run] [--no-wait]");
   process.exit(2);
 };
 
@@ -67,6 +70,19 @@ if (args._[0] === "generate") {
   for (const p of problems) console.log(p);
   console.log(problems.length ? `${problems.length} problem(s)` : `labels sound: ${NOTES.length} notes`);
   process.exit(problems.length ? 1 : 0);
+} else if (args._[0] === "table") {
+  const O = { filed: "**F**", proposed: "**P**", held: "**H**", kept: "**K**" };
+  const target = (t) => (t.kind === "row" ? `\`${t.key.replace(/^mssql:dbo_/, "")}\` ${t.columns.join(", ")}` : t.kind === "new-row" ? `new \`${t.table.replace(/^mssql:dbo_/, "")}\` row` : t.kind === "unclear" ? t.why : "doc");
+  const short = (k) => String(k).replace(/^mssql:dbo_/, "");
+  const rule = (m) => (m.change ? `change ${short(m.change)}` : m.write ? `write to ${short(m.write)}` : m.link ? `link ${short(m.link)}` : `mint "${m.mint}"`);
+  const cell = (x) => String(x).replace(/\|/g, "/");
+  console.log("| Note | By | Pieces: outcome, where, what | Also accepted | Must not | Resolves |");
+  console.log("|---|---|---|---|---|---|");
+  for (const n of NOTES) {
+    const pieces = n.pieces.map((p) => `${O[p.outcome]} ${p.about}${p.target.kind === "doc" ? "" : ` [${target(p.target)}]`}${p.stated ? ` (R12: ${p.stated})` : ""}`).join("; ");
+    const acc = [...new Set(n.pieces.flatMap((p) => p.accept ?? []))].map((o) => O[o]).join(" ") + (n.pieces.some((p) => p.unheld) ? " (item 5)" : "");
+    console.log(`| ${n.id.replace(/^ux-/, "")} | ${n.recorder} | ${cell(pieces)} | ${acc.trim()} | ${cell((n.mustNot ?? []).map(rule).join("; "))} | ${cell((n.resolves ?? []).map(short).join(", "))} |`);
+  }
 } else if (args._[0] === "seed") {
   const file = args._[1];
   if (!file) usage("give the records file");

@@ -20,32 +20,38 @@ import { normalizeEntry } from "../src/model/filing.js";
 const oracle = JSON.parse(readFileSync(new URL("./fixtures/oracle-sixty.json", import.meta.url), "utf8"));
 const clone = (x) => JSON.parse(JSON.stringify(x));
 
-test("labels: one per note, every table, column and key in S0, and each hand outcome equal to R2's rule", () => {
+test("labels: one per note, every table, column and key in the synthetic database, and each hand outcome equal to R2's rule", () => {
   assert.deepEqual(checkLabels(NOTES, oracle.map((n) => n.id)), []);
   const c = labelCounts();
-  assert.deepEqual([c.filed, c.proposed, c.held], [1, 4, 8]);
+  assert.deepEqual([c.filed, c.proposed, c.held, c.kept], [6, 6, 10, 53]);
   assert.equal(NOTES.length, 62);
 });
 
 test("labels: the rule gives Held for a missing row, Proposed without authority or a writable source, Filed otherwise", () => {
   const up = (key, columns) => ({ target: { kind: "row", table: key.split(":").slice(0, 2).join(":"), key, columns } });
-  assert.equal(ruleOutcome(up("mssql:dbo_Work_Center:INSPECT-2", ["Status"]), "bob"), "filed"); // floor holds the map's position
-  assert.equal(ruleOutcome(up("mssql:dbo_Job:3260356", ["Status"]), "bob"), "proposed"); // Job is Operations'
-  assert.equal(ruleOutcome(up("mssql:dbo_Job:3260356", ["Status"]), "alice"), "filed");
-  assert.equal(ruleOutcome(up("mssql:dbo_Employee:NGUD", ["Hourly_Rate"]), "admin"), "proposed"); // not writable
+  const create = (table, columns) => ({ target: { kind: "new-row", table, columns, needs: [] } });
+  assert.equal(ruleOutcome(up("mssql:dbo_Work_Center:INSPECT-2", ["Status"]), "bob"), "filed"); // the floor holds the map's position
+  assert.equal(ruleOutcome(up("mssql:dbo_Job:3260356", ["Status"]), "bob"), "filed"); // jobs are the floor's (M0)
+  assert.equal(ruleOutcome(up("mssql:dbo_Sales_Order:51007", ["Status"]), "bob"), "proposed"); // orders are Operations'
+  assert.equal(ruleOutcome(up("mssql:dbo_Sales_Order:51007", ["Status"]), "alice"), "filed");
+  assert.equal(ruleOutcome(up("mssql:dbo_Employee:NGUD", ["Pay_Rate"]), "admin"), "proposed"); // Employee takes no writes
+  assert.equal(ruleOutcome(create("mssql:dbo_Job", ["Customer"]), "alice"), "proposed"); // Job takes updates, not creates
+  assert.equal(ruleOutcome(create("mssql:dbo_Maintenance", ["Description"]), "bob"), "filed");
   assert.equal(ruleOutcome(up("mssql:dbo_Job:9999", ["Status"]), "alice"), "held");
   // a different dataset changes the answer: the labels are checked against whatever the sources stream ships
   const d = dataset();
-  d.dbo_Job.rows = d.dbo_Job.rows.filter((r) => r.Job !== "3260356");
+  d.dbo_Job.rows = d.dbo_Job.rows.filter((r) => r.Job !== 3260356);
   assert.ok(checkLabels(NOTES, null, { data: d }).some((p) => p.includes("ux-z01")));
 });
 
 test("labels, R12: a stated change is written given authority; a stated state the source disagrees with is Held", () => {
-  assert.deepEqual(STATED_NOTES, ["ux-m01", "ux-z01", "ux-aa07", "ux-ab05", "ux-ag03", "ux-aj02", "ux-ak03", "ux-al04", "ux-au04"]);
+  assert.deepEqual(STATED_NOTES, ["ux-m01", "ux-t06", "ux-z01", "ux-z04", "ux-aa03", "ux-aa05", "ux-aa07", "ux-ab02", "ux-ac13", "ux-ag03", "ux-al04", "ux-aq07", "ux-au04"]);
   const piece = (id) => NOTES.find((n) => n.id === id).pieces[0];
   assert.deepEqual([piece("ux-m01").stated, piece("ux-m01").outcome], ["current", "held"]); // "INSPECT-2 is down": a state
-  assert.deepEqual([piece("ux-z01").stated, piece("ux-z01").outcome], ["change", "proposed"]); // "shipped Thursday": bob lacks Job authority
-  assert.deepEqual(accepted(piece("ux-z01")), ["proposed"]); // no longer waits on F4
+  assert.deepEqual([piece("ux-t06").stated, piece("ux-t06").outcome], ["current", "held"]); // "needs certs": the row says none
+  assert.deepEqual([piece("ux-z01").stated, piece("ux-z01").outcome], ["change", "filed"]); // "shipped Thursday": the floor's job
+  assert.deepEqual([piece("ux-ag03").stated, piece("ux-ag03").outcome], ["already", "filed"]); // the row holds the order already
+  assert.deepEqual(accepted(piece("ux-z01")), ["filed"]);
   const asChange = { ...piece("ux-m01"), stated: "change" };
   assert.equal(ruleOutcome(asChange, "alice"), "filed");
 });
@@ -99,7 +105,7 @@ const entry = (over) => normalizeEntry({ id: over.id ?? "e1", outcome: "kept", r
 test("row gate: a change with a Filed entry naming its columns passes; any other change, or a delete, fails", () => {
   const before = dataset();
   const after = clone(before);
-  after.dbo_Work_Center.rows[0].Status = "Down";
+  after.dbo_Work_Center.rows.find((r) => r.Work_Center === "INSPECT-2").Status = "Down";
   after.dbo_Job.rows.push({ Job: "3260500", Customer: "EXATRON", Part_Number: "EPP-D98-2-B", Order_Quantity: 1200 });
   const changes = diffDumps(before, after);
   assert.deepEqual(changes.map((c) => [c.kind, c.key]), [["created", "mssql:dbo_Job:3260500"], ["updated", "mssql:dbo_Work_Center:INSPECT-2"]]);
@@ -112,7 +118,7 @@ test("row gate: a change with a Filed entry naming its columns passes; any other
   const proposedOnly = [entry({ id: "c", outcome: "proposed", reason: "no authority", target: { table: "mssql:dbo_Work_Center", key: "mssql:dbo_Work_Center:INSPECT-2" } })];
   assert.equal(rowGate(changes, proposedOnly).ok, false); // a Proposed piece must change nothing
   const more = clone(after);
-  more.dbo_Work_Center.rows[0].Description = "x";
+  more.dbo_Work_Center.rows.find((r) => r.Work_Center === "INSPECT-2").Description = "x";
   assert.match(rowGate(diffDumps(before, more), filed).violations[0].why, /Description/);
   const gone = clone(before);
   gone.dbo_Job.rows.pop();
@@ -122,7 +128,7 @@ test("row gate: a change with a Filed entry naming its columns passes; any other
 test("accounts: true, false claim and wrong values against the diff; caught, missed and false alarm from the verdicts", () => {
   const before = dataset();
   const after = clone(before);
-  after.dbo_Work_Center.rows[0].Status = "Down";
+  after.dbo_Work_Center.rows.find((r) => r.Work_Center === "INSPECT-2").Status = "Down";
   const changes = diffDumps(before, after);
   const v = (result) => ({ result, by: "orchestrator" });
   const es = [
@@ -138,7 +144,7 @@ test("accounts: true, false claim and wrong values against the diff; caught, mis
   const bare = accountResults(changes, [entry({ id: "n", outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471" }, account: "did it" })], { before });
   assert.deepEqual([bare.items[0].result, bare.items[0].saysRow], ["unverifiable", false], "no fields: nothing to check, and the words don't name the row");
   const after2 = clone(after);
-  after2.dbo_Job.rows[0].Status = "Hold";
+  after2.dbo_Job.rows.find((r) => r.Job === 3260356).Status = "Hold";
   assert.deepEqual(accountResults(diffDumps(before, after2), es.slice(0, 1)).omitted, ["mssql:dbo_Job:3260356"]);
 });
 
@@ -166,8 +172,8 @@ test("outcomes: a perfect log scores every piece exact; a swapped outcome is wro
   const z01 = NOTES.find((n) => n.id === "ux-z01");
   const asKept = matchNote(z01, [entry({ id: "k1", outcome: "kept" }), entry({ id: "k2", outcome: "kept" })]);
   assert.deepEqual(asKept.pieces.map((p) => [p.verdict, p.failure]), [["wrong", "target"], ["exact", null]]);
-  const filedDirect = matchNote(z01, [entry({ id: "f", outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:3260356", fields: { Status: "Shipped" } } })]);
-  assert.deepEqual([filedDirect.pieces[0].verdict, filedDirect.pieces[0].failure, filedDirect.pieces[1].verdict], ["wrong", "rule", "missing"]);
+  const proposedOnly = matchNote(z01, [entry({ id: "p", outcome: "proposed", reason: "no authority", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:3260356", fields: { Status: "Shipped" } } })]);
+  assert.deepEqual([proposedOnly.pieces[0].verdict, proposedOnly.pieces[0].failure, proposedOnly.pieces[1].verdict], ["wrong", "rule", "missing"]);
   const m01 = NOTES.find((n) => n.id === "ux-m01");
   const wroteState = matchNote(m01, [entry({ id: "w", outcome: "filed", target: { table: "mssql:dbo_Work_Center", key: "mssql:dbo_Work_Center:INSPECT-2", fields: { Status: "Down" } } })]);
   assert.deepEqual([wroteState.pieces[0].verdict, wroteState.pieces[0].failure], ["wrong", "rule"]); // R12: a state is asked about, not written
@@ -305,7 +311,7 @@ test("report: a clean snapshot passes both gates; a planted row change or a leak
   assert.deepEqual(ok.gates, { rows: true, leaks: true, ok: true });
   assert.match(ok.markdown, /Gates.*PASS.*PASS/);
   assert.equal(buildReport({ ...snap, briefs: [] }, { notes: NOTES.slice(0, 3) }).gates.leaks, false, "no briefs: the gate fails, it doesn't pass");
-  after.dbo_Job.rows[3].Status = "Rush";
+  after.dbo_Job.rows.find((r) => r.Job === 4471).Status = "Rush";
   snap.briefs.push({ id: "b2", audience: "floor", text: "context: vraexind metals" });
   const bad = buildReport(snap, { notes: NOTES.slice(0, 3) });
   assert.deepEqual(bad.gates, { rows: false, leaks: false, ok: false });

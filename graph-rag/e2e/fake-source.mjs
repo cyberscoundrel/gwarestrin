@@ -1,4 +1,5 @@
-// A fake test source for the replay harness: S0 (graph-rag/eval/s0.mjs) served as two Data API builder MCP
+// A fake test source for the replay harness: the synthetic database's rows (test-sql/data.mjs, through
+// graph-rag/eval/s0.mjs) served as two Data API builder MCP
 // endpoints over one dataset, the read-only one on 5000 and the write-capable one on 5001, answering exactly as
 // fake-dab-core.mjs (the sources stream's) says DAB 2.0.12 does. Control routes, on either port:
 //

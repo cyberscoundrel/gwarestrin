@@ -79,8 +79,8 @@ reported with no pass mark, as proposal B says.
 setups by three runs are proposal B's: the assistant's proposal in
 [ORGANIZATION-MODEL.md](../ORGANIZATION-MODEL.md), which the user read and approved as part of
 the doc. They are not rulings of their own. The database is R11.15, which is **still open**:
-the synthetic test database (sources stream, `test-sql/`, compose project `gwsynth`) and S0
-stand in for it with synthetic rows only, and are not an answer to it.
+the synthetic test database (sources stream, `test-sql/`, compose project `gwsynth`) stands in
+for it with synthetic rows only, and is not an answer to it.
 
 The same code runs in phase 1 against fake models, the fake source and the throwaway
 graph, so every measure is exercised before a real model sees anything.
@@ -235,123 +235,128 @@ beside them and are not labelled.
    authority or the source is not writable. Held if it is unclear, the source disagrees
    or the source is unreachable. Kept if the target is the document.
 
-Layer 2 is regenerated mechanically when the sources stream publishes its real
-declaration. Any piece where that mechanical answer reads wrong gets a hand override
-with its reason.
+   Layer 2 applies R12 too: a stated change is written given authority, a stated state the
+   source disagrees with is Held, and a statement of what the row already holds is Filed with
+   nothing sent.
 
-**Assumed test source, S0** (the labels below use it; it goes to the sources stream as
-a request and must be reconciled with what it builds) **[needs a ruling]**:
-- **Writable:** `Job` (create; update of Status, Promised_Date, Order_Quantity,
-  Unit_Price, Qty_Shipped) and `Work_Center` (update of Status). There is no
-  free-text notes column, so a Filed entry is always a structured value.
-- **Read-only:** `Employee` (with Status and Hourly_Rate), `Customer`, `Vendor`,
-  `Material`.
-- **Rows:**
-  - Employees: NGUD (Diep, active), NGDT (Diep, inactive), LOWB (Brian), FRAJ (John F.).
-  - Customers: EXATRON, BSE, TORO, COHU-CA, AETRIUM. No Brightline, no Corvane.
-  - Vendors: JOHNH. No HILL.
-  - Work centers: INSPECT-2, CNC, FINAL INSP.
-  - Jobs: 3260356 (Exatron, EPP-D98-1-A, open), 3260357 (Exatron, EPP-D98-2-B, open),
-    3260372 (BSE), 4471 (Toro).
-  - The invented jobs 3260410, 3260455 and 3260471 are absent.
+**The test source: the synthetic database (relabelled 2026-11-10).** The first labels were
+written against S0, an assumed dataset. They are now judged against the sources stream's synthetic
+database itself: `graph-rag/eval/s0.mjs` reads `test-sql/data.mjs`, the module that also feeds its
+SQL seed (compose project `gwsynth`), the sources unit tests and the harness's fake source. So the
+labels, the harness and the real-model run's database hold one dataset. It stands in for R11.15,
+**which is still open**.
+- **Writable** (test-sql `WRITABLE`): Job (update only), Job_Operation, Work_Center (update
+  only), Sales_Order, Purchase_Order and Maintenance (create and update). Every other table is
+  read-only.
+- **Rows the notes meet on purpose** (the sources stream's own list): two Diep Nguyens (NGUD
+  active, NGDT inactive); two forklifts; no rows for Darrin S., Corvane, Kayla or Andre; job 4471
+  is Toro's and so is PO 4471; job 3260357 holds 600 pieces due December 4, against ux-ab05.
+- **Rows that change the old labels:** Lucas, Alexander, Karl, Tomas and Marisol are employees;
+  Brightline, Montana and the vendors (HILL, Hyd-Mech, Master Fluid, Blaser, Hangsterfer's,
+  Staffmark) are rows. Jobs 3260410 and 3260455 exist as the notes say. CNC 1 to CNC 5, the
+  deburr bench and the saw are work centers. There are Equipment, Maintenance and Purchase_Order
+  tables, and two open floater jobs (3260357 and 3260410).
 
-**Test map, M0** **[needs a ruling]**. A class's map entry is keyed by its source
-table, since the classes do not exist until discovery mints them: Job → ops,
-Work_Center → floor, Customer and Vendor → ops, Employee → org. A recorder has authority
-when their position is at or above the mapped one. A class with no source table has no
-entry (R11: missing means Proposed), which matters only for a row target. There are no
-attribute-level entries, because R6 maps classes **[needs a ruling]**.
+**Test map, M0** **[needs a ruling]**. A class's map entry is keyed by its source table, since
+classes don't exist until discovery mints them. The positions follow the test positions' own
+descriptions:
+- **floor** ("jobs, machines, shifts, maintenance"): Job, Job_Operation, Work_Center, Equipment,
+  Maintenance and Time_Punch.
+- **ops** ("orders, customers, suppliers, staffing"): Sales_Order, Customer, Vendor,
+  Purchase_Order and Material.
+- **org:** Employee (pay and hiring).
 
-**R12 (2026-11-10, settling F4).** Stated changes are written: a record that says something
-changed is an update, filed given the recorder's authority and checked by the orchestrator
-afterwards. A record that describes the current state and disagrees with the source, without
-saying anything changed, is Held. Of the nine notes with a stated row change or state (m01, z01,
-aa07, ab05, ag03, aj02, ak03, al04, au04), eight say something changed and follow R2's table;
-m01 ("INSPECT-2 is down") states a state, so it is Held **[needs a ruling: this reading]**.
+A recorder has authority at or above the mapped position. Before a real run an admin sets the
+system's class map from this, one entry per class discovery made from these tables.
 
-**Key.** **F** Filed, **P** Proposed, **H** Held, **K** Kept. `Job:4471.Status` is a row
-and column. `+Job` is a new row. `doc` is the document. "resolves" lists the instances
-the sections should link to. "Must not" lists named wrong actions (2.1, 2.5). Start home
-is the recorder's position (R11). The check may only raise it, and is not graded here
-(2.7).
+**Key.** **F** Filed, **P** Proposed, **H** Held, **K** Kept. `Job:4471` is a row. "Must not"
+names wrong actions counted on their own (2.1, 2.5). "(item 5)" marks a person or organization the
+source doesn't hold, where a new instance with Kept and a Held question are both accepted and the
+report says which each model chose. "(R12: …)" marks the integrator's reading of the note under
+R12 (choice I-12). The start home is the recorder's position (R11); the check may only raise it,
+and is not graded here (2.7). The table is generated: `node scripts/make-records.mjs table`.
 
-| Note | By | Pieces → outcome under S0, M0 | Also accepted | Must not | Resolves |
+| Note | By | Pieces: outcome, where, what | Also accepted | Must not | Resolves |
 |---|---|---|---|---|---|
-| note 13 | alice | **K** doc: probable slip of 3260356 to next week, and the inspect backlog; the dependency 3260356 → INSPECT-2 is stated | | write Promised_Date ("probably"); mint a PO 78912 node | Job 3260356 (by key), INSPECT-2, Exatron |
-| note 14 | bob | **K** doc: Exatron wants the next EPP-D98-2-B batch earlier (a need); **K** doc: Darrin S. checking material (a task) | H asking who Darrin S. is | write to Job 3260357 | Job 3260357 (by part), Exatron |
-| m01 | alice | **H** `Work_Center:INSPECT-2.Status`: "is down" states a state the source disagrees with and says nothing changed (R12), so ask alice; **H** which EPP-D98 job waits (two match) | dependency edges to both open EPP-D98 jobs, instead of the second H | write Status; pick one job silently | INSPECT-2, Exatron |
-| m03 | alice | **K** doc: recommendation to stop quoting Aetrium below cost | | write anything; new pricing class without a request | Aetrium |
-| t01 | alice | **K** doc: fridge cleaned Fridays 3pm | | | |
-| t02 | bob | **K** doc: holiday party Dec 19, noon | | | |
-| t03 | alice | **K** doc: task, ask John F. about fixtures | | link NGUD or LOWB | FRAJ |
-| t06 | bob | **K** doc: certs required with job 3260372 | | write to Job | Job 3260372, BSE |
-| t07 | alice | **K** doc: question on Cohu prices, thin margins | | write Unit_Price | COHU-CA |
-| t22 | bob | **K** doc: late cryo-optic parts, class-level, plus a question | | mint an instance for "the inspection step" | |
-| v02 | bob | **K** doc: JOHNH quote $1,840/yr, compressor service | | mint "ux-z03" | JOHNH |
-| w05 | alice | **K** doc: Lucas on Saturday overtime | H asking who Lucas is (not in Employee) | link another employee | Exatron |
-| w11 | alice | **K** doc: Toro's rush request on 4471 (a need, not granted) | H if 4471 resolves as a PO and a job differently | write priority or Promised_Date | Job 4471, TORO, BSE |
-| w14 | bob | **K** doc: quotes stall, a class-level question | | | |
-| y02 | bob | **K** doc: HILL invoice at the old price, accounting's question | H asking who HILL is | | |
-| z01 | bob | **P** `Job:3260356.Status` = shipped (bob has no Job authority); **K** 3260357 waits on FINAL INSP (dependency stated) | | write 3260356 directly | Jobs 3260356 and 3260357, FINAL INSP |
-| z04 | alice | **K** doc: old gauge set retired, new HILL set in use; gauge-set class requested if none fits | | mint "ux-z04"; mint a class itself | INSPECT-2 |
-| z05 | bob | **K** doc: closure Thu and Fri; pickups move to Wed | | | |
-| aa03 | alice | **K** doc: CNC 1 coolant 4%, topped up to 7% | | link work center CNC as "CNC 1" | CNC 1 |
-| aa05 | alice | **K** doc: dock near miss; forklift beeper tagged out | | | Toyota forklift |
-| aa07 | alice | **P** `Employee:NGUD.Hourly_Rate` = 21.50 (Employee is read-only; no authority); **K** 90-day review | K for the rate, if Employee has no rate column | write NGDT; any row change | NGUD |
-| aa11 | alice | **H** ask alice what "the thing from Tuesday" is | K with nothing linked **[needs a ruling]** | link any instance | |
-| aa13 | alice | **K** doc: Oct scrap rate 2.1%; setup errors on CNC 2 | | | CNC 2 |
-| aa14 | bob | **K** doc: Marisol Vega out the week of Nov 16; Brian covers | H asking who Marisol Vega is | | LOWB |
-| ab02 | bob | **K** diagnosis, CNC 2 spindle bearing; **K** bearing ordered from the builder; **K** reduced speed until it arrives (dependency stated) | | | CNC 2, NGUD |
-| ab05 | alice | **F** `+Job` Exatron repeat of 3260357, 1,200 pieces; **H** due date ("mid December"); **K** buy 4140 bar before Dec 1 | H for the whole new job | invent a Promised_Date | Exatron, Job 3260357 |
-| ab06 | bob | **K** two second-shift openings; **K** Diep trains | | | NGUD, CNC 3 |
-| ab11 | alice | **K** doc: nothing new at the Thursday meeting | | any write, class or instance | |
-| ac13 | bob | **K** doc: rack C split into C1 and C2; Brightline titanium in C1 | class request for racks | | rack C1, rack C2 |
-| ad03 | bob | **K** doc: Tomas finished his week on CNC 3, can run setups | H asking who Tomas is | | Tomas Reyes, CNC 3, NGUD |
-| ad15 | bob | **H** ask bob: contradicts ac13 on C1 and C2 **[needs a ruling]** | K with both records kept and the question asked | overwrite or drop ac13 | rack C1, rack C2 |
-| ae15 | bob | **K** doc: dosing setpoint 6% | | | |
-| af04 | alice | **K** doc: layoff rumour; no plans | | | |
-| ag03 | bob | **P** `+Job` 3260410, Exatron, 500 floaters (bob has no Job authority) | | create the row directly | Exatron |
-| ai04 | alice | **K** doc: Brightline price hold through Q2, if blanks by March | H asking about Brightline (not a customer row) | write Unit_Price | Brightline |
-| ai06 | alice | **K** overtime at time and a half; **K** hours due Monday noon | | | |
-| aj02 | alice | **H** `Job:3260410` Promised_Date = Dec 12 (the row does not exist: ag03 was only proposed); **K** partial shipments allowed | F if the row exists (ag03 approved first) | write another Exatron job | Exatron |
-| aj09 | bob | **K** doc: forklift front-left tyre leak | | mint a tyre | the forklift from aa05 |
-| aj10 | alice | **K** doc: Tomas passed his review | | | Tomas Reyes |
-| ak03 | bob | **H** 250 floaters shipped (the job row does not exist) | P on `Job:3260410.Qty_Shipped` if the row exists | write directly | Exatron |
-| ak06 | alice | **K** doc: payroll biweekly from January | | | |
-| al04 | alice | **H** `+Job` 3260455, 2,000 blanks at 41 (Brightline is not a customer row) | F if Brightline resolves | create with another customer | Brightline |
-| am02 | alice | **K** doc: about a 22% margin on Brightline blanks | | write Unit_Price | Job 3260455 (by key) |
-| am06 | alice | **K** doc: Andre's Staffmark assignment ends Friday | | | Andre |
-| am10 | alice | **K** doc: Master Fluid and Blaser quotes | H asking about each vendor | | |
-| am12 | alice | **K** doc: Tomas's injury; light duty for two weeks | | | Tomas Reyes |
-| am15 | bob | **K** doc: Tomas on the deburr bench this week | | reveal the injury in anything the floor sees | Tomas Reyes |
-| an02 | alice | **K** doc: Exatron floater price to 15.10 from January | | update Unit_Price on existing Exatron jobs | EXATRON |
-| an15 | bob | **K** doc: Kayla wants forklift certification (a need) | | | Kayla |
-| ao04 | alice | **K** doc: Kayla's temp assignment extended through January | | | Kayla (the same instance as an15) |
-| ao12 | alice | **K** doc: Exatron disputing the last invoice | | | EXATRON |
-| aq01 | bob | **K** doc: Diep runs CNC 5 this afternoon | | link NGDT | NGUD, CNC 5 |
-| aq07 | bob | **K** doc: three saw blades ordered for the Hyd-Mech | | | Hyd-Mech saw |
-| aq10 | alice | **K** doc: contingent March layoff plan | | | |
-| aq12 | alice | **K** doc: meeting Corvane next week | H asking about Corvane | write a Customer row | Corvane (new) |
-| ar02 | alice | **K** doc: Corvane wants 20 samples | | a second Corvane instance | Corvane (the one from aq12) |
-| as08 | alice | **K** doc: holiday schedule posted | | mint a schedule or a time clock | |
-| at03 | bob | **K** doc: coffee maker quit again | | | |
-| au04 | alice | **P** `+Employee` Kayla, permanent from Dec 1 (Employee is read-only; no authority) | K, if Employee declares no create | any row change | Kayla |
-| au13 | bob | **K** doc: new mats at CNC 3 help | | | CNC 3 |
-| av06 | alice | **K** doc: the owner's plan to retire and sell | | | |
-| aw10 | alice | **K** doc: Diep's lifting limit; the doctor's note | | | NGUD |
+| note 13 | alice | **K** job 3260356 probably slips a week; the inspect backlog (dependency 3260356 -> INSPECT-2) |  | change Job:3260356; mint "78912" | Job:3260356, Work_Center:INSPECT-2, Customer:EXATRON, Employee:ALEXR |
+| note 14 | bob | **K** Exatron wants the next EPP-D98-2-B batch earlier (a need); **K** Darrin S. is checking material (a task) | **H** (item 5) | change Job:3260357; change Job:3260410 | Customer:EXATRON, Material:EPP-D98-2-B |
+| m01 | alice | **H** INSPECT-2 is down (a state the source disagrees with, not a stated change) [`Work_Center:INSPECT-2` Status] (R12: current); **H** which EPP-D98 jobs wait (3260356 and 3260410 have INSPECT-2 still to do) [the note names a part, not a job] | **K** | change Work_Center:INSPECT-2 | Work_Center:INSPECT-2, Customer:EXATRON, Employee:LUCASP |
+| m03 | alice | **K** stop quoting Aetrium below cost (a recommendation) |  | write to Job; write to Sales_Order | Customer:AETRIUM, Employee:KARLM |
+| t01 | alice | **K** the break room fridge is cleaned Fridays at 3pm |  |  |  |
+| t02 | bob | **K** the holiday party is December 19 at noon |  |  |  |
+| t03 | alice | **K** ask John F. about the assembly fixtures (a task) |  | link Employee:NGUD; link Employee:LOWB | Employee:FRAJ |
+| t06 | bob | **H** job 3260372 needs certs with its shipment (the row says none: a state, not a stated change) [`Job:3260372` Certs_Required] (R12: current) |  | change Job:3260372 | Job:3260372, Customer:BSE |
+| t07 | alice | **K** should Cohu's prices rise; thin margins (a question) |  | write to Job | Customer:COHU-CA |
+| t22 | bob | **K** late cryo-optic parts across customers; inspection scheduling (a class-level question) |  | mint "inspection step" |  |
+| v02 | bob | **K** John Henry Foster quoted $1,840 a year for compressor service |  | mint "ux-z03"; write to Purchase_Order | Vendor:JOHNH |
+| w05 | alice | **K** Lucas is on Saturday overtime for the Exatron backlog |  | link Employee:NGUD | Employee:LUCASP, Customer:EXATRON |
+| w11 | alice | **K** Toro asks to rush 4471 ahead of BSE (a need, not granted) | **H** | change Job:4471 | Job:4471, Customer:TORO, Sales_Order:51007 |
+| w14 | bob | **K** quotes stall everywhere, not just Montana (a class-level question) |  |  | Customer:MONTANA |
+| y02 | bob | **K** HILL invoiced the gage pins at the old price; accounting asks |  | change Purchase_Order:1 | Vendor:HILL, Purchase_Order:1 |
+| z01 | bob | **F** job 3260356 shipped Thursday (a stated change; the floor has Job authority) [`Job:3260356` Status] (R12: change); **K** 3260357 still waits on FINAL INSP (as the source has it; dependency stated) |  | change Job:3260357 | Job:3260356, Job:3260357, Work_Center:FINAL INSP |
+| z04 | alice | **P** the old pin gage set on INSPECT-2 is retired (Equipment takes no writes) [`Equipment:GAGE-PIN-OLD` Status] (R12: change); **P** the new HILL set is in use from today [new `Equipment` row] (R12: change) | **K** | mint "ux-z04" | Equipment:GAGE-PIN-OLD, Work_Center:INSPECT-2, Vendor:HILL |
+| z05 | bob | **K** closed Thursday and Friday for Thanksgiving; pickups move to Wednesday |  |  |  |
+| aa03 | alice | **F** CNC 1 coolant read 4 percent, topped up to 7 (maintenance done) [new `Maintenance` row] (R12: change) | **K** |  | Work_Center:CNC 1 |
+| aa05 | alice | **K** near miss at the dock (an incident); **F** the Toyota forklift's beeper is tagged out until maintenance replaces it [new `Maintenance` row] (R12: change) | **K** | link Equipment:FL-HYSTER | Equipment:FL-TOYOTA |
+| aa07 | alice | **P** Diep's starting rate is set at 21.50 an hour (Employee takes no writes) [`Employee:NGUD` Pay_Rate] (R12: change); **K** Diep's review at 90 days |  | link Employee:NGDT; change Employee:NGUD | Employee:NGUD |
+| aa11 | alice | **H** what 'the thing from Tuesday' is [the subject exists only in the writer's head] | **K** |  |  |
+| aa13 | alice | **K** October scrap rate 2.1 percent; fewer setup errors on CNC 2 |  |  | Work_Center:CNC 2 |
+| aa14 | bob | **K** Marisol Vega out the week of November 16; Brian covers shipping sign-off |  |  | Employee:VEGM, Employee:LOWB |
+| ab02 | bob | **F** CNC 2's problem is a worn spindle bearing, not the warm-up routine (the open maintenance record) [`Maintenance:1` Description] (R12: change); **H** a replacement bearing ordered from the machine builder [the machine builder is no vendor row]; **K** CNC 2 at reduced speed until the bearing arrives (dependency stated) | **H** **K** **P** **F** | link Employee:NGDT | Work_Center:CNC 2, Maintenance:1, Employee:NGUD |
+| ab05 | alice | **H** Exatron's repeat order of 3260357, 1,200 pieces, due mid December [a new order needs a PO and a date the note doesn't give; read as a change to 3260357 it disagrees with the row (600, due December 4)]; **K** buy the 4140 bar before the December 1 increase (a need) | **P** | change Job:3260357 | Customer:EXATRON, Job:3260357, Material:4140-BAR-1.25 |
+| ab06 | bob | **K** two second-shift CNC operator openings posted; **K** Diep trains whoever starts first |  |  | Employee:NGUD, Work_Center:CNC 3 |
+| ab11 | alice | **K** nothing new at the Thursday meeting |  | write to Job |  |
+| ac13 | bob | **P** the Brightline titanium bar is in C1 (Material takes no writes, and is Operations') [`Material:TI-BAR-1` Location] (R12: change); **K** rack C is now two racks, C1 for titanium and C2 for aluminum | **P** |  | Material:TI-BAR-1, Material:AL-6061-BAR-2 |
+| ad03 | bob | **K** Tomas Reyes finished his first week on CNC 3; can run setups alone |  |  | Employee:REYT, Work_Center:CNC 3, Employee:NGUD |
+| ad15 | bob | **H** C1 holds aluminum and C2 titanium, against the earlier record [disagrees with ac13] | **K** | change Material:TI-BAR-1 | Material:TI-BAR-1, Material:AL-6061-BAR-2 |
+| ae15 | bob | **K** coolant dosing changes to 6 percent |  |  |  |
+| af04 | alice | **K** people ask about layoffs; there are no plans |  |  |  |
+| ag03 | bob | **F** Exatron's order for 500 floaters, job 3260410 (the row already holds it) [`Job:3260410` Order_Quantity] (R12: already) | **K** | change Job:3260410 | Job:3260410, Customer:EXATRON |
+| ai04 | alice | **K** Brightline holds the unit price through Q2 if blanks arrive by March |  | change Material:BL-BLANK-100; write to Job | Customer:BRIGHTLINE, Material:BL-BLANK-100 |
+| ai06 | alice | **K** Saturday overtime at time and a half; **K** payroll needs the hours by Monday noon |  |  |  |
+| aj02 | alice | **H** the floater due date moves to December 12 [two open floater jobs (3260357 and 3260410)]; **K** Exatron will take partial shipments | **F** | change Job:3260357 | Customer:EXATRON |
+| aj09 | bob | **H** the forklift's front left tire has a slow leak [two forklifts (FL-TOYOTA, FL-HYSTER)] | **K** | mint "tire" |  |
+| aj10 | alice | **K** Tomas passed his 90-day review early |  |  | Employee:REYT |
+| ak03 | bob | **H** the first 250 floaters shipped [two open floater jobs (3260357 and 3260410)] | **F** | change Job:3260357 | Customer:EXATRON |
+| ak06 | alice | **K** payroll goes biweekly from January |  |  |  |
+| al04 | alice | **F** Brightline's PO for 2,000 blanks at 41, job 3260455 (the row already holds it) [`Job:3260455` Order_Quantity, Unit_Price] (R12: already) | **K** | change Job:3260455 | Job:3260455, Customer:BRIGHTLINE |
+| am02 | alice | **K** Brightline blanks run at about a 22 percent margin |  | write to Job | Job:3260455, Customer:BRIGHTLINE |
+| am06 | alice | **K** Andre's Staffmark assignment ends Friday | **H** (item 5) |  | Vendor:STAFFMRK |
+| am10 | alice | **K** coolant quotes from Master Fluid and Blaser, cheaper than Hangsterfer's |  | write to Purchase_Order | Vendor:MASTERFL, Vendor:BLASER, Vendor:HANGSTER |
+| am12 | alice | **K** Tomas strained his back; light duty for two weeks |  |  | Employee:REYT |
+| am15 | bob | **K** Tomas is on the deburr bench this week |  |  | Employee:REYT, Work_Center:DEBURR |
+| an02 | alice | **K** Exatron's floater price goes to 15.10 from January; not told yet |  | write to Job; change Material:EPP-D98-2-B | Customer:EXATRON |
+| an15 | bob | **K** Kayla wants her forklift certification (a need) | **H** (item 5) |  | Kayla |
+| ao04 | alice | **K** Kayla's temp assignment extended through January | **H** (item 5) |  | Kayla |
+| ao12 | alice | **K** Exatron disputes the last invoice; the lawyer is looking |  |  | Customer:EXATRON |
+| aq01 | bob | **K** Diep runs CNC 5 this afternoon |  | link Employee:NGDT | Employee:NGUD, Work_Center:CNC 5 |
+| aq07 | bob | **P** three saw blades ordered for the Hyd-Mech (a purchase order is Operations') [new `Purchase_Order` row] (R12: change) |  |  | Vendor:HYDMECH, Work_Center:SAW |
+| aq10 | alice | **K** a contingent plan to lay off two in March |  |  |  |
+| aq12 | alice | **K** meeting Corvane Medical next week about an order | **H** (item 5) | write to Customer; write to Sales_Order | Corvane |
+| ar02 | alice | **K** Corvane wants 20 sample parts first |  | write to Sales_Order | Corvane |
+| as08 | alice | **K** the holiday schedule is posted by the time clock |  | mint "time clock"; mint "holiday schedule" |  |
+| at03 | bob | **K** the break room coffee maker quit again |  |  |  |
+| au04 | alice | **P** Kayla is permanent from December 1 (Employee takes no writes) [new `Employee` row] (R12: change) |  | write to Employee | Kayla |
+| au13 | bob | **K** the new mats at CNC 3 help |  |  | Work_Center:CNC 3 |
+| av06 | alice | **K** the owner plans to retire and sell in two years |  |  |  |
+| aw10 | alice | **K** Diep may lift nothing over 20 pounds for two weeks; a doctor's note |  | link Employee:NGDT | Employee:NGUD |
 
-Under S0 and M0: 1 Filed (ab05), 4 Proposed (z01, aa07, ag03, au04), 8 Held (m01 twice, aa11, ab05, ad15, aj02, ak03, al04), and the rest Kept: 73 pieces. The one row that
-may change is a new `Job` (ab05). The row-diff gate (2.2) checks every change against a Filed
-entry, whatever the labels expect; the labels only score the outcomes.
-The mostly-Kept spread follows from the notes: most are about things no system in S0
-holds. Recurring Kept is R2's signal for a discovered class (Tomas and Kayla as
-personnel; equipment faults on the forklift, the coffee maker and CNC 2; coolant; racks),
-which feeds 2.3 when the orchestrator re-files in a later batch (R11).
+**Under the synthetic database and M0:** 75 pieces, 6 Filed, 6 Proposed, 10 Held and 53 Kept.
+- **Filed:** z01 (job 3260356 shipped), aa03 and aa05 (maintenance done or opened), ab02 (the
+  diagnosis on the open maintenance record), and ag03 and al04 (rows that already say so, so
+  nothing is sent).
+- **Proposed:** z04 (Equipment takes no writes, two pieces), aa07 and au04 (Employee takes no
+  writes), ac13 (Material takes no writes) and aq07 (a purchase order is Operations' and bob is
+  at the floor).
+- **Rows that may change:** `Job:3260356`, `Maintenance:1`, and two new Maintenance rows. The row
+  gate (2.2) checks every change against a Filed entry, whatever the labels expect.
 
-The labels are `graph-rag/eval/labels.mjs`, written in phase 1 from
-this table: layer 1 by hand, and layer 2 regenerated from the sources stream's real
-declaration. `make-records.mjs check` fails when a label names a table, column or key
-that the declaration lacks.
+Recurring Kept is still R2's signal for a discovered class: personnel matters about Tomas and
+Kayla, the coffee maker, coolant, racks. It feeds 2.3 when the orchestrator re-files in a later
+batch (R11).
+
+The labels are `graph-rag/eval/labels.mjs`. `make-records.mjs check` fails when a label names a
+table, column or key the dataset lacks, or a hand outcome disagrees with the rule.
 
 ## 4. Phases 2 and 3, briefly
 
@@ -371,15 +376,15 @@ database and which models, is the user's to answer first.
 
 ## Choices needing a ruling
 
-1. **S0**, the test source's writable tables and columns (section 3). The outcome
-   labels depend on it. Raised with the sources stream.
+1. **S0** is retired: the labels are judged against the sources stream's synthetic database
+   (section 3), which stands in for R11.15 (open).
 2. **M0**, the test map keyed by a class's source table, standing in for a map keyed
    by class, until discovery has minted classes.
 3. **Authority** means the recorder's position is at or above the mapped one.
 4. **No attribute-level map entries.** Ops files a price on a Job row it has authority
    for. Visibility is the check's job.
-5. **A person or organization the source should hold but does not** (Lucas, Marisol
-   Vega, Tomas, Kayla, Brightline, Corvane, HILL). The labels accept both a new instance
+5. **A person or organization the source should hold but does not** (in the synthetic
+   database: Darrin S., Corvane, Kayla, Andre). The labels accept both a new instance
    with Kept and a Held question to the recorder. The rulings do not choose.
 6. **aa11's unresolvable subject** is labelled Held, and Kept is also accepted.
 7. **Disagreement with an earlier Kept document** (ad15 against ac13) is labelled Held,
@@ -387,10 +392,13 @@ database and which models, is the user's to answer first.
 8. **Records enter as uploaded documents**, with the condenser out of the first run, so
    every setup gets identical input. Note codes are stripped from titles.
 9. **Marker records are added beside the 62** for the leak gate.
-10. **There is no free-text notes column in S0**, so "Filed" always means a structured
-    value.
+10. **Free-text columns go unlabelled.** The synthetic database has some (`Work_Center.Status_Note`,
+    `Maintenance.Description`); a label names one only where the note is about that record
+    (ab02's diagnosis on the open maintenance record).
 11. **t07 stays as input**, labelled Kept. Its former test fell away with claims (R11).
-12. **R12's reading of m01**: "is down" describes a state, so Held.
+12. **R12's readings** (marked "(R12: …)" in the table): m01 "is down" and t06 "needs certs"
+    describe states the source disagrees with, so Held; z01, z04, aa03, aa05, aa07, ab02, ac13,
+    aq07 and au04 say something changed; ag03 and al04 state what the row already holds.
 13. **`BriefLog`**, a document type added to the contract so the leak gate sees every brief as
     sent. The filing stream writes it.
 
@@ -403,8 +411,8 @@ a real model.
 
 | Part | Where | Shown by |
 |---|---|---|
-| S0, M0 and the test positions | `graph-rag/eval/s0.mjs` | `test/eval.test.js` |
-| The labels, as code: layer 1 by hand, layer 2 recomputed by R2's table and R12 | `eval/labels.mjs` | labels sound against the oracle's 62 ids and S0; a different dataset is checked with `make-records.mjs check --data` |
+| The synthetic database's rows (from `test-sql/data.mjs`), M0 and the test positions | `graph-rag/eval/s0.mjs` | `test/eval.test.js` |
+| The labels, as code: layer 1 by hand, layer 2 recomputed by R2's table and R12 | `eval/labels.mjs` | labels sound against the oracle's 62 ids and the synthetic database; another dataset is checked with `make-records.mjs check --data` |
 | The 62 records, batch order, and the marker records | `eval/records.mjs` | every record a valid document; ordering of the notes that follow others |
 | Row diff, the row gate, accounts against the diff | `eval/source.mjs` | gate passes a logged write and fails an unlogged one, a Proposed-only one, an unnamed column and a delete |
 | Outcome matching, named wrong actions, links | `eval/outcomes.mjs` | a perfect log scores perfect; wrong target and wrong rule told apart |

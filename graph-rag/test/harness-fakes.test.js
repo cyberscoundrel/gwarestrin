@@ -54,7 +54,7 @@ test("the decision model: a closed question answered only from its tag, else non
   assert.equal(unsure.probabilities.price, 0.5, "no none, nothing to go on: spread");
 });
 
-test("the fake source: S0 through DAB's tools; the read endpoint refuses writes, the write endpoint takes them; dump, plant and reset", async () => {
+test("the fake source: the synthetic database's rows through DAB's tools; the read endpoint refuses writes, the write endpoint takes them; dump, plant and reset", async () => {
   const src = fakeSource();
   const call = (write) => async (name, args) => {
     const r = src.rpc({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, write, write ? 5001 : 5000);
@@ -65,17 +65,17 @@ test("the fake source: S0 through DAB's tools; the read endpoint refuses writes,
   const read = call(false);
   const found = await read("read_records", { entity: "dbo_Employee", filter: "Employee eq 'NGDT'" });
   assert.equal(found.result.value[0].Status, "Inactive");
-  await assert.rejects(read("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } }), /Permission denied/);
-  await call(true)("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } });
+  await assert.rejects(read("update_record", { entity: "dbo_Job", keys: { Job: 4471 }, fields: { Status: "Rush" } }), /Permission denied/);
+  await call(true)("update_record", { entity: "dbo_Job", keys: { Job: 4471 }, fields: { Status: "Rush" } });
   const dumped = await dumpSource(read, { keys: { dbo_Vendor: ["Vendor"], dbo_Material: ["Material"] } });
   assert.deepEqual(Object.keys(dumped).sort(), Object.keys(dataset()).sort(), "the identity view is left out of a dump");
   assert.deepEqual(await connectionIdentity(read), { server: "gr-e2e-fake", database: "S0Fake", login: "s0_write" });
   await guardTestSource(() => connectionIdentity(read), { server: "GR-E2E-FAKE", database: "s0fake" });
   await assert.rejects(guardTestSource(() => connectionIdentity(read), { server: "gwsynth-sql", database: "GwSynthMfg" }), /refusing to run/);
   assert.deepEqual(dumped.dbo_Job.primaryKey, ["Job"], "the key from the first page's cursor");
-  assert.equal(dumped.dbo_Job.rows.find((r) => r.Job === "4471").Status, "Rush");
+  assert.equal(dumped.dbo_Job.rows.find((r) => r.Job === 4471).Status, "Rush");
   assert.deepEqual(src.control("GET", "/__dump").dbo_Job, dumped.dbo_Job);
-  assert.equal(src.control("POST", "/__plant", { table: "dbo_Work_Center", keys: { Work_Center: "CNC" }, fields: { Status: "Down" } }).ok, true);
+  assert.equal(src.control("POST", "/__plant", { table: "dbo_Work_Center", keys: { Work_Center: "CNC 1" }, fields: { Status: "Down" } }).ok, true);
   assert.equal(src.control("GET", "/__calls").filter((c) => c.error).length, 1);
   src.control("POST", "/__reset");
   const reset = src.control("GET", "/__dump");

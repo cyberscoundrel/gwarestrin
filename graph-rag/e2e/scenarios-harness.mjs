@@ -43,19 +43,19 @@ export default [
       await guardTestSource(() => connectionIdentity(read), { server: "gwsynth-sql", database: "GwSynthMfg" }).catch((e) => (refusedGuard = e.message));
       check(/refusing to run/.test(refusedGuard ?? ""), `another server's names are refused: ${refusedGuard}`);
       const before = await dumpSource(read, { keys });
-      check(before.dbo_Employee.rows.some((r) => r.Employee === "NGDT" && r.Status === "Inactive"), "S0's inactive Diep is there");
+      check(before.dbo_Employee.rows.some((r) => r.Employee === "NGDT" && r.Status === "Inactive"), "the synthetic database's inactive Diep is there");
       let refused = null;
-      await read("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } }).catch((e) => (refused = String(e.message)));
+      await read("update_record", { entity: "dbo_Job", keys: { Job: 4471 }, fields: { Status: "Rush" } }).catch((e) => (refused = String(e.message)));
       check(/Permission denied/.test(refused ?? ""), `the read endpoint refuses a write: ${refused}`);
-      check((await dumpSource(read, { keys })).dbo_Job.rows.find((r) => r.Job === "4471").Status === "Active", "nothing changed");
+      check((await dumpSource(read, { keys })).dbo_Job.rows.find((r) => r.Job === 4471).Status === "Active", "nothing changed");
       // a write nobody logged: the gate must fail it
-      await write("update_record", { entity: "dbo_Job", keys: { Job: "4471" }, fields: { Status: "Rush" } });
+      await write("update_record", { entity: "dbo_Job", keys: { Job: 4471 }, fields: { Status: "Rush" } });
       const changes = diffDumps(before, await dumpSource(read, { keys }));
       check(changes.length === 1 && changes[0].key === "mssql:dbo_Job:4471" && changes[0].columns.join() === "Status", `one change: ${JSON.stringify(changes)}`);
       check(!rowGate(changes, []).ok, "no Filed entry: the gate fails");
       const filed = { id: "e", outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471", fields: { Status: "Rush" } } };
       check(rowGate(changes, [filed]).ok, "a Filed entry naming the row and its column: the gate passes");
-      check((await ctx.sourceDump()).dbo_Job.rows.find((r) => r.Job === "4471").Status === "Rush", "the control route's dump agrees");
+      check((await ctx.sourceDump()).dbo_Job.rows.find((r) => r.Job === 4471).Status === "Rush", "the control route's dump agrees");
       await ctx.source("/__reset", {});
       check(diffDumps(before, await dumpSource(read, { keys })).length === 0, "reset: back to S0");
     },

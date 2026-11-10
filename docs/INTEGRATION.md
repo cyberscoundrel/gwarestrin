@@ -28,13 +28,12 @@ test-source guard. `source-dump.mjs` refuses to read until the connection names 
 before every source write; the fake source serves the identity view and `e2e.sh` declares the guard names,
 writable tables and read home. All checks pass with it.
 
-**The labels against the synthetic database (gwsynth), before phase 3.** The labels were written against S0, and
-`test-sql/data.mjs` differs: Brightline, HILL and a work center "CNC 1" exist; Job takes updates but no creates;
-Sales_Order, Purchase_Order, Maintenance, Equipment, Job_Operation and Time_Punch exist; there is no Hourly_Rate or
-Qty_Shipped. Run against it, the label check names five problems in ux-aa07, ux-aj02, ux-ak03 and ux-al04, and
-layer 1 (where a piece goes) changes too: a bearing or saw-blade order is a Purchase_Order, coolant and tag-outs
-are Maintenance, a new customer order is a Sales_Order. The labels need redoing against gwsynth's declaration
-before the first real run.
+**The labels against the synthetic database (gwsynth): done, on this branch.** `eval/s0.mjs` now reads
+`test-sql/data.mjs`, the module that also feeds gwsynth's seed and the harness's fake source, so the labels, the
+harness and the run's database hold one dataset (it stands in for R11.15, open). All 62 notes are relabelled:
+75 pieces, 6 Filed, 6 Proposed, 10 Held, 53 Kept; M0 follows the test positions' descriptions (jobs, machines
+and maintenance at the floor; orders, customers, suppliers and material at Operations; employees at the root).
+The table in [build/integrate.md](build/integrate.md) is generated from the labels (`make-records.mjs table`).
 
 **Prepared for the landing.** The built-in capacity scenario in `run.mjs`
 queued its threads on a plain saved note; on the filing branch a worker takes
@@ -160,18 +159,18 @@ The integrator's (labels and evaluation, [build/integrate.md](build/integrate.md
 
 | # | The choice made |
 |---|---|
-| I-1 | **S0**, the test source the labels assume: Job and Work_Center writable (create, update; named columns), Employee, Customer, Vendor and Material read-only; the invented jobs 3260410, 3260455, 3260471 absent; no Brightline, Corvane or HILL rows. Replaced by the sources stream's synthetic database when it ships |
-| I-2 | **M0**, the test map, keyed by a class's source table (Job and Customer and Vendor and Material at Operations, Work_Center at the floor, Employee at the root), because classes don't exist until discovery mints them |
+| I-1 | ~~S0~~ retired: the labels are judged against the sources stream's synthetic database (`test-sql/data.mjs`), which stands in for R11.15 (open) |
+| I-2 | **M0**, the test map, keyed by a class's source table because classes don't exist until discovery mints them, following the test positions' descriptions: Job, Job_Operation, Work_Center, Equipment, Maintenance, Time_Punch at the floor; Sales_Order, Customer, Vendor, Purchase_Order, Material at Operations; Employee at the root. Before a real run an admin sets the system's class map from it |
 | I-3 | Authority is the recorder's position at or above the mapped one (the same as contract choice 7) |
 | I-4 | No attribute-level map entries in M0: Operations files a price on a Job row; visibility is the check's job |
-| I-5 | **Someone or something the source should hold but doesn't** (Lucas, Marisol Vega, Tomas, Kayla, Brightline, Corvane, HILL, Andre, Darrin S.): the labels accept a new instance with Kept and a Held question to the recorder alike, and the report says which each model chose (the coordinator: that is what the user wants to observe) |
+| I-5 | **Someone or something the source should hold but doesn't** (in the synthetic database: Darrin S., Corvane, Kayla, Andre): the labels accept a new instance with Kept and a Held question to the recorder alike, and the report says which each model chose (the coordinator: that is what the user wants to observe) |
 | I-6 | ux-aa11's unresolvable subject is labelled Held; Kept is accepted |
 | I-7 | A disagreement with an earlier Kept document (ux-ad15 against ux-ac13) is labelled Held, since for Kept the document is the source |
 | I-8 | The records enter as uploaded documents, one section each, with the condenser out of the first run, so every setup gets identical input; note codes are stripped from titles (ux-v02's text keeps its own "Per ux-z03") |
 | I-9 | Marker records (six, seeded) are added beside the 62 for the leak gate; a marker's home is read from the graph after the run, not planted |
-| I-10 | S0 has no free-text notes column, so a Filed piece is always a structured value |
+| I-10 | Free-text columns (`Work_Center.Status_Note`, `Maintenance.Description`) are labelled only where the note is about that record (ab02's diagnosis) |
 | I-11 | ux-t07 stays as input, labelled Kept |
-| I-12 | **R12's reading of ux-m01**: "INSPECT-2 is down until the gauge is recalibrated" describes a state and says nothing changed, so it is Held, not Filed |
+| I-12 | **R12's readings**: m01 ("INSPECT-2 is down") and t06 ("needs certs") describe states the source disagrees with, so Held; z01, z04, aa03, aa05, aa07, ab02, ac13, aq07, au04 say something changed; ag03 and al04 state what the row already holds, so Filed with nothing sent |
 | I-13 | The `BriefLog` type is added to the contract (`model/schema.js`) for the leak gate; the filing stream writes it |
 | I-14 | The test configuration sets the synthetic connection's home to everyone (the coordinator), so the source carries no markers and source writes are scanned as seen by everyone |
 | I-15 | A worker's token is refused on every `/api` HTTP route, rather than each route learning a worker's audience |
