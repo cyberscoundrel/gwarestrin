@@ -97,3 +97,141 @@ test("a dependency edge is visible only to someone who sees both ends (R11)", ()
   seen.add("#1:2");
   assert.equal(dependencyVisible({ from: "#1:1", to: "#1:2" }, (r) => seen.has(r)), true);
 });
+
+// ---- the classes and discovery stream: seed, home from evidence, corrections, nodes, timeline, report ----
+import * as model from "../src/model/classes.js";
+
+test("decision and action are seeded under event, at the roots' home (R1)", () => {
+  const seeded = model.seedClasses();
+  assert.deepEqual(seeded.map((c) => c.key), ["agent", "commitment", "event", "resource", "decision", "action"]);
+  assert.deepEqual(index.get("decision").parents, ["event"]);
+  assert.deepEqual(index.get("action").parents, ["event"]);
+  assert.deepEqual(primitivesOf("action", index), ["event"]);
+  for (const c of seeded) assert.equal(c.home, "everyone");
+  // still only four roots
+  assert.deepEqual(seeded.filter((c) => !c.parents.length).map((c) => c.key), PRIMITIVES);
+});
+
+const homes = { mssql: "floor", hr: "org", open: "everyone", sales: "ops" };
+const ctx = { positions, connectionHome: (s) => homes[s] ?? null, noteHome: (r) => ({ n1: "floor", n2: "ops", n3: "everyone" })[r] ?? null };
+
+test("a class from a table takes the home of the connection that reads it (R11)", () => {
+  assert.equal(model.homeFromEvidence([{ kind: "table", ref: "mssql:dbo_Job" }], ctx), "floor");
+  assert.equal(model.homeFromEvidence([{ kind: "rows", ref: "hr:dbo_Pay:7" }], ctx), "org");
+  assert.equal(model.homeFromEvidence([{ kind: "columns", ref: "open:dbo_Part" }], ctx), "everyone");
+});
+
+test("a connection with no home, an unknown table or no evidence fails upward to the root", () => {
+  assert.equal(model.homeFromEvidence([{ kind: "table", ref: "elsewhere:dbo_X" }], ctx), "org");
+  assert.equal(model.homeFromEvidence([{ kind: "table", note: "a table somewhere" }], ctx), "org");
+  assert.equal(model.homeFromEvidence([], ctx), "org");
+});
+
+test("a class from notes takes the strictest home among them (R11)", () => {
+  assert.equal(model.homeFromEvidence([{ kind: "notes", ref: "n1" }, { kind: "notes", ref: "n2" }], ctx), "ops");
+  assert.equal(model.homeFromEvidence([{ kind: "notes", ref: "n1" }, { kind: "notes", ref: "n3" }], ctx), "floor");
+  // a note with no ref, or one nobody knows, counts as the root's
+  assert.equal(model.homeFromEvidence([{ kind: "notes", ref: "n1" }, { kind: "notes", note: "someone said" }], ctx), "org");
+});
+
+test("wider only when wider evidence independently supports it (R11)", () => {
+  // restricted notes, and a table everyone's connection reads: the table supports it on its own
+  assert.equal(model.homeFromEvidence([{ kind: "notes", ref: "n2" }, { kind: "table", ref: "open:dbo_Part" }], ctx), "everyone");
+  // two tables on one chain: the deeper (wider) one
+  assert.equal(model.homeFromEvidence([{ kind: "table", ref: "sales:dbo_Order" }, { kind: "table", ref: "mssql:dbo_Job" }], ctx), "floor");
+});
+
+test("evidence on different branches: neither is wider, so the common ancestor (NEEDS A RULING)", () => {
+  const branched = parsePositionMap({ root: "org", positions: { org: { name: "o" }, a: { name: "a", parent: "org" }, b: { name: "b", parent: "org" } } });
+  assert.equal(model.widestHome(branched, ["a", "b"]), "org");
+  assert.equal(model.widestHome(branched, ["a", "a"]), "a");
+});
+
+test("a class is never seen where one of its parents is not: strictest wins (R9, NEEDS A RULING)", () => {
+  assert.equal(model.classHome("floor", ["ops"], positions), "ops");
+  assert.equal(model.classHome("everyone", ["everyone"], positions), "everyone");
+  const idx = classIndex([
+    normalizeClass({ name: "leased building", parents: ["resource"], home: "org" }),
+    normalizeClass({ name: "warehouse", parents: ["leased building", "machines"], home: "floor" }),
+    normalizeClass({ name: "machines", parents: ["resource"], home: "floor" }),
+  ]);
+  const own = { leased_building: "ops", warehouse: "floor", machines: "floor" };
+  const got = model.treeHomes(idx, (c) => own[c.key], positions);
+  assert.equal(got.get("warehouse"), "ops");
+  assert.equal(got.get("machines"), "floor");
+  assert.equal(got.get("resource"), "everyone");
+});
+
+test("a correction pins what it sets, and the latest of retire and restore wins (R11)", () => {
+  const by = "admin";
+  const cs = [
+    model.normalizeCorrection({ kind: "home", value: "ops", by }, { positions }),
+    model.normalizeCorrection({ kind: "retire", by }),
+    model.normalizeCorrection({ kind: "rows_are_nodes", value: true, by }),
+  ];
+  assert.deepEqual(model.pinned(cs), { home: "ops", rows_are_nodes: true });
+  assert.equal(model.retiredBy(cs), true);
+  assert.equal(model.retiredBy([...cs, model.normalizeCorrection({ kind: "restore", by })]), false);
+  assert.throws(() => model.normalizeCorrection({ kind: "home", value: "nowhere", by }, { positions }), /unknown position/);
+  assert.throws(() => model.normalizeCorrection({ kind: "retire" }), /needs the person/);
+  assert.throws(() => model.normalizeCorrection({ kind: "merge", by }), /must be one of/);
+});
+
+test("a rerun never brings back a retired class, by name or by table, nor a renamed one's old name (R11)", () => {
+  const jobs = { ...index.get("jobs"), corrections: [model.normalizeCorrection({ kind: "retire", by: "admin" })] };
+  const stored = [model.applyCorrections(jobs), index.get("orders")];
+  assert.equal(stored[0].status, "retired");
+  assert.throws(() => model.assertCreatable(normalizeClass({ name: "Jobs", parents: ["commitment"], home: "floor" }), stored), /retired by a person/);
+  assert.throws(() => model.assertCreatable(normalizeClass({ name: "work orders", parents: ["commitment"], home: "floor", record_table: "mssql:dbo_job" }), stored), /retired by a person/);
+  assert.throws(() => model.assertCreatable(normalizeClass({ name: "orders", parents: ["commitment"], home: "ops" }), stored), /exists already/);
+  const renamed = model.applyCorrections({ ...index.get("machines"), corrections: [model.normalizeCorrection({ kind: "rename", value: "work centers", from: "machines", by: "admin" })] });
+  assert.equal(renamed.key, "work_centers");
+  assert.throws(() => model.assertCreatable(normalizeClass({ name: "machines", parents: ["resource"], home: "floor" }), [renamed]), /renamed machines to work centers/);
+  assert.doesNotThrow(() => model.assertCreatable(normalizeClass({ name: "vehicles", parents: ["resource"], home: "ops" }), stored));
+});
+
+test("the orchestrator can't change what a person pinned, nor touch a retired class", () => {
+  const c = { ...index.get("machines"), corrections: [model.normalizeCorrection({ kind: "rows_are_nodes", value: false, by: "admin" })] };
+  assert.throws(() => model.assertUnpinned(c, "rows_are_nodes"), /only a person changes it/);
+  assert.doesNotThrow(() => model.assertUnpinned(c, "description"));
+  assert.throws(() => model.assertUnpinned({ ...c, status: "retired" }, "description"), /retired/);
+  const u = { ...c, corrections: [model.normalizeCorrection({ kind: "unrelate", instance: "#4:2", by: "admin" })] };
+  assert.ok(model.unrelated(u).has("#4:2"));
+});
+
+test("a transactional row gets a node only for what the source can't hold (R3)", () => {
+  const orders = index.get("orders"); // rows stay in the source
+  assert.equal(model.mayMakeNode(orders, { key: "mssql:dbo_Order:9001" }).ok, false);
+  assert.equal(model.mayMakeNode(orders, { key: "mssql:dbo_Order:9001", dependency: true }).ok, true);
+  assert.equal(model.mayMakeNode(orders, { key: "mssql:dbo_Order:9001", reason: "the graph must say it waits on a permit" }).ok, true);
+  assert.equal(model.mayMakeNode(index.get("machines"), { key: "mssql:dbo_Work_Center:CNC1" }).ok, true);
+  assert.equal(model.mayMakeNode(index.get("warehouse"), { key: null }).ok, true);
+});
+
+test("a timeline reads times plus dependency (R1)", () => {
+  const items = [
+    { id: "inventory", at: "2026-01-05" },
+    { id: "lease", at: "2026-03-01" },
+    { id: "broker", at: "2026-02-01" },
+    { id: "nodate" },
+  ];
+  // inventory depends on the lease, the lease on the broker being paid
+  const deps = [{ from: "inventory", to: "lease" }, { from: "lease", to: "broker" }];
+  const order = model.timeline(items, deps).map((i) => i.id);
+  assert.deepEqual(order, ["broker", "lease", "inventory", "nodate"]);
+  assert.deepEqual(model.timeline(items, []).map((i) => i.id), ["inventory", "broker", "lease", "nodate"]);
+  const cyc = model.timeline([{ id: "a" }, { id: "b" }], [{ from: "a", to: "b" }, { from: "b", to: "a" }]);
+  assert.ok(cyc.every((i) => i.cycle));
+});
+
+test("the tree report lists every class under its parents with what a person checks (R5)", () => {
+  const idx = classIndex([...fixture, normalizeClass({ name: "rental", parents: ["commitment", "resource"], home: "ops" })]);
+  const text = model.treeReport(idx, { counts: new Map([["machines", 3]]) });
+  assert.match(text, /^- agent/m);
+  assert.match(text, /^ {2}- warehouse|^ {4}- warehouse/m);
+  assert.match(text, /- machines \(home: floor; table mssql:dbo_Work_Center, rows are nodes; 3 instances\)/);
+  assert.match(text, /- rental \(.*also under resource\)/);
+  assert.match(text, /- rental \(.*also under commitment\)/);
+  assert.match(text, /evidence: table mssql:dbo_Order/);
+  assert.match(text, /^ {2}- decision/m);
+});

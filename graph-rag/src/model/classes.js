@@ -10,9 +10,9 @@
 // Rulings: four primitives are the only roots (R1); a class may have several parents and where parents
 // conflict the strictest rule wins (R9, class-map.js); a class is scoped by home like any other node
 // (earlier ruling); what a class holds (R11); whether a class's rows become nodes is its own setting (R3).
-import { EVERYONE } from "../positions.js";
+import { ancestors, commonAncestor, effectiveHome, EVERYONE } from "../positions.js";
 import { clip, isoDate, nonEmpty, ShapeError, snakeCase } from "./text.js";
-import { TABLE_RE } from "./schema.js";
+import { parseKey, parseTable, TABLE_RE } from "./schema.js";
 
 export const CLASS_KIND = "class";
 /** the four primary primitives, the only roots (R1; "agent" is the user's word, replacing actor) */
@@ -96,9 +96,22 @@ export function normalizeClass(raw, { positions } = {}) {
 /** the four roots as classes. NEEDS A RULING (roots' home): smallest choice, everyone sees them */
 export const rootClasses = () => PRIMITIVES.map((name) => ({ name, key: name, parents: [], home: EVERYONE, description: null, evidence: [], rows_are_nodes: false, record_table: null, stages: [], status: "active" }));
 
-/** classes by key: a list of normalized classes, with the roots added when missing */
+/** decisions and actions are subclasses of event (R1); seeded with the roots, at the roots' home */
+export const SEEDED_SUBCLASSES = [
+  { name: "decision", parents: ["event"] },
+  { name: "action", parents: ["event"] },
+];
+
+/** what discovery seeds before it reads anything: the four roots, and decision and action under event (R1) */
+export const seedClasses = () => [
+  ...rootClasses(),
+  ...SEEDED_SUBCLASSES.map(({ name, parents }) => ({ name, key: name, parents, home: EVERYONE, description: null, evidence: [], rows_are_nodes: false, record_table: null, stages: [], status: "active" })),
+];
+export const SEEDED_KEYS = seedClasses().map((c) => c.key);
+
+/** classes by key: a list of normalized classes, with the seeded ones added when missing */
 export function classIndex(classes) {
-  const out = new Map(rootClasses().map((c) => [c.key, c]));
+  const out = new Map(seedClasses().map((c) => [c.key, c]));
   for (const c of classes ?? []) if (c?.key) out.set(c.key, c);
   return out;
 }
@@ -214,3 +227,273 @@ export function normalizeDependency(raw) {
 
 /** R11: a dependency edge is visible only to someone who can see both ends (`sees`: instance -> boolean) */
 export const dependencyVisible = (edge, sees) => Boolean(sees(edge.from) && sees(edge.to));
+
+/* ---------------------------------------------------------------------------------------------------
+ * Home from evidence (R11: "A class from a table gets the home of the connection that can read that
+ * table; from notes, the strictest home among them; wider only if wider evidence independently supports
+ * it"). Computed here, never chosen by a model. Unknown anything fails upward to the root.
+ * ------------------------------------------------------------------------------------------------- */
+
+/** is `a` at or above `b` in the tree (everyone sits below every position) */
+const atOrAbove = (positions, a, b) => a === b || (a !== EVERYONE && (b === EVERYONE || ancestors(positions, b).includes(a)));
+
+/**
+ * The widest of several homes, each of which independently supports the class.
+ * NEEDS A RULING (evidence on different branches): when the homes lie on one chain the deepest wins
+ * (`everyone` beats every position); when they sit on different branches neither is wider, so their
+ * common ancestor, the strictest choice, wins.
+ */
+export function widestHome(positions, homes) {
+  const list = [...new Set(homes.map((h) => effectiveHome(positions, h)))];
+  if (!list.length) return positions.root;
+  if (list.includes(EVERYONE)) return EVERYONE;
+  const chain = list.every((a) => list.every((b) => atOrAbove(positions, a, b) || atOrAbove(positions, b, a)));
+  if (!chain) return commonAncestor(positions, list);
+  return list.sort((a, b) => ancestors(positions, b).length - ancestors(positions, a).length)[0];
+}
+
+/** the strictest of several homes: the deepest point at or above all of them (positions.commonAncestor) */
+export const strictestHome = (positions, homes) => commonAncestor(positions, homes);
+
+/** the system a piece of evidence reads from: a table (`system:table`) or a row (`system:table:row`) */
+export const evidenceSystem = (e) => parseTable(e?.ref)?.system ?? parseKey(e?.ref)?.system ?? null;
+
+/**
+ * A class's home from its evidence (R11). `connectionHome(system)` is the home of the connection that
+ * reads a system (null or unknown: the root); `noteHome(ref)` is the home of a note or section (null:
+ * unknown, the root). Each table, column or row citation is one independent group, at its connection's
+ * home; every note together is one group, at the strictest home among them. The class takes the widest
+ * group (widestHome). No usable evidence: the root.
+ */
+export function homeFromEvidence(evidence, { positions, connectionHome = () => null, noteHome = () => null }) {
+  const groups = [];
+  const notes = [];
+  for (const e of evidence ?? []) {
+    if (e.kind === "correction") continue; // a person's correction pins a home itself (corrections below)
+    if (e.kind === "notes") {
+      notes.push((e.ref && noteHome(e.ref)) || positions.root);
+      continue;
+    }
+    const system = evidenceSystem(e);
+    groups.push((system && connectionHome(system)) || positions.root);
+  }
+  if (notes.length) groups.push(strictestHome(positions, notes));
+  return groups.length ? widestHome(positions, groups) : positions.root;
+}
+
+/**
+ * The home a class is stored at: its own (from evidence, or a person's correction) made no wider than
+ * any parent's (R9: where parents conflict the strictest rule wins).
+ * NEEDS A RULING (what "strictest rule" covers): smallest choice, the home is inherited strictest-wins,
+ * so a class is never seen where one of its parents is not; rows_are_nodes is the class's own and is not
+ * inherited.
+ */
+export const classHome = (ownHome, parentHomes, positions) => strictestHome(positions, [ownHome, ...parentHomes]);
+
+/**
+ * Every class's stored home, parents first: `own(c)` gives a class's own home. Returns Map key -> home.
+ * The seeded classes keep theirs.
+ */
+export function treeHomes(index, own, positions) {
+  const out = new Map();
+  const visit = (key, stack) => {
+    if (out.has(key)) return out.get(key);
+    const c = index.get(key);
+    if (!c || stack.has(key)) return positions.root; // a cycle can't be stored (assertParents); fail upward if one is
+    stack.add(key);
+    const home = SEEDED_KEYS.includes(key) ? c.home : classHome(own(c), c.parents.map((p) => visit(p, stack)), positions);
+    stack.delete(key);
+    out.set(key, home);
+    return home;
+  };
+  for (const key of index.keys()) visit(key, new Set());
+  return out;
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * Corrections (R11: "A person corrects in the admin panel or by telling the orchestrator; corrections
+ * are stored and reruns respect them; a retired class never returns on its own"). A correction is kept
+ * on the class it corrects; what it set is pinned, and nothing but another correction changes it.
+ * ------------------------------------------------------------------------------------------------- */
+
+export const CORRECTION_KINDS = ["retire", "restore", "rename", "parents", "home", "rows_are_nodes", "description", "stages", "record_table", "unrelate"];
+/** the field each pinning correction sets */
+export const PINS = { rename: "name", parents: "parents", home: "home", rows_are_nodes: "rows_are_nodes", description: "description", stages: "stages", record_table: "record_table" };
+
+/** one correction, normalized: { kind, value?, from?, instance?, by, at, reason } */
+export function normalizeCorrection(raw, { positions } = {}) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ShapeError("correction", "must be an object");
+  const kind = String(raw.kind ?? "").trim();
+  if (!CORRECTION_KINDS.includes(kind)) throw new ShapeError("kind", `must be one of ${CORRECTION_KINDS.join(", ")}`);
+  if (!nonEmpty(raw.by)) throw new ShapeError("by", "needs the person who corrected it");
+  const at = isoDate(raw.at ?? Date.now());
+  if (!at) throw new ShapeError("at", `not a date: ${raw.at}`);
+  const out = { kind, by: clip(raw.by, 120), at, reason: nonEmpty(raw.reason) ? clip(raw.reason, 600) : null };
+  const v = raw.value;
+  if (kind === "rename") {
+    if (!nonEmpty(v) || !classKey(v)) throw new ShapeError("value", "needs the new name");
+    out.value = clip(v, 80);
+    out.from = nonEmpty(raw.from) ? clip(raw.from, 80) : null;
+  } else if (kind === "parents") {
+    if (!Array.isArray(v) || !v.length || v.some((p) => !nonEmpty(p))) throw new ShapeError("value", "needs the parents' names");
+    out.value = [...new Set(v.map(classKey))];
+  } else if (kind === "home") {
+    if (!nonEmpty(v)) throw new ShapeError("value", "needs a home");
+    if (positions && v !== EVERYONE && !positions.positions[v]) throw new ShapeError("value", `unknown position: ${v}`);
+    out.value = String(v).trim();
+  } else if (kind === "rows_are_nodes") {
+    if (typeof v !== "boolean") throw new ShapeError("value", "must be true or false");
+    out.value = v;
+  } else if (kind === "description") {
+    out.value = nonEmpty(v) ? clip(v, 1000) : null;
+  } else if (kind === "stages") {
+    if (!Array.isArray(v) || v.some((s) => !nonEmpty(s))) throw new ShapeError("value", "must be a list of stage names");
+    out.value = v.map((s) => clip(s, 60));
+  } else if (kind === "record_table") {
+    if (v !== null && (!nonEmpty(v) || !TABLE_RE.test(String(v).trim()))) throw new ShapeError("value", "system:table, or null");
+    out.value = v === null ? null : String(v).trim();
+  } else if (kind === "unrelate") {
+    if (!nonEmpty(raw.instance)) throw new ShapeError("instance", "needs the instance (its record id or record key)");
+    out.instance = clip(raw.instance, 200);
+  }
+  return out;
+}
+
+/** the fields corrections pinned on a class, the latest winning: { name?, parents?, home?, ... } */
+export function pinned(corrections) {
+  const out = {};
+  for (const c of corrections ?? []) if (PINS[c.kind]) out[PINS[c.kind]] = c.value;
+  return out;
+}
+
+/** is the class retired by its corrections (the latest of retire and restore wins) */
+export function retiredBy(corrections) {
+  let retired = false;
+  for (const c of corrections ?? []) {
+    if (c.kind === "retire") retired = true;
+    if (c.kind === "restore") retired = false;
+  }
+  return retired;
+}
+
+/** the keys a class was known by before a person renamed it */
+export const formerKeys = (cls) => (cls.corrections ?? []).filter((c) => c.kind === "rename" && c.from).map((c) => classKey(c.from)).filter((k) => k !== cls.key);
+
+/** the instances a person took out of a class (record ids or keys, lower-cased): nothing puts them back on its own */
+export const unrelated = (cls) => new Set((cls.corrections ?? []).filter((c) => c.kind === "unrelate").map((c) => c.instance.toLowerCase()));
+
+/**
+ * May the orchestrator create this class (R11: corrections are respected, a retired class never returns
+ * on its own)? `classes` are every stored class with their corrections applied. Throws ShapeError naming
+ * what it collides with: a retired class by name or table, a class a person renamed, or one that exists.
+ * NEEDS A RULING (what "the same class" is on a rerun): smallest choice, the same name (classKey) or the
+ * same record table.
+ */
+export function assertCreatable(cls, classes) {
+  for (const c of classes) {
+    const sameName = c.key === cls.key;
+    const sameTable = Boolean(cls.record_table && c.record_table && c.record_table.toLowerCase() === cls.record_table.toLowerCase());
+    if ((sameName || sameTable) && c.status === "retired") throw new ShapeError(sameName ? "name" : "record_table", `${c.name} was retired by a person: it never returns on its own`);
+    if (formerKeys(c).includes(cls.key)) throw new ShapeError("name", `a person renamed ${cls.name} to ${c.name}: use ${c.name}`);
+    if (sameName) throw new ShapeError("name", `${c.name} exists already`);
+  }
+}
+
+/** may the orchestrator change this field of a class: not when it is retired, nor when a person pinned the field */
+export function assertUnpinned(cls, field) {
+  if (cls.status === "retired") throw new ShapeError("class", `${cls.name} was retired by a person`);
+  if (field in pinned(cls.corrections)) throw new ShapeError(field, `a person set ${cls.name}'s ${field}: only a person changes it`);
+}
+
+/** a class with its corrections applied: pinned fields take the person's value, the status the latest retire or restore */
+export function applyCorrections(cls) {
+  const p = pinned(cls.corrections);
+  const out = { ...cls, ...p };
+  if (p.name) out.key = classKey(p.name);
+  if ((cls.corrections ?? []).some((c) => c.kind === "retire" || c.kind === "restore")) out.status = retiredBy(cls.corrections) ? "retired" : "active";
+  return out;
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * What earns a node (R3): "A row earns a node when the graph must say something the source cannot hold
+ * (for example a dependency), created by the worker, referring back by key."
+ * ------------------------------------------------------------------------------------------------- */
+
+/**
+ * May a row of this class's table become an instance node? Yes when the class says its rows are nodes,
+ * or the node is made for a dependency.
+ * NEEDS A RULING (a row's node for other reasons): smallest choice, also yes with a stated reason of what
+ * the graph must hold that the source can't. A class with no record table has no rows: its instances are
+ * always nodes.
+ */
+export function mayMakeNode(cls, { key = null, dependency = false, reason = null } = {}) {
+  if (!cls.record_table || cls.rows_are_nodes) return { ok: true };
+  const k = parseKey(key);
+  if (k && `${k.system}:${k.table}`.toLowerCase() !== cls.record_table.toLowerCase()) return { ok: true };
+  if (dependency) return { ok: true, why: "a dependency the source can't hold" };
+  if (nonEmpty(reason)) return { ok: true, why: clip(reason, 300) };
+  return { ok: false, reason: `${cls.name}'s rows stay in ${cls.record_table}, and a section stores the key: a row gets a node only when the graph must say something the source can't hold (a dependency, or give the reason)` };
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * The timeline (R1: "read a timeline from times plus dependency").
+ * ------------------------------------------------------------------------------------------------- */
+
+/**
+ * Order instances by their times and their dependencies: whatever another depends on comes first, and
+ * among those free to come next the earliest time does (no time: after those with one, then by id).
+ * `items`: [{ id, at? }]; `deps`: [{ from, to }] (from depends on to). Dependencies on items not given are
+ * ignored. A cycle can't be ordered: its members come last, by time, marked `cycle: true`.
+ */
+export function timeline(items, deps) {
+  const before = new Map(items.map((i) => [i.id, new Set()]));
+  for (const d of deps ?? []) if (before.has(d.from) && before.has(d.to) && d.from !== d.to) before.get(d.from).add(d.to);
+  const cmp = (a, b) => {
+    const ta = isoDate(a.at);
+    const tb = isoDate(b.at);
+    if (ta && tb && ta !== tb) return ta < tb ? -1 : 1;
+    if (ta && !tb) return -1;
+    if (!ta && tb) return 1;
+    return String(a.id).localeCompare(String(b.id));
+  };
+  const done = new Set();
+  const out = [];
+  for (;;) {
+    const next = items.filter((i) => !done.has(i.id) && [...before.get(i.id)].every((d) => done.has(d))).sort(cmp)[0];
+    if (!next) break;
+    done.add(next.id);
+    out.push({ ...next, after: [...before.get(next.id)] });
+  }
+  for (const i of items.filter((x) => !done.has(x.id)).sort(cmp)) out.push({ ...i, after: [...before.get(i.id)], cycle: true });
+  return out;
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * The tree, as a person reads it (R5: "measure tree quality on real models early").
+ * ------------------------------------------------------------------------------------------------- */
+
+/**
+ * One page: each class under its parents (a class with several parents is listed under each, marked),
+ * with its home, its table and whether its rows are nodes, its instance count and its evidence, for a
+ * person to mark right, wrong or missing. `counts`: Map key -> instances; `homeName(home)` for people.
+ */
+export function treeReport(index, { counts = new Map(), homeName = (h) => h } = {}) {
+  const lines = [];
+  const kids = (key) => [...index.values()].filter((c) => c.parents.includes(key) && c.status !== "retired").sort((a, b) => a.key.localeCompare(b.key));
+  const walk = (c, depth, via) => {
+    const n = counts.get(c.key) ?? 0;
+    const facts = [
+      `home: ${homeName(c.home)}`,
+      c.record_table ? `table ${c.record_table}, rows ${c.rows_are_nodes ? "are" : "are not"} nodes` : null,
+      `${n} instance${n === 1 ? "" : "s"}`,
+      c.parents.length > 1 ? `also under ${c.parents.filter((p) => p !== via).join(", ")}` : null,
+    ].filter(Boolean);
+    lines.push(`${"  ".repeat(depth)}- ${c.name} (${facts.join("; ")})`);
+    for (const e of c.evidence ?? []) lines.push(`${"  ".repeat(depth + 1)}evidence: ${e.kind}${e.ref ? ` ${e.ref}` : ""}${e.note ? `: ${e.note}` : ""}`);
+    for (const k of kids(c.key)) walk(k, depth + 1, c.key);
+  };
+  for (const p of PRIMITIVES) walk(index.get(p), 0, null);
+  const retired = [...index.values()].filter((c) => c.status === "retired");
+  if (retired.length) lines.push("", "Retired by a person:", ...retired.map((c) => `- ${c.name}`));
+  return lines.join("\n");
+}
