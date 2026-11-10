@@ -14,19 +14,25 @@
 //        prints the labels as the Markdown table docs/build/integrate.md carries (generated, so they can't drift)
 //
 //   node scripts/make-records.mjs seed <run-dir>/records.json --url http://host:8000 --tokens tokens.json
-//        [--tool record_document] [--only marker-1,ux-m01] [--dry-run]
+//        [--tool record_document] [--only marker-1,ux-m01] [--dry-run] [--harness]
 //        posts every record, in order, as its person (tokens.json: { user: token } or graph-rag's token map).
 //        --url is required and has no default: this never finds an instance on its own, and it is never run
 //        against the development instance or the demo. Batches go one at a time: after each batch it waits
 //        until the filing log holds an entry for every record so far (--wait-ms, default 30 minutes), unless
 //        --no-wait. Run only against a throwaway graph and the synthetic test source.
-//        This writes only records to graph-rag. Every source write graph-rag then makes passes the sources
-//        stream's guard first (data-entry.js checkGuard: the write connection must name the declared test server,
-//        database and login), so nothing here reaches a source unguarded. source-dump.mjs guards its reads.
+//        The guard, before anything is sent: the records drive filing, and filing writes to whatever source the
+//        instance declares. graph-rag's own guard (data-entry.js checkGuard) only compares the write connection
+//        with the names that are declared, and checks the login only when one is declared, so it can't say the
+//        target is a test database. So this asks the instance (GET /api/sources/guard, the admin's token) what
+//        each declared write source's connection holds, live through that guard, and refuses unless every one is
+//        the synthetic test database: test-sql's server, database and write login (eval/dump.mjs
+//        assertSeedTarget). --harness accepts the replay harness's fake source instead, and nothing else.
+//        --dry-run sends nothing and skips the guard.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { checkLabels, labelCounts, NOTES, STATED_NOTES } from "../graph-rag/eval/labels.mjs";
 import { markerRecords, recordsFrom } from "../graph-rag/eval/records.mjs";
+import { assertSeedTarget } from "../graph-rag/eval/dump.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const ORACLE = `${ROOT}graph-rag/test/fixtures/oracle-sixty.json`;
@@ -45,7 +51,7 @@ function parseArgs(argv) {
 }
 const usage = (msg) => {
   if (msg) console.error(msg);
-  console.error("usage: make-records.mjs generate --out dir [--seed N]\n       make-records.mjs check [--data dump.json]\n       make-records.mjs table\n       make-records.mjs seed records.json --url URL --tokens f [--tool name] [--only ids] [--dry-run] [--no-wait]");
+  console.error("usage: make-records.mjs generate --out dir [--seed N]\n       make-records.mjs check [--data dump.json]\n       make-records.mjs table\n       make-records.mjs seed records.json --url URL --tokens f [--tool name] [--only ids] [--dry-run] [--no-wait] [--harness]");
   process.exit(2);
 };
 
@@ -112,6 +118,22 @@ if (args._[0] === "generate") {
     }
   };
   const adminToken = tokenOf("admin");
+  if (!args["dry-run"]) {
+    if (!adminToken) usage("the guard needs the admin's token in --tokens");
+    const r = await fetch(`${url}/api/sources/guard`, { headers: { authorization: `Bearer ${adminToken}` } }).catch((e) => ({ ok: false, status: 0, json: async () => ({ error: String(e.message) }) }));
+    const report = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      console.error(`refusing to seed: the instance's guard can't be read (${r.status}: ${report.error ?? "no answer"})`);
+      process.exit(1);
+    }
+    try {
+      const ok = assertSeedTarget(report, { harness: Boolean(args.harness) });
+      console.log(`guard: ${ok.map((s) => `${s.system} writes into ${s.live.server}/${s.live.database} as ${s.live.login}`).join("; ")}`);
+    } catch (e) {
+      console.error(e.message);
+      process.exit(1);
+    }
+  }
   const filedRecords = async () => {
     const r = await call(adminToken, "query_graph", { query: "SELECT DISTINCT(record) AS record FROM FilingEntry", language: "sql" });
     return new Set((r.rows ?? []).map((x) => x.record));

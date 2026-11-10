@@ -346,6 +346,37 @@ app.post("/api/worker/backfill", (req, res) => {
 });
 
 /** the pruning record: what was removed, when (names only, never content; the root only) */
+/**
+ * Which database each declared write source holds, read live through graph-rag's own guard (data-entry.js
+ * checkGuard: the write connection's identity view). For the root's admin only. A script that drives writes (the
+ * evaluation's seeder) asks this before anything, so it checks the connection graph-rag will actually write
+ * through, not one it was told about. It reads one identity row per source and writes nothing.
+ */
+app.get("/api/sources/guard", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root sees the sources' guard" });
+  void (async () => {
+    const [{ loadSources }, { checkGuard }] = await Promise.all([import("./sources.js"), import("./data-entry.js")]);
+    const out = [];
+    for (const decl of Object.values(await loadSources(undefined, { ttlMs: 0 }))) {
+      if (!decl || decl.commit?.via === "none") {
+        out.push({ system: decl?.system ?? null, writable: false });
+        continue;
+      }
+      const g = decl.commit.guard ?? null;
+      const live = await checkGuard(decl).catch((e) => ({ ok: false, why: String(e?.message ?? e).slice(0, 300) }));
+      out.push({
+        system: decl.system,
+        writable: true,
+        declared: g ? { server: g.server ?? null, database: g.database ?? null, login: g.login ?? null } : null,
+        live: { ok: Boolean(live.ok), status: live.status ?? null, server: live.server ?? null, database: live.database ?? null, login: live.login ?? null, why: live.why ?? null },
+      });
+    }
+    res.json({ sources: out });
+  })().catch((e) => res.status(500).json({ error: String(e?.message ?? e).slice(0, 300) }));
+});
+
 app.get("/api/pruned", (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);
   if (!identity) return res.status(401).json({ error: "unauthenticated" });

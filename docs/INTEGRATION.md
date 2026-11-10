@@ -22,6 +22,20 @@ Sources landed at 15ce278, the reviewed tip that filing also carries. Next, each
 record, then filing (which already carries sources and classes). The synthetic test database runs as compose
 project `gwsynth`.
 
+**The review of c376a76 (G-B1), fixed.** `make-records.mjs seed` had lost its refusal to seed an unguarded
+target, and its comment claimed graph-rag's guard checks for a *test* database and the login; it checks only the
+declared names, and the login only when one is declared. Now the seeder asks the target graph-rag, before it
+sends anything, what each declared write source's connection holds, live through graph-rag's own guard (new
+admin-only route `GET /api/sources/guard`, `routes.js`). It refuses unless every one is the synthetic test
+database: test-sql's server, database **and write login** (`eval/dump.mjs assertSeedTarget`). `--harness`
+accepts the replay harness's fake source instead, and nothing else; `--dry-run` sends nothing. The reviewer's
+probe (a target whose declared guard is another database) is the failing test, at both levels: the check alone,
+and the script run against a stand-in instance, which must exit 1 having asked for nothing but the guard. A harness
+scenario reads the route live. The only other scripts in `scripts/` that write anywhere are the older deploy and
+demo tools (`seed-arcadedb.mjs`, `queue-verify.mjs`, `demo-restore.sh`, `demo-snapshot.sh`,
+`bp-apply-sync.py`), which target the development and demo instances by design and are no part of the evaluation;
+they are left as they were.
+
 **After landing 1, on this branch, not yet on `build-base` (for the next review):** c376a76 wires the
 test-source guard. `source-dump.mjs` refuses to read until the connection names the test server and database
 (`dbo_GwConnectionIdentity`); `make-records.mjs seed` drops `--unguarded`, since graph-rag's `checkGuard` runs

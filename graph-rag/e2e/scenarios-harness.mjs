@@ -61,6 +61,30 @@ export default [
     },
   },
   {
+    name: "graph-rag reports its write sources' live guard to the root's admin only, and the seeder's check accepts the harness's fake source only as such",
+    run: async (ctx) => {
+      const { check } = ctx;
+      const { assertSeedTarget, HARNESS_FAKE } = await import(ctx.evalUrl("dump.mjs"));
+      const get = (token) => fetch(`${ctx.GRAPH}/api/sources/guard`, { headers: { authorization: `Bearer ${token}` } });
+      const r = await get(ctx.TOKENS.admin);
+      const report = await r.json();
+      check(r.ok, `the admin reads it: ${r.status} ${JSON.stringify(report).slice(0, 200)}`);
+      const mssql = (report.sources ?? []).find((x) => x.system === "mssql");
+      check(mssql?.writable && mssql.live?.ok, `the fake source's guard passes, live: ${JSON.stringify(mssql)}`);
+      check(mssql.live.server === HARNESS_FAKE.server && mssql.live.database === HARNESS_FAKE.database && mssql.live.login === HARNESS_FAKE.login, `read through the write connection: ${JSON.stringify(mssql.live)}`);
+      check(assertSeedTarget(report, { harness: true }).length === 1, "the seeder's check accepts it as the harness's fake");
+      let refused = null;
+      try {
+        assertSeedTarget(report);
+      } catch (e) {
+        refused = e.message;
+      }
+      check(/not the synthetic test database/.test(refused ?? ""), `and refuses it as a real run's target: ${refused}`);
+      for (const who of ["alice", "bob"]) check((await get(ctx.TOKENS[who])).status === 403, `${who} is refused`);
+      check((await get(ctx.workerToken("#1:0"))).status === 403, "a worker is refused");
+    },
+  },
+  {
     name: "the evaluation's snapshot reads run against the contract's schema, find a marker record where it landed, and the leak scan flags it only above its home",
     run: async (ctx) => {
       const { check, POS, until } = ctx;

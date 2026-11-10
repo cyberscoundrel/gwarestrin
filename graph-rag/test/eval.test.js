@@ -320,3 +320,57 @@ test("report: a clean snapshot passes both gates; a planted row change or a leak
   const cmp = compareRuns([{ report: ok, classes: roots }, { report: bad, classes: roots }]);
   assert.match(cmp.markdown, /\| fake \| 2 \| FAIL \|/);
 });
+
+test("seed guard: only the synthetic test database (server, database and write login) is a seeding target", async () => {
+  const { assertSeedTarget, SYNTHETIC_WRITE, HARNESS_FAKE } = await import("../eval/dump.mjs");
+  const src = (live, extra = {}) => ({ sources: [{ system: "mssql", writable: true, declared: null, live: { ok: true, status: "ok", ...live }, ...extra }] });
+  assert.equal(assertSeedTarget(src(SYNTHETIC_WRITE)).length, 1);
+  assert.equal(assertSeedTarget(src({ ...SYNTHETIC_WRITE, server: SYNTHETIC_WRITE.server.toUpperCase() })).length, 1, "case doesn't matter");
+  // the reviewer's probe: a target whose declared guard is some other database passes graph-rag's own guard
+  assert.throws(() => assertSeedTarget(src({ server: "mssql-server", database: "ErpLive", login: "erp_write" })), /refusing to seed: mssql writes into mssql-server\/ErpLive/);
+  assert.throws(() => assertSeedTarget(src({ ...SYNTHETIC_WRITE, login: "sa" })), /as sa, not the synthetic test database/, "the login counts even where no login is declared");
+  assert.throws(() => assertSeedTarget({ sources: [{ system: "mssql", writable: false }] }), /declares no write source/);
+  assert.throws(() => assertSeedTarget(src({ ok: false, why: "no guard is declared" })), /guard didn't pass \(no guard is declared\)/);
+  assert.throws(() => assertSeedTarget(src(HARNESS_FAKE)), /not the synthetic test database/, "the harness's fake only with --harness");
+  assert.equal(assertSeedTarget(src(HARNESS_FAKE), { harness: true }).length, 1);
+  assert.throws(() => assertSeedTarget(src(SYNTHETIC_WRITE), { harness: true }), /not the harness's fake/);
+  // one good source and one other: refused
+  assert.throws(() => assertSeedTarget({ sources: [...src(SYNTHETIC_WRITE).sources, ...src({ server: "tcmautomation", database: "Tcm", login: "w" }).sources] }), /tcmautomation/);
+});
+
+test("seed guard, end to end: make-records.mjs seed refuses a target that isn't the test database, and sends no record", async () => {
+  const { createServer } = await import("node:http");
+  const { spawn } = await import("node:child_process");
+  const { mkdtempSync, writeFileSync: write } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { SYNTHETIC_WRITE } = await import("../eval/dump.mjs");
+  const run = async (live) => {
+    const calls = [];
+    const server = createServer((req, res) => {
+      calls.push(`${req.method} ${req.url}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      if (req.url === "/api/sources/guard") return res.end(JSON.stringify({ sources: [{ system: "mssql", writable: true, live: { ok: true, status: "ok", ...live } }] }));
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "{}" }] } }));
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const dir = mkdtempSync(join(tmpdir(), "seed-guard-"));
+    write(join(dir, "tokens.json"), JSON.stringify({ admin: "a", alice: "b", bob: "c" }));
+    write(join(dir, "records.json"), JSON.stringify({ records: recordsFrom(oracle).slice(0, 1) }));
+    const script = new URL("../../scripts/make-records.mjs", import.meta.url).pathname;
+    const p = spawn(process.execPath, [script, "seed", join(dir, "records.json"), "--url", `http://127.0.0.1:${server.address().port}`, "--tokens", join(dir, "tokens.json"), "--no-wait"]);
+    let out = "";
+    p.stdout.on("data", (d) => (out += d));
+    p.stderr.on("data", (d) => (out += d));
+    const code = await new Promise((r) => p.on("close", r));
+    await new Promise((r) => server.close(r));
+    return { code, out, calls };
+  };
+  const bad = await run({ server: "mssql-server", database: "ErpLive", login: "erp_write" });
+  assert.equal(bad.code, 1, bad.out);
+  assert.match(bad.out, /refusing to seed/);
+  assert.deepEqual(bad.calls, ["GET /api/sources/guard"], "nothing but the guard was asked: no record sent");
+  const good = await run(SYNTHETIC_WRITE);
+  assert.equal(good.code, 0, good.out);
+  assert.ok(good.calls.some((c) => c === "POST /mcp"), "the synthetic test database: the record is sent");
+});

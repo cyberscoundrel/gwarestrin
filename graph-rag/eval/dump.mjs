@@ -3,6 +3,8 @@
 // the run stops unless they are the test names. Written apart from data-entry.js on purpose: the evaluation
 // reads the source with its own code, so a bug in the adapter can't hide a change from the gate.
 
+import { DATABASE as SYNTH_DATABASE, SERVER as SYNTH_SERVER, WRITE_LOGIN as SYNTH_WRITE_LOGIN } from "../../test-sql/data.mjs";
+
 let nextId = 1;
 
 /** a minimal MCP client for one endpoint: tools/call, the text content parsed as JSON */
@@ -78,6 +80,33 @@ export async function dumpSource(call, { tables = null, keys = {}, page = 500, m
     out[entity] = { primaryKey, rows };
   }
   return out;
+}
+
+/**
+ * The identities a run may write into: the synthetic test database's write login (test-sql/data.mjs), and, for the
+ * replay harness only, its fake source. Nothing else is a test database.
+ */
+export const SYNTHETIC_WRITE = Object.freeze({ server: SYNTH_SERVER, database: SYNTH_DATABASE, login: SYNTH_WRITE_LOGIN });
+export const HARNESS_FAKE = Object.freeze({ server: "gr-e2e-fake", database: "S0Fake", login: "s0_write" });
+
+/**
+ * Refuse a seeding target unless every write source graph-rag declares is, by its live guard answer
+ * (`GET /api/sources/guard`), the synthetic test database: server, database and login all as test-sql names them
+ * (or the harness's fake, when `harness`). No writable source, a guard that didn't pass, or any other name: refused.
+ * The login is checked here even where graph-rag's own guard has none declared. Returns the sources; throws why.
+ */
+export function assertSeedTarget(report, { harness = false } = {}) {
+  const allowed = harness ? [HARNESS_FAKE] : [SYNTHETIC_WRITE];
+  const same = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
+  const writable = (report?.sources ?? []).filter((s) => s.writable);
+  if (!writable.length) throw new Error("refusing to seed: the instance declares no write source, so its guard can't be checked");
+  for (const s of writable) {
+    const l = s.live ?? {};
+    if (!l.ok) throw new Error(`refusing to seed: ${s.system}'s guard didn't pass (${l.why ?? l.status ?? "no answer"})`);
+    const hit = allowed.find((a) => same(a.server, l.server) && same(a.database, l.database) && same(a.login, l.login));
+    if (!hit) throw new Error(`refusing to seed: ${s.system} writes into ${l.server}/${l.database} as ${l.login ?? "?"}, not the ${harness ? "harness's fake source" : "synthetic test database"} (${allowed.map((a) => `${a.server}/${a.database} as ${a.login}`).join(", ")})`);
+  }
+  return writable;
 }
 
 /** the view test-sql/seed.mjs creates, whose one row names the server, database and login of the connection reading it */

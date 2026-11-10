@@ -13,9 +13,10 @@ import { createServer } from "node:http";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dabTool } from "./fake-dab-core.mjs";
 import { dataset } from "../eval/s0.mjs";
+import { HARNESS_FAKE } from "../eval/dump.mjs";
 
 /** what the fake's identity view answers: test-sql's dbo_GwConnectionIdentity, as the guards read it */
-export const IDENTITY = { server_name: "gr-e2e-fake", database_name: "S0Fake", login_name: "s0_write" };
+export const IDENTITY = { server_name: HARNESS_FAKE.server, database_name: HARNESS_FAKE.database, login_name: HARNESS_FAKE.login };
 const withIdentity = (tables) => ({ ...tables, dbo_GwConnectionIdentity: { primaryKey: ["id"], rows: [{ id: 1, ...IDENTITY }] } });
 
 export const READ_PORT = 5000;
