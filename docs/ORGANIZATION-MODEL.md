@@ -282,8 +282,9 @@ everything reviewed in those parts has to be reviewed again.
 **It answers:** "basically what i want to see is how well models can handle this" (R5).
 
 **Built:** class nodes with several parents, the instance edge, the orchestrator's class
-decisions, a worker that files a record with the four outcomes, the filing log, briefs,
-the typed check, and a discovery run. **Left out:** the web interface, the authentik
+decisions, a worker that files a record with the four outcomes, the worker's account of
+what it did, the orchestrator checking that account against the source (R10), the filing
+log, briefs, the typed check, and a discovery run. **Left out:** the web interface, the authentik
 sync (test positions are seeded), re-homing, and the continuous briefing agent.
 
 **Input:** the 62 notes as test records (R9), after a discovery run over the test database.
@@ -315,6 +316,7 @@ least two, and run each three times to see variation.
 | Wrong placements | A sample of instances under each primitive, and every instance with several classes, checked against the source row. Sections related to the wrong instance are counted the same way. |
 | Leaks through briefs | Restricted sections and classes carry unique marker words. Every brief, and everything a worker writes, is scanned for a marker above the record's audience. |
 | The typed check | Hosted and locally served decision models on the same sections: agreement, how often each is unsure, and repeat stability (R4). |
+| Workers' accounts | How often a worker's account of what it did disagrees with what actually changed in the source, found by comparing the copy with the backup. Also how often the orchestrator's check caught it (R10). |
 
 No pass mark is proposed, since this run is to find out what happens. The exceptions
 are zero tolerance: any brief leak, and any source row changed without a Filed entry.
