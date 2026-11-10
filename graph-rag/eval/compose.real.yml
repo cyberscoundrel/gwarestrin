@@ -1,0 +1,14 @@
+# A real run (run.sh --models real, the default --via litellm): litellm takes OPENROUTER_API_KEY from the user's env
+# file, passed by path (EVAL_MODELS_ENV), and gets a route out to OpenRouter. Nothing prints the file's values.
+services:
+  litellm:
+    env_file:
+      - ${EVAL_MODELS_ENV:?run graph-rag/eval/run.sh}
+    # public resolvers past WARP's DNS interception (openrouter.ai), as the repository's litellm service
+    dns:
+      - 1.1.1.1
+      - 1.0.0.1
+    networks: [models, egress]
+
+networks:
+  egress: {}

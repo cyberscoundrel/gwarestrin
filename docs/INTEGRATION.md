@@ -81,6 +81,14 @@ three seams, fixed or reported:
   started a fresh one, so a worker asked for its account had lost its entries. The driver now keeps each job's
   conversation.
 
+**Models through litellm, as the old system reached them.** A real run's agents reach their models through the
+evaluation's own litellm in `gwsynth-eval` (`graph-rag/eval/compose.yml`): the image the repository's litellm
+service names and the committed `litellm-config.example/litellm-config.yaml`, no published port, a master key made
+for the run. The user's env file needs only `OPENROUTER_API_KEY` and the setups' aliases; `--via direct` keeps the
+direct-endpoint route. The plumbing is proved with no real model: `run.sh --models fake --via litellm` routes every
+agent call through that litellm, unchanged configuration, to a fake OpenRouter on an internal network
+(`compose.fake.yml`, `eval/driver/fake-upstream.mjs`), and the run's report matches the in-process dry run's.
+
 ### The integrator's branch, before landing
 
 `claude/build-integrate-a53e86`: the evaluation (`graph-rag/eval/`,
@@ -225,6 +233,9 @@ The integrator's (labels and evaluation, [build/integrate.md](build/integrate.md
 | I-19 | The evaluation runs agents from a script (`eval/driver/`), not pi's runtime in the workspace's microVMs: the instructions, briefs, tools and HTTP calls are the workspace's, the agent loop is the driver's |
 | I-20 | No operator in a run: a worker handed to the operator is left and counted, and no Proposed piece is approved during a run |
 | I-21 | The discovery brief gets no table digest: the orchestrator lists the tables itself, as the brief allows |
+| I-22 | DeepSeek V4 Flash is added to the committed `litellm-config.example/litellm-config.yaml` (the template the development deployment's config is copied from) as `deepseek-v4-flash`, pinned to `openrouter/deepseek/deepseek-v4-flash` rather than a `-latest` alias so that runs stay comparable |
+| I-23 | The eval's litellm uses the repository's own tag (`main-stable`, which moves) and records the image it ran in `litellm-image.txt`, rather than pinning a digest the repository doesn't |
+| I-24 | Without a `DECISION_API_KEY`, graph-rag's decision model uses the OpenRouter key, as the repository's compose does |
 
 ---
 

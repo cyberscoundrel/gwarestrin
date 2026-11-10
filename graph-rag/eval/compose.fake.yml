@@ -1,0 +1,19 @@
+# The plumbing proof (run.sh --models fake --via litellm): litellm runs the committed configuration unchanged, and
+# OpenRouter is a fake upstream on the internal network (OPENROUTER_API_BASE, which litellm's OpenRouter route reads).
+# The upstream answers with the dry run's fake policies (driver/fake-upstream.mjs). No key, no route out.
+services:
+  litellm:
+    environment:
+      OPENROUTER_API_KEY: fake-no-key
+      OPENROUTER_API_BASE: http://fake-upstream:4000/api/v1
+    depends_on:
+      fake-upstream:
+        condition: service_started
+
+  fake-upstream:
+    image: node:22-alpine
+    command: ["node", "/eval/driver/fake-upstream.mjs"]
+    volumes:
+      - ./:/eval:ro
+    networks: [models]
+    restart: "no"

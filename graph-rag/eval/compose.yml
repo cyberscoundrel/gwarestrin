@@ -1,0 +1,37 @@
+# The evaluation's own model gateway: a litellm in the run's compose project (gwsynth-eval, beside the synthetic
+# database test-sql/up.sh starts there). Started and removed by graph-rag/eval/run.sh, never by hand.
+#
+# The same image and the same committed model configuration as the repository's litellm service
+# (docker-compose.yml, litellm-config.example/litellm-config.yaml): run.sh reads the image from docker-compose.yml
+# and mounts the committed file read-only. It publishes no port (the development instance's litellm is on 4100, the
+# demo's on 4101; neither is touched). Its master key is made by run.sh for the run and dies with it.
+#
+# This file alone is the safe base: one internal network, no route out. An overlay adds the rest:
+#   compose.fake.yml  the plumbing proof: a fake upstream stands in for OpenRouter (OPENROUTER_API_BASE), no key
+#   compose.real.yml  a real run: the user's env file (OPENROUTER_API_KEY) and a route out
+name: ${GWSYNTH_PROJECT:-gwsynth-eval}
+
+services:
+  litellm:
+    image: ${EVAL_LITELLM_IMAGE:?run graph-rag/eval/run.sh}
+    command: ["--config", "/app/config/litellm-config.yaml", "--port", "4000"]
+    environment:
+      LITELLM_MASTER_KEY: ${EVAL_LITELLM_KEY:?run graph-rag/eval/run.sh}
+      # the cost map bundled in the image, not fetched at start
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    volumes:
+      - ../../litellm-config.example:/app/config:ro
+    healthcheck:
+      # as the repository's service: the image has no bash; python is guaranteed
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('127.0.0.1', 4000), 2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    networks: [models]
+    restart: "no"
+
+networks:
+  # the driver joins this network to reach http://litellm:4000/v1; nothing else does
+  models:
+    internal: true

@@ -380,13 +380,15 @@ Only on the coordinator's word, against the synthetic database only (it stands i
 
 ```bash
 graph-rag/eval/run.sh --models fake                                               # the dry run
-graph-rag/eval/run.sh --models real --env-file ~/gwsynth-models.env --setup A --run 1
+graph-rag/eval/run.sh --models fake --via litellm                                 # the same, through the eval's litellm
+graph-rag/eval/run.sh --models real --env-file ~/gwsynth-models.env --setup A --run 1             # via litellm
+graph-rag/eval/run.sh --models real --env-file ~/gwsynth-models.env --setup A --run 1 --via direct
 ```
 
 **What one run does** (`eval/run.sh`, `eval/driver/run.mjs`):
 1. Starts its own fresh copy of the synthetic database (compose project `gwsynth-eval`: a new database each run;
-   the sources stream's `gwsynth` is never touched), a throwaway ArcadeDB, a graph-rag built from this checkout,
-   and the fake model routes, all on a private network.
+   the sources stream's `gwsynth` is never touched) with the evaluation's own litellm in the same project, a
+   throwaway ArcadeDB, a graph-rag built from this checkout, and the fake model routes, all on private networks.
 2. Generates the records (the 62 notes and the seeded marker records) and dumps the source through the read side,
    after the test-source guard confirms the synthetic names.
 3. Discovery: graph-rag starts a run (`POST /api/classes/discovery`) and the orchestrator works its brief with
@@ -407,13 +409,27 @@ named as the agents see them. It is not pi's agent runtime: its context handling
 
 **Models.** `--models fake` is a fixed, naive policy per role that exercises every tool path and reads nothing
 a report scores: a dry run proves the wiring and says nothing about how models do. `--models real` runs the
-setup's orchestrator and worker models over any OpenAI-compatible endpoint (`eval/driver/models.mjs`), with no
-sampling parameter and no forced tool choice (current Claude models reject both). graph-rag's typed check uses the
-decision model from the same env file. Embeddings stay the harness's word-hash vectors (I-18).
+setup's orchestrator and worker models (`eval/driver/models.mjs`, OpenAI-compatible, with no sampling parameter and
+no forced tool choice: current Claude models reject both) through one of two routes:
+
+- **`--via litellm` (the default), as the old system reached models.** `run.sh` starts a litellm in the run's
+  compose project `gwsynth-eval` (`eval/compose.yml`): the image the repository's litellm service names in
+  `docker-compose.yml` (read from the checkout; `ghcr.io/berriai/litellm:main-stable`, litellm 1.106.4 locally) and
+  the committed `litellm-config.example/litellm-config.yaml`, mounted read-only. It publishes no port (the
+  development instance's litellm is on 4100, the demo's on 4101; neither is touched), its master key is made for the
+  run, and only the driver joins its network. The setups name the configuration's aliases; the driver refuses a
+  model the configuration doesn't define before any agent runs. The user's OpenRouter key goes only to litellm
+  (`compose.real.yml`, by path) and to graph-rag for the decision model.
+- **`--via direct`:** any OpenAI-compatible endpoint, `EVAL_AGENT_BASE_URL` and `EVAL_AGENT_API_KEY` from the env
+  file, the setups naming the endpoint's own model ids.
+
+graph-rag's typed check uses the decision model: `DECISION_API_KEY`, or else the OpenRouter key, as the repository's
+compose does. Embeddings stay the harness's word-hash vectors (I-18).
 
 **The env file** is the user's, on the host (template: `graph-rag/eval/models.env.example`). `run.sh` refuses
-to start when it is missing or names no key; it checks the names with `grep -q` and passes the file by path to
-`docker --env-file`. No value is read into the script's output, printed, logged or copied.
+to start when it is missing or names no key; it checks the names with `grep -q` and passes the file by path
+(`docker --env-file`, compose `env_file`). No key is read into the script's output, printed, logged or copied; the
+only lines copied are the setup's two model names, for the driver.
 
 ### The dry run (fake models, 2026-11-10)
 
@@ -432,18 +448,47 @@ account and recorded its verdict, and the report was written. No thread failed.
   `CONNECTION_HOMES`), the filing log's record id, a resumed worker's conversation, and two report bugs (a must-not
   line blaming another note's legitimate write, and the orchestrator's agreements left out of the account line).
 
+### The plumbing proof (fake models through the eval's litellm, 2026-11-10)
+
+`graph-rag/eval/run.sh --models fake --via litellm --seed 42`: the same fake policies, but served by a fake OpenRouter
+(`eval/driver/fake-upstream.mjs`) behind the evaluation's litellm, which ran the committed configuration unchanged
+(image `sha256:c169fb3a…`, litellm 1.106.4), with OpenRouter's base URL pointed at the fake and no key, on an internal
+network with no route out. Both setups' models were the `deepseek-v4-flash` alias.
+
+- Every agent call went through litellm: 447 chat completions (discovery 3, orchestrator 172, workers 272), each
+  reaching the fake as `deepseek/deepseek-v4-flash`, the alias's OpenRouter id; no error in litellm's log.
+- The report is the in-process dry run's: both gates PASS, one row changed by ux-z01's Filed entry, and 75 pieces
+  with 10 exact, 6 accepted, 46 wrong and 13 missing; the outcome tables are identical line for line.
+- The run's `usage.json` names the route and the models, and `litellm-image.txt` the image it ran.
+
 ### For the user: what a real run needs
 
 Create `~/gwsynth-models.env` on the host (template: `graph-rag/eval/models.env.example`), `chmod 600`, and fill:
 
-| Variable | What | Assumed provider |
+```
+OPENROUTER_API_KEY=<your OpenRouter key>
+EVAL_SETUP_A_ORCHESTRATOR=deepseek-v4-flash
+EVAL_SETUP_A_WORKER=deepseek-v4-flash
+EVAL_SETUP_B_ORCHESTRATOR=<an alias from the litellm config>
+EVAL_SETUP_B_WORKER=<an alias from the litellm config>
+```
+
+| Variable | What | Provider |
 |---|---|---|
-| `EVAL_AGENT_API_KEY` | the key the orchestrator and workers run on | OpenRouter (one key reaches several vendors' models; any OpenAI-compatible endpoint works with `EVAL_AGENT_BASE_URL`) |
-| `EVAL_AGENT_BASE_URL` | optional; default `https://openrouter.ai/api/v1` | |
-| `EVAL_SETUP_A_ORCHESTRATOR`, `EVAL_SETUP_A_WORKER` | setup A's two models, as the endpoint names them | the user's choice |
-| `EVAL_SETUP_B_ORCHESTRATOR`, `EVAL_SETUP_B_WORKER` | setup B's two models | the user's choice |
-| `DECISION_API_KEY` | the typed check's decision model, read by graph-rag | OpenRouter's decisions API with Jev (graph-rag's default `DECISION_URL` and `DECISION_MODEL`); may be the same OpenRouter key |
-| `DECISION_URL`, `DECISION_MODEL` | optional overrides | |
+| `OPENROUTER_API_KEY` | the one key: litellm reaches the agents' models with it, and graph-rag's typed check uses it for the decision model | OpenRouter (the name the committed litellm configuration reads) |
+| `EVAL_SETUP_<A,B>_ORCHESTRATOR`, `_WORKER` | each setup's two models, as aliases of `litellm-config.example/litellm-config.yaml` | through litellm to OpenRouter |
+| `DECISION_API_KEY`, `DECISION_URL`, `DECISION_MODEL` | optional: a separate decision key, or another decision endpoint and model (default OpenRouter's decisions API with Jev) | |
+| `EVAL_AGENT_BASE_URL`, `EVAL_AGENT_API_KEY` | only with `--via direct` | any OpenAI-compatible endpoint |
+
+The committed litellm configuration defines four aliases:
+- `deepseek-v4-flash`: added for the evaluation, `openrouter/deepseek/deepseek-v4-flash` (DeepSeek V4 Flash, the id
+  checked against OpenRouter's model list on 2026-11-10);
+- `grader`: `openrouter/nvidia/nemotron-3-super-120b-a12b:free`, graph-rag's semantic grader;
+- `embed-minilm`: an embedding model, not a chat model;
+- a local llama.cpp Qwen3.8-27B on the inference box (`100.96.0.9`), named by its gguf path, which the run's
+  litellm can't reach from its network.
+
+So a second setup needs a second chat alias: one more entry in that file, as the DeepSeek one is.
 
 R4 also asks for a locally served decision model on the same sections; that comparison is a second check run, not
 wired yet.
@@ -463,6 +508,9 @@ first-party prices (input / output per million: Opus 5.5 $4 / $20, Sonnet 5.5 $2
 | Opus 5.5 orchestrator, Sonnet 5.5 workers | about $35 | about $105 |
 | Sonnet 5.5 orchestrator, Haiku 5.5 workers | about $8 | about $25 |
 | Sonnet 5.5 for both | about $26 | about $78 |
+
+DeepSeek V4 Flash on OpenRouter lists at $0.091 / $0.182 per million: about $1 a run, about $3 for three, by the same
+token estimate.
 
 Any other model: three runs cost about 3 × (orchestrator: 2.5M × input price + 0.25M × output price; workers: 7.5M ×
 input price + 0.35M × output price). Add the endpoint's own fee, and the decision model's price, neither of which is

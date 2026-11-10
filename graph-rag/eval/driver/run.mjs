@@ -8,8 +8,8 @@
 //   node graph-rag/eval/driver/run.mjs --graph URL --tokens tokens.json --dab-read URL --dab-write URL --run-dir DIR
 //        --models fake | --models real --setup A   [--run 1] [--seed N] [--concurrency 4] [--timeout-min 240]
 //
-// --models real reads the setup's models and keys from the environment (eval/run.sh passes the user's env file with
-// docker's --env-file; nothing here prints a value). Proposal B's plan (the assistant's, approved with the doc):
+// --models real reads the setup's model names from the environment and reaches them through the evaluation's litellm
+// or directly (EVAL_VIA, below; eval/run.sh sets this up, and nothing here prints a key). Proposal B's plan (the assistant's, approved with the doc):
 // at least two setups, three runs each; this runs one.
 import { mkdirSync, readFileSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
 import { spawn } from "node:child_process";
@@ -59,14 +59,31 @@ const say = (s) => {
 };
 
 // ---- the models: what each role runs on ----
+// EVAL_VIA says how agents reach their models: "litellm" (the evaluation's own litellm in the run's compose project,
+// with the committed model configuration; run.sh gives EVAL_LITELLM_URL and the run's own EVAL_LITELLM_KEY), or
+// "direct" (any OpenAI-compatible endpoint: EVAL_AGENT_BASE_URL and EVAL_AGENT_API_KEY from the user's env file).
+// The setup's model names are EVAL_SETUP_<setup>_ORCHESTRATOR and _WORKER: litellm aliases, or the endpoint's ids.
+// --models fake with no EVAL_VIA: the fake policies in this process (the dry run).
+const VIA = process.env.EVAL_VIA || (MODE === "fake" ? "none" : "direct");
+const modelOf = (role) => process.env[`EVAL_SETUP_${SETUP}_${role === "worker" || role === "part" ? "WORKER" : "ORCHESTRATOR"}`];
 function clientFor(role) {
-  if (MODE === "fake") return fakeClient(role === "part" ? "worker" : role);
+  if (VIA === "none") return fakeClient(role === "part" ? "worker" : role);
   const env = process.env;
-  const key = env.EVAL_AGENT_API_KEY;
-  const base = env.EVAL_AGENT_BASE_URL || "https://openrouter.ai/api/v1";
-  const model = role === "worker" || role === "part" ? env[`EVAL_SETUP_${SETUP}_WORKER`] : env[`EVAL_SETUP_${SETUP}_ORCHESTRATOR`];
+  const model = modelOf(role);
   if (!model) throw new Error(`the env file names no model for setup ${SETUP}'s ${role === "worker" || role === "part" ? "worker" : "orchestrator"} (EVAL_SETUP_${SETUP}_...)`);
-  return openaiClient({ baseUrl: base, apiKey: key, model });
+  if (VIA === "litellm") return openaiClient({ baseUrl: env.EVAL_LITELLM_URL, apiKey: env.EVAL_LITELLM_KEY, model });
+  return openaiClient({ baseUrl: env.EVAL_AGENT_BASE_URL || "https://openrouter.ai/api/v1", apiKey: env.EVAL_AGENT_API_KEY, model });
+}
+/** through litellm, refuse early when a setup names a model the committed configuration doesn't define */
+async function checkLitellmModels() {
+  if (VIA !== "litellm") return;
+  const r = await fetch(`${String(process.env.EVAL_LITELLM_URL).replace(/\/$/, "")}/models`, { headers: { authorization: `Bearer ${process.env.EVAL_LITELLM_KEY}` } });
+  if (!r.ok) throw new Error(`litellm's model list: ${r.status}`);
+  const defined = new Set(((await r.json()).data ?? []).map((m) => m.id));
+  for (const role of ["orchestrator", "worker"]) {
+    const m = modelOf(role);
+    if (!defined.has(m)) throw new Error(`setup ${SETUP}'s ${role} model "${m}" is not in the committed litellm configuration (it defines: ${[...defined].join(", ")})`);
+  }
 }
 /** each thread's conversation by job: a resumed thread goes on with the agent it had, as the workspace's does */
 const conversations = new Map();
@@ -151,7 +168,8 @@ const simpleTokens = `${RUN_DIR}/tokens.simple.json`;
 writeFileSync(simpleTokens, JSON.stringify(Object.fromEntries(tokenMap.tokens.map((t) => [t.user, t.token]))));
 const dumpArgs = ["--read-url", DAB_READ, "--identity-url", DAB_WRITE, "--expect-server", "gwsynth-sql", "--expect-database", "GwSynthMfg"];
 
-say(`run ${SETUP}/${RUN}: ${MODE} models, graph-rag ${GRAPH}`);
+say(`run ${SETUP}/${RUN}: ${MODE} models${VIA === "none" ? "" : ` via ${VIA} (orchestrator ${modelOf("orchestrator")}, worker ${modelOf("worker")})`}, graph-rag ${GRAPH}`);
+await checkLitellmModels();
 await until("graph-rag up", async () => (await api("/api/worker")).status === 200);
 
 // 1. the records, and the source before anything happens
@@ -201,7 +219,7 @@ if (seedResult.code) say(`the seeder ended with ${seedResult.code}: ${seedResult
 // 5. the source after, and the report
 const after = await node("scripts/source-dump.mjs", [...dumpArgs, "--out", `${RUN_DIR}/after.json`]);
 if (after.code) throw new Error(`the after dump refused or failed: ${after.out}`);
-writeFileSync(`${RUN_DIR}/usage.json`, `${JSON.stringify({ setup: SETUP, run: RUN, models: MODE, usage }, null, 2)}\n`);
+writeFileSync(`${RUN_DIR}/usage.json`, `${JSON.stringify({ setup: SETUP, run: RUN, models: MODE, via: VIA, ...(VIA === "none" ? {} : { orchestrator: modelOf("orchestrator"), worker: modelOf("worker") }), usage }, null, 2)}\n`);
 const rep = await node("scripts/filing-report.mjs", ["run", "--url", GRAPH, "--tokens", simpleTokens, "--run-dir", RUN_DIR, "--setup", SETUP, "--run", String(RUN)]);
 say(rep.out.trim());
 process.exit(rep.code ?? 1);

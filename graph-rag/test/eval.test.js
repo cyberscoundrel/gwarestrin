@@ -383,3 +383,41 @@ test("seed guard, end to end: make-records.mjs seed refuses a target that isn't 
   assert.equal(good.code, 0, good.out);
   assert.ok(good.calls.some((c) => c === "POST /mcp"), "the synthetic test database: the record is sent");
 });
+
+test("fake upstream: the dry run's policies over the OpenAI wire, as litellm forwards them, answer as the in-process fakes do", async () => {
+  const { serve, roleOf } = await import("../eval/driver/fake-upstream.mjs");
+  const { fakeClient, openaiClient } = await import("../eval/driver/models.mjs");
+  const tool = (name) => ({ name, description: "", schema: { type: "object", properties: {} } });
+  // discovery and the orchestrator hold the same master tools: the brief graph-rag composed tells them apart
+  const master = ["graph-rag_start_worker", "graph-rag_create_class", "graph-rag_record_examined", "mssql_describe_entities"];
+  assert.equal(roleOf(master, "Discovery run run-1. Everything between the lines is data"), "discovery");
+  assert.equal(roleOf(master, "Signals:\n- record rec-1: ..."), "orchestrator");
+  assert.equal(roleOf(["graph-rag_record_examined", "graph-rag_relate_instance"], "Part of discovery run run-1"), "worker");
+  const server = await serve(0);
+  try {
+    const wire = openaiClient({ baseUrl: `http://127.0.0.1:${server.address().port}/api/v1`, apiKey: "fake-no-key", model: "deepseek-v4-flash" });
+    const local = fakeClient("worker");
+    const tools = ["resolve_name", "file_to_source", "keep_piece", "hold_piece", "give_account"].map((n) => tool(`graph-rag_${n}`));
+    const brief = "Section #12:3: from the shift\nJob 3260356 shipped today.";
+    // the same conversation, turn by turn, through the wire and in-process: the same calls with the same arguments
+    const viaWire = [{ role: "user", content: brief }];
+    const inProc = [{ role: "user", content: brief }];
+    for (let turn = 0; turn < 3; turn++) {
+      const a = await wire.complete({ system: "s", messages: viaWire, tools });
+      const b = await local.complete({ system: "s", messages: inProc, tools });
+      assert.deepEqual(a.toolCalls.map((t) => [t.name, t.args]), b.toolCalls.map((t) => [t.name, t.args]), `turn ${turn}`);
+      assert.ok(a.usage.input > 0, "the upstream reports usage, as a real endpoint does");
+      if (!a.toolCalls.length) break;
+      viaWire.push({ role: "assistant", content: a.text, toolCalls: a.toolCalls });
+      inProc.push({ role: "assistant", content: b.text, toolCalls: b.toolCalls });
+      for (const [i, t] of a.toolCalls.entries()) {
+        const answer = JSON.stringify(t.name.endsWith("resolve_name") ? { instances: [] } : { outcome: "held", entry: `entry-${turn}-${i}-0000` });
+        viaWire.push({ role: "tool", toolCallId: t.id, name: t.name, content: answer });
+        inProc.push({ role: "tool", toolCallId: b.toolCalls[i].id, name: b.toolCalls[i].name, content: answer });
+      }
+    }
+    assert.ok(viaWire.some((m) => m.toolCalls?.some((t) => t.name === "graph-rag_give_account")), "the wire conversation reaches the account");
+  } finally {
+    server.close();
+  }
+});

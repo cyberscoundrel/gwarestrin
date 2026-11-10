@@ -34,6 +34,14 @@ model_list:
       model: openrouter/sentence-transformers/all-minilm-l6-v2
       api_key: os.environ/OPENROUTER_API_KEY
 
+  # agents for the real-model evaluation (graph-rag/eval/run.sh names these aliases in a setup).
+  # DeepSeek V4 Flash: its exact OpenRouter id, checked against openrouter.ai/api/v1/models on 2026-11-10
+  # (OpenRouter also lists deepseek-v4-flash-0731, ~deepseek/deepseek-v4-flash-latest and deepseek-v4.1-flash).
+  - model_name: deepseek-v4-flash
+    litellm_params:
+      model: openrouter/deepseek/deepseek-v4-flash
+      api_key: os.environ/OPENROUTER_API_KEY
+
 litellm_settings:
   drop_params: true   # tolerate client params a backend doesn't support
 
