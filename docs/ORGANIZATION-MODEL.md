@@ -1,363 +1,307 @@
 # The organization model
 
-Status: design, 2026-11-05. Nothing below is built. It supersedes the
-activity model drafted on 2026-11-04 (which stopped one level too low: it
-declared activity types per organization instead of deriving them) and
-records the direction settled in discussion, the contract the first piece of
-work must produce, how the work is split across sessions, and the decisions
-that are still open with the default each session takes until the user says
-otherwise. Line numbers are against main at 0e48d84.
+Rewritten 2026-11-09 from the user's rulings. No code has been written against this
+version, and none will be until the user has read it. After that, the smallest version
+that can run on real models is built.
 
-The demo instance (tag `demo-2026-11`, compose project `gwdemo`, snapshot on
-the host, [DEMO.md](DEMO.md)) is frozen and off limits to all of this work. It
-shares no data source with the development instance and stays down until a
-demo. Everything here lands in the development instance only.
+**How to read it.** Every decided statement is the user's: quoted, or marked with
+its ruling, R1 to R9 (`~/reviews/design-rulings.md`). "Earlier" marks the rulings
+that came before those nine, listed at the top of the same file. Anything else is
+in [Open](#open) and is not decided. The two [proposals](#proposals-from-the-assistant-not-rulings)
+at the end are the assistant's.
 
-## Why
+## What an organization is
 
-Three weeks of graph-worker batches ([GRAPH-WORKER-RELIABILITY.md](GRAPH-WORKER-RELIABILITY.md))
-converged on the mechanics (outages, placement, unfinished turns) and did not
-converge on the content: which things to mint, what a note is about, how
-sensitive it is, whether it changes something already known. Each of those is
-answered today by a model reading prose, per note, with no structure to map
-onto:
+> "if you generalize an organization or a business down to the least concepts
+> required to describe it, it could be described as a series of asynchronous
+> decisions and actions, some of which are dependent on others"
 
-| Question | Answered today by |
+Four primary primitives are the roots: **agent**, **commitment**, **event** and
+**resource** (R1).
+
+- Decisions and actions are subclasses of event (R1).
+- Agent is the user's word, replacing actor. The AI agents are instances under it (R1).
+- Resource is anything of value the organization controls: vehicles, buildings,
+  software (R1).
+- Organizational needs are unfulfilled commitments with dependency edges. Questions
+  stay as one kind of need (R9).
+
+## Classes, subclasses and instances
+
+> "instances should be an entity that has an instance relationship to a class"
+
+> "a class name would be something like leased building and warehouse is a subclass
+> and then xxxx abc street location would be an instance of warehouse"
+
+> "there might be employees and contractors and volunteers, there might be software
+> or capital resources they have relationships to, instances of these classes would
+> be individual employees or individual company owned vehicles or individual software
+> resources, relationships between instances and classes form the hierarchical
+> structure of an organization while classes represent the relevant internal symbols"
+
+- Classes can be of anything and form a tree with subclasses (earlier).
+- A class may have several parents. Where parents conflict, the strictest rule wins (R9).
+- A class is scoped by home like any other node (earlier).
+- There is no person gate on classes. People can correct afterwards (R5).
+- A class is never negotiated in a record or a conversation. The chat agent and the
+  condenser deal in text, not class vocabulary (R5).
+- The orchestrator makes the broad decisions about classes and subclasses. Workers
+  create instances and relate them to existing classes. Nothing mints except these
+  two (R5, R7).
+- The goal is to see how well models handle this, so tree quality is measured on real
+  models early (R5).
+
+> "over time as the actions satisfy the needs of the organization classes of things
+> crystalize"
+
+## Dependency and timeline
+
+> "an generic organization begins as no infrastructure and timeline of actions, a
+> business does not generally start with a warehouse it has to be acquired and legally
+> purchased or leased"
+
+Instances can be joined by a dependency edge, stated by a person, a record or an
+agent. A timeline is read from times plus dependency (R1).
+
+## What earns a node
+
+> "naively recording notes into the graph pollutes it with nodes that are not useful
+> enough to justify being nodes"
+
+- Lasting individuals (employees, vehicles, buildings, machines, customers, software)
+  are instances with nodes (R3).
+- Transactional rows (order lines, operations, invoices, time punches) stay in the
+  source. The class points at its table and a section stores the key. There are no
+  per-row reference nodes (R3).
+- A row earns a node when the graph must say something the source cannot hold, for
+  example a dependency. The worker creates it, and it refers back by key (R3).
+- Each class carries this as a setting, set by discovery from evidence and correctable
+  by a person. There are no word lists (R3).
+
+## On record, off record and condensing
+
+> "first considering explicitly whether a thread is intended to be on record or off
+> record, and if you want the content of a conversation on record, the agent condenses
+> whole sections a conversation into a summary document with relevant context rather
+> than atomic data, and then you barely need intermediate language model calls"
+
+- The condensed document and its sections are the record. Sections relate to
+  instances. The user does not need model-free answers from the graph (R2).
+- The pipeline is: condense, one typed check per section, worker files (R4).
+
+## How workers file a record
+
+> "this necessitates a worker has tool access to those data sources for data entry to
+> act on a summary document"
+
+Workers are responsible for filing incoming records. Information is committed to its
+relevant source by whatever means that source takes; for SQL Server, a write. Each
+source declares how it is committed to (R2).
+
+Each piece of a record ends in one outcome on record (R2):
+
+| Outcome | Meaning |
 |---|---|
-| What is this note about? | the linker's open model call per note (`things.js` `mentionsPrompt`) |
-| Does it need work; does it change or contradict something? | triage's decision-model call per note (`decisions.js`) |
-| Who may see it? | the grader's model call per write (`grading.js`) |
-| How long is it true? | the same grader call (`extent.js`) |
-| What is the current state of X? | a search, then an agent reading the hits |
+| **Filed** | Source and record are clear and the person has authority. It is written, and the section references the row. |
+| **Proposed** | Clear, but there is no authority or the source is not writable. |
+| **Held** | A source exists, but it is unclear which record, or the source disagrees. The worker asks whoever put it on record and never overwrites. |
+| **Kept** | No system holds it. The document is the source, linked to instances. |
 
-The fixes show the cost: things minted for schedules and time clocks, a name
-linked to the wrong same-named person for a week, a note about quantities
-restricted because it reads like money, hidden titles copied from a master's
-brief into floor notes. They are one gap. The graph holds nouns and prose and
-knows nothing about the shape of the work the prose describes, so every
-reading is a guess, and every input that reaches an agent outside the tracked
-read channel (a brief, a pasted message) is a leak waiting to happen.
+**Data with no source.** R2 raised this as its open part and settled the outcome: it is
+Kept, and recurring Kept is a signal for a discovered class. What follows from that is
+item 4 under Open.
 
-The input model is the other half of the problem. Every batch seeds sparse,
-context-free sentences, and the standing instructions tell every agent to
-save pasted text first. That is how injected content and half-thoughts enter
-the graph, why the grader has to defend against "this is public" inside a
-note, and why the graph fills with nodes that do not earn their place.
+Workers resolve names against the source with read tools. If the source is
+unreachable, the piece is Held (R3).
 
-## What the graph holds now (as built)
+One filing log outside the knowledge graph holds every filing outcome, including
+source writes. There are no audit nodes (R9).
 
-Grounding, from `graph-rag/src/server.js` unless noted. Nothing in this
-section changes until a stream below changes it.
+## The orchestrator, workers and briefs
 
-- **Entries**: `Entity` vertices keyed by `(name, _origin)`, facet texts and
-  embeddings (identity, location, state, temporal, relations, custom),
-  `_home`, `_origin`, `_grade`, `_written_by`, `_valid_until`/`_valid_by`,
-  `_placed_by`, `_kind` (null = assertion, or need, document, section, task,
-  thing), `updated_at`. `written_at` is a write argument, not stored.
-- **Things**: entries with `_kind: 'thing'`, a flat `_thing_type` from a
-  list of ten, `_alias_norms`, `_keys` (connected-system keys such as
-  `mssql:dbo_Customer:TORO`), `_homes`, `embed_thing`.
-- **Edges**: `ABOUT` (entry → thing, with `role`), `RELATES` (thing → thing,
-  with `rel`, `evidence`, `job`, `at`), `NEAR`/`ALSO` (needs),
-  `PART_OF`/`NEXT`/`SOURCED_FROM` (documents, sections, extracted facts;
-  `documents.js`).
-- **Time**: `_valid_until` only. No valid-from, no event time.
-- **Connected systems**: rows are never imported. The survey (`pool.js`
-  `surveyBrief`) writes one entry per main table and seeds master-data tables
-  as things with keys. Agents get a digest of table and key-column names
-  (`packages/server/src/agents/connection-digest.ts`).
-- **Visibility**: positions tree, grants, person shares, the derived-data
-  floor (`recordReads`, `derivedFloor`, `workerLift`, `workerWriteFloor`),
-  grading on closed topics (`policy.restrictedTopics`), proposals where a
-  write exceeds the writer's level ([DATA-SCOPING.md](DATA-SCOPING.md)).
-- **Triage outcomes**: each decision is a `Triage` row with the verdict's
-  probabilities and what the worker then changed. This is the pattern for
-  tuning any threshold from outcomes.
+> "the orchestrator and the workers start with the relevant information to behave
+> properly when they need to create the necessary nodes in the graph and their
+> relationships to classes and instances"
 
-## The model
+- The orchestrator is the most privileged agent. It reads batches, makes the broad
+  class decisions and starts workers (R7).
+- Every record gets a worker (R4). Workers create instances, relate them to existing
+  classes and commit to sources (R7).
+- A worker starts with a brief: the record, the relevant class tree, connected
+  instances, and how each source is committed to (R7).
+- A brief contains only what the record audience can see, enforced in code (R7).
+- The continuous briefing agent per profile comes after the first real batch. Briefing
+  content is treated as data and sanitized (R7).
 
-### Four primitives
+## Discovery
 
-An organization is a set of **actors** making **commitments** that
-**events** fulfil or break, moving **resources** between them. This is as
-low as the model goes while a note still maps to a closed question:
+> "a discovery process that evaluates a corpus of information and historical records
+> that have to be evaluated agentically as an upfront cost"
 
-- **Actor**: a person, a position, an organization (customer, supplier), or
-  an agent acting for one of these.
-- **Commitment**: something owed. An order is a commitment to deliver; a
-  quote a conditional one; a shift swap, a hire, a maintenance booking, a
-  purchase of saw blades, all commitments. A commitment has a party that
-  owes, a party owed, what is owed, and when it was made.
-- **Event**: something that happened at a point in time. Most events bear on
-  a commitment: fulfil it, break it, change its terms, or are an observation
-  that matters to it (blades arrived; invoice paid; Tomas was late).
-- **Resource**: what changes hands or is consumed: money, parts, machine
-  time, a person's time.
+> "in a discovery phase since its building from scratch doesnt rely on human input so
+> long as its a read only process"
 
-"Decision" and "action" are below this level and untyped; a decision is an
-event that creates or changes a commitment. Dependency is restricted to
-commitment fulfilment ("this cannot be fulfilled until that is"), which is
-structural and detectable. General causality is not inferred from text.
+- The new version starts on an empty graph, and discovery builds from the connected
+  systems (R8).
+- Discovery seeds only what organizational structure needs (R3).
+- Reruns and new tables count as discovery (R9).
+- The old development notes are read-only history for discovery, with restrictions
+  respected through home from evidence (R8).
+- The development volume is snapshotted first, only when the user says so. The demo
+  instance is unaffected (R8).
 
-The same quartet appears independently in REA accounting, DEMO's transaction
-pattern, and event sourcing. The convergence is why the level is trusted.
+## Visibility, and the map that chooses Filed or Proposed
 
-### Classes and instances
+- Visibility is the section's position home plus the restrict-only check (R6).
+- A map from classes to positions is used only to choose Filed or Proposed (R6).
+- Positions are mirrored as classes under agent, with people as instances. The sync
+  is one-way from authentik, which keeps granting access (R6).
+- When a class map entry tightens, sections related to instances of that class move
+  to the stricter home (R6). The user's words: "Re-home sections".
 
-A **class** is a commitment pattern that recurs (every order goes quote, PO,
-produce, ship, invoice, pay). An **instance** is one occurrence (job 4471,
-the Corvane quote). Classes are the organization's own symbols; the
-hierarchy of its people and the schema of its ERP are both made of them.
+## The restrict-only check
 
-Classes are **discovered, not declared**. The organization met mid-life
-hands over its fossil record: ERP tables are classes that crystallized years
-ago, rows are instances, and the notes are the same process still running.
-So the model instantiates two ways, from a snapshot (tables → classes,
-rows → instances, no history) and from a stream (recorded claims →
-commitments and events), and these are the same model at different times.
+One write-time sensitivity check stays. It is independent of the agents that read the
+content, for trust and timing. It runs once per section, can only restrict, uses
+closed categories, and is a typed decision model with real probabilities, so
+uncertainty holds the section higher (R4).
 
-Discovery is an upfront, agentic cost over the connected systems and a
-sample of the corpus, incremental afterwards (a new table, or a recurring
-commitment sequence the graph has not seen, is a discovery event, not a
-re-run). A discovered class is **confirmed by a person before anything maps
-onto it**. A wrong name at this layer poisons every later mapping.
+A locally served decision model for on-prem is unproven and should be tested in the
+first real batch (R4).
 
-### Authority: the hierarchy read the other way
+## What is removed
 
-The positions tree says who sees what. Read the other way it says who may
-commit the organization to what: a floor worker can promise a shift swap,
-not a price. That is one rule, **authority over a class of commitment**, and
-three existing subsystems are special cases of it:
+| Removed | Ruling |
+|---|---|
+| Atomic claims | R2 |
+| The linker and triage: every record gets a worker instead | R4 |
+| The language-model fallback for the sensitivity check | R4 |
+| The person gate on classes | R5 |
+| The single authority-over-a-class rule | R6 |
+| Any migration of the existing graph | R8 |
+| Per-row reference nodes and word lists | R3 |
+| Audit nodes | R9 |
+| One parent per class | R9 |
+| The 62-note oracle as the acceptance standard. Its notes stay as test input, and the first real run is judged on filing outcomes and tree quality | R9 |
 
-- **Visibility**: a claim is seen by those whose authority covers its class
-  (today: positions, grants, the derived floor).
-- **Proposals**: an agent proposes when it lacks authority to commit (today:
-  `queueWrite` in ~15 places deciding direct-or-propose by level).
-- **Grading**: a note is restricted when its content commits or reveals
-  above the writer's authority (today: the grader on closed topics).
+## Open
 
-The policy an admin edits becomes a map from commitment classes and
-attributes (pay, dismissal, price, margin) to the position that holds
-authority over them. The grader runs only on the residue: free text that
-maps to no class.
+None of this is decided.
 
-### Needs are commitments with the sign flipped
+1. **What a "piece" of a record is (R2).** Claims are gone but each piece still gets an
+   outcome. Who divides a section, and whether the division is stored, decides what
+   the filing log can count.
+2. **No existing class fits (R5, R7).** Workers use existing classes and the
+   orchestrator decides new ones. Whether a worker asks the orchestrator, holds the
+   piece or keeps it decides how often filing stalls.
+3. **Who runs discovery (R7).** "Nothing mints except these two", yet discovery creates
+   classes. It needs saying whether discovery is those two agents running read-only.
+4. **Kept, later (R2).** Whether anything goes back when a class or source appears for
+   Kept data, and how often counts as recurring. Without this, Kept can only grow.
+5. **Where a section starts (R6).** The check only raises a home, so the starting home
+   is the widest a section can be after the check. Today it is the recorder's position;
+   no ruling says so.
+6. **A record with sections at different homes (R4, R7).** One worker per record, but a
+   brief holds only what the record audience can see. Which audience applies decides
+   what a worker can read and file.
+7. **Filed or Proposed in detail (R2, R6).** Whose authority counts, what a class absent
+   from the map means, and who decides a Proposed piece. Filing cannot run without these.
+8. **Homes of instances and dependency edges (R1, R6).** The rulings home sections and
+   classes. A dependency between something visible and something hidden can reveal the
+   hidden one.
+9. **Home from evidence (R8).** How a discovery run sets it when it reads above where it
+   writes. This decides whether a restricted table's class name can reach a lower position.
+10. **Corrections and reruns (R5, R9).** How a person corrects, and whether a rerun must
+    respect it. Otherwise a rerun can undo a correction.
+11. **The check's list, threshold and failure (R4).** Which closed categories, how
+    uncertain is too uncertain, and what happens if the model cannot answer at all, now
+    that the fallback is gone. Nine categories exist in code; the rulings name none.
+12. **Off record, and uploaded files.** The user's words give the choice but not who
+    makes it or what it guarantees. Whether an uploaded document is a record that gets
+    a worker is also unruled.
+13. **Three items from the integration report.** Whether a writer's own notes raise
+    their derived floor, and whether that floor stays at all under R6; the need ux-t07,
+    which may fall away with claims; and whether a document's title moves when a section
+    is re-homed. Each changes who sees what.
+14. **What primitives and classes contain.** Commitment and event are named but not
+    defined, and the earlier stage lists and attributes are unruled. Workers and
+    discovery need to know what a class holds.
+15. **The first run's data and models.** See proposal B. A copy of real records would
+    reach whichever models run it.
 
-A question is a request for an information-delivery event nobody has
-promised yet. An unfulfilled need and an open question are one node, and in
-a document-first graph the answer is a section that meets it. This part of
-the current design (`needs.js`) stays.
+## Proposals from the assistant (not rulings)
 
-### Node admission
+### A. What happens to `integration` at a26e90b
 
-A node earns its place when **at least one** holds:
+Read from the code at that commit: each module's exports, function sizes and importers,
+not line by line. Sizes are rough line counts.
 
-1. it has an identity that outlives any one document (a person, customer,
-   machine, instance);
-2. it is referenced from more than one place;
-3. it is a commitment, decision or judgement that no source system records.
+| Area | Lines | Carries | Changes | Deleted | Main point |
+|---|--:|--:|--:|--:|---|
+| Identity, positions, scope, sharing, plumbing | 2,000 | 1,900 | 100 | 0 | Read filters must cover classes |
+| On/off record and documents | 1,700 | 1,200 | 250 | 250 | Claims leave `ingest.js`; class list leaves the condenser |
+| Linker, triage, name rules | 1,300 | 150 | 0 | 1,150 | A few lookups survive |
+| Claims and state queries | 850 | 100 | 0 | 750 | Date helpers and open needs survive |
+| Grader, floor, re-homing, authority rule | 1,200 | 450 | 350 | 400 | Decision model is re-aimed; re-homing follows class, instances, sections |
+| Search, write path, tools, routes | 2,000 | 1,500 | 400 | 100 | |
+| Orchestrator and workers | 2,400 | 1,500 | 800 | 100 | Queue and threads carry; worker tools and briefs are rewritten |
+| Source writes | 1,050 | 500 | 250 | 300 | `data-entry.js` carries; audit nodes and source references go |
+| Discovery | 1,250 | 250 | 600 | 400 | Noun tables and the confirm route go |
+| Needs and questions | 900 | 800 | 100 | 0 | |
+| Contract (`model/schema.js`) | 200 | 0 | 200 | 0 | |
+| **Source total** | **14,850** | **8,350** | **3,050** | **3,450** | |
+| Unit tests and replay scenarios | 11,450 | 1,700 | 5,750 | 4,000 | The replay suite is rebuilt around filing |
 
-Everything else is content inside a document section or a row behind a key.
-A holiday schedule, a bench, a part number inside a job, a topic: attributes
-or values on a claim, never nodes. Things are minted by a record key, by a
-person, or by a worker's explicit judgement, never by the linker alone.
+Not in the table, because it does not exist yet: classes with several parents, the
+instance edge, dependency edges and timeline, filing tools and log, each source's
+declaration, the typed check per section, the positions mirror, and corrections.
+A guess of 2,000 to 3,000 lines plus tests, with less behind it than the table.
 
-### Reference, never copy
+More than half of the source carries, but the parts that change decide behaviour, and
+everything reviewed in those parts has to be reviewed again.
 
-The ERP is authoritative for rows, so the graph holds no copy of a row: a
-**source reference** by key (`mssql:dbo_Job:4471`) and whatever the ERP
-cannot hold, which is context, commitments, judgement and provenance. This
-extends the DATA-SCOPING principle (the database's login is the boundary;
-gwarestrin only decides reachability) to the graph's own contents.
+### B. The smallest version that runs on real models
 
-Writes into source systems go the other way through the same authority
-rule: direct if the person the agent acts for could do it, proposed
-otherwise, through a write-capable DAB instance. The graph **does** hold the
-event of such a write (row referenced, who authorized, when), because the
-ERP will not record what an agent did to it. The graph becomes the audit
-trail of agent actions on source systems.
+**It answers:** "The goal is to see how well models handle this" (R5).
 
-## Inputs: on record, condensed, per claim
+**Built:** class nodes with several parents, the instance edge, the orchestrator's class
+decisions, a worker that files a record with the four outcomes, the filing log, briefs,
+the typed check, and a discovery run. **Left out:** the web interface, the authentik
+sync (test positions are seeded), re-homing, and the continuous briefing agent.
 
-### On record is a deliberate act
+**Input:** the 62 notes as test records (R9), after a discovery run over the test database.
 
-Every thread is explicitly on record or off record, chosen by the person
-whose agent it is. Off-record content never reaches the graph. On-record
-content is recorded under that person's authority: the write carries intent,
-the position, and a reason, so most of the defensive machinery around
-unattributed writes goes away. The instruction "save pasted text first"
-goes with it.
+**Test database, source side.** A new SQL Server 2022 container, on its own Docker
+network with no published port, holding a restored copy under a new name. Only the test
+run points at it.
 
-### Condensation changes the input unit, not the storage unit
+1. The user, or whoever holds the ERP login, takes a copy-only backup and puts the file
+   on the host. No assistant handles that password.
+2. A script restores it, then creates a read login and a write login limited to create
+   and update on chosen tables.
+3. Two new Data API builder containers, one per login, reach only that container.
+4. Before starting, the run asks the write connection which server and database it
+   holds, and stops unless they are the test names.
 
-The conversation's own agent condenses whole sections of an on-record
-thread into a **summary document with context**, not atomic sentences. It is
-the right condenser: it was in the conversation, acts for a person, knows
-what was meant to go on record, and has the confirmed classes in front of it.
+**Test database, graph side.** An empty, throwaway ArcadeDB container, as the replay
+harness starts today. Neither the development volume nor the demo is touched. Each run
+starts from a fresh restore and an empty graph, so runs can be compared.
 
-The document is stored the way ingested manuals already are
-(`documents.js`): a document entry, sections, and **claims** extracted from
-each section, `SOURCED_FROM` it and homed no lower than it. A claim is one
-of the four primitives bound to an instance, with an interval:
+**How to judge it.** A setup is one choice of orchestrator and worker models. Try at
+least two, and run each three times to see variation.
 
-```
-claim(kind: commitment|event|state|observation,
-      subject: instance or actor, class, attribute, value,
-      valid_from, valid_until, recorded_at, recorded_by, section)
-```
+| Measure | How |
+|---|---|
+| Filing outcomes | Compare the log with an outcome labelled by hand for each piece. Compare the copy with the backup: every changed row must match a Filed entry, and nothing else may change. |
+| Tree quality | The user reads a one-page tree: each class, its parents, its evidence, its instance count, marked right, wrong or missing. Also how much of the tree survives across the three runs. |
+| Duplicate classes | Name similarity and shared tables suggest pairs; a person confirms them. Reported as a share of all classes, and after a rerun. |
+| Wrong placements | A sample of instances under each primitive, and every instance with several classes, checked against the source row. Sections related to the wrong instance are counted the same way. |
+| Leaks through briefs | Restricted sections and classes carry unique marker words. Every brief, and everything a worker writes, is scanned for a marker above the record's audience. |
+| The typed check | Hosted and locally served decision models on the same sections: agreement, how often each is unsure, and repeat stability (R4). |
 
-The atomic claim does not disappear. It stops being what a person types and
-becomes what the condenser extracts, once, with full context, rather than
-what three cold models (linker, triage, grader) each reconstruct per note.
-Everything built for placement, visibility, the derived floor and expiry
-keeps working per claim, because a summary mixing a raise, a quote and a
-delivery is three claims at three sensitivities, not one blob.
+No pass mark is proposed, since this run is to find out what happens. The exceptions
+are zero tolerance: any brief leak, and any source row changed without a Filed entry.
 
-### The worker's job
-
-Reconcile the recorded claims against the source systems and prior state:
-resolve instances by key, enter data where it has authority, propose where
-it does not, mark a need met when a claim meets it. That is narrower and
-better specified than "read this note and work out what it means", and it
-is the part that needs an agent. The master's job shrinks to dispatch.
-
-Every input to an agent is a read, including its brief. A brief composed at
-the root and handed to a worker homed lower is the leak found in ux-av; under
-this model a brief is a read recorded like any other, and its floor applies.
-
-## What each component becomes
-
-| Component | Today | With the model |
-|---|---|---|
-| Survey (`pool.js` `surveyBrief`) | seeds master data as things, writes patterns | the first discovery pass: drafts classes, stages and record tables from the connected systems for a person to confirm |
-| Chat agent (`standing-instructions.ts`) | saves pasted text first | on/off record per thread; condenses on-record sections into documents with claims |
-| Linker (`things.js`) | one open call: names and types | resolve by key and by confirmed class first; one closed call for the residue (which instance, which attribute); mint nothing on its own |
-| Triage (`decisions.js`) | level, reason, contradiction, candidate | level and reason only; contradiction is two claims on one attribute with overlapping intervals, a query |
-| Grader (`grading.js`) | every write | claims that map to no class |
-| Policy (`policy.js`) | restricted topics by name | commitment classes and attributes with the position holding authority |
-| Proposals (`queueWrite` sites) | per-site level test | one `decideWrite(identity, class, ...)` applying the authority rule |
-| Worker | read, judge, link, edit, propose | reconcile claims against sources and prior state; data entry; propose |
-| Needs (`needs.js`) | question meets nearby entry by embedding | a question on an attribute is a state query when the state exists; embedding match stays for the rest |
-| Search | hits plus `temporal_filter` | adds current state and `as_of` for an instance |
-| Documents (`documents.js`) | sections and extracted facts | the storage shape for everything on record; facts become claims with intervals |
-| Batches (`~/ux-live` on the host) | sparse notes | on-record conversations that get condensed |
-
-Model calls per recorded section go from three open ones per note to one
-condensation by an agent that was present, plus closed calls on the residue.
-
-A consequence to accept: the ux batch suite tests the input model this
-rejects. Part of its flaky list (duplicate things, stale facets, grader
-wobbles on context-free sentences) is an artifact of that input and should
-retire without a fix once batches are conversations.
-
-## The contract (serial step one)
-
-One session produces the contract and nothing else. It is the shared ground
-every stream starts from, so it lands before any stream starts.
-
-1. **The sixty-note oracle.** Sixty notes from the ux batches already run
-   (the development instance holds 418; the seed scripts are in `~/ux-live`
-   on the host), each hand-classified as actor, commitment, event, resource
-   or residue, with its instance and class, and its expected claims. If
-   every note fits, the primitives hold and discovery is a data problem. If a
-   meaningful fraction does not, the residue names the fifth primitive and
-   this document changes before anything is built. The oracle is a fixture
-   file in the repo and every stream must handle all sixty.
-2. **The data contract as code**, in a new `graph-rag/src/model/` with unit
-   tests under `graph-rag/test/`, no behavior and no edit to `server.js`:
-   - ArcadeDB types and edges for class, instance (a thing with a record
-     key and a class), claim (`CLAIMS` edge from a section or entry to its
-     subject, carrying kind, class, attribute, value and the interval),
-     source reference, audit event (an agent's write to a source system),
-     and the on-record marker on a document;
-   - the document → section → claim shape as a module that validates and
-     normalizes what the condenser emits;
-   - the authority rule as a pure function: `(identity, class, attribute) →
-     direct | propose | hidden`, over the positions tree and the policy map;
-   - fixtures: the oracle's claims, a small confirmed class set, a policy
-     map, so every stream tests against the same data.
-3. **The five decisions** below, with the defaults confirmed or changed by
-   the user, written into this document.
-
-## Serial step two: split `server.js`
-
-`server.js` is 5,320 lines, makes the write-or-propose decision in about
-fifteen places, and has no unit tests. Two sessions editing it conflict on
-every merge and diverge on semantics. One session cuts it along the areas
-already mapped, purely mechanically, no behavior change, gated by the replay
-harness (`graph-rag/e2e/e2e.sh`, 22 of 22 today): identity and scope,
-search, derived data and placement, write, worker tools, master and handler,
-needs, documents, routes and `createServer`. This is what makes exclusive
-file ownership possible. It touches nothing in `graph-rag/src/model/`.
-
-Steps one and two are independent of each other and start together.
-
-## The streams (after the contract lands)
-
-Each stream runs in its own worktree session, owns its file set
-exclusively, starts from the contract and fixtures, and ships acceptance
-scenarios in the replay harness. Cross-cutting needs go through the contract,
-never through editing a neighbor's module.
-
-| Stream | Owns | Depends on |
-|---|---|---|
-| Discovery | survey brief, a discovery module, the admin confirm panel in `packages/web` | contract |
-| Condenser | chat-agent on/off record flow, thread → document with claims, the document ingest path | contract |
-| Admission and resolution | `things.js` and the linker: mint only by key, person or worker; look up before embedding; source references | contract |
-| Authority | `grading.js`, `policy.js`, `placement.js`, proposals: one rule over commitment classes; policy by class | contract |
-| Reconciliation and data entry | worker tools, write-capable DAB instance, audit event nodes | authority rule (stubbed until it lands) |
-| Queries | current state, `as_of`, needs answered from state | contract; fixtures stand in for claims |
-| Test harness | a batch generator producing on-record conversations instead of sparse notes; per-stream scenarios | each stream's acceptance scenarios, written first |
-
-Landing is serial: one integrator merges streams one at a time in dependency
-order, runs the harness after each, and bounces anything that drops a
-scenario. Every merge gets a review from an agent with no context of the
-author's reasoning. Any stream that cannot handle all sixty oracle notes has
-not met the contract, whatever its own tests say.
-
-Headcount: one session for the contract, one for the split, seven streams,
-one integrator, review subagents per merge.
-
-## Decisions still open
-
-Each has a default. Sessions take the default until the user changes it
-here.
-
-1. **Who confirms discovered classes.** Default: a person with admin
-   authority confirms in the app; a worker that keeps finding an unconfirmed
-   pattern files a proposal naming it, and only a person confirms.
-2. **Claims on free text that maps to no class.** Default: store the
-   section with no claim (still searchable), run the grader on it, and let
-   the condenser propose a class for a person. Never mint a class from one
-   occurrence.
-3. **Default interval for a state with no dates.** Default: `valid_from =
-   recorded_at`, open-ended, closed by the next claim on the same attribute
-   of the same instance. The condenser asks the person only when the text
-   gives a date range it cannot parse.
-4. **Which model answers the closed questions.** Default: a decision model
-   (Jev-style, typed output, probabilities, thresholds tuned from `Triage`
-   outcomes) for the residue, with the language model as fallback until a
-   locally served decision model is proven for the on-prem tier.
-5. **Multiple homes per instance** (DATA-SCOPING open question 2). Default:
-   unchanged. A claim is seen by whoever sees the section it came from; an
-   instance two branches work on has claims in both, each at its own home.
-   **When an authority rule tightens** (decided by the user), that sentence
-   stays true by moving the section, not by hiding the claim from it. When a
-   change to the map raises the authority over a class or attribute (a rule
-   appears, moves up the tree, or moves to another branch), every section
-   holding a claim the rule now covers moves to the lowest home above both
-   where it is and the new authority, with all of its text and every claim on
-   it: a section's other text rises with it, which is accepted. It happens on
-   the policy change itself, whatever wrote the map, and is recorded on
-   `PolicyChange` until finished, so a restart completes it and running it
-   twice changes nothing. `_grade` says which rule raised the section and who
-   changed that rule. What depends on the section follows: facts extracted
-   from it, the things its claims are about (no longer seen from a home with
-   no statement about them left), and the document entry once none of its
-   sections is left at the document's home. While another section is still
-   seen there the document stays, and so does its title. Only tightening
-   moves anything: a rule moved down the tree or removed leaves every
-   section where it is, and a person lowers one on purpose with `set_home`,
-   which is a widening and so goes through approval. What has been shared
-   with someone by a grant on that entry stays shared until the grant ends
-   or is revoked: grants are not authority.
+**To answer first:** which database to copy, and which models may see that copy. A
+`mssql-server` container runs on the host. This work did not open it, so whether it
+holds production data is unknown.
