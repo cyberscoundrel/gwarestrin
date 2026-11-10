@@ -381,6 +381,7 @@ function graphDb({ onRecord = true, ungraded = null, docHome = "floor", jobs = [
   const things = [
     { rid: "#80:1", label: "CNC 5", _homes: ["floor"], _keys: [] },
     { rid: "#80:2", label: "ZEBRA-INSTANCE", _homes: ["org"], _keys: [] },
+    { rid: "#80:3", label: "the dock", _homes: ["floor"], _keys: [] },
   ];
   const enq = [];
   return {
@@ -397,8 +398,8 @@ function graphDb({ onRecord = true, ungraded = null, docHome = "floor", jobs = [
       if (sql.includes("_kind = 'section' AND _doc_id")) return sections;
       if (sql.includes("_kind = 'class'")) return classRows;
       if (sql.includes("FROM SUBCLASS_OF")) return [];
-      if (sql.includes("out('INSTANCE_OF')")) return sql.includes("#80:1") ? [{ key: "machines" }] : [{ key: "zebra_pay_class" }];
-      if (sql.includes("outE('DEPENDS_ON')")) return [{ src: "#80:1", dst: "#80:2", note: "ZEBRA-EDGE" }];
+      if (sql.includes("outE('INSTANCE_OF')")) return sql.includes("#80:1") ? [{ cls: "#40:1", home: "floor" }, { cls: "#40:2", home: "org" }, { cls: "#40:1", home: null }] : [{ cls: "#40:2", home: "org" }];
+      if (sql.includes("outE('DEPENDS_ON')")) return [{ src: "#80:1", dst: "#80:2", note: "ZEBRA-EDGE", home: "org" }, { src: "#80:1", dst: "#80:3", note: "ZEBRA-LINK-ABOVE", home: "ops" }, { src: "#80:3", dst: "#80:1", note: "a link with no home", home: null }, { src: "#80:3", dst: "#80:1", note: "floor-link", home: "floor" }];
       if (sql.includes("FROM Job WHERE kind = 'review'")) return jobs.filter((j) => !params.k || j.job_key === params.k || (params.k.endsWith("%") && j.job_key.startsWith(params.k.slice(0, -1))));
       if (sql.includes("FROM WorkBatch")) return [{ id: "b1", entries: JSON.stringify(["doc-1"]) }];
       return [];
@@ -418,10 +419,11 @@ test("a brief holds only what its audience sees (R7, R11): marked items above th
   const text = taskBrief(composed);
   assert.doesNotMatch(text, /ZEBRA/, "no class, instance, edge, title or section text above the audience");
   assert.match(text, /Job 4471 is done/);
-  assert.match(text, /CNC 5 \(machines\)/);
+  assert.match(text, /CNC 5 \(jobs\)/, "its classes by links the audience sees: the org link and the homeless one are left out");
+  assert.doesNotMatch(text, /zebra_pay_class/);
   assert.match(text, /Classes \(1; 1 more above your audience\)/);
   assert.match(text, /Record: its title is above your audience/, "the title takes the strictest home among the sections (R11)");
-  assert.deepEqual(composed.dependencies, [], "a dependency is seen only by someone who sees both ends (R11)");
+  assert.deepEqual(composed.dependencies.map((d) => d.note), ["floor-link"], "a dependency is seen by someone who sees both ends (R11) and its link's home; none counts as the root");
   assert.doesNotMatch(JSON.stringify(composed.brief.sources), /http/, "a brief says how a source is committed to, never where it is");
   // the Operations worker of the same record sees the title and its own section, not the floor's alone
   const ops = taskBrief(await composeFilingBrief({ record: "doc-1", home: "ops", sections: ["#71:4"] }, { db, positions: map, sources: {}, entries: async () => [] }));

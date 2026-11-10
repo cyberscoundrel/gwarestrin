@@ -279,14 +279,18 @@ export async function composeFilingBrief(payload, { db = { adbQuery }, positions
   const parents = new Map();
   for (const e of sub) if (keyOf.has(String(e.o)) && keyOf.has(String(e.i))) parents.set(keyOf.get(String(e.o)), [...(parents.get(keyOf.get(String(e.o))) ?? []), keyOf.get(String(e.i))]);
   const classes = classRows.map((c) => ({ key: c._class_key, name: c._class_name ?? c._class_key, parents: parents.get(c._class_key) ?? [], home: c._home ?? null, description: c._description ?? null, rows_are_nodes: c._rows_are_nodes === true, record_table: c._record_table ?? null }));
+  // a link (INSTANCE_OF, DEPENDS_ON) is seen where its home is seen; one with no home counts as the root's
+  const linkSeen = (h) => canSee(positions, [home], h ?? positions.root);
   const related = await db.adbQuery(`SELECT @rid AS rid, label, _homes, _keys FROM (SELECT expand(out('ABOUT')) FROM [${rids.join(",")}]) WHERE _kind = 'thing'`).catch(() => []);
   const instances = [];
   const seen = new Set();
   for (const r of related) {
     if (seen.has(String(r.rid))) continue;
     seen.add(String(r.rid));
-    const of = await db.adbQuery(`SELECT _class_key AS key FROM (SELECT expand(out('INSTANCE_OF')) FROM ${r.rid})`).catch(() => []);
-    instances.push({ rid: String(r.rid), label: r.label ?? null, homes: Array.isArray(r._homes) ? r._homes : [], keys: Array.isArray(r._keys) ? r._keys : [], classes: of.map((x) => x.key).filter(Boolean) });
+    // its classes by links the audience sees: an INSTANCE_OF edge carries its own home, none meaning the root (R11.8, R11.9)
+    const of = await db.adbQuery(`SELECT @in AS cls, home FROM (SELECT expand(outE('INSTANCE_OF')) FROM ${r.rid})`).catch(() => []);
+    const classesOf = of.filter((e) => linkSeen(e.home)).map((e) => keyOf.get(String(e.cls))).filter(Boolean);
+    instances.push({ rid: String(r.rid), label: r.label ?? null, homes: Array.isArray(r._homes) ? r._homes : [], keys: Array.isArray(r._keys) ? r._keys : [], classes: [...new Set(classesOf)] });
   }
   // how each source is committed to (R7), from its declaration: its tables and actions as declared, and only the
   // sources whose read home the audience sees (R11.6, R11.9; no home: the root). Never a URL (briefSource).
@@ -297,8 +301,9 @@ export async function composeFilingBrief(payload, { db = { adbQuery }, positions
   const { brief, dropped } = scopeBrief({ audience: home, record, sections, classes, instances, sources: srcs }, positions);
   // a dependency is seen only by someone who sees both ends (R11): only between instances the brief keeps
   const kept = new Set(brief.instances.map((i) => i.rid));
-  const deps = kept.size ? await db.adbQuery(`SELECT @out AS src, @in AS dst, stated_as, note FROM (SELECT expand(outE('DEPENDS_ON')) FROM [${[...kept].join(",")}])`).catch(() => []) : [];
-  const dependencies = deps.filter((d) => kept.has(String(d.src)) && kept.has(String(d.dst))).map((d) => ({ from: String(d.src), to: String(d.dst), stated_as: d.stated_as ?? null, note: d.note ?? null }));
+  const deps = kept.size ? await db.adbQuery(`SELECT @out AS src, @in AS dst, stated_as, note, home FROM (SELECT expand(outE('DEPENDS_ON')) FROM [${[...kept].join(",")}])`).catch(() => []) : [];
+  // both ends seen, and the link's own home seen (none: the root)
+  const dependencies = deps.filter((d) => kept.has(String(d.src)) && kept.has(String(d.dst)) && linkSeen(d.home)).map((d) => ({ from: String(d.src), to: String(d.dst), stated_as: d.stated_as ?? null, note: d.note ?? null }));
   assertBrief(brief, positions);
   // the Kept or Held pieces it re-files (R11): only this record's, at this home
   const byId = entries ?? (async (id) => (await import("./filing.js")).arcadeStore().entries({ id }));
