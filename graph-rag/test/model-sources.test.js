@@ -29,3 +29,19 @@ test("a brief says how a source is committed to, never where it is", () => {
   assert.deepEqual(b, { system: "mssql", description: null, commits: true, actions: ["create", "update"], tables: ["dbo_Job"] });
   assert.ok(!JSON.stringify(b).includes("http"));
 });
+
+test("a connection's home defaults to the root (null), the strictest; a declaration may name one (R11.9)", () => {
+  assert.equal(normalizeSource(sql).read.home, null, "no home declared: the root");
+  assert.equal(normalizeSource({ ...sql, read: { ...sql.read, home: "everyone" } }).read.home, "everyone");
+  assert.throws(() => normalizeSource({ ...sql, read: { ...sql.read, home: "" } }), /read.home/);
+  assert.throws(() => normalizeSource({ ...sql, read: { ...sql.read, home: 7 } }), /read.home/);
+});
+
+test("a commit side names the server and database its guard expects; a brief never shows them", () => {
+  const s = normalizeSource({ ...sql, commit: { ...sql.commit, guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } });
+  assert.deepEqual(s.commit.guard, { server: "gwsynth-sql", database: "GwSynthMfg", entity: "dbo_GwConnectionIdentity" });
+  assert.equal(normalizeSource(sql).commit.guard, null, "no guard declared: the write adapter writes nothing");
+  assert.throws(() => normalizeSource({ ...sql, commit: { ...sql.commit, guard: { server: "x" } } }), /commit.guard.database/);
+  assert.throws(() => normalizeSource({ ...sql, commit: { ...sql.commit, guard: { database: "x" } } }), /commit.guard.server/);
+  assert.ok(!JSON.stringify(briefSource(s)).includes("gwsynth"), "the guard's names stay out of briefs");
+});
