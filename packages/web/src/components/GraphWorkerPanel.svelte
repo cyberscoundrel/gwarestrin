@@ -12,6 +12,9 @@
   let { onclose }: { onclose: () => void } = $props();
 
   let status = $state<GraphWorkerView | null>(null);
+  // the filing log by outcome (graph-rag workerStatus `filing`, R2); not in GraphWorkerView yet, so read as an extension
+  const filingStatus = $derived(status as (GraphWorkerView & { filing?: Record<string, number>; open_requests?: number; open_held_questions?: number }) | null);
+  const filing = $derived(filingStatus?.filing ?? null);
   let threads = $state<WorkerThread[]>([]);
   let questions = $state<WorkerQuestion[]>([]);
   let proposals = $state<WorkerProposal[]>([]);
@@ -201,7 +204,7 @@
         <p class="m-0 text-xs text-faint">
           {status.profile ? `From the ${status.profile} profile` : "No profile runs the graph worker: mark one in its profile's Graph worker section"} ·
           {status.threads?.running ?? 0} working · {status.threads?.waiting ?? 0} waiting on you · {status.threads?.pending ?? 0} queued ·
-          {status.threads?.today ?? 0}{status.pool ? ` of ${status.pool.dailyThreads}` : ""} started today · {status.things} things known
+          {status.threads?.today ?? 0}{status.pool ? ` of ${status.pool.dailyThreads}` : ""} started today · {status.things} things known{#if filing}<br />Filing log: {filing.filed ?? 0} filed · {filing.proposed ?? 0} proposed · {filing.held ?? 0} held · {filing.kept ?? 0} kept · {filingStatus?.open_requests ?? 0} requests waiting on the orchestrator · {filingStatus?.open_held_questions ?? 0} questions waiting on whoever put records on record{/if}
         </p>
 
         {#if outages.length || failingLoops.length || status.awaiting_grading}
@@ -226,7 +229,7 @@
               </p>
             {/if}
             <span class="text-xs text-faint">
-              Master on · {status.master.intake} entries waiting for the next batch · {status.master.signals} signals for the master · {status.master.handlers} handlers waiting on you
+              Orchestrator on · {status.master.intake} sections waiting for the next batch · {status.master.signals} signals for the orchestrator · {status.master.handlers} handlers waiting on you
             </span>
             {#each handlers.filter((h) => h.status !== "done") as h (h.id)}
               <div class="flex flex-wrap items-center gap-2 rounded-lg border border-edge2 bg-panel p-3">
@@ -296,15 +299,15 @@
               </span>
             </label>
             <label class="flex items-start gap-3">
-              <Switch checked={draft.master} label="run a master" onchange={(v) => draft && (draft.master = v)} />
+              <Switch checked={draft.master} label="run the orchestrator" onchange={(v) => draft && (draft.master = v)} />
               <span class="grid gap-0.5">
-                <span class="text-sm text-fg">Run a master</span>
-                <span class="text-xs text-faint">Saved entries batch up for one long-running master thread, which groups them, starts workers, settles what it can of their stops and hands the rest to handlers that ask you. Off: each entry is sorted and threaded on its own.</span>
+                <span class="text-sm text-fg">Run the orchestrator</span>
+                <span class="text-xs text-faint">Records on record batch up for one long-running orchestrator, which decides their classes, starts a worker per record and home, answers workers' requests and checks their accounts. Off: each record is filed by a worker of its own, with no one to answer requests.</span>
               </span>
             </label>
             {#if draft.master}
               <div class="grid gap-4 sm:grid-cols-3">
-                {@render num("Batch size", "batchSize", 1, 200, "A batch goes to the master at this many entries…")}
+                {@render num("Batch size", "batchSize", 1, 200, "A batch goes to the orchestrator at this many sections…")}
                 {@render num("Batch minutes", "batchMinutes", 1, 1440, "…or when its oldest entry has waited this long.")}
                 {@render num("Handlers waiting, at most", "maxHandlers", 1, 50, "Past this, no new batch starts until you've answered some.")}
               </div>

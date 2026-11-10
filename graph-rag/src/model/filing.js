@@ -97,6 +97,12 @@ export function normalizeEntry(raw) {
   if (!Array.isArray(instances) || instances.some((r) => !nonEmpty(r))) throw new ShapeError("instances", "must be a list of record ids");
   if (raw.outcome === HELD && !nonEmpty(raw.question)) throw new ShapeError("question", "a Held piece asks whoever put it on record");
   if (raw.outcome === PROPOSED && !nonEmpty(raw.reason)) throw new ShapeError("reason", "a Proposed piece says why it isn't Filed");
+  // R11: a class missing from the map means Proposed, so a Filed piece passed the map under a class
+  if (raw.outcome === FILED && !nonEmpty(raw.class)) throw new ShapeError("class", "a Filed piece names the class the map passed it under");
+  // R10: a worker that resolves a piece to storage reports what it did
+  if (raw.outcome === FILED && (raw.account === undefined || raw.account === null)) throw new ShapeError("account", "a Filed piece carries the account of what was written");
+  // R2: Kept is "linked to instances"
+  if (raw.outcome === KEPT && !instances.length) throw new ShapeError("instances", "a Kept piece is linked to the instances it is about");
   return {
     id: String(raw.id).trim(),
     outcome: raw.outcome,
@@ -149,4 +155,76 @@ export function normalizeRequest(raw) {
     answered_by: str(raw.answered_by, 120),
     at: date(raw.at, "at", new Date().toISOString()),
   };
+}
+
+/**
+ * What happens when the row already holds a different, non-empty value in a column the piece would write: a
+ * disagreement with the source. R2 has "the source disagrees" Held, the worker asking whoever put it on record
+ * and never overwriting; R11 calls a conflict with a source high stakes, a request to the orchestrator.
+ * Ruled (R12, the user: "Yes, write changes", 2026-11-10; filing choice F4). The decision lives here alone:
+ *   update_when_changed  (R12, in force): a record that says something changed is an update, filed given the
+ *                        recorder's authority and checked by the orchestrator afterwards; one that describes the
+ *                        current state and disagrees without saying anything changed is Held, asking the recorder
+ *   hold_and_request     (the conservative reading the build started from, kept and tested): nothing is written;
+ *                        the piece is Held with a question to the recorder and a "conflict" request
+ */
+export const DISAGREEMENT_RULES = ["hold_and_request", "update_when_changed"];
+export const DISAGREEMENT_RULE = "update_when_changed";
+
+/**
+ * The one decision for a disagreement with the source. `says_change`: the worker's reading that the record
+ * says something changed. Returns { file: true } (write it, as any piece) or { file: false, outcome: "held",
+ * request: "conflict" | null }.
+ */
+export function onDisagreement({ says_change = false } = {}, rule = DISAGREEMENT_RULE) {
+  if (!DISAGREEMENT_RULES.includes(rule)) throw new ShapeError("rule", `must be one of ${DISAGREEMENT_RULES.join(", ")}`);
+  if (rule === "update_when_changed") return says_change === true ? { file: true, outcome: null, request: null } : { file: false, outcome: HELD, request: null };
+  return { file: false, outcome: HELD, request: "conflict" };
+}
+
+/**
+ * The columns of `fields` the row already holds a different, non-empty value in (`same`: a value comparison,
+ * data-entry.js sameValue). An empty column taking a value is no disagreement: nothing is overwritten.
+ * NEEDS A RULING (F21): R2's "never overwrites" read as "never replaces a value"; an empty column is filled without asking.
+ */
+export function disagreeingColumns(row, fields, same = (a, b) => a === b) {
+  if (!row || !fields) return [];
+  const empty = (v) => v === null || v === undefined || (typeof v === "string" && !v.trim());
+  return Object.entries(fields)
+    .filter(([c, v]) => c in row && !empty(row[c]) && !same(row[c], v))
+    .map(([c, v]) => ({ column: c, source: row[c], record: v }));
+}
+
+/**
+ * What a worker's request is answered with: structured, never free text, so nothing above the worker's
+ * audience can ride along (NEEDS A RULING F7). `class` names a class for use_class / class_created; the caller
+ * checks the worker's audience can see it.
+ *   use_class      file the piece under this existing class
+ *   class_created  the orchestrator made this class: file the piece under it
+ *   keep           no class fits: keep the piece (the document is its source)
+ *   hold           leave the piece Held with its question to the recorder
+ *   update         (a conflict) the record states a change: file it as an update, given authority
+ */
+export const ANSWERS = ["use_class", "class_created", "keep", "hold", "update"];
+
+export function normalizeAnswer(raw) {
+  if (!raw || typeof raw !== "object") throw new ShapeError("answer", "must be { decision, class? }");
+  if (!ANSWERS.includes(raw.decision)) throw new ShapeError("answer.decision", `must be one of ${ANSWERS.join(", ")}`);
+  const needsClass = raw.decision === "use_class" || raw.decision === "class_created";
+  if (needsClass && !nonEmpty(raw.class)) throw new ShapeError("answer.class", `${raw.decision} names the class`);
+  if (!needsClass && nonEmpty(raw.class)) throw new ShapeError("answer.class", `${raw.decision} names no class`);
+  return { decision: raw.decision, class: needsClass ? classKey(raw.class) : null };
+}
+
+/** the suggested verdict on one entry, from the source as read now (the orchestrator records its own: R10, R11) */
+export function suggestVerdict(entry, read, same = (a, b) => a === b) {
+  if (entry.outcome === KEPT) return { result: "unverifiable", checked: "a Kept piece has no source to check" };
+  const fields = entry.target?.fields ?? null;
+  if (!entry.target?.key || !fields) return { result: "unverifiable", checked: "the entry names no row and fields" };
+  if (!read || read.status === "unreachable") return { result: "unverifiable", checked: "the source couldn't be read" };
+  if (read.status === "not_found") return entry.outcome === FILED ? { result: "differs", checked: `no row ${entry.target.key}` } : { result: "matches", checked: `no row ${entry.target.key}: nothing was written` };
+  const holds = Object.entries(fields).every(([c, v]) => c in read.row && same(read.row[c], v));
+  if (entry.outcome === FILED) return holds ? { result: "matches", checked: `${entry.target.key} holds what was filed` } : { result: "differs", checked: `${entry.target.key} doesn't hold what was filed` };
+  // Proposed and Held write nothing: a row holding the piece's values is either an approval since, or a write that shouldn't have happened
+  return holds ? { result: "differs", checked: `${entry.target.key} holds the piece's values though it was ${entry.outcome}` } : { result: "matches", checked: `${entry.target.key} is unchanged by this piece` };
 }

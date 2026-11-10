@@ -50,13 +50,26 @@ describe("graph worker tools", () => {
   it("the liaison's and worker's instructions: their own preamble, sources read-only, the profile's guidance", () => {
     const w = buildStandingInstructions({ graph: true, connections: [{ name: "mssql", description: "the ERP" }], profileInstructions: "Customers go by ERP code.", graphRole: "worker" });
     expect(w).toMatch(/mssql \(read-only\): the ERP/);
-    expect(w).toMatch(/graph-rag_raise_question/);
     expect(w).toMatch(/You file what people put on record/);
-    expect(w).not.toMatch(/link_things|upsert_entities|merge_things|confirm_claim|resolve_subject|record_conflict|enter_data|mark_need_met/);
+    // the filing tools (graph-rag worker-tools.js), the four outcomes, low and high stakes, the account (R2, R10, R11)
+    for (const t of ["resolve_name", "file_to_source", "hold_piece", "keep_piece", "create_instance", "relate_section", "section_key", "state_dependency", "request", "give_account"]) expect(w).toContain(`graph-rag_${t}`);
+    for (const o of ["Filed:", "Proposed:", "Held:", "Kept:"]) expect(w).toContain(o);
+    expect(w).toMatch(/You never pick Filed or Proposed/);
+    expect(w).toMatch(/You never make or change a class/);
+    expect(w).toMatch(/Keep requests few/);
+    expect(w).not.toMatch(/beyond|query_graph/, "a worker sees only its audience (R11): no beyond, no raw queries");
+    expect(w).not.toMatch(/link_things|upsert_entities|merge_things|confirm_claim|resolve_subject|record_conflict|enter_data|mark_need_met|raise_question/);
     expect(w).toMatch(/Customers go by ERP code/);
     expect(w).not.toMatch(/Sharing knowledge/);
     const l = buildStandingInstructions({ graph: true, connections: [], graphRole: "liaison" });
     expect(l).toMatch(/liaison/);
     expect(l).toMatch(/Only ever on the admin's word/);
+    expect(l).toMatch(/never yours to decide, even on the admin's word/, "R11: a person with authority approves, themselves");
+    const m = buildStandingInstructions({ graph: true, connections: [], graphRole: "master" });
+    expect(m).toMatch(/You are the graph orchestrator/);
+    for (const t of ["start_worker", "answer_request", "check_account", "record_verdict", "kept_pieces", "refile", "filing_log"]) expect(m).toContain(`graph-rag_${t}`);
+    expect(m).toMatch(/You never approve or reject a Proposed piece/);
+    expect(m).not.toMatch(/graph-rag_decide_proposal|graph-rag_answer_worker/);
+    expect(buildStandingInstructions({ graph: true, connections: [], graphRole: "handler" })).toMatch(/never yours to apply or reject, even on the operator's word/);
   });
 });

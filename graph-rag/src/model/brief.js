@@ -39,18 +39,30 @@ export function scopeBrief({ audience, record, sections = [], classes = [], inst
   const [s, ds] = keep(sections, (x) => homeOk(positions, audience, x.home));
   const [c, dc] = keep(classes, (x) => homeOk(positions, audience, x.home));
   const [i, di] = keep(instances, (x) => instanceOk(positions, audience, x));
-  const recordOk = !record?.home || homeOk(positions, audience, record.home);
+  // the record is its title and description only, never its sections (they come one by one, above); its title is
+  // homed by R11 (the strictest home among its sections), and a record with no home counts as the root
+  const recordOk = Boolean(record) && homeOk(positions, audience, record.home);
   return {
-    brief: { audience, record: recordOk ? record ?? null : null, sections: s, classes: c, instances: i, sources },
-    dropped: { sections: ds, classes: dc, instances: di, record: recordOk ? 0 : 1 },
+    brief: { audience, record: recordOk ? briefRecord(record) : null, sections: s, classes: c, instances: i, sources },
+    dropped: { sections: ds, classes: dc, instances: di, record: record && !recordOk ? 1 : 0 },
   };
 }
+
+/** what a brief may say of a record: its id, title, description and the title's home; nothing else */
+export const RECORD_FIELDS = ["id", "title", "description", "home"];
+const briefRecord = (r) => Object.fromEntries(RECORD_FIELDS.map((k) => [k, r[k] ?? null]));
 
 /** the check the brief's sender runs last: throws ShapeError when anything in it is above the audience */
 export function assertBrief(brief, positions) {
   const { audience } = brief ?? {};
   if (!audience) throw new ShapeError("audience", "a brief needs its audience");
-  if (brief.record?.home && !homeOk(positions, audience, brief.record.home)) throw new ShapeError("record", "the record's title is above the audience");
+  if (brief.record) {
+    // a record carrying anything but its title and description could carry sections above the audience (R7)
+    const extra = Object.keys(brief.record).filter((k) => !RECORD_FIELDS.includes(k));
+    if (extra.length) throw new ShapeError(`record.${extra.includes("sections") ? "sections" : extra[0]}`, "a brief holds the record's title and description only, never its sections");
+    // no home counts as the root, as for sections and classes
+    if (!homeOk(positions, audience, brief.record.home)) throw new ShapeError("record", "the record's title is above the audience");
+  }
   brief.sections.forEach((x, n) => {
     if (!homeOk(positions, audience, x.home)) throw new ShapeError(`sections[${n}]`, "above the audience");
   });
