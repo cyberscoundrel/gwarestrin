@@ -74,7 +74,7 @@
       const n = Number(body.sections ?? 0);
       return {
         title: `Add the document "${String(body.title ?? "")}" (${n} ${n === 1 ? "section" : "sections"}) at ${pos(body.home)}`,
-        detail: `${String(body.description ?? "")} ${body.extract ? "Individual facts will be extracted from it too." : "No facts are extracted from it."}`.trim(),
+        detail: String(body.description ?? "").trim(),
       };
     }
     if (p.kind === "rehome") {

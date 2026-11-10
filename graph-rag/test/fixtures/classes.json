@@ -1,40 +1,12 @@
 {
   "classes": [
-    {
-      "name": "orders",
-      "description": "a customer order: a commitment to deliver",
-      "stages": ["quoted", "ordered", "in_production", "shipped", "invoiced", "paid"],
-      "record_table": "mssql:dbo_Order",
-      "attributes": ["stage", "customer", "quantity", "due_date", "price", "margin"],
-      "confirmed_by": "admin",
-      "confirmed_at": "2026-11-01T09:00:00.000Z"
-    },
-    {
-      "name": "jobs",
-      "description": "a production job: a commitment of machine and people time to an order",
-      "stages": ["planned", "running", "paused", "done"],
-      "record_table": "mssql:dbo_Job",
-      "attributes": ["stage", "machine", "operator", "shift_cover", "quantity", "due_date"],
-      "confirmed_by": "admin",
-      "confirmed_at": "2026-11-01T09:00:00.000Z"
-    },
-    {
-      "name": "hires",
-      "description": "a hire: a commitment of a position to a person; no source system records it",
-      "stages": ["opened", "interviewing", "offered", "hired", "declined"],
-      "record_table": null,
-      "attributes": ["stage", "candidate", "start_date", "pay", "dismissal"],
-      "confirmed_by": "admin",
-      "confirmed_at": "2026-11-01T09:00:00.000Z"
-    },
-    {
-      "name": "maintenance",
-      "description": "a maintenance booking: a commitment of a machine's time to a service",
-      "stages": ["booked", "in_progress", "done"],
-      "record_table": "mssql:dbo_Maintenance",
-      "attributes": ["stage", "machine", "technician", "booked_for", "parts"],
-      "confirmed_by": "admin",
-      "confirmed_at": "2026-11-01T09:00:00.000Z"
-    }
+    { "name": "orders", "parents": ["commitment"], "home": "ops", "description": "a customer order: a commitment to deliver", "stages": ["quoted", "ordered", "in_production", "shipped", "invoiced", "paid"], "record_table": "mssql:dbo_Order", "rows_are_nodes": false, "evidence": [{ "kind": "table", "ref": "mssql:dbo_Order" }] },
+    { "name": "jobs", "parents": ["commitment"], "home": "floor", "description": "a production job: a commitment to make parts", "stages": ["open", "in_progress", "complete", "closed"], "record_table": "mssql:dbo_Job", "rows_are_nodes": false, "evidence": [{ "kind": "table", "ref": "mssql:dbo_Job" }] },
+    { "name": "hires", "parents": ["commitment"], "home": "org", "description": "a hire: an offer and its answer", "stages": ["opened", "interviewing", "offered", "hired", "declined"], "record_table": null, "rows_are_nodes": false, "evidence": [{ "kind": "notes", "note": "recurs in the admins' notes" }] },
+    { "name": "maintenance", "parents": ["event"], "home": "floor", "description": "work done on a machine", "record_table": "mssql:dbo_Maintenance", "rows_are_nodes": false, "evidence": [{ "kind": "table", "ref": "mssql:dbo_Maintenance" }] },
+    { "name": "machines", "parents": ["resource"], "home": "floor", "description": "a machine on the floor", "record_table": "mssql:dbo_Work_Center", "rows_are_nodes": true, "evidence": [{ "kind": "table", "ref": "mssql:dbo_Work_Center" }] },
+    { "name": "employees", "parents": ["agent"], "home": "ops", "description": "a person employed by the organization", "record_table": "mssql:dbo_Employee", "rows_are_nodes": true, "evidence": [{ "kind": "table", "ref": "mssql:dbo_Employee" }] },
+    { "name": "leased building", "parents": ["resource"], "home": "ops", "description": "a building the organization leases", "record_table": null, "evidence": [{ "kind": "notes", "note": "the user's example" }] },
+    { "name": "warehouse", "parents": ["leased building"], "home": "ops", "description": "a building holding stock", "record_table": null, "evidence": [{ "kind": "notes", "note": "the user's example" }] }
   ]
 }

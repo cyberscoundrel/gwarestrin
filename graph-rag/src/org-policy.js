@@ -6,7 +6,6 @@ import { applyPolicyUpdate, defaultPolicy, normalizeStored } from "./policy.js";
 import { log } from "./context.js";
 import { adbCommand, adbQuery } from "./db.js";
 import { positionMap, SCOPED } from "./scope.js";
-import { authorityOf } from "./model/authority.js";
 import { changeStatus, settleTightening } from "./tightening.js";
 
 /** ---- organization policy (Organization settings; see policy.js) ---- */
@@ -95,6 +94,3 @@ export async function savePolicy(input, identity) {
 }
 
 export const canEditPolicy = (identity, scope) => !identity.agent && !identity.open && scope.root && SCOPED;
-
-/** the position holding authority over a class (and attribute) under the current policy, or null when no rule applies */
-export const authorityFor = (cls, attribute) => authorityOf(policy.authorityMap, cls, attribute);

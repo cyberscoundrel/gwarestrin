@@ -1,10 +1,9 @@
 /**
- * The record tool (docs/ORGANIZATION-MODEL.md, "Inputs: on record, condensed, per claim"): a person's chat
- * agent puts a condensed document on record, in the contract's shape (model/README.md), and the ingest path
- * stores it with its claims (ingest.js recordDocument). Registered by createServer in server.js the way the
- * worker's tools are: `registerRecordTools(server, { identity, scope, need })` for identities that write
- * and hold no graph role. Until it is wired, ingest_document with the document as JSON in `text` takes the
- * same path.
+ * The record tool: a person's chat agent puts a condensed document on record (R2: the condensed document and its
+ * sections are the record), in the contract's shape (model/record.js), and the ingest path stores it
+ * (ingest.js recordDocument). No claims and no class vocabulary (R5). Registered by createServer in server.js:
+ * `registerRecordTools(server, { identity, scope, need })` for identities that write and hold no graph role.
+ * The record stream owns this module.
  */
 import { z } from "zod";
 import { recordDocument } from "./ingest.js";
@@ -12,22 +11,19 @@ import { recordDocument } from "./ingest.js";
 /** the tool's name: what the harness looks for in tools/list (/condens|on_record|record_document/) */
 export const RECORD_TOOL = "record_document";
 
-// the whole document is the contract's to judge (model/claims.js validateDocument: every problem named by
+// the whole document is the contract's to judge (model/record.js validateDocument: every problem named by
 // field, the same answer ingest_document gives); a stricter shape here refuses what the contract takes
 export const documentShape = z.object({}).passthrough();
 
 export function registerRecordTools(server, { identity, scope, need }) {
   server.tool(
     RECORD_TOOL,
-    `Put a condensed section of an on-record conversation into the knowledge graph as a document with claims
-(see "On record" in your workspace instructions). document: {title, description, reason, sections:
-[{heading, text, claims: [{kind, subject, class, attribute, value, valid_from, valid_until, at}]}]};
-recorded_by, position and recorded_at are set here from your token, whatever the document says. A claim's
-class must be a confirmed commitment class and a stage value one of its stages; a section with no claims is
-stored and graded as free text. The reply names every field that is wrong, or says on_record with the
-sections and claims written (queued for approval when the claims lie with a higher authority); sending the
-same document again changes nothing and says already_on_record. Only what the person meant for the record
-goes in.`,
+    `Put a condensed section of an on-record conversation into the knowledge graph as a document (see
+"On record" in your workspace instructions). document: {title, description, reason, sections: [{heading, text}]}:
+whole sections as text, with the context a reader needs. recorded_by, position and recorded_at are set here
+from your token, whatever the document says. The reply names what is wrong, or says on_record with the
+sections written (queued for approval when your writes are); sending the same document again changes nothing
+and says already_on_record. Only what the person meant for the record goes in.`,
     {
       document: documentShape,
       title: z.string().optional(),

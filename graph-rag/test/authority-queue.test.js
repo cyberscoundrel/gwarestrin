@@ -4,7 +4,7 @@
 // here (useDataEntry), so this branch needs neither the module nor a database.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { decideWrite, executePending, refusePending, useDataEntry } from "../src/write.js";
+import { executePending, refusePending, useDataEntry } from "../src/write.js";
 
 const calls = [];
 useDataEntry({
@@ -40,14 +40,4 @@ test("a rejected data_entry proposal is marked refused; other kinds leave nothin
 test("a stub that fails on refusal is logged, never thrown (the rejection itself stands)", async () => {
   useDataEntry({ refuseProposedEntry: async () => { throw new Error("audit store down"); } });
   await refusePending({ id: "p-5", kind: "data_entry", payload });
-});
-
-test("decideWrite with kind data_entry takes the class rule alone: authority over the class, no derived-floor lift", () => {
-  const map = { root: "org", positions: { org: { name: "org", parent: null }, ops: { name: "Operations", parent: "org" }, floor: { name: "Production floor", parent: "ops" } } };
-  const policy = { classes: { jobs: { authority: "floor" }, orders: { authority: "ops", attributes: { price: "org" } } }, attributes: {} };
-  const bob = { user: "bob", positions: ["floor"], caps: { write: "direct" } };
-  assert.equal(decideWrite(bob, { kind: "data_entry", cls: "jobs", attribute: "stage" }, { policy, positions: map, origin: "floor" }).action, "direct");
-  const d = decideWrite(bob, { kind: "data_entry", cls: "orders", attribute: "price" }, { policy, positions: map, origin: "floor" });
-  assert.deepEqual([d.action, d.home, d.authority, d.lift], ["propose", "org", "org", null]);
-  assert.equal(decideWrite({ ...bob, caps: { write: "queued" } }, { kind: "data_entry", cls: "jobs", attribute: "stage" }, { policy, positions: map, origin: "floor" }).action, "propose");
 });

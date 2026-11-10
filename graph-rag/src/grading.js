@@ -90,7 +90,7 @@ export function gradingPrompt(map, origin, entities, writtenAt = Date.now(), top
 }
 
 function describe(e) {
-  // a claim-bearing section's whole text when it was given (its facet is only a preview)
+  // a section's whole text when it was given (its facet is only a preview)
   const facets = typeof e._text === "string" ? [`identity: ${e._text.slice(0, 6000)}`] : Object.entries(e.facets ?? {}).map(([k, v]) => `${k}: ${String(v).slice(0, 1200)}`);
   const props = Object.entries(e.properties ?? {}).map(([k, v]) => `${k}=${String(v).slice(0, 200)}`);
   return [...facets, props.length ? `properties: ${props.join("; ")}` : ""].filter(Boolean).join("\n");

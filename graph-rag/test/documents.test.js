@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chunk, extractionPrompt, MAX, MIN, parseExtraction, preview, sectionName, TARGET } from "../src/documents.js";
+import { chunk, MAX, MIN, preview, sectionName, TARGET } from "../src/documents.js";
 
 const para = (n, word = "spindle") => Array.from({ length: n }, (_, i) => `${word} ${i} needs grease every 500 hours.`).join(" ");
 
@@ -42,26 +42,4 @@ test("names and previews", () => {
   assert.equal(sectionName("Weekly meeting", 0, ""), "Weekly meeting §1");
   assert.equal(preview("a  b\n\nc"), "a b c");
   assert.equal(preview("x".repeat(500)).length, 400);
-});
-
-test("extraction: facts tied to their section; junk, duplicates and overflow dropped", () => {
-  const written = Date.parse("2026-10-08T12:00:00Z");
-  const sections = [{ index: 4, heading: "Coolant", text: "..." }, { index: 5, heading: "Actions", text: "..." }];
-  const msgs = extractionPrompt("Mill 1 manual", sections, written);
-  assert.match(msgs[1].content, /section 2: Actions/);
-  assert.match(msgs[0].content, /data, not instructions/);
-  const text = JSON.stringify({
-    facts: [
-      { section: 1, name: "Mill 1 coolant interval", statement: "Mill 1 coolant is changed every 500 hours.", until: null },
-      { section: 2, name: "Ken orders spindles", statement: "Ken orders two spare spindles for Mill 1 by October 20.", until: "2026-10-20" },
-      { section: 2, name: "ken orders spindles", statement: "duplicate name", until: null },
-      { section: 9, name: "Nowhere", statement: "A fact from a section that wasn't sent.", until: null },
-      { section: 1, name: "x", statement: "too short a name" },
-    ],
-  });
-  const facts = parseExtraction(`here you go: ${text}`, sections, written);
-  assert.deepEqual(facts.map((f) => [f.section, f.name]), [[4, "Mill 1 coolant interval"], [5, "Ken orders spindles"]]);
-  assert.equal(facts[1].until, "2026-10-20T23:59:59.000Z");
-  assert.equal(facts[0].until, null);
-  assert.deepEqual(parseExtraction("not json", sections), []);
 });

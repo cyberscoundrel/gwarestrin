@@ -18,7 +18,7 @@ import { OpenShellAgentLauncher } from "../runtime/openshell-agent.js";
 import { OpenShellProviders, OpenShellRuntime, connectOpenShell } from "../runtime/openshell.js";
 import { openShellIdentity } from "../runtime/openshell-identity.js";
 import { lastReply, lastTurn } from "./last-reply.js";
-import { condensedFromEvent, type ConfirmedClass, fetchConfirmedClasses, RECORD_FILE, recordContext, switchRecord, threadIdOf, writeRecordContext } from "./condenser.js";
+import { condensedFromEvent, RECORD_FILE, recordContext, switchRecord, threadIdOf, writeRecordContext } from "./condenser.js";
 import { pushThreadRecord } from "./record-gate.js";
 import { AgentStore } from "./store.js";
 import { DEFAULT_PROFILE_ID, ProfileStore } from "./profiles.js";
@@ -75,8 +75,6 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   private starting = new WeakSet<RpcAgent>();
   private extensionsRoot: string;
   private launcher: Promise<OpenShellAgentLauncher> | undefined;
-  /** the confirmed commitment classes, as last read from the graph (a few minutes' cache) */
-  private classes: { at: number; list: ConfirmedClass[] | null } = { at: 0, list: null };
   /** agents whose record state is waiting for a retry to reach graph-rag */
   private gateRetries = new Set<string>();
   /** per agent: the latest thread-change push, and whether it failed */
@@ -252,8 +250,7 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
   private async syncRecordContext(id: string, state: ThreadRecordState): Promise<void> {
     const record = this.store.get(id);
     if (!record) return;
-    const classes = state.on ? await this.confirmedClasses() : null;
-    const text = recordContext(state, classes);
+    const text = recordContext(state);
     await writeRecordContext(dirsFor(this.config.stateDir, record).home, text);
     if (this.onOpenShell && this.running.has(id)) {
       await (await this.openShellLauncher()).writeHomeFile(id, RECORD_FILE, text).catch((err) => log.warn(`agent ${record.name}: record state not written into its sandbox: ${err instanceof Error ? err.message : String(err)}`));
@@ -311,15 +308,6 @@ export class AgentManager extends EventEmitter<ManagerEvents> {
     const pushed = await this.gatePush.get(id);
     if (pushed === false && !this.threadRecord(id).on) return "the knowledge graph couldn't be told this conversation is off record yet, so nothing can be sent for now; try again in a moment";
     return null;
-  }
-
-  /** the confirmed commitment classes (CommitmentClass rows), read through graph-rag as this instance; null when they can't be read */
-  async confirmedClasses(): Promise<ConfirmedClass[] | null> {
-    if (Date.now() - this.classes.at < 300_000) return this.classes.list;
-    const { url, token } = this.instanceGraph();
-    const list = url ? await fetchConfirmedClasses(url, token) : null;
-    this.classes = { at: Date.now(), list };
-    return list;
   }
 
   /**

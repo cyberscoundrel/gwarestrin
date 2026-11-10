@@ -51,9 +51,8 @@ describe("graph worker tools", () => {
     const w = buildStandingInstructions({ graph: true, connections: [{ name: "mssql", description: "the ERP" }], profileInstructions: "Customers go by ERP code.", graphRole: "worker" });
     expect(w).toMatch(/mssql \(read-only\): the ERP/);
     expect(w).toMatch(/graph-rag_raise_question/);
-    expect(w).toMatch(/graph-rag_confirm_claim/);
-    expect(w).toMatch(/graph-rag_enter_data/);
-    expect(w).not.toMatch(/link_things|upsert_entities|merge_things/);
+    expect(w).toMatch(/You file what people put on record/);
+    expect(w).not.toMatch(/link_things|upsert_entities|merge_things|confirm_claim|resolve_subject|record_conflict|enter_data|mark_need_met/);
     expect(w).toMatch(/Customers go by ERP code/);
     expect(w).not.toMatch(/Sharing knowledge/);
     const l = buildStandingInstructions({ graph: true, connections: [], graphRole: "liaison" });
