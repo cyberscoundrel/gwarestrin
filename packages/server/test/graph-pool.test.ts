@@ -214,7 +214,7 @@ describe("graph worker pool", () => {
   });
 });
 
-describe("graph master", () => {
+describe("graph orchestrator (role kind master)", () => {
   it("wakes the master with its signals as one message, acks them, compacts after a batch", async () => {
     const { manager, records, prompts, compacted } = fakeManager();
     const calls: Array<[string, unknown]> = [];
@@ -226,7 +226,7 @@ describe("graph master", () => {
     const pool = new GraphPool(manager, call, () => 8);
     await pool.masterTurn("worker-profile");
     const master = [...records.values()].find((a) => a.graphRole?.kind === "master");
-    expect(master?.name).toBe("Graph master");
+    expect(master?.name).toBe("Graph orchestrator");
     expect(prompts).toEqual([[master!.id, "Signals for you (2)."]]);
     expect(calls.find(([p]) => p === "/api/worker/signals/ack")?.[1]).toEqual({ ids: ["s1", "s2"] });
     expect(compacted()).toBe(1);

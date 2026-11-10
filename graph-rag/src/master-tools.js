@@ -2,20 +2,20 @@
  * The master (pool.master), its handlers and the liaison: batches of sections, signals, starting and
  * settling workers, and the MCP registration of their tools.
  *
- * The master is the orchestrator's start: the most privileged agent, it reads batches and starts workers (R7).
- * It writes no brief: a worker's brief is composed from the graph at claim time (worker-pool.js), as the
- * section's people see it. What the master is told of a section is its id and where it is seen from, never a
- * title or a text (the ux-av leak: titles from a root brief copied into floor notes). The filing stream owns
- * this module and gives the orchestrator its class decisions, its check of workers' accounts and requests.
+ * The master is the orchestrator (its role kind stays `master`): the most privileged agent, it reads batches in
+ * full and starts workers (R7). It writes no brief: a worker's brief is composed from the graph at claim time
+ * (worker-pool.js), as the worker's audience sees it, so what the orchestrator reads never reaches a worker through
+ * one. Its filing tools are in orchestrator.js. The filing stream owns this module.
  */
 import { randomUUID } from "node:crypto";
-import { effectiveHome, homeName, moveKind } from "./positions.js";
+import { homeName } from "./positions.js";
 import { z } from "zod";
 import { log } from "./context.js";
 import { adbCommand, adbQuery, RID_RE } from "./db.js";
 import { positionMap } from "./scope.js";
 import { approvePending, rejectPending } from "./write.js";
-import { answerQuestions, enqueue, JOB_ID_RE, listProposals, listQuestions, proposalLands, resumeThread, worker } from "./worker-pool.js";
+import { answerQuestions, JOB_ID_RE, listProposals, listQuestions, proposalLands, resumeThread, worker } from "./worker-pool.js";
+import { recordsForBatch, registerOrchestratorTools, startUnstarted } from "./orchestrator.js";
 
 /**
  * ---- the master (pool.master): a long-running thread dispatches batches of
@@ -46,7 +46,7 @@ export async function emitSignal(kind, { job_id = null, batch_id = null, data = 
 
 /** a stopped worker's open questions and undecided proposals */
 export async function openItems(jobId) {
-  const questions = await adbQuery("SELECT id, question, options FROM WorkerQuestion WHERE job_id = :id AND status = 'open'", { id: jobId }).catch(() => []);
+  const questions = await adbQuery("SELECT id, question, options FROM WorkerQuestion WHERE job_id = :id AND status = 'open' AND asked_of IS NULL", { id: jobId }).catch(() => []);
   const proposals = await adbQuery("SELECT id, kind, note, payload FROM PendingWrite WHERE job_id = :id AND status = 'pending'", { id: jobId }).catch(() => []);
   return {
     questions: questions.map((q) => ({ id: q.id, question: q.question, options: JSON.parse(q.options || "[]") })),
@@ -64,68 +64,38 @@ export async function masterStatus() {
   return { on: !!worker.pool.master && worker.pool.poolSize > 0, handlers, maxHandlers: worker.pool.maxHandlers, halted: handlers >= worker.pool.maxHandlers, intake, signals };
 }
 
-/** What the master is told of one section: its id and where it is seen from. No title, no text. */
+/** What a stopped worker's situation names of a section: its id and where it is seen from. */
 export async function sectionForMaster(rid) {
   const row = (await adbQuery(`SELECT _home, _kind FROM ${rid}`).catch(() => []))[0];
   if (!row) return null;
   return { rid: String(rid), home: homeName(positionMap, row._home), kind: row._kind ?? "entry" };
 }
 
-/** a batch closes at batchSize sections or when its oldest has waited batchMinutes; not while halted */
+/**
+ * A batch closes at batchSize sections or when its oldest has waited batchMinutes; not while halted. It names the
+ * records the sections belong to, in full (orchestrator.js recordsForBatch: the orchestrator reads batches, R7).
+ * Records of a batch the orchestrator left without a worker get one when the batch has waited as long again (R4).
+ */
 export async function batchTick() {
   const st = await masterStatus();
-  if (!st.on || st.halted || !st.intake) return;
+  if (!st.on) return;
+  await startUnstarted({ minutes: worker.pool.batchMinutes }).catch((e) => log.warn(`every record gets a worker: ${String(e?.message ?? e).slice(0, 160)}`));
+  if (st.halted || !st.intake) return;
   const rows = await adbQuery("SELECT id, payload, created_at FROM Job WHERE kind = 'intake' AND status = 'pending' ORDER BY created_at ASC LIMIT " + Math.floor(worker.pool.batchSize));
   const oldest = Date.parse(rows[0]?.created_at ?? "");
   if (rows.length < worker.pool.batchSize && !(Date.now() - oldest >= worker.pool.batchMinutes * 60_000)) return;
   const batch = randomUUID();
-  const sections = [];
-  const taken = [];
-  for (const r of rows) {
-    const p = JSON.parse(r.payload || "{}");
-    taken.push(r.id);
-    const s = RID_RE.test(String(p.rid)) ? await sectionForMaster(p.rid) : null;
-    if (!s) continue; // gone since it was recorded
-    sections.push(s);
-  }
-  // the batch and its signal first: sections leave the intake only once the master will hear of them
-  if (sections.length) {
-    await adbCommand("INSERT INTO WorkBatch SET id = :id, entries = :e, status = 'open', created_at = :now", "sql", { id: batch, e: JSON.stringify(sections.map((s) => s.rid)), now: new Date().toISOString() });
-    await emitSignal("batch", { batch_id: batch, data: { sections } });
+  const taken = rows.map((r) => r.id);
+  const rids = rows.map((r) => JSON.parse(r.payload || "{}").rid).filter((r) => RID_RE.test(String(r)));
+  const records = await recordsForBatch(rids);
+  // the batch and its signal first: sections leave the intake only once the orchestrator will hear of them
+  if (records.length) {
+    await adbCommand("INSERT INTO WorkBatch SET id = :id, entries = :e, status = 'open', created_at = :now", "sql", { id: batch, e: JSON.stringify(records.map((r) => r.record)), now: new Date().toISOString() });
+    await emitSignal("batch", { batch_id: batch, data: { records } });
   }
   for (const id of taken) await adbCommand("UPDATE Job SET status = 'done', summary = :b, updated_at = :now WHERE id = :id AND status = 'pending'", "sql", { b: `batch ${batch}`, now: new Date().toISOString(), id });
-  if (!sections.length) return;
-  log.info(`batch ${batch.slice(0, 8)}: ${sections.length} sections for the master`);
-}
-
-/**
- * The master starts a worker on sections (by id): a review job whose brief is composed at claim time.
- * The sections must be seen from one position (one worker per position: its reads of one would hold
- * its writes to another); the brief is checked again when claimed. Its level of work (which model runs
- * it): the master's call, else an investigation.
- */
-async function masterStartWorker(args, identity) {
-  const rids = [...new Set((args.sections ?? []).map((s) => String(s).trim()))].slice(0, 25);
-  if (!rids.length) throw new Error("which sections (their ids)");
-  const bad = rids.filter((r) => !RID_RE.test(r));
-  if (bad.length) throw new Error(`not section ids: ${bad.join(", ")}`);
-  const homes = new Map();
-  for (const r of rids) {
-    const row = (await adbQuery(`SELECT _home, _kind FROM ${r}`).catch(() => []))[0];
-    if (!row) throw new Error(`no section ${r}`);
-    if (row._kind && !["section", "task"].includes(row._kind)) throw new Error(`${r} is a ${row._kind}, not a section`);
-    homes.set(r, effectiveHome(positionMap, row._home));
-  }
-  const distinct = [...new Set(homes.values())];
-  if (distinct.length > 1) throw new Error(`the sections are seen from different positions (${distinct.map((h) => homeName(positionMap, h)).join(", ")}): one worker per position`);
-  const level = Number(args.level) || 0;
-  const label = `${rids.length} section${rids.length === 1 ? "" : "s"} at ${homeName(positionMap, distinct[0])}`;
-  const job = await enqueue(
-    "review",
-    { rid: rids[0], sections: rids, parent: MASTER, by: identity.user, label, minutes: Math.max(5, Math.min(180, Number(args.minutes) || worker.pool.threadMinutes)), level: Math.max(1, Math.min(3, level || 2)) },
-    { key: `reconcile:${rids.join(",")}`, priority: 3 },
-  );
-  return { job, sections: rids, level: Math.max(1, Math.min(3, level || 2)), note: "Started: you'll get a signal when it's done or stopped. Its brief is composed from the graph as its sections' people see it." };
+  if (!records.length) return;
+  log.info(`batch ${batch.slice(0, 8)}: ${records.length} records for the orchestrator`);
 }
 
 /** one worker's situation, for the master or its handler: no brief text, the sections by id */
@@ -152,25 +122,14 @@ async function workerSituation(jobId) {
   };
 }
 
-/** the master (or a handler, on the operator's word) answers a stopped worker: it resumes with the message */
-async function answerWorker(jobId, answer, by) {
-  const items = await openItems(jobId);
-  if (items.questions.length) await answerQuestions(items.questions.map((q) => q.id), { answer, quiet: true }, by);
-  await resumeThread(jobId, { message: String(answer).slice(0, 3000), answered_by: by });
-  return { resumed: true, answered: items.questions.length };
-}
-
-/** raw commands, widening who sees something, and writes into a source system are the operator's, whatever the master thinks */
-async function needsOperator(id) {
-  const rec = (await adbQuery("SELECT kind, payload FROM PendingWrite WHERE id = :id", { id }))[0];
-  if (!rec) return null;
-  if (rec.kind === "command") return "a raw command";
-  if (rec.kind === "data_entry") return "a write into a source system";
-  if (rec.kind === "rehome") {
-    const m = JSON.parse(rec.payload);
-    if (moveKind(positionMap, m.from, m.to) === "widen") return "widening who sees something";
-  }
-  return null;
+/**
+ * A Proposed piece (a data_entry proposal) is approved by a person with authority for its class, as themselves
+ * (R11: the orchestrator never approves). No agent applies or rejects one on anyone's word: not the orchestrator,
+ * a handler or the liaison (NEEDS A RULING F15: they stay for questions and explanations).
+ */
+export async function assertNotFilingProposal(id) {
+  const rec = (await adbQuery("SELECT kind FROM PendingWrite WHERE id = :id", { id }).catch(() => []))[0];
+  if (rec?.kind === "data_entry") throw new Error(`${String(id).slice(0, 8)} is a Proposed piece of a record: a person with authority for its class approves or rejects it themselves (Approvals), never an agent on their word. Nothing was recorded.`);
 }
 
 /** the master closes a worker it won't pursue: questions dismissed, proposals rejected, no resume */
@@ -220,6 +179,7 @@ async function handlerDecide(args, identity) {
   };
   const approve = (args.approve ?? []).map(resolve);
   const reject = (args.reject ?? []).map((r) => ({ ...r, id: resolve(r.id) }));
+  for (const id of [...approve, ...reject.map((r) => r.id)]) await assertNotFilingProposal(id);
   if (!args.answer?.trim() && !approve.length && !reject.length) throw new Error("Nothing to record: give the operator's answer, or the proposals to apply or reject. Nothing was recorded.");
   const by = `${identity.user} (on the operator's word)`;
   const done = [];
@@ -247,45 +207,16 @@ export async function decideProposal(id, approve, reason, identity) {
 
 /** the tools of a master thread, registered on the MCP server built for that identity (see createServer) */
 export function registerMasterTools(server, { identity }) {
-  server.tool(
-    "start_worker",
-    `Start a worker on sections of a batch (by id). Group sections seen from the same position that share
-an instance or a class; sections seen from different positions never share a worker. The worker's brief
-is composed from the graph as its sections' people see it: you write none. level picks the model it runs
-on: 1 a quick check, 2 an investigation (the default), 3 a broad matter. You get a signal when it's done
-or stopped.`,
-    {
-      sections: z.array(z.string().max(40)).min(1).max(25),
-      minutes: z.number().int().min(5).max(180).optional(),
-      level: z.number().int().min(1).max(3).optional(),
-    },
-    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await masterStartWorker(args, identity)) }] }),
-  );
+  // starting workers by record, requests, Kept, the log and the account check (orchestrator.js)
+  registerOrchestratorTools(server, { identity });
   server.tool(
     "worker_status",
     "A worker's situation: its status, sections (by id), report, changes, and the questions and proposals it's waiting on.",
     { job: z.string() },
     async (args) => ({ content: [{ type: "text", text: JSON.stringify(await workerSituation(args.job)) }] }),
   );
-  server.tool(
-    "answer_worker",
-    `Settle a stopped worker yourself when you can: your answer to its questions, or what to do next. It
-resumes in its own conversation.`,
-    { job: z.string(), answer: z.string().min(2).max(3000) },
-    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await answerWorker(args.job, args.answer, identity.user)) }] }),
-  );
-  server.tool(
-    "decide_proposal",
-    `Apply or reject a worker's proposal yourself (its worker resumes with your decision). Raw commands,
-widening who sees something, and writes into a source system (data entries) are the operator's: hand
-those to a handler, once they're queued (the handler applies them on the operator's word).`,
-    { id: z.string(), approve: z.boolean(), reason: z.string().max(1000).optional() },
-    async (args) => {
-      const why = await needsOperator(args.id);
-      if (why) throw new Error(`${why} is the operator's decision: start a handler for this worker`);
-      return { content: [{ type: "text", text: JSON.stringify(await decideProposal(args.id, args.approve, args.reason ?? "", identity)) }] };
-    },
-  );
+  // no answer_worker (its free text could carry what the worker's audience can't see: answer_request is structured,
+  // NEEDS A RULING F7) and no decide_proposal (R11: the orchestrator never approves)
   server.tool(
     "close_worker",
     "Close a worker you won't pursue (its questions dismissed, its proposals rejected). Say why.",
@@ -366,6 +297,9 @@ dismiss: true closes the questions without an answer (the threads finish as they
     `Apply or reject a worker's proposal, as the admin decided. Only on the admin's say-so. A rejection (and
 an approval with a reason) resumes the thread with the reason.`,
     { id: z.string(), approve: z.boolean(), reason: z.string().max(1000).optional() },
-    async (args) => ({ content: [{ type: "text", text: JSON.stringify(await decideProposal(args.id, args.approve, args.reason ?? "", identity)) }] }),
+    async (args) => {
+      await assertNotFilingProposal(args.id);
+      return { content: [{ type: "text", text: JSON.stringify(await decideProposal(args.id, args.approve, args.reason ?? "", identity)) }] };
+    },
   );
 }

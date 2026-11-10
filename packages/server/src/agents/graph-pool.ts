@@ -62,7 +62,7 @@ interface ClaimedHandler {
 /** a thread's agent name: readable in the rail, unique */
 export const threadName = (title: string, job: string): string => `graph · ${title.replace(/\s+/g, " ").trim().slice(0, 48)} · ${job.slice(0, 4)}`;
 export const LIAISON_NAME = "Graph liaison";
-export const MASTER_NAME = "Graph master";
+export const MASTER_NAME = "Graph orchestrator"; // the role kind stays `master` (NEEDS A RULING F13): only the name people see changes (R7)
 /** a handler's agent name: in the rail, for the operator to open */
 export const handlerName = (title: string, job: string): string => `handler · ${title.replace(/\s+/g, " ").trim().slice(0, 44)} · ${job.slice(0, 4)}`;
 const MASTER_IDLE_MS = 10 * 60_000;
@@ -361,7 +361,7 @@ export class GraphPool {
   async ensureMaster(profileId: string): Promise<AgentRecord> {
     const existing = this.manager.store.list().find((a) => a.graphRole?.kind === "master");
     if (existing) return existing;
-    log.info("making the graph master");
+    log.info("making the graph orchestrator");
     return this.manager.createAgent({ name: MASTER_NAME, profileId }, { graphRole: { kind: "master" } });
   }
 

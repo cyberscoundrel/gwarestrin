@@ -1,0 +1,680 @@
+/**
+ * Filing a record, piece by piece (docs/ORGANIZATION-MODEL.md, "How workers file a record"): the filing log, the
+ * worker's filing tools, Held questions to the recorder, requests of the orchestrator, the worker's account, and the
+ * orchestrator's check of that account against the source.
+ *
+ *   A piece is whatever one filing-log entry covers; the worker decides the split, and nothing is stored to divide
+ *   sections (R11). Each piece ends in one outcome on record (R2):
+ *     Filed     source and record clear, the recorder has authority: written, the entry names the row
+ *     Proposed  clear, but no authority, a class missing from the map, or a source that isn't writable
+ *     Held      a source exists but it's unclear which record, the source disagrees, or it can't be reached: the
+ *               worker asks whoever put it on record, and nothing is overwritten
+ *     Kept      no system holds it: the document is the source, linked to instances
+ *   Filed or Proposed is decided here from facts (the row as read, the class map, the recorder's standing), never
+ *   taken from the model: the worker says what it would write, and the code says which outcome that is.
+ *
+ *   The log is append-only (NEEDS A RULING F2): a later outcome for a piece is a new entry pointing back at the old
+ *   one with `refiled_from` (a re-filed Kept piece, R11; an approved Proposed one; an answered Held one). An entry
+ *   gains only its account and the orchestrator's verdict after it is written. It lives outside the graph (R9;
+ *   model/filing.js: a FilingEntry document, never a vertex or an edge).
+ *
+ * Everything a handler touches comes through `env` (the log's store, the database, the source reads, the class
+ * reads, the position map, the people), so tests run it over fakes that hand it facts, never answers.
+ * The filing stream owns this module.
+ */
+import { randomUUID } from "node:crypto";
+import { adbCommand as realCommand, adbQuery as realQuery, ENTITY_LABEL, RID_RE } from "./db.js";
+import { canSee, EVERYONE } from "./positions.js";
+import { classKey } from "./model/classes.js";
+import { parseKey } from "./model/schema.js";
+import { disagreeingColumns, FILED, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, onDisagreement, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
+import { clientFor, DAB_CALLS, enterData, mcpToolCall, rowsOf, sameValue, sourcesConfig } from "./data-entry.js";
+
+const realDb = { adbCommand: realCommand, adbQuery: realQuery };
+const json = (v) => (v === null || v === undefined ? null : JSON.stringify(v));
+const parse = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  try {
+    return typeof v === "string" ? JSON.parse(v) : v;
+  } catch {
+    return null;
+  }
+};
+const normName = (s) =>
+  String(s ?? "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+
+/** ---- the log's store ---- */
+
+const ENTRY_FIELDS = ["id", "outcome", "record", "section", "home", "piece", "class", "instances", "target", "recorder", "worker", "reason", "pending_id", "question", "request", "account", "verdict", "refiled_from", "at"];
+const fromEntryRow = (r) => ({ ...Object.fromEntries(ENTRY_FIELDS.map((k) => [k, r[k] ?? null])), instances: Array.isArray(r.instances) ? r.instances : [], target: parse(r.target), account: parse(r.account), verdict: parse(r.verdict) });
+const REQUEST_FIELDS = ["id", "kind", "record", "section", "home", "worker", "question", "suggestion", "status", "answer", "answered_by", "at"];
+
+/**
+ * The log and the requests in ArcadeDB (the FilingEntry and WorkerRequest documents the contract declares,
+ * model/schema.js). Never a vertex or an edge, so no graph read returns them (R9).
+ */
+export function arcadeStore(db = realDb) {
+  return {
+    async insertEntry(e) {
+      await db.adbCommand(`INSERT INTO FilingEntry SET ${ENTRY_FIELDS.map((k) => `${k} = :${k}`).join(", ")}`, "sql", { ...e, target: json(e.target), account: json(e.account), verdict: json(e.verdict) });
+      return e;
+    },
+    /** an entry gains its account or verdict; nothing else about it changes */
+    async annotateEntry(id, { account, verdict }) {
+      const sets = [];
+      const params = { id };
+      if (account !== undefined) (sets.push("account = :account"), (params.account = json(account)));
+      if (verdict !== undefined) (sets.push("verdict = :verdict"), (params.verdict = json(verdict)));
+      if (sets.length) await db.adbCommand(`UPDATE FilingEntry SET ${sets.join(", ")} WHERE id = :id`, "sql", params);
+    },
+    async entries({ id, record, worker, outcome, refiled_from, pending_id, limit = 500 } = {}) {
+      const where = [];
+      const params = {};
+      for (const [k, v] of Object.entries({ id, record, worker, outcome, refiled_from, pending_id })) if (v !== undefined) (where.push(`${k} = :${k}`), (params[k] = v));
+      const rows = await db.adbQuery(`SELECT FROM FilingEntry${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY at ASC LIMIT ${Math.max(1, Math.min(5000, Math.floor(limit)))}`, params);
+      return rows.map(fromEntryRow);
+    },
+    async insertRequest(r) {
+      await db.adbCommand(`INSERT INTO WorkerRequest SET ${REQUEST_FIELDS.map((k) => `${k} = :${k}`).join(", ")}`, "sql", r);
+      return r;
+    },
+    async updateRequest(id, fields) {
+      const keys = Object.keys(fields).filter((k) => REQUEST_FIELDS.includes(k) && k !== "id");
+      if (keys.length) await db.adbCommand(`UPDATE WorkerRequest SET ${keys.map((k) => `${k} = :${k}`).join(", ")} WHERE id = :id`, "sql", { ...fields, id });
+    },
+    async requests({ id, worker, status } = {}) {
+      const where = [];
+      const params = {};
+      for (const [k, v] of Object.entries({ id, worker, status })) if (v !== undefined) (where.push(`${k} = :${k}`), (params[k] = v));
+      const rows = await db.adbQuery(`SELECT FROM WorkerRequest${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY at ASC LIMIT 500`, params);
+      return rows.map((r) => Object.fromEntries(REQUEST_FIELDS.map((k) => [k, r[k] ?? null])));
+    },
+  };
+}
+
+/** ---- the live environment (tests pass their own) ---- */
+
+const liveScope = async () => import("./scope.js");
+
+/** a class by key as stored (an Entity with _kind 'class'; model/schema.js), with its parents; null when none */
+export async function classByKey(key, db = realDb) {
+  const k = classKey(key);
+  if (!k) return null;
+  const row = (await db.adbQuery(`SELECT @rid AS rid, _class_name, _class_key, _home, _rows_are_nodes, _record_table, _status FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _class_key = :k LIMIT 1`, { k }))[0];
+  if (!row) return null;
+  const parents = await db.adbQuery(`SELECT _class_key AS key FROM (SELECT expand(out('SUBCLASS_OF')) FROM ${row.rid})`).catch(() => []);
+  return { rid: String(row.rid), key: row._class_key, name: row._class_name ?? row._class_key, home: row._home ?? null, rows_are_nodes: row._rows_are_nodes === true, record_table: row._record_table ?? null, status: row._status ?? "active", parents: parents.map((p) => p.key).filter(Boolean) };
+}
+
+/** a row by its key, as a fact: { status: ok, row } | { status: not_found } | { status: unreachable, error } */
+export async function readSourceRow(key, { db = realDb, fetch } = {}) {
+  const k = parseKey(key);
+  if (!k) return { status: "not_found", error: `not a record key: ${key}` };
+  try {
+    const { client } = await clientFor(k.key, { db, fetch });
+    const hit = await client.readRow(k.table, k.row_key);
+    return hit ? { status: "ok", row: hit.row } : { status: "not_found" };
+  } catch (e) {
+    // the source said no (a wrong table, a wrong key type): the key is what's unclear. Anything else: it couldn't be reached (R3)
+    if (e?.toolError) return { status: "not_found", error: String(e.message).slice(0, 300) };
+    return { status: "unreachable", error: String(e?.message ?? e).slice(0, 300) };
+  }
+}
+
+/**
+ * Rows whose column equals a name, read through the source's read endpoint (at most five). Until the sources
+ * stream's read adapter lands (its `find`), this reads with DAB's own filter, text equality only.
+ */
+export async function findSourceRows(system, table, column, value, { db = realDb, fetch } = {}) {
+  const urls = (await sourcesConfig(db, { ttlMs: 0 }))[system];
+  if (!urls?.read) return { status: "unreachable", error: `no connected source called ${system}` };
+  try {
+    const literal = `'${String(value).replace(/'/g, "''")}'`;
+    const rows = rowsOf(await mcpToolCall(urls.read, DAB_CALLS.read(table, column, literal).name, { ...DAB_CALLS.read(table, column, literal).args, first: 5 }, fetch ? { fetch } : {}));
+    return { status: "ok", rows: rows.slice(0, 5) };
+  } catch (e) {
+    return e?.toolError ? { status: "not_found", error: String(e.message).slice(0, 300) } : { status: "unreachable", error: String(e?.message ?? e).slice(0, 300) };
+  }
+}
+
+/** the environment a handler runs in: the live one, with anything a caller passes over it */
+export async function liveEnv(over = {}) {
+  const scope = await liveScope();
+  const db = over.db ?? realDb;
+  return {
+    db,
+    store: over.store ?? arcadeStore(db),
+    positions: over.positions ?? scope.positionMap,
+    people: over.people ?? ((name) => scope.entriesByUser.get(name)),
+    classes: over.classes ?? { get: (key) => classByKey(key, db) },
+    readRow: over.readRow ?? ((key) => readSourceRow(key, { db, fetch: over.fetch })),
+    findRows: over.findRows ?? ((...a) => findSourceRows(...a, { db, fetch: over.fetch })),
+    enter: over.enter ?? ((args, opts = {}) => enterData(args, { db, fetch: over.fetch, positions: over.positions ?? scope.positionMap, people: over.people, policy: over.policy, ...opts })),
+    signal: over.signal ?? (async (kind, payload) => (await import("./master-tools.js")).emitSignal(kind, payload)),
+    resume: over.resume ?? (async (job, message) => (await import("./worker-pool.js")).resumeThread(job, message)),
+    now: over.now ?? (() => new Date().toISOString()),
+    rule: over.rule,
+  };
+}
+
+/** ---- a worker's job, as its tools see it ---- */
+
+/**
+ * What a filing worker works on, from its job (worker-pool.js claimThreads sets it up): the record, its sections at
+ * one home, that home (the audience: R11), and the recorder as the record names them (R11: the recorder's authority
+ * counts, never the agent's). Null when the job isn't a filing job.
+ */
+export async function jobContext(identity, db = realDb) {
+  const job = identity?.role?.job;
+  if (!job) return null;
+  const row = (await db.adbQuery("SELECT payload FROM Job WHERE id = :id AND kind = 'review'", { id: job }).catch(() => []))[0];
+  const p = parse(row?.payload) ?? {};
+  if (!p.record || !Array.isArray(p.sections) || !p.home) return null;
+  const doc = (await db.adbQuery(`SELECT @rid AS rid, _recorded_by, _record_position FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: p.record }).catch(() => []))[0];
+  return { job, record: p.record, document: doc ? String(doc.rid) : null, sections: p.sections.map(String), home: p.home, recorder: doc?._recorded_by ? { person: doc._recorded_by, position: doc._record_position ?? null } : null, refile: Array.isArray(p.refile) ? p.refile : [] };
+}
+
+const refuse = (msg) => Object.assign(new Error(msg), { refused: true });
+
+/** a section of this worker's own record and home, or a refusal (which section is the model's word) */
+function ownSection(ctx, section) {
+  const s = String(section ?? "").trim();
+  if (!ctx.sections.includes(s)) throw refuse(`no section ${s || "(none given)"} in your brief: give a section id from your brief`);
+  return s;
+}
+
+/** can this worker's audience see something homed at `home` (R7, R11: a worker sees only its audience) */
+const audienceSees = (env, ctx, home) => !env.positions || canSee(env.positions, [ctx.home], home ?? env.positions.root);
+
+/** a class this worker may file under: it exists, is in use, and its audience can see it. No worker makes or changes a class (R5, R7) */
+async function visibleClass(env, ctx, name) {
+  const cls = await env.classes.get(name);
+  if (!cls || !audienceSees(env, ctx, cls.home)) throw refuse(`no class ${classKey(name)} you can file under: when no class fits, request one (graph-rag_request, kind "class"), and don't file the piece yourself`);
+  if (cls.status === "retired") throw refuse(`${cls.key} is retired: request a class (graph-rag_request, kind "class")`);
+  return cls;
+}
+
+/** the request a piece may rely on: this worker's own, answered, with that decision */
+async function answeredRequest(env, ctx, id, decisions) {
+  if (!id) return null;
+  const r = (await env.store.requests({ id: String(id) }))[0];
+  const ans = parse(r?.answer);
+  if (!r || r.worker !== ctx.job || r.status !== "answered" || !decisions.includes(ans?.decision)) throw refuse(`request ${id} isn't an answered request of yours saying ${decisions.join(" or ")}`);
+  return { ...r, answer: ans };
+}
+
+/** a Kept or Held entry this worker was given to re-file: it points back at it (R11) */
+async function refiledFrom(env, ctx, id) {
+  if (!id) return null;
+  const e = (await env.store.entries({ id: String(id) }))[0];
+  if (!e || e.record !== ctx.record || e.home !== ctx.home || ![KEPT, HELD, PROPOSED].includes(e.outcome)) throw refuse(`entry ${id} isn't a piece of this record at your home to re-file`);
+  return e.id;
+}
+
+/** write one entry (normalized, append-only) */
+async function appendEntry(env, raw) {
+  const e = normalizeEntry({ id: randomUUID(), at: env.now(), ...raw });
+  await env.store.insertEntry(e);
+  return e;
+}
+
+/** a Held piece asks whoever put it on record (R2): a question addressed to them, not to the admin (NEEDS A RULING F3) */
+async function askRecorder(env, ctx, entry) {
+  const id = randomUUID();
+  await env.db.adbCommand(
+    "INSERT INTO WorkerQuestion SET id = :id, job_id = :job, entry = :entry, entry_name = :ename, question = :q, options = '[]', why = '', asked_by = :u, asked_of = :of, filing_entry = :fe, status = 'open', created_at = :now",
+    "sql",
+    { id, job: ctx.job, entry: entry.section, ename: null, q: entry.question, u: `worker:${ctx.job.slice(0, 8)}`, of: ctx.recorder?.person ?? null, fe: entry.id, now: env.now() },
+  );
+  return id;
+}
+
+async function holdEntry(env, ctx, { section, piece, cls, target, question, request = null, reason = null, refiled = null, instances = [] }) {
+  const entry = await appendEntry(env, { outcome: HELD, record: ctx.record, section, home: ctx.home, piece, class: cls ?? null, instances, target, recorder: ctx.recorder?.person ?? "unknown", worker: ctx.job, question, request, reason, refiled_from: refiled });
+  await askRecorder(env, ctx, entry);
+  return entry;
+}
+
+const tableOf = (key) => {
+  const k = parseKey(key);
+  return k ? `${k.system}:${k.table}` : null;
+};
+
+/**
+ * File a piece to its source row (`key`, `fields`) under a class: Filed or Proposed by the class map over the
+ * recorder as they stand now (data-entry.js, model/class-map.js), Held when the row can't be found or read (R3)
+ * or the source disagrees (model/filing.js onDisagreement, F4), never overwritten.
+ */
+export async function fileToSource(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  if (!ctx.recorder) throw refuse("the record names nobody who put it on record, so nothing can be filed for them");
+  const section = ownSection(ctx, args.section);
+  const piece = String(args.piece ?? "").trim();
+  if (!piece) throw refuse("piece: say what this piece of the record is, in a sentence");
+  const cls = await visibleClass(env, ctx, args.class);
+  const key = parseKey(args.key);
+  if (!key) throw refuse(`key: not system:table:row: ${args.key ?? "(none)"}`);
+  const fields = args.fields && typeof args.fields === "object" && !Array.isArray(args.fields) ? args.fields : null;
+  if (!fields || !Object.keys(fields).length) throw refuse("fields: the columns to write, with their values");
+  const refiled = await refiledFrom(env, ctx, args.refiles);
+  const target = { table: tableOf(key.key), key: key.key, fields };
+  const base = { section, piece, cls: cls.key, target, refiled };
+  const read = await env.readRow(key.key);
+  if (read.status === "unreachable") {
+    return { outcome: HELD, entry: (await holdEntry(env, ctx, { ...base, question: args.question || `${key.system} couldn't be reached to file this: "${piece}". It waits for you to confirm it once the source is back.`, reason: read.error })).id };
+  }
+  if (read.status === "not_found") {
+    return { outcome: HELD, entry: (await holdEntry(env, ctx, { ...base, question: args.question || `No row ${key.key} was found for "${piece}". Which record did you mean?`, reason: read.error ?? null })).id };
+  }
+  const differing = disagreeingColumns(read.row, fields, sameValue);
+  if (differing.length) {
+    const confirmed = await answeredRequest(env, ctx, args.confirmed_update, ["update"]);
+    const d = confirmed ? { file: true } : onDisagreement({ says_change: args.says_change === true }, env.rule);
+    if (!d.file) {
+      const says = differing.map((x) => `${x.column} is ${JSON.stringify(x.source)} in the source, the record says ${JSON.stringify(x.record)}`).join("; ");
+      let request = null;
+      if (d.request) request = (await openRequest(env, ctx, { kind: d.request, section, question: `${key.key}: ${says}. Is the record an update, or does it disagree with the source?` })).id;
+      const entry = await holdEntry(env, ctx, { ...base, question: args.question || `For "${piece}": ${says}. Which is right?`, request, reason: "the source disagrees: nothing was overwritten" });
+      return { outcome: HELD, entry: entry.id, ...(request ? { request } : {}), note: request ? "Held, and a conflict request went to the orchestrator: nothing was written. Carry on with the other pieces." : "Held: nothing was written, and the recorder is asked." };
+    }
+  }
+  const r = await env.enter(
+    { actsFor: ctx.recorder, by: identity.user, key: key.key, fields, cls: cls.key, reason: piece, identity },
+    // a Proposed piece is an outcome, not a wait: the proposal names no thread (the person approves it as themselves)
+    { proposal: (_identity, reason) => ({ note: String(reason ?? "").slice(0, 600) || "(no reason given)" }) },
+  );
+  if (r.outcome === "filed") {
+    const before = r.before && Object.keys(r.before).length ? `before: ${JSON.stringify(r.before)}` : null;
+    const entry = await appendEntry(env, { outcome: FILED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target, recorder: ctx.recorder.person, worker: ctx.job, reason: before, refiled_from: refiled });
+    return { outcome: FILED, entry: entry.id, note: "Filed: written to the source." };
+  }
+  if (r.outcome === "proposed") {
+    const entry = await appendEntry(env, { outcome: PROPOSED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target, recorder: ctx.recorder.person, worker: ctx.job, reason: r.reason || "the recorder doesn't hold the authority", pending_id: r.pendingId ?? null, refiled_from: refiled });
+    return { outcome: PROPOSED, entry: entry.id, note: `Proposed: ${entry.reason}. A person with authority approves it; carry on.` };
+  }
+  if (r.outcome === "refused") {
+    // NEEDS A RULING (BUILD.md 12): the recorder has left or moved, so nothing stands behind the write: Held, asking them
+    const entry = await holdEntry(env, ctx, { ...base, question: args.question || `"${piece}" couldn't be filed for you: ${r.reason}`, reason: r.reason });
+    return { outcome: HELD, entry: entry.id };
+  }
+  if (r.unverified) {
+    // NEEDS A RULING (F18): the connection broke mid-write and the row couldn't be read back. Held, so the orchestrator's check reads the row
+    const entry = await holdEntry(env, ctx, { ...base, question: `"${piece}": the source couldn't confirm whether it was written. It's being checked.`, reason: r.error });
+    return { outcome: HELD, entry: entry.id };
+  }
+  // the source refused the write (a wrong column, say): the piece hasn't ended, and the worker hears why
+  throw refuse(`the source refused the write, nothing was filed: ${r.error}`);
+}
+
+/** hold a piece: unclear which record, or the source disagrees; the recorder is asked, nothing is written (R2) */
+export async function holdPiece(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  const section = ownSection(ctx, args.section);
+  const piece = String(args.piece ?? "").trim();
+  const question = String(args.question ?? "").trim();
+  if (!piece || !question) throw refuse("piece and question: what the piece is, and what you ask whoever put it on record");
+  const cls = args.class ? (await visibleClass(env, ctx, args.class)).key : null;
+  const table = args.key ? tableOf(args.key) : args.table ? String(args.table).trim() : cls ? (await env.classes.get(cls))?.record_table : null;
+  if (!table) throw refuse("a Held piece goes to a source: name its table or key, or its class's table. If no system holds it, keep it (graph-rag_keep_piece)");
+  const target = { table, key: args.key ? parseKey(args.key)?.key ?? null : null, fields: args.fields ?? null };
+  const entry = await holdEntry(env, ctx, { section, piece, cls, target, question, refiled: await refiledFrom(env, ctx, args.refiles) });
+  return { outcome: HELD, entry: entry.id, note: "Held: whoever put it on record is asked. Carry on with the other pieces." };
+}
+
+/** keep a piece no system holds: the document is the source, linked to the instances it is about (R2) */
+export async function keepPiece(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  const section = ownSection(ctx, args.section);
+  const piece = String(args.piece ?? "").trim();
+  if (!piece) throw refuse("piece: say what this piece of the record is");
+  const instances = [];
+  for (const rid of args.instances ?? []) instances.push((await visibleInstance(env, ctx, rid)).rid);
+  for (const rid of instances) await relate(env, ctx, section, rid);
+  const entry = await appendEntry(env, { outcome: KEPT, record: ctx.record, section, home: ctx.home, piece, class: null, instances, target: null, recorder: ctx.recorder?.person ?? "unknown", worker: ctx.job, refiled_from: await refiledFrom(env, ctx, args.refiles) });
+  return { outcome: KEPT, entry: entry.id, note: "Kept: the document is the source. Nothing Kept is deleted; the orchestrator re-files it when a fitting class or source appears." };
+}
+
+/** ---- requests of the orchestrator (R10: few, and only for what isn't low stakes) ---- */
+
+async function openRequest(env, ctx, { kind, section = null, question, suggestion = null }) {
+  const r = normalizeRequest({ id: randomUUID(), kind, record: ctx.record, section, home: ctx.home, worker: ctx.job, question, suggestion, status: "open", at: env.now() });
+  await env.store.insertRequest(r);
+  // the orchestrator hears of it with its next signals: a request names the record and the home, the question as data
+  await env.signal("request", { job_id: ctx.job, data: { request: r.id, kind: r.kind, record: r.record, home: r.home, question: r.question, ...(r.suggestion ? { suggestion: r.suggestion } : {}) } });
+  return r;
+}
+
+/** a worker asks the orchestrator: a class no existing one fits, a conflict with a source, or something else not low stakes */
+export async function requestOrchestrator(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  const section = args.section ? ownSection(ctx, args.section) : null;
+  const open = (await env.store.requests({ worker: ctx.job, status: "open" })).length;
+  if (open >= 3) throw refuse("you already have 3 open requests: file the other pieces, give your account, and end your turn");
+  const r = await openRequest(env, ctx, { kind: args.kind, section, question: args.question, suggestion: args.suggestion ?? null });
+  return { request: r.id, note: "Sent to the orchestrator. Don't file that piece yourself: carry on with the others, and you're resumed with the answer." };
+}
+
+/** the orchestrator answers a request, structured (model/filing.js normalizeAnswer); the worker resumes with it */
+export async function answerRequest(id, raw, by, env) {
+  const r = (await env.store.requests({ id: String(id) }))[0];
+  if (!r) throw refuse(`no request ${id}`);
+  if (r.status !== "open") throw refuse(`request ${id} is ${r.status}`);
+  const answer = normalizeAnswer(raw);
+  if (answer.class) {
+    const cls = await env.classes.get(answer.class);
+    // the worker sees only its audience (R11): a class above it can't be named to it
+    if (!cls || cls.status === "retired" || (env.positions && !canSee(env.positions, [r.home], cls.home ?? env.positions.root))) throw refuse(`${answer.class} isn't a class the worker's audience can see: name one at or below ${r.home}, or answer keep or hold`);
+  }
+  await env.store.updateRequest(r.id, { status: "answered", answer: JSON.stringify(answer), answered_by: String(by).slice(0, 120) });
+  await env.resume(r.worker, { request: r.id, decision: answer.decision, class: answer.class, answered_by: "the orchestrator" });
+  return { answered: r.id, ...answer };
+}
+
+/** ---- instances, sections and dependency (R1, R3, R7) ---- */
+
+async function visibleInstance(env, ctx, rid) {
+  const r = String(rid ?? "").trim();
+  if (!RID_RE.test(r)) throw refuse(`not an instance id: ${r}`);
+  const row = (await env.db.adbQuery(`SELECT @rid AS rid, label, _homes, _keys FROM ${r} WHERE _kind = 'thing'`).catch(() => []))[0];
+  const homes = Array.isArray(row?._homes) ? row._homes : [];
+  // an instance is visible wherever a section about it is (R11): one of its homes the audience sees will do
+  if (!row || !(homes.includes(EVERYONE) || homes.some((h) => audienceSees(env, ctx, h)))) throw refuse(`no instance ${r} you can see`);
+  return { rid: String(row.rid), label: row.label, keys: Array.isArray(row._keys) ? row._keys : [] };
+}
+
+/** a section relates to an instance (ABOUT), and the instance is seen from the section's home (R2, R11) */
+async function relate(env, ctx, section, rid, role = "about") {
+  const out = await env.db.adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${section})`).catch(() => []);
+  if (!out.some((e) => String(e.dst) === rid)) await env.db.adbCommand(`CREATE EDGE ABOUT FROM ${section} TO ${rid} SET role = :role`, "sql", { role });
+  const row = (await env.db.adbQuery(`SELECT _homes FROM ${rid}`))[0];
+  const homes = Array.isArray(row?._homes) ? row._homes : [];
+  if (!homes.includes(ctx.home)) await env.db.adbCommand(`UPDATE ${rid} SET _homes = :homes`, "sql", { homes: [...homes, ctx.home] });
+}
+
+/** the instance holding a key, or with this name under this class, when one exists */
+async function existingInstance(env, { key, label, cls }) {
+  if (key) {
+    const hit = (await env.db.adbQuery(`SELECT @rid AS rid, label, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => []))[0];
+    if (hit) return hit;
+  }
+  if (label && cls?.rid) {
+    const hits = await env.db.adbQuery(`SELECT @rid AS rid, label, _homes FROM (SELECT expand(in('INSTANCE_OF')) FROM ${cls.rid}) WHERE _norm = :n LIMIT 1`, { n: normName(label) }).catch(() => []);
+    if (hits[0]) return hits[0];
+  }
+  return null;
+}
+
+async function mintInstance(env, ctx, { label, key, cls, by }) {
+  const name = String(label).replace(/\s+/g, " ").trim().slice(0, 120);
+  const rows = await env.db.adbCommand(
+    `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, label = :name, _kind = 'thing', _norm = :norm, _keys = :keys, _homes = :homes, _home = :home, _origin = :home, updated_at = :now`,
+    "sql",
+    { name, norm: normName(name), keys: key ? [key] : [], homes: [ctx.home], home: ctx.home, now: env.now() },
+  );
+  const rid = String(rows?.[0]?.["@rid"] ?? rows?.[0]?.rid ?? (await env.db.adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _norm = :n ORDER BY @rid DESC LIMIT 1`, { n: normName(name) }))[0]?.rid);
+  if (cls?.rid) await env.db.adbCommand(`CREATE EDGE INSTANCE_OF FROM ${rid} TO ${cls.rid} SET added_by = :who, at = :at`, "sql", { who: by, at: env.now() });
+  return rid;
+}
+
+/**
+ * A lasting individual under an existing class (R3, R7): made once (an instance holding the key, or of that name
+ * under that class, is reused), related to the section. A row of a class whose rows stay in the source is refused:
+ * the section stores its key (section_key), and the row earns a node only through a dependency (R3).
+ * NEEDS A RULING (F5): creating an instance isn't in R11's list of low or high stakes; R7 lets workers do it.
+ */
+export async function createInstance(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  const section = ownSection(ctx, args.section);
+  const cls = await visibleClass(env, ctx, args.class);
+  const label = String(args.name ?? "").trim();
+  if (!label) throw refuse("name: the individual's name");
+  const key = args.key ? parseKey(args.key)?.key : null;
+  if (args.key && !key) throw refuse(`key: not system:table:row: ${args.key}`);
+  if (key && cls.record_table && tableOf(key) === cls.record_table && !cls.rows_are_nodes) throw refuse(`${cls.key}'s rows stay in the source (R3): store the key on the section (graph-rag_section_key), or state a dependency if the graph must say something the source can't hold`);
+  if (key) {
+    const read = await env.readRow(key);
+    if (read.status !== "ok") throw refuse(read.status === "unreachable" ? `${key}: the source can't be reached to check the row: hold the piece instead` : `${key}: the source has no such row`);
+  }
+  const found = await existingInstance(env, { key, label, cls });
+  const rid = found ? String(found.rid) : await mintInstance(env, ctx, { label, key, cls, by: identity.user });
+  if (found) {
+    const linked = await env.db.adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('INSTANCE_OF')) FROM ${rid})`).catch(() => []);
+    if (!linked.some((e) => String(e.dst) === cls.rid)) await env.db.adbCommand(`CREATE EDGE INSTANCE_OF FROM ${rid} TO ${cls.rid} SET added_by = :who, at = :at`, "sql", { who: identity.user, at: env.now() });
+  }
+  await relate(env, ctx, section, rid);
+  return { instance: rid, created: !found, class: cls.key, note: found ? "An instance already held this; the section now relates to it." : "Made, and the section relates to it." };
+}
+
+/** relate a section to an instance its audience sees (low stakes: R11) */
+export async function relateSection(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  const section = ownSection(ctx, args.section);
+  const inst = await visibleInstance(env, ctx, args.instance);
+  await relate(env, ctx, section, inst.rid, args.role ? String(args.role).slice(0, 40) : "about");
+  return { section, instance: inst.rid, related: true };
+}
+
+/** a transactional row's key stays on the section, with no node (R3: "a section stores the key") */
+export async function sectionKey(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  const section = ownSection(ctx, args.section);
+  const key = parseKey(args.key)?.key;
+  if (!key) throw refuse(`key: not system:table:row: ${args.key ?? "(none)"}`);
+  const read = await env.readRow(key);
+  if (read.status !== "ok") throw refuse(read.status === "unreachable" ? `${key}: the source can't be reached to check the row` : `${key}: the source has no such row`);
+  const row = (await env.db.adbQuery(`SELECT _keys FROM ${section}`))[0];
+  const keys = Array.isArray(row?._keys) ? row._keys : [];
+  if (!keys.includes(key)) await env.db.adbCommand(`UPDATE ${section} SET _keys = :keys`, "sql", { keys: [...keys, key] });
+  return { section, key, stored: true };
+}
+
+/** an end of a dependency: a visible instance, or a transactional row that earns its node here (R3) */
+async function dependencyEnd(env, ctx, ref, by) {
+  if (RID_RE.test(String(ref ?? "").trim())) return (await visibleInstance(env, ctx, ref)).rid;
+  const key = parseKey(ref)?.key;
+  if (!key) throw refuse(`${ref}: an instance id, or a row's key`);
+  const held = (await env.db.adbQuery(`SELECT @rid AS rid, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND _keys CONTAINS :k LIMIT 1`, { k: key }).catch(() => []))[0];
+  if (held) return (await visibleInstance(env, ctx, held.rid)).rid;
+  const read = await env.readRow(key);
+  if (read.status !== "ok") throw refuse(read.status === "unreachable" ? `${key}: the source can't be reached to check the row` : `${key}: the source has no such row`);
+  const table = tableOf(key);
+  const cls = (await env.db.adbQuery(`SELECT _class_key AS key FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _record_table = :t AND _status <> 'retired' LIMIT 1`, { t: table }).catch(() => []))[0];
+  const c = cls ? await env.classes.get(cls.key) : null;
+  // the row's class, when one points at its table and the audience sees it; else a bare node referring back by key
+  return mintInstance(env, ctx, { label: key, key, cls: c && audienceSees(env, ctx, c.home) ? c : null, by });
+}
+
+/** a dependency between instances, stated by the record or by the agent (R1); a transactional row earns its node here (R3) */
+export async function stateDependency(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  const section = ownSection(ctx, args.section);
+  const statedAs = args.stated_as === "agent" ? "agent" : "record";
+  const from = await dependencyEnd(env, ctx, args.from, identity.user);
+  const to = await dependencyEnd(env, ctx, args.to, identity.user);
+  if (from === to) throw refuse("an instance can't depend on itself");
+  const { normalizeDependency } = await import("./model/classes.js");
+  const d = normalizeDependency({ from, to, stated_as: statedAs, stated_by: statedAs === "record" ? ctx.record : identity.user, source: section, note: args.note, valid_from: args.valid_from, valid_until: args.valid_until, stated_at: env.now() });
+  await env.db.adbCommand(
+    `CREATE EDGE DEPENDS_ON FROM ${from} TO ${to} SET stated_as = :sa, stated_by = :sb, source = :src, note = :note, stated_at = :at, valid_from = :vf, valid_until = :vu`,
+    "sql",
+    { sa: d.stated_as, sb: d.stated_by, src: d.source, note: d.note, at: d.stated_at, vf: d.valid_from, vu: d.valid_until },
+  );
+  for (const rid of [from, to]) await relate(env, ctx, section, rid);
+  return { from, to, stated_as: d.stated_as, note: "Stated. It is seen only by someone who sees both ends (R11)." };
+}
+
+/** look a name up: instances this audience sees, and rows of a table whose column holds it (read-only; R3) */
+export async function resolveName(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  const n = normName(args.name);
+  if (!n) throw refuse("name: what to look up");
+  const rows = await env.db.adbQuery(`SELECT @rid AS rid, label, _keys, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 10`, { n }).catch(() => []);
+  const instances = rows.filter((r) => (r._homes ?? []).some((h) => h === EVERYONE || audienceSees(env, ctx, h))).map((r) => ({ instance: String(r.rid), label: r.label, keys: r._keys ?? [] }));
+  let source = null;
+  if (args.table && args.column) {
+    const t = String(args.table).split(":");
+    if (t.length !== 2) throw refuse("table: system:table");
+    source = await env.findRows(t[0], t[1], String(args.column), String(args.name));
+  }
+  return { instances, ...(source ? { source } : {}), note: source?.status === "unreachable" ? "The source can't be reached: a piece that needs it is Held." : undefined };
+}
+
+/** ---- the worker's account, and the orchestrator's check (R10, R11) ---- */
+
+/** the worker says what it did, piece by piece; every entry it wrote needs one before the thread is done */
+export async function giveAccount(args, identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) throw refuse("this thread has no record to file");
+  const mine = await env.store.entries({ worker: ctx.job });
+  const byId = new Map(mine.map((e) => [e.id, e]));
+  for (const p of args.pieces ?? []) {
+    const e = byId.get(String(p.entry ?? "").trim());
+    if (!e) throw refuse(`entry ${p.entry} isn't one of yours`);
+    const account = normalizeAccount({ said: p.said, at: env.now() });
+    await env.store.annotateEntry(e.id, { account });
+    e.account = account;
+  }
+  const missing = mine.filter((e) => !e.account).map((e) => e.id);
+  if (!missing.length) await markAccounted(env.db, ctx.job, args.summary);
+  return { accounted: mine.length - missing.length, missing, note: missing.length ? "Each entry you wrote needs your account: give the missing ones." : "Your account is in. End your turn with a short report." };
+}
+
+async function markAccounted(db, job, summary) {
+  const row = (await db.adbQuery("SELECT payload FROM Job WHERE id = :id", { id: job }))[0];
+  const p = parse(row?.payload) ?? {};
+  p.accounted = true;
+  if (summary) p.account_summary = String(summary).slice(0, 2000);
+  await db.adbCommand("UPDATE Job SET payload = :p WHERE id = :id", "sql", { p: JSON.stringify(p), id: job });
+}
+
+/** has a filing thread given its account: every entry it wrote has one, and it said so (a thread that filed nothing says so too) */
+export async function accountGiven(job, payload, env) {
+  if (!payload?.record) return true;
+  const mine = await env.store.entries({ worker: job });
+  return payload.accounted === true && mine.every((e) => e.account);
+}
+
+/**
+ * What the orchestrator checks a worker's account against: each entry, what the worker said, the row as read from
+ * the source now, and a suggested verdict (model/filing.js suggestVerdict). The orchestrator records its own.
+ */
+export async function accountEvidence(job, env) {
+  const mine = await env.store.entries({ worker: String(job) });
+  const out = [];
+  for (const e of mine) {
+    const later = (await env.store.entries({ refiled_from: e.id })).length > 0;
+    const read = e.target?.key && !later ? await env.readRow(e.target.key) : null;
+    const suggested = later ? { result: "unverifiable", checked: "a later entry supersedes this one" } : suggestVerdict(e, read, sameValue);
+    out.push({ entry: e.id, outcome: e.outcome, piece: e.piece, class: e.class, target: e.target, account: e.account?.said ?? null, source_now: read?.status === "ok" && e.target?.fields ? Object.fromEntries(Object.keys(e.target.fields).map((c) => [c, read.row[c] ?? null])) : (read?.status ?? null), suggested, verdict: e.verdict });
+  }
+  return { job: String(job), entries: out };
+}
+
+/** the orchestrator's verdict on one entry's account (R10). NEEDS A RULING (F8): a "differs" flags the entry for a person; nothing is undone */
+export async function recordVerdict(entryId, { result, note }, by, env) {
+  const e = (await env.store.entries({ id: String(entryId) }))[0];
+  if (!e) throw refuse(`no entry ${entryId}`);
+  if (!e.account) throw refuse(`entry ${entryId} has no account yet to check`);
+  const read = e.target?.key ? await env.readRow(e.target.key) : null;
+  const verdict = normalizeVerdict({ result, note, by, checked: suggestVerdict(e, read, sameValue).checked, at: env.now() });
+  await env.store.annotateEntry(e.id, { verdict });
+  return { entry: e.id, verdict };
+}
+
+/** ---- after the fact: approvals, Held answers ---- */
+
+/**
+ * A Proposed piece a person approved becomes Filed: a new entry pointing back at it (NEEDS A RULING F6). Rejected
+ * ones stay Proposed. Idempotent: runs on the worker loop.
+ */
+export async function settleProposals(env) {
+  const proposed = await env.store.entries({ outcome: PROPOSED });
+  let filed = 0;
+  for (const e of proposed) {
+    if (!e.pending_id) continue;
+    const pw = (await env.db.adbQuery("SELECT status, approved_by FROM PendingWrite WHERE id = :id", { id: e.pending_id }).catch(() => []))[0];
+    if (pw?.status !== "approved") continue;
+    if ((await env.store.entries({ refiled_from: e.id })).length) continue;
+    await appendEntry(env, { outcome: FILED, record: e.record, section: e.section, home: e.home, piece: e.piece, class: e.class, instances: e.instances, target: e.target, recorder: e.recorder, worker: e.worker, reason: `approved by ${pw.approved_by ?? "a person"}`, refiled_from: e.id });
+    filed++;
+  }
+  return { filed };
+}
+
+/** the Held questions put to this person (only theirs: R2 asks whoever put it on record) */
+export async function heldQuestionsFor(person, db = realDb) {
+  const rows = await db.adbQuery("SELECT id, job_id, question, filing_entry, status, answer, created_at FROM WorkerQuestion WHERE asked_of = :p AND status = 'open' ORDER BY created_at ASC LIMIT 200", { p: String(person) }).catch(() => []);
+  return rows.map((r) => ({ id: r.id, question: r.question, entry: r.filing_entry, asked_at: r.created_at }));
+}
+
+/** the recorder answers a Held question: the worker is resumed to file the piece again (a new entry pointing back) */
+export async function answerHeld(id, answer, person, env) {
+  const q = (await env.db.adbQuery("SELECT FROM WorkerQuestion WHERE id = :id AND status = 'open'", { id: String(id) }))[0];
+  if (!q || q.asked_of !== person) throw refuse(`no open question ${id} for you`);
+  const text = String(answer ?? "").trim().slice(0, 2000);
+  if (!text) throw refuse("an answer");
+  await env.db.adbCommand("UPDATE WorkerQuestion SET status = 'answered', answer = :a, answered_by = :u, answered_at = :now WHERE id = :id", "sql", { a: text, u: person, now: env.now(), id: q.id });
+  await env.resume(q.job_id, { held: q.filing_entry, question: q.question, answer: text, answered_by: person });
+  return { answered: q.id };
+}
+
+/** the log, for the admin and the orchestrator (NEEDS A RULING F16: who else sees it) */
+export async function filingLog({ record, outcome, worker, limit = 200 } = {}, env) {
+  if (outcome && !OUTCOMES.includes(outcome)) throw refuse(`outcome: one of ${OUTCOMES.join(", ")}`);
+  return { entries: await env.store.entries({ record, outcome, worker, limit }) };
+}
+
+/** Kept pieces nothing has re-filed yet (R11: nothing Kept is deleted; the orchestrator re-files them) */
+export async function keptPieces(env) {
+  const kept = await env.store.entries({ outcome: KEPT });
+  const out = [];
+  for (const e of kept) if (!(await env.store.entries({ refiled_from: e.id })).length) out.push({ entry: e.id, record: e.record, home: e.home, piece: e.piece, instances: e.instances, at: e.at });
+  return out;
+}
+
+/** the filing routes (the integrator wires them: routes.js calls registerFilingRoutes(app)) */
+export function registerFilingRoutes(app, { resolveIdentity, personOf, isRoot }) {
+  const who = (req) => resolveIdentity(req.headers.authorization);
+  app.get("/api/filing/held", async (req, res) => {
+    const identity = who(req);
+    if (!identity || identity.role) return res.status(401).json({ error: "a person asks for their own questions" });
+    res.json({ questions: await heldQuestionsFor(personOf(identity.user)) });
+  });
+  app.post("/api/filing/held/:id/answer", async (req, res) => {
+    const identity = who(req);
+    if (!identity || identity.role || identity.agent) return res.status(401).json({ error: "the person who put it on record answers" });
+    try {
+      res.json(await answerHeld(req.params.id, req.body?.answer, personOf(identity.user), await liveEnv()));
+    } catch (e) {
+      res.status(e.refused ? 400 : 500).json({ error: String(e.message ?? e) });
+    }
+  });
+  app.get("/api/filing/log", async (req, res) => {
+    const identity = who(req);
+    if (!identity || !isRoot(identity)) return res.status(403).json({ error: "the filing log is the admin's" });
+    try {
+      res.json(await filingLog({ record: req.query.record || undefined, outcome: req.query.outcome || undefined, worker: req.query.worker || undefined }, await liveEnv()));
+    } catch (e) {
+      res.status(e.refused ? 400 : 500).json({ error: String(e.message ?? e) });
+    }
+  });
+}
+
+/** WorkerQuestion carries who a Held question is for and which entry it holds (the filing stream's type, not the contract's) */
+export async function ensureFilingSchema(db = realDb) {
+  for (const prop of ["asked_of", "filing_entry"]) await db.adbCommand(`CREATE PROPERTY WorkerQuestion.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  await db.adbCommand("CREATE INDEX IF NOT EXISTS ON WorkerQuestion (asked_of) NOTUNIQUE").catch(() => {});
+  await db.adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._keys IF NOT EXISTS LIST`).catch(() => {});
+}

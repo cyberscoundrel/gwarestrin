@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { awaitingVerdict, normalizeEntry, normalizeRequest, normalizeVerdict, OUTCOMES } from "../src/model/filing.js";
+import { awaitingVerdict, DISAGREEMENT_RULE, disagreeingColumns, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, onDisagreement, OUTCOMES, suggestVerdict } from "../src/model/filing.js";
 
 const base = { id: "f1", record: "#20:1", section: "#20:2", home: "floor", recorder: "bob", worker: "admin/agent:w1", piece: "Job 4471 moved to CNC 5" };
 
@@ -51,4 +51,41 @@ test("requests: a class request, answered by the orchestrator", () => {
   assert.throws(() => normalizeRequest({ ...r, status: "answered" }), /the answer and who gave it/);
   assert.throws(() => normalizeRequest({ ...r, kind: "chat" }), /must be one of/);
   assert.equal(normalizeRequest({ ...r, status: "answered", answer: "made forklift", answered_by: "orchestrator" }).answered_by, "orchestrator");
+});
+
+test("F4 lives in one function: the conservative default holds and requests, the proposed rule files a stated change", () => {
+  assert.equal(DISAGREEMENT_RULE, "hold_and_request", "the default until a ruling");
+  assert.deepEqual(onDisagreement({ says_change: true }), { file: false, outcome: "held", request: "conflict" });
+  assert.deepEqual(onDisagreement({ says_change: false }), { file: false, outcome: "held", request: "conflict" });
+  assert.deepEqual(onDisagreement({ says_change: true }, "update_when_changed"), { file: true, outcome: null, request: null });
+  assert.deepEqual(onDisagreement({ says_change: false }, "update_when_changed"), { file: false, outcome: "held", request: null });
+  assert.deepEqual(onDisagreement({ says_change: "yes" }, "update_when_changed").file, false, "only a stated true counts");
+  assert.throws(() => onDisagreement({}, "overwrite"), /must be one of/);
+});
+
+test("a disagreement is a different, non-empty value in a written column; an empty column taking a value is none", () => {
+  const row = { Status: "open", Note: "", Qty: 500, Owner: null };
+  assert.deepEqual(disagreeingColumns(row, { Status: "done", Note: "x", Qty: 500, Owner: "bob" }), [{ column: "Status", source: "open", record: "done" }]);
+  assert.deepEqual(disagreeingColumns(row, { Status: "OPEN" }, (a, b) => String(a).toLowerCase() === String(b).toLowerCase()), []);
+  assert.deepEqual(disagreeingColumns(null, { Status: "done" }), []);
+});
+
+test("an answer to a request is structured: a decision, and a class only where it names one (F7)", () => {
+  assert.deepEqual(normalizeAnswer({ decision: "use_class", class: "Leased building" }), { decision: "use_class", class: "leased_building" });
+  assert.deepEqual(normalizeAnswer({ decision: "keep" }), { decision: "keep", class: null });
+  assert.throws(() => normalizeAnswer({ decision: "class_created" }), /names the class/);
+  assert.throws(() => normalizeAnswer({ decision: "hold", class: "jobs" }), /names no class/);
+  assert.throws(() => normalizeAnswer({ decision: "whatever you think" }), /must be one of/);
+});
+
+test("the suggested verdict reads the source: Filed must be in the row, Proposed and Held must not have changed it", () => {
+  const filed = { outcome: "filed", target: { key: "mssql:dbo_Job:4471", fields: { Status: "done" } } };
+  assert.equal(suggestVerdict(filed, { status: "ok", row: { Status: "done" } }).result, "matches");
+  assert.equal(suggestVerdict(filed, { status: "ok", row: { Status: "open" } }).result, "differs");
+  assert.equal(suggestVerdict(filed, { status: "not_found" }).result, "differs");
+  assert.equal(suggestVerdict(filed, { status: "unreachable" }).result, "unverifiable");
+  const held = { ...filed, outcome: "held" };
+  assert.equal(suggestVerdict(held, { status: "ok", row: { Status: "open" } }).result, "matches");
+  assert.equal(suggestVerdict(held, { status: "ok", row: { Status: "done" } }).result, "differs", "a Held piece's values in the row: something wrote it");
+  assert.equal(suggestVerdict({ outcome: "kept", target: null }, null).result, "unverifiable");
 });
