@@ -1,5 +1,6 @@
 // The class tree (docs/build/integrate.md, 2.3), duplicate classes (2.4) and instances checked against the
-// source (2.5). Pure.
+// source (2.5). Pure. Tree quality measured on real models early is R5; the one-page tree, the marks and the
+// survival across three runs of a setup are proposal B's (the assistant's, approved by the user with the doc).
 //
 // A class: { key, name, parents, home, description, evidence, rows_are_nodes, record_table, status }, as
 // model/classes.js normalizes it. An instance: { rid, name, key?, classes: [classKey], homes? }.

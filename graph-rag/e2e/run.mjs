@@ -222,7 +222,7 @@ await scenario("a worker reads documents as its entry's people do, beyond: true 
   check(/writes no entries/.test(viaUpsert.error ?? ""), `upsert_entities is refused: ${JSON.stringify(viaUpsert).slice(0, 300)}`);
 });
 
-await scenario("a worker cannot read above its audience by any read tool it is offered, and one whose entry can't be resolved reads nothing", async () => {
+await scenario("a worker cannot read above its audience by any tool it is offered or over HTTP, set_home neither finds nor moves what it can't see, and one whose entry can't be resolved reads nothing", async () => {
   const listTools = async (who) => {
     const r = await fetch(`${GRAPH}/mcp`, { method: "POST", headers: { authorization: `Bearer ${who}`, "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify({ jsonrpc: "2.0", id: id++, method: "tools/list", params: {} }) });
     const t = await r.text();
@@ -242,12 +242,15 @@ await scenario("a worker cannot read above its audience by any read tool it is o
   const w = workerToken(String(floorEntry.rid));
   // the secret's content, never a name this scenario passes in (a reply may echo what it was asked)
   const leaked = (r) => /4 percent/i.test(JSON.stringify(r));
-  // every tool a worker is offered, sorted into reads (checked here) and the rest: a new read tool fails this until it's checked
+  // every tool a worker is offered, sorted: reads, and writes that find their target by name (both checked here),
+  // and writes that find nothing. A new tool fails this until it's sorted and, if it reads or finds, checked.
   const offered = await listTools(w);
   const READS = ["search_graph", "about_thing", "read_document", "schema_graph"];
-  // execute_graph: a worker's raw command is always a proposal for an admin (write.js), never run for it
-  const NOT_READS = ["upsert_entities", "set_home", "raise_question", "execute_graph"];
-  const unknown = offered.filter((t) => !READS.includes(t) && !NOT_READS.includes(t));
+  const FINDS = ["set_home"];
+  // execute_graph: a worker's raw command is always a proposal for an admin (write.js), never run for it;
+  // upsert_entities: refused for a worker (it writes no entries); raise_question: asks, reads nothing back
+  const NEITHER = ["upsert_entities", "raise_question", "execute_graph"];
+  const unknown = offered.filter((t) => ![...READS, ...FINDS, ...NEITHER].includes(t));
   check(!unknown.length, `a worker tool this scenario doesn't sort into reads or not: ${unknown.join(", ")}`);
   check(!offered.includes("query_graph"), `no raw reads for a worker: ${offered.join(", ")}`);
   const raw = "SELECT text_identity FROM Entity WHERE text_identity LIKE '%percent%'";
@@ -268,6 +271,23 @@ await scenario("a worker cannot read above its audience by any read tool it is o
     }
   }
   check(!leaked(await tool(w, "schema_graph", {})), "schema_graph names no entry");
+  // set_home: an entry above the audience answers as one that doesn't exist (no existence oracle), and doesn't move
+  await save("alice", "e2e-a4 vellichor ops plan", "The vellichor crew moves to second shift in April.");
+  check((await entry("e2e-a4 vellichor ops plan"))?._home === POS.ops, "an Operations entry");
+  const missing = await tool(w, "set_home", { entities: [{ name: "e2e-a9 no such entry" }], to: "Top of the organization", reason: "e2e" });
+  for (const name of [secret, "e2e-a4 vellichor ops plan"]) {
+    const r = await tool(w, "set_home", { entities: [{ name }], to: "Top of the organization", reason: "e2e" });
+    check(r.error && r.error.replace(name, "X") === missing.error.replace("e2e-a9 no such entry", "X"), `set_home on ${name} answers as for no entry: ${JSON.stringify(r).slice(0, 200)} vs ${JSON.stringify(missing).slice(0, 200)}`);
+  }
+  check((await entry("e2e-a4 vellichor ops plan"))?._home === POS.ops, "the Operations entry did not move");
+  // over HTTP: a worker's token reads nothing at all, whatever the route
+  for (const path of ["/api/entities", "/api/grants", "/api/requests", "/api/positions", "/api/queue", "/api/policy", "/api/worker", "/api/pruned"]) {
+    const r = await fetch(`${GRAPH}${path}`, { headers: { authorization: `Bearer ${w}` } });
+    const text = await r.text();
+    check(r.status === 403 && !/vellichor/i.test(text), `${path} refused for a worker: ${r.status} ${text.slice(0, 160)}`);
+  }
+  const people = await fetch(`${GRAPH}/api/entities`, { headers: { authorization: `Bearer ${TOKENS.alice}` } });
+  check(people.status !== 403, `a person's token still reads over HTTP: ${people.status}`);
   // the control: the admin's search does find it, so the worker's reads could have shown it
   const adminSees = await tool("admin", "search_graph", { query: "vellichor crew raises 4 percent" });
   check(leaked(adminSees.results ?? []), `the admin's search finds it: ${JSON.stringify(adminSees).slice(0, 200)}`);

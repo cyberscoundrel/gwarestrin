@@ -1,7 +1,13 @@
 // The 62 notes' expected filing outcomes (docs/build/integrate.md, section 3), from the notes' words and the
 // rulings only. Two layers: where each piece goes, by hand (`target`), and the outcome, also written by hand
-// (`outcome`) and recomputed by R2's table under S0 and M0 (`ruleOutcome`); test/eval-labels.test.js holds
-// the two equal, so a hand label that disagrees with the rule has to say why (`override`).
+// (`outcome`) and recomputed by R2's table under S0 and M0 (`ruleOutcome`); test/eval.test.js holds the two
+// equal, so a hand label that disagrees with the rule has to say why (`override`).
+//
+// These are one person's reading (the integrator's) of the notes under the rulings, not an acceptance standard:
+// R9 retired the 62-note oracle as one, and nothing here has a pass mark. A run is compared with them to see what
+// happens, and where a model disagrees the label may be the one that is wrong.
+// The labels assume no person approves a Proposed piece during the run: ux-aj02 and ux-ak03 are Held only while
+// ux-ag03's new job stays Proposed (once it is approved and written, both would follow R2's table on a real row).
 //
 // A piece:
 //   { about, target, outcome, accept?, stated?, override? }

@@ -48,6 +48,7 @@ test("the decision model: a closed question answered only from its tag, else non
   assert.equal(ask("x: Diep is on CNC 5 [who_0: c1]").who_0.probabilities.c1, 0.9);
   const contra = decide({ state: { entry: "x: Rack C1 holds aluminum [contradicts]", related: "y: C1 titanium" }, questions: { contradiction: { type: "noul" } } }).answers;
   assert.equal(contra.contradiction.noul, 0.9);
+  assert.equal(answerChoice("pick.one(a)", { criteria: { x: "x", none: "n" }, entry: "[pick.one(a): x]" }).choice, "x", "a question name with regex metacharacters matches its tag");
   const unsure = answerChoice("which_attribute", { criteria: { price: "p", margin: "m" }, entry: "nothing" });
   assert.equal(unsure.choice, "price");
   assert.equal(unsure.probabilities.price, 0.5, "no none, nothing to go on: spread");

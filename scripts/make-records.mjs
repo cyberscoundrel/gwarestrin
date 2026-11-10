@@ -11,12 +11,15 @@
 //        source dump, scripts/source-dump.mjs, of the sources stream's synthetic database); exit 1 on a problem
 //
 //   node scripts/make-records.mjs seed <run-dir>/records.json --url http://host:8000 --tokens tokens.json
-//        [--tool record_document] [--only marker-1,ux-m01] [--dry-run]
+//        [--tool record_document] [--only marker-1,ux-m01] [--dry-run] [--unguarded]
 //        posts every record, in order, as its person (tokens.json: { user: token } or graph-rag's token map).
 //        --url is required and has no default: this never finds an instance on its own, and it is never run
 //        against the development instance or the demo. Batches go one at a time: after each batch it waits
 //        until the filing log holds an entry for every record so far (--wait-ms, default 30 minutes), unless
 //        --no-wait. Run only against a throwaway graph and the synthetic test source.
+//        NOT YET GUARDED: proposal B's guard (the write connection says it holds the test server and database)
+//        is eval/dump.mjs guardTestSource, which nothing calls yet; it is wired to the sources stream's
+//        test-sql guard when that stream lands. Until then this refuses to seed without --unguarded.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { checkLabels, labelCounts, NOTES, STATED_NOTES } from "../graph-rag/eval/labels.mjs";
@@ -66,6 +69,7 @@ if (args._[0] === "generate") {
   process.exit(problems.length ? 1 : 0);
 } else if (args._[0] === "seed") {
   const file = args._[1];
+  if (!args.unguarded && !args["dry-run"]) usage("not yet guarded: the test-source guard is wired when the sources stream lands; pass --unguarded only against the fake source or gwsynth");
   if (!file) usage("give the records file");
   if (typeof args.url !== "string" || !/^https?:\/\//.test(args.url)) usage("--url http://host:port is required; there is no default instance");
   if (typeof args.tokens !== "string") usage("--tokens is required");

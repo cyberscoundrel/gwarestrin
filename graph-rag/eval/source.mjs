@@ -38,8 +38,9 @@ export function diffDumps(before, after, { system = SYSTEM } = {}) {
 }
 
 /**
- * The gate (zero tolerance): every changed row has a Filed entry naming that table and key, and the changed
+ * The gate: every changed row has a Filed entry naming that table and key, and the changed
  * columns are among the columns the entry names. A deleted row always fails (a write may never delete).
+ * Zero tolerance is proposal B's (the assistant's proposal, which the user read and approved with the doc).
  * Returns { ok, violations: [{ key, kind, why }] }.
  */
 export function rowGate(changes, entries) {
@@ -63,29 +64,39 @@ export function rowGate(changes, entries) {
 }
 
 /**
- * Workers' accounts against the source (2.8). For each entry that says it wrote (Filed with fields): true,
- * false-claim (the row didn't change), or wrong-values (it changed to something else). Changes no entry
- * accounts for are `omitted`. Then the orchestrator's verdicts: caught (a bad account it marked differs),
- * missed (a bad account it marked matches), false-alarm (a true account it marked differs), unverifiable,
- * and unchecked (no verdict).
+ * Workers' accounts against the source (2.8; R10). For each Filed entry: true, false-claim (the row didn't
+ * change and doesn't hold what the entry says), wrong-values (it changed to something else), or unverifiable
+ * (the entry names no fields to check). A write of a value the row already held changes nothing in the diff and is
+ * true. Changes no entry accounts for are `omitted`. What the account says in words (`account.said`, R10) is
+ * prose: it is checked only for naming the row (`saysRow`), and listed for a person to read. Then the
+ * orchestrator's verdicts: caught (a bad account it marked differs), missed (a bad account it marked matches),
+ * false-alarm (a true account it marked differs), unverifiable, and unchecked (no verdict).
+ * `before`: the before dump, to tell a write of an unchanged value from a false claim.
  */
-export function accountResults(changes, entries) {
+export function accountResults(changes, entries, { before = null } = {}) {
   const byKey = new Map(changes.map((c) => [c.key, c]));
+  const beforeRows = new Map();
+  for (const [table, t] of Object.entries(before ?? {})) for (const r of t.rows) beforeRows.set(rowKey(table, t.primaryKey, r), r);
   const items = [];
   for (const e of entries) {
     if (e.outcome !== "filed" || !e.target?.key) continue;
     const ch = byKey.get(e.target.key);
     const fields = e.target.fields ?? {};
     let result;
-    if (!ch) result = Object.keys(fields).length ? "false-claim" : "true";
-    else {
+    if (!Object.keys(fields).length) result = "unverifiable";
+    else if (!ch) {
+      const was = beforeRows.get(e.target.key);
+      result = was && Object.entries(fields).every(([c, v]) => same(was[c], v)) ? "true" : "false-claim";
+    } else {
       const wrong = Object.entries(fields).filter(([c, v]) => !same(ch.after?.[c], v));
       result = wrong.length ? "wrong-values" : "true";
     }
     const verdict = e.verdict?.result ?? null;
     const bad = result !== "true";
     const check = !verdict ? "unchecked" : verdict === "unverifiable" ? "unverifiable" : bad ? (verdict === "differs" ? "caught" : "missed") : verdict === "differs" ? "false-alarm" : "agreed";
-    items.push({ entry: e.id, record: e.record, key: e.target.key, result, verdict, check, said: e.account?.said ?? null });
+    const said = e.account?.said ?? null;
+    const row = e.target.key.split(":").slice(2).join(":");
+    items.push({ entry: e.id, record: e.record, key: e.target.key, result, verdict, check, said, saysRow: Boolean(said && said.includes(row)) });
   }
   const accounted = new Set(entries.filter((e) => e.outcome === "filed").map((e) => e.target?.key));
   const omitted = changes.filter((c) => !accounted.has(c.key)).map((c) => c.key);
@@ -98,6 +109,8 @@ export function accountResults(changes, entries) {
       true: count("result", "true"),
       falseClaim: count("result", "false-claim"),
       wrongValues: count("result", "wrong-values"),
+      unverifiableFields: count("result", "unverifiable"),
+      silent: items.filter((i) => !i.saysRow).length,
       omitted: omitted.length,
       caught: count("check", "caught"),
       missed: count("check", "missed"),

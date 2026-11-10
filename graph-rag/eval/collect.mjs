@@ -69,6 +69,7 @@ export async function collectGraph(query, { records = [] } = {}) {
     requests,
     briefs: briefs.map((b) => ({ id: b.id, record: b.record, audience: b.audience, worker: b.worker, text: b.brief, dropped: parse(b.dropped) })),
     documents,
+    titles: documents.map((d) => ({ rid: rid(d.rid), record: rid(d.rid), home: d._home ?? null, title: d.name ?? d._doc_title ?? "" })),
     sections: sections.map((s) => ({ rid: rid(s.rid), record: rid(docByDocId.get(s._doc_id)?.rid) || null, home: s._home ?? null, text: s.text_identity ?? "" })),
     classes: classes.map((c) => ({ rid: rid(c.rid), key: c._class_key, name: c._class_name ?? c._class_key, parents: c.parents ?? [], home: c._home ?? null, description: c._description ?? null, evidence: parse(c._evidence, []), rows_are_nodes: Boolean(c._rows_are_nodes), record_table: c._record_table ?? null, stages: c._stages ?? [], status: c._status ?? "active" })),
     instances: instances.map((i) => ({ rid: rid(i.rid), name: i.name, key: i._record_key ?? i.record_key ?? i.key ?? null, classes: i.classes ?? [], homes: i._homes?.length ? i._homes : i._home ? [i._home] : [] })),

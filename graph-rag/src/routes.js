@@ -32,6 +32,15 @@ app.use((req, res, next) => {
   next();
 });
 
+// a graph worker's token reads nothing over HTTP: every /api route resolves an identity's own scope, which for a
+// worker is the delegating admin's whole view, and a worker sees only its audience (R11). Its tools (/mcp) are
+// scoped to that audience (server.js readScope); the workspace drives the pool with its own token, never a worker's.
+app.use("/api", (req, res, next) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (identity?.role?.kind === "worker") return res.status(403).json({ error: "a graph worker reads only through its tools, which see only its audience" });
+  next();
+});
+
 app.post("/mcp", async (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);
   if (!identity) {

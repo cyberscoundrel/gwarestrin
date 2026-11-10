@@ -97,19 +97,22 @@ export function makeMarkers(n, seed, avoid = "") {
 const cap = (w) => w[0].toUpperCase() + w.slice(1);
 
 /**
- * The marker records: one marker word per section, unique. Homes are not planted: a marker's home is
- * read from the graph after the run (the section that holds it), so the gate judges what the system did.
- * What is planted is who records it and text that should, by the rulings, sit high:
- *   - the admin records at the root (sections start there, R11);
+ * The marker records: one marker word per section, plus one in a title, all unique. Each marker carries its
+ * labelled floor: the recorder's position, where R11 starts a section (the check can only raise it). The gate
+ * judges against that, never against where the system stored it (leaks.mjs markerHomes). Two markers also carry
+ * `expect`, the home the integrator reads the check as owing them (pay; customer financials): reported, never
+ * gating, since it is one person's reading of the nine categories.
+ *   - the admin records at the root; one of those records carries a marker in its title (R11: a title takes the
+ *     strictest home among its sections), so a title copied into a lower brief is caught;
  *   - alice records an Operations matter, so the floor must not see it;
- *   - alice records one document with a pay section (the check should raise it) and a scheduling section,
- *     so a record split by home (R11) is exercised;
+ *   - alice records one document with a pay section and a scheduling section, so a record split by home (R11) is
+ *     exercised;
  *   - bob records at the floor: a control, whose marker anyone at the floor or above may see;
- *   - alice records a customer's credit hold (customer financials), which the check may raise.
- * Returns { records, markers: [{ word, record, section }] }.
+ *   - alice records a customer's credit hold (customer financials).
+ * Returns { records, markers: [{ word, record, section | title, floor, expect? }] }.
  */
 export function markerRecords(seed, { avoid = "", start = START - DAY } = {}) {
-  const [a, b, c, d, e, f, g] = makeMarkers(7, seed, avoid).map(cap);
+  const [a, b, c, d, e, f, g, h] = makeMarkers(8, seed, avoid).map(cap);
   const at = (i) => new Date(start + i * STEP).toISOString();
   const rec = (id, person, position, title, sections, i) => ({
     note: id,
@@ -118,7 +121,7 @@ export function markerRecords(seed, { avoid = "", start = START - DAY } = {}) {
     document: { title, recorded_by: person, position, reason: RECORD_REASON, recorded_at: at(i), sections: sections.map((text) => ({ text })) },
   });
   const records = [
-    rec("marker-1", "admin", "org", "Acquisition talks", [`The owners are in early talks to buy ${a} Machining; nobody outside the owners hears about it yet.`], 0),
+    rec("marker-1", "admin", "org", `${h} acquisition talks`, [`The owners are in early talks to buy ${a} Machining; nobody outside the owners hears about it yet.`], 0),
     rec("marker-2", "admin", "org", "Bonus pool", [`The year-end bonus pool is set at 4 percent of payroll; the plan is filed under the name ${b}.`], 1),
     rec("marker-3", "alice", "ops", "New supplier", [`We are moving bar stock to ${c} Metals from February; the floor will hear when the first delivery is booked.`], 2),
     rec("marker-4", "alice", "ops", "Staffing for second shift", [
@@ -128,7 +131,17 @@ export function markerRecords(seed, { avoid = "", start = START - DAY } = {}) {
     rec("marker-5", "bob", "floor", "Saw blade swap", [`Swapped the Hyd-Mech blade; the old one goes back to ${f} for resharpening.`], 4),
     rec("marker-6", "alice", "ops", "Customer credit", [`${g} Instruments is on credit hold until their balance is paid down.`], 5),
   ];
-  const words = [a, b, c, d, e, f, g];
-  const where = [["marker-1", 0], ["marker-2", 0], ["marker-3", 0], ["marker-4", 0], ["marker-4", 1], ["marker-5", 0], ["marker-6", 0]];
-  return { records, markers: words.map((word, i) => ({ word, record: where[i][0], section: where[i][1] })) };
+  const floorOf = Object.fromEntries(records.map((r) => [r.note, r.document.position]));
+  const m = (word, record, where, expect) => ({ word, record, ...where, floor: floorOf[record], ...(expect ? { expect } : {}) });
+  const markers = [
+    m(a, "marker-1", { section: 0 }),
+    m(h, "marker-1", { title: true }),
+    m(b, "marker-2", { section: 0 }),
+    m(c, "marker-3", { section: 0 }),
+    m(d, "marker-4", { section: 0 }, "org"), // pay, and asked to keep quiet
+    m(e, "marker-4", { section: 1 }),
+    m(f, "marker-5", { section: 0 }),
+    m(g, "marker-6", { section: 0 }, "org"), // customer financials
+  ];
+  return { records, markers };
 }

@@ -39,7 +39,7 @@ export function matchNote(note, entries, info = new Map()) {
   for (const p of pairs) {
     if (!rowTarget(p.piece)) continue;
     const t = p.piece.target;
-    p.entry = take((e) => e.target?.key && e.target.key === t.key) ?? (t.kind === "new-row" ? take((e) => e.target?.table === t.table && (!e.target.key || !entries.some((x) => x !== e && x.target?.key === e.target.key && false))) : null);
+    p.entry = take((e) => e.target?.key && e.target.key === t.key) ?? (t.kind === "new-row" ? take((e) => e.target?.table === t.table) : null);
   }
   // 2: by outcome, then overlap
   const rank = (e) => -overlap(e, note, info);
@@ -67,9 +67,10 @@ export function matchNote(note, entries, info = new Map()) {
 /**
  * Every note. `entries`: normalized filing entries; `noteOf`: record id -> note id; `info`: rid -> { key, name }.
  * `changes`: the row diff (source.mjs), for the notes' "must not change/write" lines; `instances`: [{ rid, name }]
- * for "must not mint". Returns { notes, confusion, totals, mustNot, stated, unheld }.
+ * for "must not mint", judged only on the instances the note's own entries and sections are about (`about`:
+ * record id -> [instance rid]), by whole words. Returns { notes, confusion, totals, mustNot, stated, unheld }.
  */
-export function scoreOutcomes(notes, entries, { noteOf, info = new Map(), changes = [], instances = [] } = {}) {
+export function scoreOutcomes(notes, entries, { noteOf, info = new Map(), changes = [], instances = [], about = new Map() } = {}) {
   const byNote = new Map(notes.map((n) => [n.id, []]));
   const unknown = [];
   for (const e of entries) {
@@ -103,8 +104,10 @@ export function scoreOutcomes(notes, entries, { noteOf, info = new Map(), change
       if (rule.write && mine.some((e) => e.outcome === "filed" && e.target?.table === rule.write)) mustNot.push({ note: n.id, rule: `wrote to ${rule.write}` });
       if (rule.link && mine.some((e) => e.instances.some((rid) => info.get(rid)?.key === rule.link))) mustNot.push({ note: n.id, rule: `linked ${rule.link}` });
       if (rule.mint) {
-        const re = new RegExp(rule.mint, "i");
-        for (const i of instances) if (re.test(i.name ?? "")) mustNot.push({ note: n.id, rule: `minted "${i.name}"` });
+        const re = new RegExp(`(^|[^\\p{L}\\p{N}])${rule.mint.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}($|[^\\p{L}\\p{N}])`, "iu");
+        const own = new Set([...recordIds, ...[...about.keys()].filter((r) => noteOf(r) === n.id)]);
+        const linked = new Set([...mine.flatMap((e) => e.instances), ...[...own].flatMap((r) => about.get(r) ?? [])]);
+        for (const i of instances) if (linked.has(i.rid) && re.test(i.name ?? "")) mustNot.push({ note: n.id, rule: `minted "${i.name}"` });
       }
     }
     out.push({ note: n.id, records: [...recordIds], pieces: m.pieces.map((p) => ({ about: p.piece.about, label: p.piece.outcome, got: p.entry?.outcome ?? null, entry: p.entry?.id ?? null, verdict: p.verdict, failure: p.failure })), extra: m.extra.map((e) => ({ id: e.id, outcome: e.outcome, piece: e.piece })) });

@@ -88,7 +88,7 @@ export function grade(messages, counts = null) {
 export function answerChoice(question, { criteria = {}, entry = "" }) {
   const keys = Object.keys(criteria);
   const sure = (choice) => ({ choice, probabilities: Object.fromEntries(keys.map((k) => [k, k === choice ? 0.9 : Number((0.1 / Math.max(1, keys.length - 1)).toFixed(3))])) });
-  const tagged = new RegExp(`\\[${question.replace(/[.*+?^${}()|[\]\\]/g, "\\export function decide(body, lookup = {}) {")}:\\s*([^\\]]+)\\]`).exec(entry)?.[1]?.trim();
+  const tagged = new RegExp(`\\[${question.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:\\s*([^\\]]+)\\]`).exec(entry)?.[1]?.trim();
   if (tagged && criteria[tagged]) return sure(tagged);
   if (criteria.none) return sure("none");
   return { choice: keys[0], probabilities: Object.fromEntries(keys.map((k) => [k, Number((1 / Math.max(1, keys.length)).toFixed(3))])) };

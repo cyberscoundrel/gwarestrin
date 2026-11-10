@@ -1,8 +1,11 @@
 // S0: the test source the labels assume (docs/build/integrate.md, section 3), and M0, the test map. A
 // synthetic dataset in the shape fake-dab-core.mjs serves (`{ table: { primaryKey, rows } }`), its
 // declaration (model/sources.js shape, URLs left to the caller), and the columns a write may touch.
-// Nothing here is real data. The sources stream's synthetic SQL Server (test-sql/) replaces the dataset for a
-// real run; `checkAgainst` in labels.mjs says which labels a different dataset would change.
+// Nothing here is real data. `checkLabels` in labels.mjs says which labels a different dataset would change.
+//
+// OPEN (R11.15): which database the first real-model run copies, and which models may see it, is the user's to
+// answer. The sources stream's synthetic SQL Server (test-sql/, compose project gwsynth) stands in for it, with
+// synthetic rows only; using it, or this dataset, for a real run is not that answer.
 //
 // NEEDS A RULING (S0): which tables and columns are writable is the integrator's assumption, made from the
 // notes, until the sources stream publishes its declaration.

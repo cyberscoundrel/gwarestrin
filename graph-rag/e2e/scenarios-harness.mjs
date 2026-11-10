@@ -80,8 +80,9 @@ export default [
         const s = await collectGraph(query, { records: [rec] });
         return s.sections.some((x) => x.text.includes(word)) && s.recordIds["marker-3"] ? s : null;
       });
-      const homes = markerHomes([{ word, record: "marker-3", recordId: snap.recordIds["marker-3"] }], snap.sections, POSITIONS);
-      check(homes[0].home === POS.ops, `the marker's home is the section's: ${JSON.stringify(homes)}`);
+      const homes = markerHomes([{ word, record: "marker-3", recordId: snap.recordIds["marker-3"], floor: rec.document.position }], snap.sections, POSITIONS);
+      // the expected home is the label's (alice's position); the system stored it there, not lower
+      check(homes[0].home === POS.ops && homes[0].stored === POS.ops && !homes[0].misplaced && !homes[0].untested, `stored at its recorder's position: ${JSON.stringify(homes)}`);
       const clean = scanLeaks(sectionItems(snap.sections), homes, POSITIONS);
       check(clean.ok, `no section above its audience holds it: ${JSON.stringify(clean.leaks)}`);
       // what bob's search returns is what a floor brief could carry: the marker must not be in it

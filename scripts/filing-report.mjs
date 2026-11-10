@@ -5,8 +5,10 @@
 //        [--setup "orchestrator X, worker Y"] [--run 1] [--checks checks.json]
 //        reads <dir>/records.json (make-records.mjs), <dir>/before.json and <dir>/after.json (source-dump.mjs),
 //        and the instance's filing log and graph; writes <dir>/report.md, report.json, tree.md and
-//        snapshot.json. Exit 1 when a gate fails (a row changed without a Filed entry, or a marker leaked),
-//        0 otherwise: nothing else has a pass mark.
+//        snapshot.json. Exit 1 when a gate fails (a row changed without a Filed entry; a marker leaked, was
+//        stored below its recorder's position or never stored; no brief to scan), 0 otherwise: nothing else has a
+//        pass mark. The two gates and their zero tolerance are proposal B's (the assistant's proposal, which the
+//        user read and approved with docs/ORGANIZATION-MODEL.md), not a ruling of their own.
 //
 //   node scripts/filing-report.mjs compare <dir> <dir> ...   writes compare.md next to the first dir's parent
 //

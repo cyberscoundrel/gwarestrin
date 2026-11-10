@@ -79,7 +79,7 @@
   // what's out and what keeps failing (graph-rag/src/health.js)
   const outages = $derived(Object.entries(status?.dependencies ?? {}).filter((e): e is [string, Extract<DependencyHealth, { ok: false }>] => !e[1].ok));
   const failingLoops = $derived(Object.entries(status?.loops ?? {}).filter((e): e is [string, Extract<LoopHealth, { ok: false }>] => !e[1].ok));
-  const depName = (dep: string) => (dep === "decisions" ? "Triage (the decision API)" : dep.startsWith("model:") ? `The model route ${dep.slice(6)}` : dep);
+  const depName = (dep: string) => (dep === "decisions" ? "The decision API" : dep.startsWith("model:") ? `The model route ${dep.slice(6)}` : dep);
 
   const dirty = $derived(!!draft && !!status?.pool && JSON.stringify(draft) !== JSON.stringify(status.pool));
   async function savePool(): Promise<void> {

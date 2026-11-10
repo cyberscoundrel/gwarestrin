@@ -28,12 +28,20 @@ export function sees(doc, audience, home) {
 /** is `a` at or above `b` (so a holder of a has authority where b is named) */
 export const atOrAbove = (doc, a, b) => chain(doc, b).includes(a);
 
-/** the strictest of some homes: the one deepest in the tree (ties: the first) */
+// A home nearer the root is seen by fewer people (its holders and those above them); `everyone` by all.
+const depth = (doc, h) => (h === EVERYONE ? Infinity : chain(doc, h).length);
+
+/** the strictest of some homes: the one nearest the root, seen by the fewest (ties: the first). The test tree is one
+ * chain; on homes in different branches, the nearest the root is taken, which no ruling settles */
 export function strictest(doc, homes) {
   let best = null;
-  for (const h of homes) {
-    if (!h) continue;
-    if (best === null || (h !== EVERYONE && (best === EVERYONE || chain(doc, h).length > chain(doc, best).length))) best = h;
-  }
+  for (const h of homes) if (h && (best === null || depth(doc, h) < depth(doc, best))) best = h;
+  return best;
+}
+
+/** the widest of some homes: the one seen by the most (`everyone`, else the deepest) */
+export function widest(doc, homes) {
+  let best = null;
+  for (const h of homes) if (h && (best === null || depth(doc, h) > depth(doc, best))) best = h;
   return best;
 }

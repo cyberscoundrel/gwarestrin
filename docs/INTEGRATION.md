@@ -73,13 +73,49 @@ It lands on `build-base` with the first stream merge.
   and `GraphWorkerPanel.svelte`. That panel is the filing stream's file,
   changed here at the coordinator's request: five lines, one `{#if}` block.
 
+### The review of this branch at 6f688e0 (`~/reviews/build-build-integrate-a53e86-6f688e0.md`)
+
+- **I-B1, fixed.** `set_home` finds (and so moves) only what a worker's audience
+  sees: a name above it answers "no visible entity", as a name that doesn't
+  exist does, so it is no existence oracle. A worker's token is refused on every
+  `/api` route (`routes.js`), since those resolve the delegating admin's whole
+  scope; the workspace drives the pool with its own token. The audience scenario
+  now checks `set_home` on a root and an Operations entry, and eight `/api`
+  routes, against a person's token as the control.
+- **I-B2, fixed.** A marker's home is its labelled floor (the recorder's
+  position), stricter only where the system stored it so; a marker stored below
+  it is a misplacement, and fails the gate. Fixing it turned up a second bug:
+  `strictest` picked the home deepest in the tree, which is the widest, so the
+  first version also judged a doubly stored marker at its widest copy. Strictest
+  is now the home nearest the root.
+- **I-B3, fixed on this side.** The leak gate fails on a run with no briefs, on
+  a marker never stored, and with no markers. The filing stream is asked to write
+  `BriefLog` in `claimThreads` once `composeFilingBrief` succeeds (below); until
+  it does, every run's leak gate reports FAIL, by design.
+- **Non-blocking, done:** titles and classes are scanned (one marker is planted
+  in a title); accounts score a write of an unchanged value as true, a Filed entry
+  with no fields as unverifiable, and say whether the account's words name the
+  row; the must-not-mint check matches whole words, on the note's own instances
+  only; the regex escape in `fake-models.mjs` is restored; the trivia is gone
+  (`&& false`, the wrong test and function names, the "Triage" label).
+- **Marks:** the gates, their zero tolerance and the runs plan are marked as
+  proposal B's (the assistant's, approved by the user with the doc), in the code
+  and in [build/integrate.md](build/integrate.md); S0 and the synthetic database
+  are marked as standing in for R11.15, which is open; the labels are marked as
+  one person's reading, and their dependence on no approval during the run is
+  noted. `make-records.mjs seed` refuses to run without `--unguarded` until the
+  sources stream's guard is wired in at its landing.
+- **Expected after classes or filing merge:** the audience scenario fails until
+  their new worker tools are sorted into reads, finding writes or neither, and
+  checked. That is by design.
+
 ### Requests to the streams
 
 | To | Request | Why |
 |---|---|---|
 | filing | `packages/server/src/agents/instructions/worker.ts:13` and `graph-roles.ts:30` still tell workers about `beyond: true` and `query_graph`, which workers no longer have (B3) | The instructions should name only the tools a worker is offered |
 | filing | Expect a one-block change in `GraphWorkerPanel.svelte` (the triage line removed, review item 9) when merging | So the conflict, if any, keeps both |
-| filing | Write every brief, exactly as sent, to `BriefLog` (`model/schema.js`): `{ id, record, audience, worker, brief (JSON), dropped (JSON), at }` | The leak gate scans every brief as sent (proposal B; integrate.md 2.6). Without it the gate sees only what workers wrote |
+| filing | Write every brief, exactly as sent, to `BriefLog` (`model/schema.js`): `{ id, record, audience, worker, brief (JSON), dropped (JSON), at }`, in `claimThreads` right after `composeFilingBrief` succeeds; a brief that can't be logged isn't sent (sent to the filing session) | The leak gate scans every brief as sent (proposal B; integrate.md 2.6), and fails a run with none (review I-B3) |
 | filing | A Held entry for a piece with no source at all (ux-aa11, "the thing from Tuesday") needs a `target.table`, which `normalizeEntry` requires | Either a table is named or the shape allows none; see choice I-6 |
 | classes | Name the property that holds an instance's source key (`eval/collect.mjs` reads `_record_key`, `record_key` or `key`) | Placement checks compare the key with the row |
 | record | The path a file uploaded on record takes (R11), for `make-records.mjs seed` (it calls `record_document` as the person today) | The 62 notes enter as uploaded documents (choice I-8) |
@@ -124,6 +160,9 @@ The integrator's (labels and evaluation, [build/integrate.md](build/integrate.md
 | I-12 | **R12's reading of ux-m01**: "INSPECT-2 is down until the gauge is recalibrated" describes a state and says nothing changed, so it is Held, not Filed |
 | I-13 | The `BriefLog` type is added to the contract (`model/schema.js`) for the leak gate; the filing stream writes it |
 | I-14 | The test configuration sets the synthetic connection's home to everyone (the coordinator), so the source carries no markers and source writes are scanned as seen by everyone |
+| I-15 | A worker's token is refused on every `/api` HTTP route, rather than each route learning a worker's audience |
+| I-16 | Two marker labels carry the integrator's reading of where the check should put them (pay; customer financials): reported, never gating |
+| I-17 | Where two homes sit in different branches of the tree, "strictest" takes the one nearest the root (the test tree is one chain, so this never arises there) |
 
 ---
 

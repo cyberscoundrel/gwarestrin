@@ -234,7 +234,8 @@ homes you can see).`,
     },
     async (args) => {
       need("write");
-      const r = await setHome(args, identity, scope);
+      // a worker finds (and so moves) only what its audience sees: a name above it is "no visible entity", as for anyone
+      const r = await setHome(args, identity, await readScope());
       if (role === "worker" && r.results.some((x) => x.queued)) r.note = PROPOSED_NOTE;
       return { content: [{ type: "text", text: JSON.stringify(r) }] };
     },

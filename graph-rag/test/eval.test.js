@@ -8,12 +8,12 @@ import { STATED_NOTES, NOTES, accepted, checkLabels, labelCounts, ruleOutcome } 
 import { batchOrder, makeMarkers, markerRecords, recordsFrom } from "../eval/records.mjs";
 import { accountResults, diffDumps, rowGate } from "../eval/source.mjs";
 import { matchNote, scoreOutcomes } from "../eval/outcomes.mjs";
-import { markerHomes, scanLeaks } from "../eval/leaks.mjs";
+import { classItems, markerHomes, scanLeaks, sectionItems, titleItems } from "../eval/leaks.mjs";
 import { duplicateCandidates, foldName, placementSample, renderTree, stability } from "../eval/tree.mjs";
 import { compareChecks, kappa } from "../eval/check.mjs";
 import { buildReport, compareRuns } from "../eval/report.mjs";
 import { POSITIONS, dataset, rowKey } from "../eval/s0.mjs";
-import { sees, strictest } from "../eval/positions.mjs";
+import { sees, strictest, widest } from "../eval/positions.mjs";
 import { validateDocument } from "../src/model/record.js";
 import { normalizeEntry } from "../src/model/filing.js";
 
@@ -72,18 +72,26 @@ test("markers: distinct made-up words, the same for the same seed, in none of th
   assert.notDeepEqual(makeMarkers(20, 8, all), a);
   for (const w of a) assert.ok(!all.toLowerCase().includes(w));
   const { records, markers } = markerRecords(3, { avoid: all });
-  assert.equal(markers.length, 7);
+  assert.equal(markers.length, 8);
   for (const r of records) assert.deepEqual(validateDocument(r.document).errors, []);
-  for (const m of markers) assert.ok(records.find((r) => r.note === m.record).document.sections[m.section].text.includes(m.word));
+  for (const m of markers) {
+    const doc = records.find((r) => r.note === m.record).document;
+    assert.ok((m.title ? doc.title : doc.sections[m.section].text).includes(m.word), m.word);
+    assert.equal(m.floor, doc.position, "each marker's floor is its recorder's position, from the record, not the graph");
+  }
+  assert.equal(markers.filter((m) => m.title).length, 1);
 });
 
-test("positions: a holder sees its home and below, and everyone; strictest is the deepest", () => {
+test("positions: a holder sees its home and below, and everyone; strictest is nearest the root, widest is everyone or the deepest", () => {
   assert.ok(sees(POSITIONS, "org", "floor"));
   assert.ok(sees(POSITIONS, "ops", "ops"));
   assert.ok(!sees(POSITIONS, "floor", "ops"));
   assert.ok(sees(POSITIONS, "floor", "everyone"));
-  assert.equal(strictest(POSITIONS, ["everyone", "ops", "floor"]), "floor");
+  assert.equal(strictest(POSITIONS, ["everyone", "ops", "floor"]), "ops");
+  assert.equal(strictest(POSITIONS, ["floor", "org"]), "org");
   assert.equal(strictest(POSITIONS, ["everyone", "org"]), "org");
+  assert.equal(widest(POSITIONS, ["ops", "floor"]), "floor");
+  assert.equal(widest(POSITIONS, ["org", "everyone"]), "everyone");
 });
 
 const entry = (over) => normalizeEntry({ id: over.id ?? "e1", outcome: "kept", record: "#1:0", section: "#2:0", home: "ops", piece: "p", recorder: "alice", worker: "w", ...over });
@@ -125,6 +133,10 @@ test("accounts: true, false claim and wrong values against the diff; caught, mis
   ];
   const r = accountResults(changes, es);
   assert.deepEqual(r.items.map((i) => [i.entry, i.result, i.check]), [["t", "true", "agreed"], ["f", "false-claim", "caught"], ["w", "wrong-values", "missed"], ["a", "true", "false-alarm"]]);
+  const same = accountResults(changes, [entry({ id: "s", outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471", fields: { Status: "Active" } }, account: "set 4471 to Active" })], { before });
+  assert.deepEqual([same.items[0].result, same.items[0].saysRow], ["true", true], "a write of the value the row held is true, not a false claim");
+  const bare = accountResults(changes, [entry({ id: "n", outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471" }, account: "did it" })], { before });
+  assert.deepEqual([bare.items[0].result, bare.items[0].saysRow], ["unverifiable", false], "no fields: nothing to check, and the words don't name the row");
   const after2 = clone(after);
   after2.dbo_Job.rows[0].Status = "Hold";
   assert.deepEqual(accountResults(diffDumps(before, after2), es.slice(0, 1)).omitted, ["mssql:dbo_Job:3260356"]);
@@ -166,25 +178,67 @@ test("outcomes: must-not lines catch a change, a write to a table, a link to the
   const info = new Map([["#5:1", { key: "mssql:dbo_Employee:NGDT", name: "Diep Ngo" }]]);
   const entries = [entry({ id: "x", record: "#10:0", outcome: "kept", instances: ["#5:1"] })];
   const changes = [{ key: "mssql:dbo_Job:4471", kind: "updated", columns: ["Status"] }];
-  const s = scoreOutcomes(n, entries, { noteOf: () => "ux-aa07", info, changes, instances: [{ rid: "#5:2", name: "ux-z04" }] });
+  const noteOf = (r) => ({ "#10:0": "ux-aa07", "#10:1": "ux-z04", "#10:2": "ux-aj09" })[r];
+  const about = new Map([["#10:1", ["#5:2"]], ["#10:2", ["#5:3", "#5:4"]]]);
+  const instances = [{ rid: "#5:2", name: "ux-z04" }, { rid: "#5:3", name: "Retired pin gauge set" }, { rid: "#5:4", name: "forklift" }, { rid: "#5:9", name: "spare tire" }];
+  const notes = [...n, NOTES.find((x) => x.id === "ux-aj09")];
+  const s = scoreOutcomes(notes, entries, { noteOf, info, changes, instances, about });
   const rules = s.mustNot.map((m) => `${m.note} ${m.rule}`);
   assert.ok(rules.includes("ux-aa07 linked mssql:dbo_Employee:NGDT"));
-  assert.ok(rules.includes('ux-z04 minted "ux-z04"'));
+  assert.ok(rules.includes('ux-z04 minted "ux-z04"'), "an instance one of its own sections is about");
   assert.ok(rules.includes("ux-w11 changed mssql:dbo_Job:4471"));
+  assert.ok(!rules.some((r) => r.includes("Retired")), "a whole word: 'tire' isn't in 'Retired'");
+  assert.ok(!rules.some((r) => r.includes("spare tire")), "an instance no section of the note is about doesn't count against it");
 });
 
-test("leaks: a marker above a brief's audience is a leak; one at or below it isn't; no audience is a leak", () => {
-  const sections = [{ rid: "#3:1", record: "#1:1", home: "ops", text: "Moving to Vraexind Metals" }, { rid: "#3:2", record: "#1:2", home: "floor", text: "Back to Glouzzarn" }];
-  const homes = markerHomes([{ word: "Vraexind", record: "marker-3", recordId: "#1:1" }, { word: "Glouzzarn", record: "marker-5", recordId: "#1:2" }, { word: "Neverlanded", record: "marker-9" }], sections, POSITIONS);
-  assert.deepEqual(homes.map((h) => h.home), ["ops", "floor", null]);
+test("leaks: a marker's home is its labelled floor, or stricter where stored so; a marker above an audience is a leak", () => {
+  const holders = [{ rid: "#3:1", record: "#1:1", home: "ops", text: "Moving to Vraexind Metals" }, { rid: "#3:2", record: "#1:2", home: "floor", text: "Back to Glouzzarn" }, { rid: "#3:3", record: "#1:3", home: "org", text: "Plimbex pay" }];
+  const homes = markerHomes([
+    { word: "Vraexind", record: "marker-3", recordId: "#1:1", floor: "ops" },
+    { word: "Glouzzarn", record: "marker-5", recordId: "#1:2", floor: "floor" },
+    { word: "Plimbex", record: "marker-4", recordId: "#1:3", floor: "ops", expect: "org" }, // the check raised it
+    { word: "Neverlanded", record: "marker-9", recordId: "#1:9", floor: "ops" },
+  ], holders, POSITIONS);
+  assert.deepEqual(homes.map((h) => h.home), ["ops", "floor", "org", "ops"]);
+  assert.deepEqual(homes.map((h) => h.untested), [false, false, false, true]);
   const items = [
     { where: "brief:b1", audience: "floor", text: "... VRAEXINDmetals ..." },
     { where: "brief:b2", audience: "ops", text: "Glouzzarn and Vraexind" },
+    { where: "brief:b3", audience: "ops", text: "Plimbex" }, // raised to org: now a leak at ops
     { where: "entry:e1", audience: null, text: "Glouzzarn" },
+    { where: "brief:b4", audience: "floor", text: "neverlanded" }, // never stored, but its floor still counts
   ];
-  const r = scanLeaks(items, homes, POSITIONS);
-  assert.deepEqual(r.leaks.map((l) => [l.where, l.word]), [["brief:b1", "Vraexind"], ["entry:e1", "Glouzzarn"]]);
+  const r = scanLeaks(items, homes, POSITIONS, { briefs: 4 });
+  assert.deepEqual(r.leaks.map((l) => [l.where, l.word]), [["brief:b1", "Vraexind"], ["brief:b3", "Plimbex"], ["entry:e1", "Glouzzarn"], ["brief:b4", "Neverlanded"]]);
   assert.deepEqual(r.untested, ["Neverlanded"]);
+  assert.equal(r.ok, false);
+});
+
+test("leaks, the reviewer's probe: an org-recorded section the system stored at the floor, carried in a floor brief, fails the gate", () => {
+  const holders = [{ rid: "#3:7", record: "#1:7", home: "floor", text: "Talks to buy Skarnex Machining" }];
+  const homes = markerHomes([{ word: "Skarnex", record: "marker-1", recordId: "#1:7", floor: "org" }], holders, POSITIONS);
+  assert.deepEqual([homes[0].home, homes[0].stored, homes[0].misplaced], ["org", "floor", true], "the label's floor, not the stored home");
+  const r = scanLeaks([{ where: "brief:f1", audience: "floor", text: "context: Skarnex machining" }, ...sectionItems(holders)], homes, POSITIONS, { briefs: 1 });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.leaks.map((l) => l.where), ["brief:f1", "section:#3:7"]);
+  assert.deepEqual(r.misplaced, [{ word: "Skarnex", record: "marker-1", stored: "floor", floor: "org" }]);
+});
+
+test("leaks: a gate with nothing to check fails: no briefs, no markers, or a marker never stored", () => {
+  const holders = [{ rid: "#3:1", record: "#1:1", home: "ops", text: "Vraexind" }];
+  const homes = markerHomes([{ word: "Vraexind", record: "marker-3", recordId: "#1:1", floor: "ops" }], holders, POSITIONS);
+  const none = scanLeaks([], homes, POSITIONS, { briefs: 0 });
+  assert.equal(none.ok, false);
+  assert.match(none.reasons.join(), /no briefs to scan/);
+  assert.equal(scanLeaks([{ where: "brief:b", audience: "ops", text: "x" }], [], POSITIONS, { briefs: 1 }).ok, false);
+  assert.equal(scanLeaks([{ where: "brief:b", audience: "ops", text: "x" }], homes, POSITIONS, { briefs: 1 }).ok, true);
+  assert.throws(() => markerHomes([{ word: "W", record: "r" }], holders, POSITIONS), /no labelled floor/);
+});
+
+test("leaks: titles and classes are scanned at their homes", () => {
+  const homes = markerHomes([{ word: "Thalvex", record: "marker-1", recordId: "#1:1", floor: "org" }], [{ rid: "#1:1", record: "#1:1", home: "org", text: "Thalvex acquisition talks" }], POSITIONS);
+  const r = scanLeaks([...titleItems([{ rid: "#1:1", home: "org", title: "Thalvex acquisition talks" }]), ...classItems([{ key: "thalvex_deal", name: "Thalvex deal", home: "everyone", evidence: [] }])], homes, POSITIONS, { briefs: 1 });
+  assert.deepEqual(r.leaks.map((l) => l.where), ["class:thalvex_deal"]);
 });
 
 const cls = (key, parents, extra = {}) => ({ key, name: key.replace(/_/g, " "), parents, home: "everyone", evidence: [], rows_are_nodes: false, record_table: null, status: "active", ...extra });
@@ -235,7 +289,7 @@ test("report: a clean snapshot passes both gates; a planted row change or a leak
   const before = dataset();
   const after = clone(before);
   const snap = {
-    meta: { setup: "fake", run: 1, seed: 1, noteOf, markers: [{ word: "Vraexind", record: "marker-3", recordId: "#1:9" }] },
+    meta: { setup: "fake", run: 1, seed: 1, noteOf, markers: [{ word: "Vraexind", record: "marker-3", recordId: "#1:9", floor: "ops" }] },
     positions: POSITIONS,
     before,
     after,
@@ -250,6 +304,7 @@ test("report: a clean snapshot passes both gates; a planted row change or a leak
   const ok = buildReport(snap, { notes: NOTES.slice(0, 3) });
   assert.deepEqual(ok.gates, { rows: true, leaks: true, ok: true });
   assert.match(ok.markdown, /Gates.*PASS.*PASS/);
+  assert.equal(buildReport({ ...snap, briefs: [] }, { notes: NOTES.slice(0, 3) }).gates.leaks, false, "no briefs: the gate fails, it doesn't pass");
   after.dbo_Job.rows[3].Status = "Rush";
   snap.briefs.push({ id: "b2", audience: "floor", text: "context: vraexind metals" });
   const bad = buildReport(snap, { notes: NOTES.slice(0, 3) });

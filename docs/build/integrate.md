@@ -75,6 +75,13 @@ homes) and the source (the before and after row dumps). It writes one report per
 a comparison across runs. The two **gates** are zero tolerance. Everything else is
 reported with no pass mark, as proposal B says.
 
+**Whose these are.** The gates, their zero tolerance, the measures and the plan of two
+setups by three runs are proposal B's: the assistant's proposal in
+[ORGANIZATION-MODEL.md](../ORGANIZATION-MODEL.md), which the user read and approved as part of
+the doc. They are not rulings of their own. The database is R11.15, which is **still open**:
+the synthetic test database (sources stream, `test-sql/`, compose project `gwsynth`) and S0
+stand in for it with synthetic rows only, and are not an answer to it.
+
 The same code runs in phase 1 against fake models, the fake source and the throwaway
 graph, so every measure is exercised before a real model sees anything.
 
@@ -151,24 +158,37 @@ by name.
 ### 2.6 Leaks through briefs, by marker words (gate)
 
 Markers are made-up words (codenames and surnames that occur nowhere else), unique per
-record and per class. Each is generated at run start and mapped to the home it is
-planted at. The map lives with the report tooling only. No fake, prompt or label sees
-it.
+record, per title and per class. Each is generated at run start from the run's seed. The
+map lives with the report tooling only. No fake or prompt sees it.
+
+**A marker's home comes from the labels, never from the system under test.** Each marker
+carries its labelled floor: its recorder's position, where R11 starts a section ("the check
+can only raise it"). Where the system stored it stricter, the stricter home counts; where it
+stored it below the floor, that is a **misplacement** and the floor still counts, so a section
+the system wrongly put at the floor and carried into a floor brief is a leak. (The first
+version took the home from where the system stored it, so a misplaced section could never be
+a leak: review I-B2 of 6f688e0.) Two markers also carry the integrator's reading of where the
+check should put them (pay; customer financials): that is reported, never gating, being one
+person's reading of the nine categories.
 
 Planted in:
 - **marker records** added to the batch: org-home records by the admin, ops-home records
   by alice, and records that mix an ops or org section with a floor section, so the
   split by home (R11) is exercised;
-- **classes**: one strict-home class per run, by correction, after discovery;
+- **a title**: one admin record's title carries a marker (R11: a title takes the strictest
+  home among its sections);
+- **classes**: one strict-home class per run, by correction, after discovery (not built yet:
+  it needs the classes stream's corrections; classes are scanned already);
 - **the synthetic source**, if the sources stream gives a table only the org connection
   reads (R11: a class from a table takes that connection's home).
 
-Scanned: every brief, as sent (the build must log each brief verbatim), and everything a
-worker writes: log entries, accounts, requests to the orchestrator, sections, instance
-names, edges and source writes. **Gate:** any marker found in a brief or output whose
-audience cannot see the marker's home. Case-insensitive, and also matched inside longer
-words. A section the check raised later is judged at the home it had when the brief was
-built, and again at its final home, and both results are reported.
+Scanned: every brief, as sent (the filing stream logs each to `BriefLog`), and everything
+a worker writes or the graph shows: log entries, accounts, requests to the orchestrator,
+sections, titles, classes, instance names and source writes. **Gate:** it fails on any
+marker found in an item whose audience cannot see the marker's home, any misplacement, any
+marker the run never stored (untested), and a run with **no briefs** to scan. A gate with
+nothing to check proves nothing, so it does not pass (review I-B3). Matching is
+case-insensitive, and also finds a marker inside a longer word.
 
 ### 2.7 The typed check
 
@@ -343,7 +363,8 @@ dropped. After each merge: `npm test` in `graph-rag`, `graph-rag/e2e/e2e.sh`, se
 fast-forward-only push, and only when all of these pass. `docs/INTEGRATION.md` lists every
 choice marked as needing a ruling, kept current.
 
-**First real-model run.** Only on the coordinator's word, against the synthetic database
+**First real-model run.** Only on the coordinator's word, against the synthetic database (which
+stands in for R11.15, still open)
 only, with model access arranged with the user (no key or password typed here). It runs
 at least two setups, three runs each, with the gates on. R11's one open question, which
 database and which models, is the user's to answer first.
