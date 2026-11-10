@@ -102,3 +102,13 @@ test("the master and handler roles: the admin's only; read, never write", () => 
   assert.equal(resolveAgentToken(signAgentToken(KEY, { u: "alice", a: "a1", p: [], r: "master", iat: 1 }), entryFor, map).role, undefined);
   assert.equal(resolveAgentToken(signAgentToken("a".repeat(64), { u: "admin", a: "h1", p: [], r: "handler", j: "nope", iat: 1 }), entryFor, map).role, undefined);
 });
+
+test("a discovery run's claim marks the admin's master and worker tokens, and nobody else's (R11)", () => {
+  const A = "a".repeat(64);
+  const m = resolveAgentToken(signAgentToken(A, { u: "admin", a: "m1", p: [], r: "master", d: "run-1", iat: 1 }), entryFor, map);
+  assert.deepEqual(m.role, { kind: "master", discovery: true, run: "run-1" });
+  const w = resolveAgentToken(signAgentToken(A, { u: "admin", a: "w1", p: [], r: "worker", j: "0".repeat(8) + "-0000-0000-0000-" + "0".repeat(12), e: "#3:4", d: "run-1", iat: 1 }), entryFor, map);
+  assert.equal(w.role.discovery, true);
+  assert.equal(resolveAgentToken(signAgentToken(KEY, { u: "alice", a: "a1", p: [], r: "master", d: "run-1", iat: 1 }), entryFor, map).role, undefined);
+  assert.equal(resolveAgentToken(signAgentToken(A, { u: "admin", a: "m1", p: [], r: "master", d: "bad id!", iat: 1 }), entryFor, map).role.discovery, undefined);
+});

@@ -27,6 +27,9 @@
 //            job): answers its questions and decides its proposals on the
 //            operator's word; writes nothing itself.
 import { createHmac, timingSafeEqual } from "node:crypto";
+
+/** d: a discovery run's id, on a master or worker token: the identity is held to the discovery tools (discovery.js, R11) */
+const discoveryClaim = (payload) => (typeof payload.d === "string" && /^[a-z0-9-]{1,60}$/i.test(payload.d) ? { discovery: true, run: payload.d } : {});
 import { heldPositions, visibleHomes } from "./positions.js";
 
 export const PREFIX = "gwa1.";
@@ -80,7 +83,7 @@ export function resolveAgentToken(token, entryFor, map, now = Date.now()) {
       user: `${entry.user}/worker:${payload.a.slice(0, 8)}`,
       key: `${entry.user}/agent:${payload.a}`,
       agent: payload.a,
-      role: { kind: "worker", job: payload.j, entry: payload.e },
+      role: { kind: "worker", job: payload.j, entry: payload.e, ...discoveryClaim(payload) },
       caps: { read: true, write: "direct", approve: false, raw: entry.caps?.raw === true },
       positions: tenantPositions,
     };
@@ -90,7 +93,7 @@ export function resolveAgentToken(token, entryFor, map, now = Date.now()) {
       user: `${entry.user}/master:${payload.a.slice(0, 8)}`,
       key: `${entry.user}/agent:${payload.a}`,
       agent: payload.a,
-      role: { kind: "master" },
+      role: { kind: "master", ...discoveryClaim(payload) },
       caps: { read: true, write: "deny", approve: true, raw: entry.caps?.raw === true },
       positions: tenantPositions,
     };
