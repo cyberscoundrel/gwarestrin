@@ -35,6 +35,7 @@
 import { log } from "./context.js";
 import { adbCommand as realCommand, adbQuery as realQuery } from "./db.js";
 import { filedOrProposed, validatePolicy } from "./model/class-map.js";
+import { classIndex } from "./model/classes.js";
 import { isoDate, snakeCase } from "./model/text.js";
 import { parseKey, parseTable } from "./model/schema.js";
 import { writable as declaredWritable } from "./model/sources.js";
@@ -51,6 +52,22 @@ const livePeople = async () => {
   const scope = await import("./scope.js");
   return (name) => scope.entriesByUser.get(name);
 };
+/**
+ * The class tree as stored now (the classes stream's classes.js allClasses), as model/classes.js classIndex, so a
+ * subclass takes its parents' map entries (R9). Null when it can't be read: then only a class's own entry counts,
+ * which fails safe (a class with no entry is Proposed).
+ */
+async function liveIndex() {
+  try {
+    const m = await import("./classes.js");
+    return typeof m.allClasses === "function" ? classIndex(await m.allClasses()) : null;
+  } catch (e) {
+    log.warn(`the class tree couldn't be read, so only a class's own map entry counts: ${String(e?.message ?? e).slice(0, 160)}`);
+    return null;
+  }
+}
+/** the index a decision runs over: the one given (null for none), else the live tree */
+const indexFor = async (index) => (index === undefined ? liveIndex() : index);
 /** the filing log's journal for source writes, when the filing stream's filing.js exports one */
 const liveJournal = async () => (await import("./filing.js").catch(() => null))?.sourceJournal ?? null;
 
@@ -633,7 +650,7 @@ export const approvingPerson = (user) => String(user ?? "").split(/[/ ]/)[0];
  * NEEDS A RULING (recorder gone or moved): which filing outcome such a piece gets; smallest choice, the adapter
  * says "refused" and the filing stream records it as Held, asking whoever put it on record.
  */
-export async function enterData({ actsFor, by, key, fields, before = null, cls, reason, identity, held = null, piece = null }, { db = realDb, fetch: f, positions, policy, queue, proposal, people, journal, sources } = {}) {
+export async function enterData({ actsFor, by, key, fields, before = null, cls, reason, identity, held = null, piece = null }, { db = realDb, fetch: f, positions, policy, queue, proposal, people, journal, sources, index } = {}) {
   const k = parseKey(key);
   if (!k) throw new Error(`not a record key (system:table:row): ${key}`);
   if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).length) throw new Error("fields: the columns to write, with their values");
@@ -650,7 +667,7 @@ export async function enterData({ actsFor, by, key, fields, before = null, cls, 
   try {
     map = await authorityMapFor({ policy, positions, db });
     decision = positions
-      ? filedOrProposed({ recorder: standing.identity, cls, columns: Object.keys(fields), map, positions, writable })
+      ? filedOrProposed({ recorder: standing.identity, cls, columns: Object.keys(fields), map, positions, writable, index: await indexFor(index) })
       : { outcome: "proposed", authority: null, reason: "no position map is loaded" };
   } catch (e) {
     log.warn(`class map unreadable, so the entry on ${k.key} is proposed: ${String(e?.message ?? e).slice(0, 160)}`);
@@ -673,7 +690,7 @@ export async function enterData({ actsFor, by, key, fields, before = null, cls, 
 const asEntry = (r) => (r.filing === "filed" ? { outcome: "filed", ...r } : { outcome: r.filing === "proposed" ? "proposed" : "held", ...r });
 
 /** an approver must hold the authority the map names for the class, as they stand now; a map that can't be read leaves it to the root */
-async function assertApproverHolds(p, person, entry, { positions, db }) {
+async function assertApproverHolds(p, person, entry, { positions, db, index }) {
   if (!positions) return;
   const standing = standingOf({ person, position: null }, entry, positions);
   if (!standing.ok) throw new Error(`not applied: ${standing.why}`);
@@ -682,17 +699,19 @@ async function assertApproverHolds(p, person, entry, { positions, db }) {
     if (standing.identity.positions.includes(positions.root)) return;
     throw new Error("not applied: the class map can't be read, so only someone at the top of the organization can approve this");
   }
-  const d = filedOrProposed({ recorder: standing.identity, cls: p.class ?? null, columns: Object.keys(p.fields ?? {}), map, positions });
+  const d = filedOrProposed({ recorder: standing.identity, cls: p.class ?? null, columns: Object.keys(p.fields ?? {}), map, positions, index: await indexFor(index) });
   // a class missing from the map: a person at the root approves (R11: a person with authority for that class approves; the orchestrator never does)
   if (d.outcome !== "filed" && !(d.authority === null && standing.identity.positions.includes(positions.root))) throw new Error(`not applied: ${person} doesn't hold the authority the map names for ${p.class ?? "this class"}, so can't approve this entry`);
 }
 
 /**
  * An approved data_entry proposal: the write runs now, authorized by the person who approved it (who must hold
- * the authority), acted by the agent that proposed it.
+ * the authority), acted by the agent that proposed it. The write is begun and settled in the filing log like any
+ * other (commitRow), its `piece` naming the proposal and who approved it, so the filing stream writes the Filed
+ * entry from it; with no journal, nothing is written.
  * NEEDS A RULING (approving a class missing from the map): smallest choice, a person at the root approves it.
  */
-export async function applyProposedEntry(payload, pendingId, approver, { db = realDb, fetch: f, people, positions, journal, sources } = {}) {
+export async function applyProposedEntry(payload, pendingId, approver, { db = realDb, fetch: f, people, positions, journal, sources, index } = {}) {
   const p = typeof payload === "string" ? JSON.parse(payload) : payload;
   const k = parseKey(p.key);
   if (!k) throw new Error(`not a record key: ${p.key}`);
@@ -700,8 +719,8 @@ export async function applyProposedEntry(payload, pendingId, approver, { db = re
   const authorized_by = approvingPerson(approver);
   if (!authorized_by) throw new Error("not applied: an approved entry needs the person who approved it");
   const entry = await (people ?? (await livePeople()))(authorized_by);
-  await assertApproverHolds(p, authorized_by, entry, { positions, db });
-  const r = asEntry(await commitRow({ key: k.key, fields: p.fields, before: p.before ?? null, piece: p.piece ?? null }, { db, fetch: f, journal, sources }));
+  await assertApproverHolds(p, authorized_by, entry, { positions, db, index });
+  const r = asEntry(await commitRow({ key: k.key, fields: p.fields, before: p.before ?? null, piece: { ...(p.piece ?? {}), pending_id: pendingId ?? null, approved_by: authorized_by } }, { db, fetch: f, journal, sources }));
   if (r.outcome !== "filed") throw new Error(`not applied (${r.status}): ${r.why ?? "the write didn't land"}`);
   return { ...r, authorized_by, pending_id: pendingId ?? null };
 }

@@ -219,3 +219,51 @@ in the phase report.
   `data-entry.js` keeps once BUILD.md says who removes its claim and authority parts.
 - Not touched: `docker-compose.yml`'s `dab` and `dab-write`, which serve the
   development deployment.
+
+## As built (phase 1)
+
+The file map followed `docs/BUILD.md`. The synthetic database is in `test-sql/`, not `sources/synthetic/`.
+
+| Piece | Where |
+|---|---|
+| Declarations: a connection's `home` (null, the root, by default) and the commit side's `guard` | `graph-rag/src/model/sources.js` |
+| The declarations' store, stored over the environment's, and `testDeclaration()` (home `everyone`, in test configuration only, as the coordinator directed) | `graph-rag/src/sources.js` |
+| The read adapter (`getRow`, `findRows`, `describeSource`), the guard (`checkGuard`), the write adapter (`commitRow`, `createRow`), and data entry routed through them | `graph-rag/src/data-entry.js` |
+| The fake DAB, matched to the real one by `test-sql/check.sh parity` | `graph-rag/e2e/fake-dab-core.mjs` |
+| The synthetic SQL Server, its two DABs, backup, restore, and live checks | `test-sql/` (README) |
+
+What the real DAB 2.0.12 showed, which changed the plan:
+- Its filter has no `contains` or `startswith`. `findRows` offers `eq`, and `prefix` read as a range. Substring
+  search is not available.
+- Text compares case-insensitively.
+- Its identity keys can't be given on create.
+- `describe_entities` lists no columns, so a table's columns come from its first row.
+
+The filing log is the filing stream's. The write adapter takes a journal (`begin`, `settle`) and writes nothing
+without one. Until `filing.js` exports `sourceJournal`, approved `data_entry` proposals (write.js) are refused rather
+than written without a log entry.
+
+Ruling 12 (2026-11-10) settles unclear item 3. A record that says something changed is filed as an update. A
+record that describes the current state and disagrees with the source is Held. That is the worker's call while filing.
+The adapter's `moved` check stays: it refuses only when the row changed between the worker's read and its write.
+
+The reviewer's three items on `ba583bc`:
+1. An approved proposal writes through `commitRow`, so its write is begun and settled in the filing log. The entry's
+   `piece` names `pending_id` and `approved_by`, for the filing stream to write the Filed entry. With no journal,
+   nothing is written.
+2. `enterData` and the approval check pass the class tree (`classes.js allClasses` as `classIndex`, or an
+   `index` the caller gives), so a subclass takes its parent's map entry.
+3. The write path uses `writable(decl, table, action)`.
+
+Every choice marked `NEEDS A RULING` in this stream's files:
+
+| Where | The choice |
+|---|---|
+| `model/sources.js` | A connection's home is the root until declared (unclear item 4) |
+| `model/sources.js` | A source write may create and update, never delete (BUILD.md 11) |
+| `data-entry.js` | The read side is reachable and the write side is not: Held (item 1) |
+| `data-entry.js` | A write whose result can't be told: Held, with its log entry `unknown` (item 2) |
+| `data-entry.js` | The caller may narrow the tables a worker reads, and no rule narrows them here (item 5) |
+| `data-entry.js` | Composite keys are refused (item 6) |
+| `data-entry.js` | A recorder who left or moved: `refused`, recorded as Held by filing (BUILD.md 12) |
+| `data-entry.js` | A proposal on a class missing from the map is approved by a person at the root (BUILD.md 13) |

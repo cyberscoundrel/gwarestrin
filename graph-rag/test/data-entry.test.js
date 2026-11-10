@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { dabTool } from "../e2e/fake-dab-core.mjs";
 import { applyProposedEntry, approvingPerson, assertWritable, checkGuard, columnFor, commitRow, createRow, DAB_CALLS, describeEntry, describeSource, enterData, findRows, forgetAuthorityPolicy, forgetPrimaryKeys, forgetSources, getRow, mcpToolCall, odata, primaryKeyFrom, rowsOf, sameValue, sourceClient, standingOf } from "../src/data-entry.js";
 import { normalizeSource } from "../src/model/sources.js";
+import { classIndex } from "../src/model/classes.js";
 import { parsePositionMap } from "../src/positions.js";
 
 /** a fake ArcadeDB: the OrgPolicy rows a test gives (policyRows), every statement it saw */
@@ -523,4 +524,45 @@ test("a restarted DAB forgets its session: the call is made again after a fresh 
   };
   assert.deepEqual(await mcpToolCall("http://restarted/mcp", "t", {}, { fetch: f }), { ok: true });
   assert.deepEqual(seen.map((s) => s.join(" ")), ["initialize ", "tools/call old", "initialize ", "tools/call new"]);
+});
+
+test("R9: a subclass with no map entry of its own takes its parent's, on the live path too: Filed for a recorder holding the parent's position, and approvable by one", async () => {
+  const index = classIndex([{ key: "jobs", name: "jobs", parents: ["commitment"] }, { key: "rush_jobs", name: "rush jobs", parents: ["jobs"] }]);
+  const h = harness();
+  const filed = await enterData(entry({ cls: "rush jobs" }), { ...h.opts, index });
+  assert.equal(filed.outcome, "filed", "jobs is the floor's, so bob may file a rush job");
+  assert.equal(h.dab.rows[0].Status, "done");
+  const without = harness();
+  assert.equal((await enterData(entry({ cls: "rush jobs" }), { ...without.opts, index: null })).outcome, "proposed", "without the tree, a class with no entry of its own is Proposed");
+  forgetPrimaryKeys();
+  const dab = fakeDab([{ Job: 4471, Quantity: 1 }, { Job: 4472, Quantity: 2 }]);
+  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, class: "rush jobs", by: "w", acts_for: { person: "dana", position: "floor" }, reason: "r" };
+  const approved = await applyProposedEntry(payload, "p9", "bob", { db: policyDb(fakeDb()), fetch: dab.fetch, people: lookup, positions: map, journal: journal(), index });
+  assert.equal(approved.outcome, "filed");
+  assert.equal(dab.rows[0].Quantity, 700);
+});
+
+test("an approved proposal is written only with a filing-log entry, which names the approval for the Filed entry; with no log, nothing is written", async () => {
+  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, class: "jobs", by: "w", acts_for: { person: "dana", position: "floor" }, reason: "r", piece: { document: "d1", section: 2 } };
+  forgetPrimaryKeys();
+  const dab = fakeDab([{ Job: 4471, Quantity: 1 }, { Job: 4472, Quantity: 2 }]);
+  const log = journal();
+  await applyProposedEntry(payload, "p7", "bob/liaison:ab12", { db: policyDb(fakeDb()), fetch: dab.fetch, people: lookup, positions: map, journal: log, index: null });
+  assert.deepEqual(log.entries.map((e) => [e.status, e.piece]), [["written", { document: "d1", section: 2, pending_id: "p7", approved_by: "bob" }]]);
+  forgetPrimaryKeys();
+  const dab2 = fakeDab([{ Job: 4471, Quantity: 1 }, { Job: 4472, Quantity: 2 }]);
+  await assert.rejects(applyProposedEntry(payload, "p8", "bob", { db: policyDb(fakeDb()), fetch: dab2.fetch, people: lookup, positions: map, journal: null, index: null }), /no filing log/);
+  assert.equal(dab2.rows[0].Quantity, 1);
+  assert.ok(!dab2.calls.some((c) => c.name === "update_record"));
+});
+
+test("the write path reads the declaration (model/sources.js writable): a table outside its tables is Proposed, nothing written", async () => {
+  const db = fakeDb();
+  db.policyRows = (params, sql) => (sql.includes("'authority'") ? [{ json: policyJson }] : sql.includes("'sources'") ? [{ json: JSON.stringify([{ ...DECL, commit: { ...DECL.commit, tables: ["dbo_Maintenance"] } }]) }] : []);
+  const h = harness({ db });
+  const r = await enterData(entry(), h.opts);
+  assert.equal(r.outcome, "proposed");
+  assert.match(r.reason, /not writable/);
+  assert.equal(h.dab.rows[0].Status, "running");
+  assert.ok(!h.dab.calls.some((c) => c.name === "update_record"));
 });
