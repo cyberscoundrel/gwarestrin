@@ -333,7 +333,7 @@ The write floor then applies to whichever was chosen.
 ## The re-review of c1323a3 (`~/reviews/build-build-classes-17566f-c1323a3.md`)
 
 - **C2-B1, links floored by everything read.** Replaced by the coordinator's decision, taken from R11.8 and
-  R11.9 and pending the user, and marked so in `instances.js linkHome`.
+  R11.9, which the user then confirmed as R13 ("Yes, that's right", 2026-11-10); `instances.js linkHome` cites R13.
   - A link (INSTANCE_OF or DEPENDS_ON) is homed at the strictest of its two ends and the home of the record
     or evidence that states it.
   - The edge stores that evidence's home in `home`: the caller's section home, else the cited `source` or

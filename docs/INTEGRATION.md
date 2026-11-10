@@ -8,7 +8,7 @@ build from it; the integrator lands them one at a time, each after the
 independent reviewer has passed it, with every check run after each merge and
 `build-base` moved only by a fast-forward push. The design is
 [ORGANIZATION-MODEL.md](ORGANIZATION-MODEL.md); the rulings
-(`~/reviews/design-rulings.md`, R1 to R12) outrank it and this file. The
+(`~/reviews/design-rulings.md`, R1 to R13) outrank it and this file. The
 evaluation plan is [build/integrate.md](build/integrate.md).
 
 ### Landed
@@ -72,6 +72,14 @@ and one contract addition: the `BriefLog` document type in `model/schema.js`.
 It lands on `build-base` with the first stream merge.
 
 ### Ruled since the contract
+
+- **R13, link visibility** (the user: "Yes, that's right", 2026-11-10, confirming the
+  coordinator's decision). A link (instance-of or dependency) is homed at the strictest of
+  its two ends and the home of the record or evidence that states it. The rule that an
+  agent cannot write lower than what it read applies to text an agent writes, not to the
+  orchestrator's links. The classes code's mark (`instances.js linkHome`) and the stream
+  docs that said "pending the user" now cite R13; `ORGANIZATION-MODEL.md` carries R12
+  and R13 in its filing and visibility sections.
 
 - **F4 is R12** (the user, 2026-11-10: "Yes, write changes"). A record that
   says something changed is an update, filed to the source given the

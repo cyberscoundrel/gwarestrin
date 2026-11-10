@@ -431,7 +431,7 @@ F1 to F17 stand as phase 0 set them, except where noted. Each is marked `NEEDS A
 
 ## After ee2e37e: links carry a home (classes 525581b merged)
 
-- INSTANCE_OF and DEPENDS_ON edges now carry their own `home` (the coordinator's decision from R11.8 and R11.9,
-  pending the user). The brief's two reads of them check it against the audience, a missing home counting as the
+- INSTANCE_OF and DEPENDS_ON edges now carry their own `home` (ruled: R13, the user's "Yes, that's right",
+  2026-11-10). The brief's two reads of them check it against the audience, a missing home counting as the
   root: an instance's classes are only those by links the audience sees, and a dependency needs both ends and its
   link seen. Filing's calls already fit: with the section's home as `opts.home`, the link is homed at the section.

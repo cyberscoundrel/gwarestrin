@@ -118,9 +118,10 @@ export async function writeFloor(identity, base, { given = false } = {}) {
 
 /**
  * The home of a link, an INSTANCE_OF or DEPENDS_ON edge: the strictest of its two ends and the home of the
- * record or evidence that states it. Decided by the coordinator from R11.8 and R11.9, pending the user (the
- * re-review of c1323a3, C2-B1, found that flooring a link by everything its writer read leaves the orchestrator,
- * which reads everything, able to relate nothing below the root). The ends are checked when the link is read
+ * record or evidence that states it. Ruled: R13 (the user: "Yes, that's right", 2026-11-10), which also says the rule
+ * that an agent cannot write lower than what it read applies to text an agent writes, not to the orchestrator's
+ * links (the re-review of c1323a3, C2-B1, had found that flooring a link by everything its writer read leaves the
+ * orchestrator, which reads everything, able to relate nothing below the root). The ends are checked when the link is read
  * (a reader must see both); the edge stores the evidence's home: `home` (the section a filing worker files
  * from), else the records it cites (`refs`, a record the writer can't see counting as the root's), else the
  * writer's own home. Text the writer puts on the link (a note) is still floored by what it read (R11.13).

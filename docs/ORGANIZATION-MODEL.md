@@ -5,10 +5,11 @@ version, and none will be until the user has read it. After that, the smallest v
 that can run on real models is built.
 
 **How to read it.** Every decided statement is the user's: quoted, or marked with
-its ruling, R1 to R11 (`~/reviews/design-rulings.md`). "Earlier" marks the rulings
+its ruling, R1 to R13 (`~/reviews/design-rulings.md`). "Earlier" marks the rulings
 that came before R1, listed at the top of the same file. R11 statements are answers
 the assistant recommended to fourteen open questions, which the user accepted with
-"They stand". The one question left is in [Open](#open) and is not decided. The two
+"They stand". R12 and R13 are the assistant's proposals, which the user confirmed in
+the words quoted with them (2026-11-10). The one question left is in [Open](#open) and is not decided. The two
 [proposals](#proposals-from-the-assistant-not-rulings) at the end are the assistant's.
 
 ## What an organization is
@@ -129,6 +130,13 @@ judges what counts as recurring; there is no fixed number. Nothing Kept is delet
 class missing from the map means Proposed. A person with authority for that class
 approves a Proposed piece; the orchestrator never approves (R11).
 
+> "Yes, write changes"
+
+**Stated changes.** A record that says something changed is an update: the worker files
+it to the source given the recorder has authority, and the orchestrator checks it
+afterwards. A record that describes the current state and disagrees with the source,
+without saying anything changed, is Held, and the worker asks the recorder (R12).
+
 Workers resolve names against the source with read tools. If the source is
 unreachable, the piece is Held (R3).
 
@@ -199,9 +207,13 @@ source writes. There are no audit nodes (R9).
   can only raise it (R11).
 - An instance is visible wherever a section about it is. A dependency edge is visible
   only to someone who can see both ends (R11).
+- A link (instance-of or dependency) is homed at the strictest of its two ends and the
+  home of the record or evidence that states it (R13). The user's words: "Yes, that's
+  right".
 - A document's title takes the strictest home among its sections (R11).
 - An agent cannot write lower than what it read, but a person's own notes do not raise
-  their level (R11).
+  their level (R11). That rule applies to text an agent writes, not to the orchestrator's
+  links (R13).
 - A map from classes to positions is used only to choose Filed or Proposed (R6).
 - Positions are mirrored as classes under agent, with people as instances. The sync
   is one-way from authentik, which keeps granting access (R6).
