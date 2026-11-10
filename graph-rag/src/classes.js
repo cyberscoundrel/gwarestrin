@@ -363,9 +363,9 @@ export async function createClass(input, actor) {
   }
   try {
     await adbCommand(
-      `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'class', _class_name = :name, _class_key = :key, _home = :home, _origin = :home, _description = :description, _evidence = :evidence, _rows_are_nodes = :nodes, _record_table = :table, _stages = :stages, _status = 'active', _corrections = '[]', _run = :run, _written_by = :who`,
+      `CREATE VERTEX ${ENTITY_LABEL} SET name = :name, _kind = 'class', _class_name = :name, _class_key = :key, _home = :home, _origin = :home, _description = :description, _evidence = :evidence, _rows_are_nodes = :nodes, _record_table = :table, _stages = :stages, _status = 'active', _corrections = '[]', _run = :run, _written_by = :who, _created_at = :at`,
       "sql",
-      { name: cls.name, key: cls.key, home, description: cls.description, evidence: JSON.stringify(cls.evidence), nodes: cls.rows_are_nodes, table: cls.record_table, stages: cls.stages, run: actor.run ?? null, who: actor.user },
+      { name: cls.name, key: cls.key, home, description: cls.description, evidence: JSON.stringify(cls.evidence), nodes: cls.rows_are_nodes, table: cls.record_table, stages: cls.stages, run: actor.run ?? null, who: actor.user, at: new Date().toISOString() },
     );
   } catch (e) {
     if (isDuplicate(e)) throw refuse(new ShapeError("name", `${cls.name} exists already`)); // made meanwhile by another call
@@ -411,6 +411,8 @@ export async function updateClass(name, patch, actor) {
     if (patch.record_table !== undefined) {
       touch("record_table");
       sets._record_table = normalizeClass({ ...plain, record_table: patch.record_table }).record_table;
+      // R14: a source table declared now may give Kept pieces a home (filing.js laterClassOrSource)
+      if (sets._record_table && sets._record_table !== cur.record_table) sets._table_at = new Date().toISOString();
     }
     if (patch.stages !== undefined) {
       touch("stages");

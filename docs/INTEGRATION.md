@@ -115,6 +115,16 @@ It lands on `build-base` with the first stream merge.
   saying anything changed, is Held with a question to the recorder. The labels
   follow it: of the nine notes with a stated row change or state, eight say
   something changed; ux-m01 ("INSPECT-2 is down") states a state, so it is Held.
+- **R14, re-filing a Kept piece** (the user: "Stop, fix, rerun", 2026-11-10). The
+  first real run (DeepSeek V4 Flash) re-filed one piece 55 times: a re-filing
+  Kept it again, the new Kept entry was offered again, and the orchestrator
+  re-filed it again. Now a Kept piece is offered by `kept_pieces` and taken
+  by `refile` only if a class was created, or a source table declared, after
+  it was Kept, and its `refiled_from` chain is shorter than 3
+  (`filing.js refileRefusal`, `REFILE_LIMIT`). `refile` refuses the
+  others one by one, each with its reason, and starts the rest. Classes now
+  carry `_created_at`, and `_table_at` when `update_class` gives one a
+  table. Run A/1's output is kept as `graph-rag/eval/runs/A-1-loop`.
 
 ### The review of ba583bc (`~/reviews/build-build-base-ba583bc.md`): the integrator's items
 
@@ -236,6 +246,7 @@ The integrator's (labels and evaluation, [build/integrate.md](build/integrate.md
 | I-22 | DeepSeek V4 Flash is added to the committed `litellm-config.example/litellm-config.yaml` (the template the development deployment's config is copied from) as `deepseek-v4-flash`, pinned to `openrouter/deepseek/deepseek-v4-flash` rather than a `-latest` alias so that runs stay comparable |
 | I-23 | The eval's litellm uses the repository's own tag (`main-stable`, which moves) and records the image it ran in `litellm-image.txt`, rather than pinning a digest the repository doesn't |
 | I-24 | Without a `DECISION_API_KEY`, graph-rag's decision model uses the OpenRouter key, as the repository's compose does |
+| I-25 | R14's "a source table declared" is read as a class given its table by `update_class` (`_table_at`), or the stored source declarations (OrgPolicy `sources`) changing after the piece was Kept. A source declared only in the environment never counts as new, and classes made before `_created_at` existed count as older |
 
 ---
 

@@ -193,7 +193,47 @@ export default [
         const v = await ctx.tool(orchestrator(ctx), "record_verdict", { entry: f.entry, result: "differs", note: "the row was reopened" });
         ctx.check(v.verdict?.result === "differs", `the verdict: ${JSON.stringify(v)}`);
         const kept = await ctx.tool(orchestrator(ctx), "kept_pieces", {});
-        ctx.check(kept.kept?.some((p) => p.entry === k.entry), "the Kept piece waits to be re-filed (R11)");
+        ctx.check(Array.isArray(kept.kept) && !kept.kept.some((p) => p.entry === k.entry), `no class or source table since it was Kept, so it isn't offered (R14): ${JSON.stringify(kept).slice(0, 300)}`);
+      });
+    },
+  },
+  {
+    name: "R14: a Kept piece is re-filed only after a new class or source table, and at most 3 times",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const rec = await record(ctx, "r14", ["The forklift is booked Thursday."]);
+        const fork = await ctx.tool(rec.worker, "create_instance", { section: rec.sections[0], name: "e2e-filing r14 forklift", class: "e2e_filing_equipment" });
+        const keep = async (refiles) => (await ctx.tool(rec.worker, "keep_piece", { section: rec.sections[0], piece: "the forklift is booked Thursday", instances: [fork.instance], ...(refiles ? { refiles } : {}) })).entry;
+        const offered = async () => (await ctx.tool(orchestrator(ctx), "kept_pieces", {})).kept?.map((p) => p.entry) ?? [];
+        const refile = (entry) => ctx.tool(orchestrator(ctx), "refile", { entries: [entry] });
+        const tag = ctx.randomUUID().slice(0, 8);
+        const newClass = async (i) => {
+          const c = await ctx.tool(orchestrator(ctx), "create_class", { name: `e2e filing r14 ${tag} ${i}`, parents: ["resource"], evidence: [{ kind: "table", ref: "mssql:dbo_FJob" }] });
+          ctx.check(!c.error, `class ${i} made: ${JSON.stringify(c).slice(0, 200)}`);
+        };
+        let prev = await keep();
+        ctx.check(Boolean(prev), "Kept");
+        ctx.check(!(await offered()).includes(prev), "nothing new since it was Kept: not offered");
+        const early = await refile(prev);
+        ctx.check(early.refused?.[0]?.entry === prev && /no class was created/.test(early.refused[0].reason) && !early.started?.length, `refile refuses it, with the reason: ${JSON.stringify(early).slice(0, 300)}`);
+        for (let i = 1; i <= 3; i++) {
+          await newClass(i);
+          ctx.check((await offered()).includes(prev), `a class made since: offered (re-filing ${i})`);
+          const r = await refile(prev);
+          ctx.check(!r.error && !r.refused, `re-filing ${i} goes ahead: ${JSON.stringify(r).slice(0, 300)}`);
+          const next = await keep(prev);
+          ctx.check(Boolean(next) && next !== prev, `the re-filing's worker Keeps it again (${i})`);
+          const now = await offered();
+          ctx.check(!now.includes(prev) && !now.includes(next), `re-filed with no class since: neither the old entry nor the new one is offered (${i})`);
+          prev = next;
+        }
+        await newClass(4);
+        ctx.check(!(await offered()).includes(prev), "re-filed 3 times: never offered again, even after a new class");
+        const late = await refile(prev);
+        ctx.check(late.refused?.[0]?.entry === prev && /re-filed 3 times already/.test(late.refused[0].reason), `refile refuses a fourth: ${JSON.stringify(late).slice(0, 300)}`);
+        const chain = (await log(ctx, rec.doc)).filter((e) => e.outcome === "kept");
+        ctx.check(chain.length === 4 && chain.filter((e) => e.refiled_from).length === 3, `one piece, Kept once and re-filed three times: ${chain.length} Kept entries`);
       });
     },
   },

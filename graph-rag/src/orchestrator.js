@@ -16,7 +16,7 @@ import { log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { effectiveHome, homeName } from "./positions.js";
 import { positionMap } from "./scope.js";
-import { accountEvidence, answerRequest, filingLog, keptPieces, liveEnv, recordVerdict } from "./filing.js";
+import { accountEvidence, answerRequest, filingLog, keptPieces, liveEnv, recordVerdict, refileRefusal, REFILE_LIMIT } from "./filing.js";
 import { ANSWERS, VERDICTS } from "./model/filing.js";
 import { splitByHome } from "./model/brief.js";
 
@@ -115,21 +115,31 @@ export async function startUnstarted({ minutes, db = db0, start = startRecordWor
   return started;
 }
 
-/** re-file Kept pieces (by entry id) in a later batch: one worker per record and home, pointing back at them (R11) */
+/**
+ * re-file Kept pieces (by entry id) in a later batch: one worker per record and home, pointing back at them (R11).
+ * R14: an entry is refused, with its reason, when it was re-filed REFILE_LIMIT times already or when no class was
+ * created and no source table declared since it was Kept; the others go ahead.
+ */
 export async function refileKept(ids, by, env) {
   const groups = new Map();
+  const refused = [];
   for (const id of ids) {
     const e = (await env.store.entries({ id: String(id) }))[0];
     if (!e || e.outcome !== "kept") throw new Error(`entry ${id} isn't a Kept piece`);
+    const why = await refileRefusal(env, e);
+    if (why) {
+      refused.push({ entry: e.id, reason: why });
+      continue;
+    }
     const k = `${e.record}\u0000${e.home}`;
     groups.set(k, [...(groups.get(k) ?? []), e]);
   }
   const out = [];
   for (const list of groups.values()) {
-    const jobs = await startRecordWorkers(list[0].record, { by, refile: list.map((e) => e.id), why: "a fitting class or source may exist now for pieces that were Kept" });
+    const jobs = await (env.startRecordWorkers ?? startRecordWorkers)(list[0].record, { by, refile: list.map((e) => e.id), why: "a fitting class or source may exist now for pieces that were Kept" });
     out.push(...jobs.filter((j) => j.home === list[0].home));
   }
-  return { started: out };
+  return { started: out, ...(refused.length ? { refused } : {}) };
 }
 
 const reply = (v) => ({ content: [{ type: "text", text: JSON.stringify(v) }] });
@@ -167,13 +177,17 @@ record states. No free text reaches the worker.`,
   );
   server.tool(
     "kept_pieces",
-    "Kept pieces nothing has re-filed yet. When a fitting class or source has appeared for some, re-file them (graph-rag_refile). Recurring Kept pieces are a signal for a class.",
+    `Kept pieces that may be re-filed now: nothing has re-filed them yet, a class was created or a source table declared
+since each was Kept, and none has been re-filed ${REFILE_LIMIT} times already (R14). Re-file those a new class or
+source fits (graph-rag_refile); leave the rest. Recurring Kept pieces are a signal for a class.`,
     {},
     async () => reply({ kept: await keptPieces(await liveEnv()) }),
   );
   server.tool(
     "refile",
-    "Re-file Kept pieces (by entry id) now that a fitting class or source exists: a worker per record and home files them again. The Kept entries stay.",
+    `Re-file Kept pieces (by entry id, from graph-rag_kept_pieces) that a class created or a source table declared since
+they were Kept now fits: a worker per record and home files them again, and the Kept entries stay. Refused, with the
+reason, for a piece with nothing new since it was Kept or re-filed ${REFILE_LIMIT} times already (R14).`,
     { entries: z.array(z.string().min(8).max(80)).min(1).max(50) },
     async (args) => reply(await refileKept(args.entries, identity.user, await liveEnv())),
   );

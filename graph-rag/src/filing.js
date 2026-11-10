@@ -162,6 +162,7 @@ export async function liveEnv(over = {}) {
     classes: over.classes ?? { get: (key) => classByKey(key, db) },
     readRow: over.readRow ?? ((key, o = {}) => readSourceRow(key, { db, fetch: over.fetch, positions, ...o })),
     findRows: over.findRows ?? ((system, table, column, value, o = {}) => findSourceRows(system, table, column, value, { db, fetch: over.fetch, positions, ...o })),
+    laterClassOrSource: over.laterClassOrSource ?? ((at) => laterClassOrSource(at, db)),
     classesForTable: over.classesForTable ?? (async (table) => (await db.adbQuery(`SELECT _class_key AS key, _home AS home FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _record_table = :t AND (_status IS NULL OR _status <> 'retired')`, { t: table }).catch(() => [])).map((r) => ({ key: r.key, home: r.home ?? null }))),
     // the home of the connection that reads a system (its declaration's read.home; none, or no such system: the root)
     connectionHome: over.connectionHome ?? (async (system) => {
@@ -711,11 +712,59 @@ export async function filingLog({ record, outcome, worker, limit = 200 } = {}, e
   return { entries: await env.store.entries({ record, outcome, worker, limit }) };
 }
 
-/** Kept pieces nothing has re-filed yet (R11: nothing Kept is deleted; the orchestrator re-files them) */
+/** R14: the most times one piece is re-filed (the assistant's number; it can change) */
+export const REFILE_LIMIT = 3;
+
+/**
+ * R14: whether something that could give a Kept piece a home appeared after `at`: a class created, or a source table
+ * declared (a class given its table by update_class, or the stored source declarations changed). Classes made before
+ * classes carried a creation time count as older.
+ */
+export async function laterClassOrSource(at, db = realDb) {
+  const cls = await db.adbQuery(`SELECT count(*) AS n FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND (_created_at > :at OR _table_at > :at)`, { at }).catch(() => []);
+  if (Number(cls[0]?.n ?? 0) > 0) return true;
+  const src = (await db.adbQuery("SELECT updated_at FROM OrgPolicy WHERE scope = 'sources' LIMIT 1").catch(() => []))[0];
+  return Boolean(src?.updated_at && String(src.updated_at) > String(at));
+}
+
+/** how many re-filings led to this entry: its refiled_from chain, followed back */
+async function refileDepth(env, e) {
+  let n = 0;
+  const seen = new Set([e.id]);
+  for (let cur = e; cur?.refiled_from && !seen.has(cur.refiled_from) && n < REFILE_LIMIT + 1; ) {
+    seen.add(cur.refiled_from);
+    n++;
+    cur = (await env.store.entries({ id: cur.refiled_from }))[0];
+  }
+  return n;
+}
+
+/**
+ * Why a Kept entry may not be re-filed now (R14), or null when it may: it was re-filed REFILE_LIMIT times already, or
+ * no class was created and no source table declared since it was Kept. Both enforced here, not only asked of the
+ * orchestrator: kept_pieces doesn't offer such a piece and refile refuses it.
+ */
+export async function refileRefusal(env, e) {
+  if (!e || e.outcome !== KEPT) return "it isn't a Kept piece";
+  const depth = await refileDepth(env, e);
+  if (depth >= REFILE_LIMIT) return `this piece was re-filed ${depth} times already, the most allowed (R14)`;
+  const later = env.laterClassOrSource ?? ((at) => laterClassOrSource(at, env.db));
+  if (!(await later(e.at))) return "no class was created and no source table declared since this piece was Kept, so nothing new could give it a home (R14)";
+  return null;
+}
+
+/**
+ * Kept pieces nothing has re-filed yet (R11: nothing Kept is deleted; the orchestrator re-files them), offered only
+ * when R14 allows a re-filing: something new since, and fewer than REFILE_LIMIT re-filings behind it.
+ */
 export async function keptPieces(env) {
   const kept = await env.store.entries({ outcome: KEPT });
   const out = [];
-  for (const e of kept) if (!(await env.store.entries({ refiled_from: e.id })).length) out.push({ entry: e.id, record: e.record, home: e.home, piece: e.piece, instances: e.instances, at: e.at });
+  for (const e of kept) {
+    if ((await env.store.entries({ refiled_from: e.id })).length) continue;
+    if (await refileRefusal(env, e)) continue;
+    out.push({ entry: e.id, record: e.record, home: e.home, piece: e.piece, instances: e.instances, at: e.at });
+  }
   return out;
 }
 

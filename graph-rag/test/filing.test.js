@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dabTool } from "../e2e/fake-dab-core.mjs";
 import { enterData, forgetPrimaryKeys, forgetSources } from "../src/data-entry.js";
-import { accountEvidence, accountGiven, answerRequest, createInstance, makeJournal, fileToSource, giveAccount, holdPiece, keepPiece, keptPieces, readSourceRow, recordVerdict, requestOrchestrator, settleProposals } from "../src/filing.js";
+import { accountEvidence, accountGiven, answerRequest, createInstance, makeJournal, fileToSource, giveAccount, holdPiece, keepPiece, keptPieces, laterClassOrSource, readSourceRow, REFILE_LIMIT, refileRefusal, recordVerdict, requestOrchestrator, settleProposals } from "../src/filing.js";
 import { normalizeClass } from "../src/model/classes.js";
 import { parsePositionMap } from "../src/positions.js";
 
@@ -289,6 +289,7 @@ test("Kept: no system holds it, the document is the source; Hold asks the record
   assert.equal(h.store.entries_[1].target.table, "mssql:dbo_Job", "a Held piece goes to a source: its class's table");
   await assert.rejects(holdPiece({ section: "#71:3", piece: "x y z", question: "what is it really?" }, identity, h.env), /keep it/);
   assert.equal(h.dab.calls.filter((c) => c.name === "update_record").length, 0);
+  h.env.laterClassOrSource = async () => true; // a class made since (R14)
   assert.deepEqual((await keptPieces(h.env)).map((p) => p.entry), [h.store.entries_[0].id]);
 });
 
@@ -589,4 +590,66 @@ test("state_dependency goes through the classes stream's addDependency (C-B7): a
   for (const rid of ["#80:5", "#80:1"]) assert.ok(h.db.statements.some((st) => st.startsWith(`CREATE EDGE ABOUT FROM #71:3 TO ${rid}`)));
   await assert.rejects(stateDependency({ section: "#71:3", from: "mssql:dbo_Job:9999", to: "#80:1", stated_as: "agent" }, identity, h.env), /no such row/);
   assert.equal(h.depended.length, 1, "no dependency on a row the source doesn't hold");
+});
+
+test("R14: a Kept piece is offered for re-filing only when a class was created or a source table declared since it was Kept", async () => {
+  const h = setup();
+  const k = await keepPiece({ section: "#71:4", piece: "the forklift is booked Thursday", instances: ["#80:1"] }, identity, h.env);
+  const seen = [];
+  h.env.laterClassOrSource = async (at) => (seen.push(at), false);
+  assert.deepEqual(await keptPieces(h.env), [], "nothing new since it was Kept: not offered");
+  assert.equal(seen[0], h.store.entries_[0].at, "asked about what came after the entry's own time");
+  assert.match(await refileRefusal(h.env, h.store.entries_[0]), /no class was created and no source table declared/);
+  h.env.laterClassOrSource = async () => true;
+  assert.deepEqual((await keptPieces(h.env)).map((p) => p.entry), [k.entry]);
+  assert.equal(await refileRefusal(h.env, h.store.entries_[0]), null);
+});
+
+test("R14: after REFILE_LIMIT re-filings a piece is never offered again and refile refuses it, whatever is new", async () => {
+  const { refileKept } = await import("../src/orchestrator.js");
+  const h = setup();
+  h.env.laterClassOrSource = async () => true;
+  const started = [];
+  h.env.startRecordWorkers = async (record, o) => (started.push({ record, refile: o.refile }), [{ job: "j-" + started.length, home: "floor" }]);
+  // a piece Kept, then Kept again by each re-filing: a chain of refiled_from links
+  let prev = (await keepPiece({ section: "#71:4", piece: "the forklift is booked Thursday", instances: ["#80:1"] }, identity, h.env)).entry;
+  const chain = [prev];
+  for (let i = 1; i <= REFILE_LIMIT; i++) {
+    const r = await refileKept([prev], "orchestrator", h.env);
+    assert.equal(r.started.length, 1, `re-filing ${i} goes ahead`);
+    assert.equal(r.refused, undefined);
+    prev = (await keepPiece({ section: "#71:4", piece: "the forklift is booked Thursday", instances: ["#80:1"], refiles: prev }, identity, h.env)).entry;
+    chain.push(prev);
+  }
+  assert.equal(h.store.entries_.at(-1).refiled_from, chain.at(-2), "each Kept entry points back at the one it re-filed");
+  assert.deepEqual(await keptPieces(h.env), [], `re-filed ${REFILE_LIMIT} times: never offered again`);
+  const r = await refileKept([prev], "orchestrator", h.env);
+  assert.deepEqual(r.started, []);
+  assert.equal(r.refused?.[0]?.entry, prev);
+  assert.match(r.refused[0].reason, new RegExp(`re-filed ${REFILE_LIMIT} times already`));
+  assert.equal(started.length, REFILE_LIMIT, "no worker started for the refused one");
+  // nothing new: refused for that reason, and the others in the same call still go ahead
+  const fresh = (await keepPiece({ section: "#71:3", piece: "the crate is in bay 2", instances: ["#80:1"] }, identity, h.env)).entry;
+  h.env.laterClassOrSource = async (at) => at === h.store.entries_.find((e) => e.id === fresh).at;
+  const mixed = await refileKept([chain[0], fresh], "orchestrator", h.env);
+  assert.equal(mixed.started.length, 1);
+  assert.deepEqual(mixed.refused.map((x) => x.entry), [chain[0]]);
+  assert.match(mixed.refused[0].reason, /no class was created and no source table declared/);
+});
+
+test("R14: what counts as new: a class created or given its table after the entry, or the stored sources changed after it", async () => {
+  const at = "2026-11-10T12:00:00.000Z";
+  const db = (classes, sourcesAt) => ({
+    async adbQuery(sql, params) {
+      if (sql.includes("_kind = 'class'")) return [{ n: classes.filter((c) => (c.created ?? "") > params.at || (c.table ?? "") > params.at).length }];
+      if (sql.includes("OrgPolicy")) return sourcesAt ? [{ updated_at: sourcesAt }] : [];
+      return [];
+    },
+  });
+  assert.equal(await laterClassOrSource(at, db([{ created: "2026-11-10T11:00:00.000Z" }])), false, "an older class");
+  assert.equal(await laterClassOrSource(at, db([{}])), false, "a class with no creation time counts as older");
+  assert.equal(await laterClassOrSource(at, db([{ created: "2026-11-10T12:00:01.000Z" }])), true, "a class created since");
+  assert.equal(await laterClassOrSource(at, db([{ created: "2026-11-10T11:00:00.000Z", table: "2026-11-10T13:00:00.000Z" }])), true, "a table declared since");
+  assert.equal(await laterClassOrSource(at, db([], "2026-11-10T12:30:00.000Z")), true, "the stored sources changed since");
+  assert.equal(await laterClassOrSource(at, db([], "2026-11-10T11:30:00.000Z")), false);
 });
