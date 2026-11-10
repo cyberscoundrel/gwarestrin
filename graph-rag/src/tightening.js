@@ -18,6 +18,7 @@ import { canonical } from "./documents.js";
 import { log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { instanceSeenFrom } from "./instances.js";
+import { settleDocument } from "./document-home.js";
 import { EMPTY_AUTHORITY_MAP } from "./policy.js";
 import { loadPolicy, policy, policyMeta, serialized } from "./org-policy.js";
 import { positionMap, SCOPED } from "./scope.js";
@@ -88,10 +89,11 @@ async function thingLeaves(thing, left, except) {
 
 /**
  * One entry up: the instances it is about first, its own home last. Until that last
- * write it still counts as not moved, so a restart does the whole of it again. What waits for the
- * grader goes on waiting from its new home (regradeTick compares with `held`).
+ * write it still counts as not moved, so a restart does the whole of it again. What waits for its
+ * check goes on waiting from its new home (regradeTick compares with `held`), and its recheck keeps it no
+ * lower than `rule`, the home the class map now requires.
  */
-async function raise(row, to, note) {
+async function raise(row, to, note, rule = to) {
   const rid = String(row.rid);
   const from = effectiveHome(positionMap, row._home);
   for (const thing of await thingsOf(rid)) {
@@ -100,7 +102,7 @@ async function raise(row, to, note) {
   }
   let waiting = null;
   try {
-    waiting = row._ungraded ? JSON.stringify({ ...JSON.parse(row._ungraded), held: to, raised: note }) : null;
+    waiting = row._ungraded ? waitingWith(row._ungraded, { held: to, rule, raised: note }) : null;
   } catch {
     /* unreadable: regradeTick clears it */
   }
@@ -108,22 +110,20 @@ async function raise(row, to, note) {
   log.info(`${row.name ?? rid}: ${homeName(positionMap, from)} -> ${homeName(positionMap, to)} (${note})`);
 }
 
+/** what a waiting entry carries for its recheck (floor.js regradeTick), with these fields set; the stricter rule wins */
+function waitingWith(json, { held, rule, raised }) {
+  const w = JSON.parse(json);
+  const strictest = w.rule && positionMap.positions[w.rule] ? commonAncestor(positionMap, [w.rule, rule]) : rule;
+  return JSON.stringify({ ...w, ...(held ? { held } : {}), rule: strictest, raised });
+}
+
 /**
- * The document entry, once none of its sections is left where it stands: people there would see a title
- * and nothing under it, so it goes up to the lowest home one of its sections has. Sections are never
- * lower than their document, and any section still seen where the document is keeps the document there.
+ * R11.13: a document's title takes the strictest home among its sections. Settled after every raise, and again
+ * for a section already where the rule puts it, so a restart between the raise and the settling still settles it.
  */
-async function documentFollows(section, to, note) {
+async function titleFollows(section) {
   if (!section._doc_id) return;
-  const doc = (await adbQuery(`SELECT @rid AS rid, name, _home, _ungraded FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: section._doc_id }))[0];
-  if (!doc) return;
-  const rows = await adbQuery(`SELECT @rid AS rid, _home FROM ${ENTITY_LABEL} WHERE _kind = 'section' AND _doc_id = :d LIMIT ${NO_LIMIT}`, { d: section._doc_id });
-  const homes = rows.map((s) => (String(s.rid) === String(section.rid) ? to : effectiveHome(positionMap, s._home)));
-  const from = effectiveHome(positionMap, doc._home);
-  const above = (h) => h !== EVERYONE && (from === EVERYONE || ancestors(positionMap, from).includes(h));
-  if (!homes.length || !homes.every(above)) return;
-  const depth = (h) => ancestors(positionMap, h).length;
-  await raise(doc, homes.reduce((a, b) => (depth(b) > depth(a) ? b : a)), `${note}; none of its sections is left below that`);
+  await settleDocument(section._doc_id);
 }
 
 /** a map with only its class-level entries: what re-homing reads (R6: a map from classes to positions) */
@@ -159,13 +159,25 @@ async function applyChange(change) {
     // a person placed it after this rule changed: their call stands
     if (!row || (row._placed_at && row._placed_at > change.changed_at)) continue;
     const from = effectiveHome(positionMap, row._home);
-    // the stricter home: the lowest position at or above both where it is and every tightened class's position
-    const to = commonAncestor(positionMap, [from, ...keys.map((k) => k.authority)]);
-    if (to === from) continue;
+    // the home the map now requires, and the stricter home: the lowest position at or above both where it is and that
+    const rule = commonAncestor(positionMap, keys.map((k) => k.authority));
+    const to = commonAncestor(positionMap, [from, rule]);
     const by = keys.find((k) => commonAncestor(positionMap, [from, k.authority]) === to) ?? keys[0];
     const note = `raised to ${homeName(positionMap, to)}: the map now puts ${by.class} at ${homeName(positionMap, by.authority)}, ${stamp}`;
-    await documentFollows(row, to, note);
-    await raise(row, to, note);
+    if (to === from) {
+      // already there: one waiting for its check (held admin-only) keeps the rule for when it is checked
+      if (row._ungraded) {
+        try {
+          await adbCommand(`UPDATE ${rid} SET _ungraded = :w`, "sql", { w: waitingWith(row._ungraded, { rule, raised: note }) });
+        } catch {
+          /* unreadable: regradeTick clears it */
+        }
+      }
+      await titleFollows(row);
+      continue;
+    }
+    await raise(row, to, note, rule);
+    await titleFollows(row);
     moved++;
   }
   return moved;

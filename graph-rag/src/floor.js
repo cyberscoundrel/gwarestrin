@@ -266,9 +266,11 @@ export async function regradeTick() {
     const [verdict] = await checkBatch(w.origin, [entity]);
     if (verdict === undefined) return; // still no answer: next time
     const p = placeOne(positionMap, { origin: w.origin, verdict, floor: w.floor ?? w.origin });
-    // raised by a tightened rule while it waited: it stays no lower than the rule put it
-    const home = w.raised ? commonAncestor(positionMap, [p.home, w.held]) : p.home;
-    const note = w.raised && home === w.held ? w.raised : p.note;
+    // a class map entry that tightened while it waited (tightening.js): no lower than the home the rule requires
+    // (`rule`; an older marker has only `held`, where the rule put it)
+    const rule = w.rule && positionMap.positions[w.rule] ? w.rule : w.raised ? w.held : null;
+    const home = rule ? commonAncestor(positionMap, [p.home, rule]) : p.home;
+    const note = w.raised && rule && home === rule && home !== p.home ? w.raised : p.note;
     await adbCommand(`UPDATE ${rid} SET _home = :home, _grade = :note, _ungraded = null`, "sql", { home, note });
     if (r._doc_id) await settleDocument(r._doc_id).catch((e) => log.warn(`document ${r._doc_id} not settled after its check: ${String(e).slice(0, 160)}`));
     if (home !== w.held) {

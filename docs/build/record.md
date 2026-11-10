@@ -293,3 +293,21 @@ it.
 | 9 | `ingest.js recordHome` | The record tool's `home` argument is gone. A person moves a section afterwards with `set_home`. |
 | 10 | `floor.js gradeBatch` | No typed question judges end dates. A writer's own `valid_until` stands. |
 | 11 | `floor.js placeEntities` | R4 says once per section. Every entity written through `upsertEntities` is checked the same way (the restrict-only side). |
+
+## Review of ba583bc: the record stream's two items
+
+- **B2 (blocking), fixed.** `tightening.js` now calls `settleDocument` after every raise, in place of
+  `documentFollows`, so the title takes the strictest home among its sections (R11.13). It also settles a
+  section the rule finds already raised, so a restart between the raise and the settling still settles the
+  title. Scenario: `scenarios-rehoming.mjs`, "re-homing raises a section and its document's title goes with the
+  strictest section". It failed on the old code (the document stayed at floor) and passes now.
+- **Non-blocking 6, restored** in `scenarios-rehoming.mjs`, against classes, `INSTANCE_OF` and `ABOUT`:
+  - loosening widens nothing; a person lowers a section with `set_home`, and the next tightening moves it again;
+  - a restart partway finishes the change (now including the title the crash left behind), and running it
+    twice changes nothing;
+  - a direct edit of the stored policy, and a crash before the change was logged;
+  - a section waiting for its check.
+- **Found while restoring the last one, and fixed.** A section with no answer waits at the root, so a rule that
+  tightens doesn't move it. Its recheck would then have placed it below the rule. The waiting marker now
+  carries `rule`, the home the class map requires, and `regradeTick` places the section no lower than that.
+  This failed on the old code and passes now.
