@@ -57,7 +57,7 @@ describe("graph worker tools", () => {
     expect(w).toMatch(/You never pick Filed or Proposed/);
     expect(w).toMatch(/You never make or change a class/);
     expect(w).toMatch(/Keep requests few/);
-    expect(w).not.toMatch(/beyond: true/, "a worker sees only its audience (R11)");
+    expect(w).not.toMatch(/beyond|query_graph/, "a worker sees only its audience (R11): no beyond, no raw queries");
     expect(w).not.toMatch(/link_things|upsert_entities|merge_things|confirm_claim|resolve_subject|record_conflict|enter_data|mark_need_met|raise_question/);
     expect(w).toMatch(/Customers go by ERP code/);
     expect(w).not.toMatch(/Sharing knowledge/);

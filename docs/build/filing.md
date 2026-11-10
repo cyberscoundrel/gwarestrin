@@ -238,7 +238,7 @@ an outcome.
 | One job per record and home; off-record and unchecked sections never reach a worker | `worker-pool.js filingJob`, `claimThreads` | R4, R11.6, R11.11, R11.12 | gates |
 | The brief: record, sections, class tree, connected instances, dependencies seen at both ends, how each source is committed to; scoped and checked by the contract's `scopeBrief` and `assertBrief` | `worker-pool.js composeFilingBrief`, `pool.js taskBrief` | R7, R11.6, R11.8, R11.13 | marker leak test |
 | The orchestrator: batches by record in full, a worker per record and home, every record gets one, its filing tools | `src/orchestrator.js`, `master-tools.js batchTick`, `pool.js signalsMessage` | R4, R7, R11.6 | orchestrator tests, inbox test |
-| Instructions: worker, orchestrator, handler, liaison | `packages/server/src/agents/instructions/*.ts` | R2, R5, R10, R11 | server tests |
+| Instructions: worker, orchestrator, handler, liaison. A worker's instructions name no `beyond` and no `query_graph`: it reads only its audience (R11.6; the integrator removed both from its tools) | `packages/server/src/agents/instructions/*.ts` | R2, R5, R10, R11 | server tests |
 | The orchestrator's name where people see it; the filing counts in the worker panel | `graph-pool.ts`, `GraphWorkerPanel.svelte` | R7 | `graph-pool.test.ts` |
 
 ## Requests to the integrator (shared files)
@@ -260,10 +260,12 @@ an outcome.
 
 ## For other streams
 
-- **Sources:** `enterData` decides with `filedOrProposed` but without the class index, so a class with no map
-  entry of its own doesn't take its parents' entries (R9, BUILD.md 6). Passing `index` fixes it. The filing
-  stream's `findSourceRows` stands in for the read adapter's `find` and should be replaced by it. Filing only
-  updates rows: a piece that needs a new row has no tool yet.
+- **Sources:** `enterData` keeps deciding Filed or Proposed at integration; nothing moves into `fileToSource`. On
+  `claude/build-sources-000b53` (c1eaf39) it decides with `filedOrProposed` and the class index (R9, BUILD.md 6)
+  and the declaration's `writable`, and writes through `filing.js sourceJournal`. On `build-base` it still
+  decides without the index (fails safe: a subclass with no entry of its own is Proposed). The filing stream's
+  `findSourceRows` stands in for the read adapter's `findRows` and should be replaced by it. Filing only updates
+  rows: a piece that needs a new row has no tool yet.
 - **Classes:** the orchestrator's class tools (create a class, add a parent) are expected from the classes
   stream and registered for the `master` role; `answer_request` names their keys. Filing reads classes as
   contract rows (`_kind = 'class'`, `SUBCLASS_OF`) and instances as `_kind = 'thing'` with `INSTANCE_OF`.
