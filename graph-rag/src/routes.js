@@ -17,6 +17,7 @@ import { answerQuestions, claimThreads, createTask, enqueue, finishThread, JOB_I
 import { decideProposal, masterStatus } from "./master-tools.js";
 import { pruneExpired, prunePreview } from "./pruning.js";
 import { canEditPolicy, policy, policyDefaults, policyMeta, savePolicy } from "./org-policy.js";
+import { tighteningRunning } from "./tightening.js";
 import { createServer } from "./server.js";
 import { isOffRecord, OFF_RECORD_REFUSAL } from "./record-state.js";
 import { registerDiscoveryRoutes } from "./routes-discovery.js";
@@ -25,6 +26,13 @@ import { registerQueryRoutes } from "./tools-queries.js";
 /** ---- http ---- */
 export const app = express();
 app.use(express.json({ limit: "2mb" }));
+// an off-record chat agent's token changes nothing over HTTP, whichever route is added here (/mcp is decided per tool)
+app.use((req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD" || req.path === "/mcp") return next();
+  const identity = resolveIdentity(req.headers.authorization);
+  if (identity && isOffRecord(identity)) return res.status(403).json({ error: OFF_RECORD_REFUSAL });
+  next();
+});
 
 // ---- the Discovery stream's route group: drafted commitment classes, confirmed or retired by a person at the root ----
 registerDiscoveryRoutes(app);
@@ -111,7 +119,7 @@ app.get("/api/policy", (req, res) => {
   if (!identity) return res.status(401).json({ error: "unauthenticated" });
   const scope = scopeOf(identity);
   void Promise.all([
-    adbQuery("SELECT changed_at, changed_by, prev_json, next_json FROM PolicyChange ORDER BY changed_at DESC LIMIT 10").catch(() => []),
+    adbQuery("SELECT changed_at, changed_by, prev_json, next_json, rehome_status, rehome_moved FROM PolicyChange WHERE rehome_status IS NULL OR rehome_status <> 'baseline' ORDER BY changed_at DESC LIMIT 10").catch(() => []),
     canEditPolicy(identity, scope) ? prunePreview() : null,
   ])
     .then(([history, pruning]) =>
@@ -355,7 +363,7 @@ app.put("/api/policy", (req, res) => {
   if (!identity) return res.status(401).json({ error: "unauthenticated" });
   if (!canEditPolicy(identity, scopeOf(identity))) return res.status(403).json({ error: "only the organization's root can change these settings" });
   void savePolicy(req.body, identity).then(
-    (p) => res.json({ policy: p, ...policyMeta }),
+    (p) => res.json({ policy: p, ...policyMeta, rehoming: tighteningRunning() }),
     (e) => res.status(400).json({ error: String(e instanceof Error ? e.message : e).slice(0, 300) }),
   );
 });
@@ -369,11 +377,6 @@ function httpScope(req, res) {
   }
   if (!SCOPED || !positionMap) {
     res.status(409).json({ error: "the knowledge graph isn't divided into positions" });
-    return null;
-  }
-  // the routes below reach the same writes as the tools: an off-record chat agent's token doesn't get them either
-  if (req.method !== "GET" && isOffRecord(identity)) {
-    res.status(403).json({ error: OFF_RECORD_REFUSAL });
     return null;
   }
   return { identity, scope: scopeOf(identity) };

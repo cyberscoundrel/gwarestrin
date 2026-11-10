@@ -91,11 +91,21 @@ const plainLinker = (h) => h.api("/api/worker", { method: "PUT", body: JSON.stri
  */
 const workerResolves = (h, e, { name, type, key }) => h.tool(h.workerToken(String(e.rid)), "resolve_subject", { name, thing: { name, type, ...(key ? { key } : {}) }, reason: "e2e: looked the row up" });
 
+/** the rows a source holds for this file's scenarios: a worker's key must be a row, on a mint too (B17, B19) */
+const ROWS = {
+  dbo_Employee: { primaryKey: ["Employee"], rows: ["NGUD", "NGDT", "NGZ1", "NGZ2"].map((Employee) => ({ Employee })) },
+  dbo_Job: { primaryKey: ["Job"], rows: ["3260356", "3260357", "3260359", "7700001"].map((Job) => ({ Job })) },
+  dbo_Customer: { primaryKey: ["Customer"], rows: ["ACMEZ", "EXATRONZ", "GRIDLEY", "TOROZ", "WRENZ"].map((Customer) => ({ Customer })) },
+  dbo_Order: { primaryKey: ["Order"], rows: ["5500001", "5500002"].map((Order) => ({ Order })) },
+};
+let rowSource = null;
 /**
- * A read-only fake DAB in this process (a resolve that teaches a thing a key checks the row: B19), pointed at by the
- * organization's stored `sources` for one scenario. stop() puts the stored row back.
+ * A read-only fake DAB in this process, pointed at by the organization's stored `sources`. One for the file; its last
+ * scenario takes it down.
  */
-async function startRowSource(h, tables) {
+export async function startRowSource(h, extra = {}) {
+  Object.assign(ROWS, extra);
+  if (rowSource) return rowSource;
   const server = createServer(async (req, res) => {
     let s = "";
     for await (const c of req) s += c;
@@ -106,7 +116,7 @@ async function startRowSource(h, tables) {
     };
     if (body.method === "initialize") return reply({ protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "fake-rows" } });
     if (body.method !== "tools/call") return reply({});
-    reply(dabTool(tables, body.params?.name, body.params?.arguments ?? {}, { write: false }));
+    reply(dabTool(ROWS, body.params?.name, body.params?.arguments ?? {}, { write: false }));
   });
   await new Promise((r) => server.listen(4291, "0.0.0.0", r));
   server.unref();
@@ -116,12 +126,14 @@ async function startRowSource(h, tables) {
   const json = JSON.stringify({ mssql: { read: `http://${address}:4291/read/mcp` } }).replace(/'/g, "\\'");
   const r = await set(before === null ? `INSERT INTO OrgPolicy SET scope = 'sources', json = '${json}'` : `UPDATE OrgPolicy SET json = '${json}' WHERE scope = 'sources'`);
   h.check(!r.error, `sources stored: ${JSON.stringify(r).slice(0, 200)}`);
-  return {
+  rowSource = {
     stop: async () => {
       server.close();
+      rowSource = null;
       await set(before === null ? "DELETE FROM OrgPolicy WHERE scope = 'sources'" : `UPDATE OrgPolicy SET json = '${before.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}' WHERE scope = 'sources'`);
     },
   };
+  return rowSource;
 }
 
 /** a thing as the graph would hold it: the seed a scenario needs, written directly so the scenario controls its homes and keys */
@@ -183,6 +195,7 @@ const SCENARIOS = [
     async run(ctx) {
       const h = harness(ctx);
       await plainLinker(h);
+      await startRowSource(h);
       // two employees called Diep, each from its ERP row: a worker that looked them up links them by key
       // (bob's, at the floor: the candidates below are read from the floor, and a name reaches only what its reader can see)
       await h.save("bob", "e2e-adm1 diep roster", "Two people on the roster are called Diep.");
@@ -254,6 +267,7 @@ const SCENARIOS = [
       const n14 = await h.entry("e2e-adm5 exatron wants it earlier");
       await linkedUp(h, n13);
       await linkedUp(h, n14);
+      await startRowSource(h);
       // a worker that looked the jobs up links each by its own row's key: the job is the instance
       const j13 = await workerResolves(h, n13, { name: "3260356", type: "order", key: "mssql:dbo_Job:3260356" });
       const j14 = await workerResolves(h, n14, { name: "3260357", type: "order", key: "mssql:dbo_Job:3260357" });
@@ -372,21 +386,17 @@ const SCENARIOS = [
   },
   {
     name: "a keyed mention finds the keyless thing of its name, and a key is the same key in any case",
-    async run(ctx) {
+    run: noDerivedFloor(async (ctx) => {
       const h = harness(ctx);
       await plainLinker(h);
       // B19: a key an existing thing learns must be a row the source holds, so this needs a source that holds them
-      const source = await startRowSource(h, { dbo_Customer: { primaryKey: ["Customer"], rows: [{ Customer: "ACMEZ" }, { Customer: "EXATRONZ" }, { Customer: "TOROZ" }] } });
-      try {
+      await startRowSource(h);
       await h.save("bob", "e2e-adm18 keyless", "Called Exatronz about the next batch.");
       const note = await h.entry("e2e-adm18 keyless");
       // keyless: the worker's key finds it, and it learns the key
       const keyless = await seedThing(h, "Exatronz", { homes: ["floor"], type: "customer" });
       // the stored sources are cached for a minute: until it picks these up the resolve is refused with a connection error
-      const a = await h.until("the source is picked up", async () => {
-        const r = await workerResolves(h, note, { name: "Exatronz", type: "customer", key: "mssql:dbo_Customer:EXATRONZ" });
-        return /fetch failed|no connected source/.test(r.error ?? "") ? false : r;
-      }, 90_000);
+      const a = await workerResolves(h, note, { name: "Exatronz", type: "customer", key: "mssql:dbo_Customer:EXATRONZ" });
       h.check(a.minted === false && a.thing === keyless, `found, not minted: ${JSON.stringify(a).slice(0, 300)}`);
       h.check((await things(h, "Exatronz")).length === 1, "one Exatronz");
       h.check(((await h.sql(`SELECT _keys FROM ${keyless}`))[0]._keys ?? []).includes("mssql:dbo_Customer:EXATRONZ"), "it learned the key");
@@ -405,10 +415,7 @@ const SCENARIOS = [
       await linkedUp(h, n);
       h.check((await about(h, String(n.rid))).some((l) => l.dst === toro), "a key in the text finds it too");
       h.check((await sourceRefs(h, "mssql:dbo_Customer:toroz")).length === 0, "the SourceRef keeps the row's own spelling");
-      } finally {
-        await source.stop();
-      }
-    },
+    }),
   },
   {
     name: "same-named people aren't settled by a model's pick, in the first call or the residue's: both stay candidates and the note stays unresolved",
@@ -433,6 +440,220 @@ const SCENARIOS = [
       await linkedUp(h, second);
       h.check(!(await about(h, String(second.rid))).some((l) => [k1, k2].includes(l.dst)), "the residue's pick links neither");
       h.check((await things(h, "Zelda")).length === 2, "and nothing was minted");
+    },
+  },
+  {
+    name: "a name that collides with a hidden thing makes its own thing, and never binds to the hidden one (NB2)",
+    run: noDerivedFloor(async (ctx) => {
+      const h = harness(ctx);
+      await plainLinker(h);
+      await seedClass(h, "e2e-adm-nb2");
+      const hidden = await seedThing(h, "Hidcust", { homes: ["org"], aliases: ["hc secret"], keys: ["mssql:dbo_Customer:HC"], type: "customer" });
+      await record(h, "bob", "e2e-adm20 hidcust", "floor", [{ kind: "state", subject: { name: "Hidcust", actor: "customer" }, class: "e2e-adm-nb2", attribute: "status", value: "floor says hi" }]);
+      const [c] = await claimsOf(h, "e2e-adm20 hidcust");
+      h.check(!c.unresolved && c.dst !== hidden, `the claim is on the floor's own thing: ${JSON.stringify(c)}`);
+      const row = (await h.sql(`SELECT _homes FROM ${hidden}`))[0];
+      h.check(JSON.stringify(row._homes) === '["org"]', `the hidden thing's homes are unchanged: ${JSON.stringify(row)}`);
+      h.check((await things(h, "Hidcust")).length === 2, "two things, one each side of the line");
+      const seen = JSON.stringify(await h.tool("bob", "about_thing", { name: "hc secret" }));
+      h.check(!seen.includes("mssql:dbo_Customer:HC") && !seen.includes("Hidcust"), `the floor learns nothing of it: ${seen.slice(0, 300)}`);
+      // the same collision through a worker: it makes its own, without being told the other exists
+      await h.save("bob", "e2e-adm21 heron", "Project Heronz rack needs a label.");
+      const note = await h.entry("e2e-adm21 heron");
+      await linkedUp(h, note);
+      const heron = await seedThing(h, "Project Heronz", { homes: ["org"], aliases: ["heron secret"], keys: ["mssql:dbo_Project:HZ"], type: "project" });
+      const made = await workerResolves(h, note, { name: "Project Heronz", type: "project" });
+      h.check(made.minted === true && made.thing !== heron && !made.error, `its own thing: ${JSON.stringify(made).slice(0, 300)}`);
+      h.check(!JSON.stringify(made).includes("heron secret") && !/can't be found/.test(JSON.stringify(made)), "nothing says a hidden one exists");
+      h.check(JSON.stringify((await h.sql(`SELECT _homes FROM ${heron}`))[0]._homes) === '["org"]', "and the hidden one stays where it is");
+    }),
+  },
+  {
+    name: "a key reaches a hidden thing without bringing it down: the link is made, its label, aliases and other keys stay above (B9)",
+    run: retiring(noDerivedFloor(async (ctx) => {
+      const h = harness(ctx);
+      await plainLinker(h);
+      await startRowSource(h);
+      await seedClass(h, "e2e-adm-hidden");
+      const kestrel = await seedThing(h, "Project Kestrelz", { homes: ["org"], aliases: ["kestrel secret alias"], keys: ["mssql:dbo_Project:KZ", "mssql:dbo_ProjectSecret:KZ9"], type: "project" });
+      await h.save("bob", "e2e-adm22 key in floor note", "Please check mssql:dbo_Project:KZ for me.");
+      const note = await h.entry("e2e-adm22 key in floor note");
+      await linkedUp(h, note);
+      h.check((await about(h, String(note.rid))).some((l) => l.dst === kestrel), "the note is linked: one instance per key");
+      h.check(JSON.stringify((await h.sql(`SELECT _homes FROM ${kestrel}`))[0]._homes) === '["org"]', "the thing is not pulled down");
+      for (const name of ["mssql:dbo_Project:KZ", "Project Kestrelz", "kestrel secret alias"]) {
+        const r = await h.tool("bob", "about_thing", { name });
+        h.check(!(r.things ?? []).length, `about_thing "${name}" from the floor: ${JSON.stringify(r).slice(0, 300)}`);
+      }
+      const found = JSON.stringify(await h.tool("bob", "search_graph", { query: "check mssql:dbo_Project:KZ", as_of: new Date().toISOString() }));
+      h.check(!found.includes("Kestrelz") && !found.includes("KZ9"), `search doesn't name it either: ${found.slice(0, 400)}`);
+      const admin = JSON.stringify(await h.tool("admin", "about_thing", { name: "mssql:dbo_Project:KZ" }));
+      h.check(admin.includes("Project Kestrelz"), "above, it's there");
+      // a worker on the floor's section resolving by key: told the instance is held, and nothing about it
+      await seedThing(h, "Project Wrenz", { homes: ["org"], aliases: ["wren secret"], keys: ["mssql:dbo_Customer:WRENZ"], type: "customer" });
+      const wren = String((await h.thing("Project Wrenz")).rid);
+      await h.save("bob", "e2e-adm23 worker by key", "Something about a row, see the worker.");
+      const wn = await h.entry("e2e-adm23 worker by key");
+      await linkedUp(h, wn);
+      const r = await h.tool(h.workerToken(String(wn.rid)), "resolve_subject", { name: "the row", thing: { key: "mssql:dbo_Customer:WRENZ" }, reason: "e2e" });
+      h.check(!r.error && r.thing === wren && r.minted === false, `resolved to the instance holding the key: ${JSON.stringify(r).slice(0, 300)}`);
+      const said = JSON.stringify(r);
+      h.check(!said.includes("Wrenz") && !said.includes("wren secret"), `and told nothing of it: ${said.slice(0, 300)}`);
+      h.check(JSON.stringify((await h.sql(`SELECT _homes FROM ${wren}`))[0]._homes) === '["org"]', "the worker didn't bring it down");
+      // the worker's brief for that section is as quiet
+      const brief = await h.sql(`SELECT _unresolved FROM ${String(wn.rid)}`);
+      h.check(!JSON.stringify(brief).includes("Wrenz"), "nothing written on the section names it");
+      // what the floor wrote about a row it can't see the thing of stays its own to read: as the key, and nothing more
+      await record(h, "bob", "e2e-adm24 floor claim on the row", "floor", [{ kind: "state", subject: { key: "mssql:dbo_Customer:WRENZ" }, class: "e2e-adm-hidden", attribute: "note", value: "from the floor" }]);
+      const own = JSON.stringify(await h.tool("bob", "current_state", { subject: "mssql:dbo_Customer:WRENZ" }));
+      h.check(own.includes("from the floor"), `the floor reads its own claim: ${own.slice(0, 300)}`);
+      h.check(!own.includes("Wrenz") && !own.includes("wren secret"), `and nothing of the thing: ${own.slice(0, 300)}`);
+    })),
+  },
+  {
+    name: "what a restricted statement teaches a thing the floor knows stays restricted: aliases, keys and class (B8)",
+    run: retiring(noDerivedFloor(async (ctx) => {
+      const h = harness(ctx);
+      await plainLinker(h);
+      await seedClass(h, "e2e-adm-b8");
+      // an org-home claim naming a floor-known thing by key, under a name the floor hasn't got
+      const fennel = await seedThing(h, "Fennelz", { homes: ["floor"], keys: ["mssql:dbo_Customer:FENZ"], type: "customer" });
+      await record(h, "admin", "e2e-adm25 fennel restricted", "org", [{ kind: "state", subject: { key: "mssql:dbo_Customer:FENZ", name: "Ken dismissal case" }, class: "e2e-adm-b8", attribute: "note", value: "x" }]);
+      const [c] = await claimsOf(h, "e2e-adm25 fennel restricted");
+      h.check(c.dst === fennel, `the claim is on the thing: ${JSON.stringify(c)}`);
+      const floorSees = JSON.stringify(await h.tool("bob", "about_thing", { name: "Fennelz" }));
+      h.check(!floorSees.includes("ken dismissal") && !floorSees.includes("Ken dismissal"), `the alias doesn't reach the floor: ${floorSees.slice(0, 300)}`);
+      const byName = await h.tool("bob", "about_thing", { name: "Ken dismissal case" });
+      h.check(!(byName.things ?? []).length, `nor does the floor find it by that name: ${JSON.stringify(byName).slice(0, 200)}`);
+      h.check(!JSON.stringify(await h.sql(`SELECT _alias_norms FROM ${fennel}`)).includes("ken dismissal"), "the restricted name isn't among the names everyone reads");
+      const top = await h.tool("admin", "about_thing", { name: "Fennelz" });
+      h.check(JSON.stringify(top).includes("ken dismissal"), `above, it shows: ${JSON.stringify(top).slice(0, 300)}`);
+      // and it resolves from above, by that name, like any alias
+      await record(h, "admin", "e2e-adm26 fennel by name", "org", [{ kind: "state", subject: { name: "Ken dismissal case" }, class: "e2e-adm-b8", attribute: "note2", value: "y" }]);
+      h.check((await claimsOf(h, "e2e-adm26 fennel by name"))[0].dst === fennel, "a restricted reader resolves by it");
+      // a key first supplied by an org-home claim doesn't show in floor keys, and still names the row
+      const gantry = await seedThing(h, "Gantryz", { homes: ["floor"], type: "customer" });
+      await record(h, "admin", "e2e-adm27 gantry key", "org", [{ kind: "state", subject: { key: "mssql:dbo_Customer:GANZ", name: "Gantryz" }, class: "e2e-adm-b8", attribute: "note", value: "x" }]);
+      h.check((await claimsOf(h, "e2e-adm27 gantry key"))[0].dst === gantry, "the keyless thing is that row");
+      const floorKeys = JSON.stringify(await h.tool("bob", "about_thing", { name: "Gantryz" }));
+      h.check(!floorKeys.includes("GANZ"), `the key doesn't show on the floor: ${floorKeys.slice(0, 300)}`);
+      h.check(!JSON.stringify(await h.sql(`SELECT _keys FROM ${gantry}`)).includes("GANZ"), "and it isn't among the keys everyone reads");
+      // the held key is still the row's identity: no second instance by key from anywhere, and a floor statement of it opens it
+      await h.save("bob", "e2e-adm28 gantry key on floor", "Sent mssql:dbo_Customer:GANZ the cert.");
+      const n = await h.entry("e2e-adm28 gantry key on floor");
+      await linkedUp(h, n);
+      h.check((await things(h, "Gantryz")).length === 1 && (await about(h, String(n.rid))).some((l) => l.dst === gantry), "one instance, found by the held key");
+      h.check(JSON.stringify(await h.sql(`SELECT _keys FROM ${gantry}`)).includes("GANZ"), "stated at the floor, it is the floor's to read");
+      // the class stamp: a restricted claim doesn't label a floor thing either
+      const clsless = await seedThing(h, "Stampz", { homes: ["floor"], keys: ["mssql:dbo_Customer:STZ"], type: "customer" });
+      await record(h, "admin", "e2e-adm29 stamp", "org", [{ kind: "state", subject: { key: "mssql:dbo_Customer:STZ", class: "e2e-adm-b8" }, class: "e2e-adm-b8", attribute: "note", value: "x" }]);
+      h.check(!(await h.sql(`SELECT _class FROM ${clsless}`))[0]._class, "no class from above");
+    })),
+  },
+  {
+    name: "a second mention earns a node only for an individual: never-nodes stay claims in every spelling, a rack earns one, and the first claim moves onto it (B14, NB4)",
+    run: retiring(noDerivedFloor(async (ctx) => {
+      const h = harness(ctx);
+      await plainLinker(h);
+      for (const c of ["e2e-adm-note2", "e2e-adm-rack2"]) await seedClass(h, c);
+      for (const [i, name] of ["holiday schedule", "Holiday Schedule", "the time clock", "Time Clock"].entries()) {
+        for (const n of [1, 2]) await record(h, "alice", `e2e-adm30-${i}-${n}`, "ops", [{ kind: "event", subject: { name, class: "e2e-adm-note2" }, class: "e2e-adm-note2", attribute: "posted_at", value: `spot ${n}` }]);
+        h.check(!(await things(h, name)).length, `no thing for "${name}"`);
+        h.check((await claimsOf(h, `e2e-adm30-${i}-2`))[0].unresolved, `"${name}" stays a claim`);
+      }
+      await record(h, "alice", "e2e-adm31 payroll commitment", "ops", [{ kind: "commitment", subject: { name: "payroll", class: "e2e-adm-note2" }, class: "e2e-adm-note2", attribute: "due", value: "friday" }]);
+      h.check(!(await things(h, "payroll")).length, "a commitment on payroll isn't a node");
+      // floor first, ops second: the second earns the thing, the first moves onto it, and the floor can see the name it wrote
+      await record(h, "bob", "e2e-adm32 rack first", "floor", [{ kind: "state", subject: { name: "rack Q7", class: "e2e-adm-rack2" }, class: "e2e-adm-rack2", attribute: "holds", value: "titanium" }]);
+      h.check((await claimsOf(h, "e2e-adm32 rack first"))[0].unresolved, "named once, no thing yet");
+      await record(h, "alice", "e2e-adm33 rack second", "ops", [{ kind: "state", subject: { name: "rack Q7", class: "e2e-adm-rack2" }, class: "e2e-adm-rack2", attribute: "holds", value: "aluminum" }]);
+      const rack = (await things(h, "rack Q7"))[0];
+      h.check(rack, "the second place earns it");
+      const [first] = await claimsOf(h, "e2e-adm32 rack first");
+      h.check(!first.unresolved && first.dst === String(rack.rid), `the first claim is on the thing now: ${JSON.stringify(first)}`);
+      const history = JSON.stringify(await h.tool("alice", "state_history", { subject: "rack Q7", attribute: "holds" }));
+      h.check(history.includes("titanium") && history.includes("aluminum"), `both are the rack's history: ${history.slice(0, 500)}`);
+      const fromFloor = JSON.stringify(await h.tool("bob", "state_history", { subject: "rack Q7", attribute: "holds" }));
+      h.check(fromFloor.includes("titanium"), `the floor reads its own claim on it: ${fromFloor.slice(0, 400)}`);
+      // the same name in another class is another subject: its first mention isn't moved, and doesn't count
+      await record(h, "alice", "e2e-adm34 rack other class", "ops", [{ kind: "state", subject: { name: "rack P8", class: "e2e-adm-note2" }, class: "e2e-adm-note2", attribute: "holds", value: "x" }]);
+      await record(h, "alice", "e2e-adm35 rack other class 2", "ops", [{ kind: "state", subject: { name: "rack P8", class: "e2e-adm-rack2" }, class: "e2e-adm-rack2", attribute: "holds", value: "y" }]);
+      h.check(!(await things(h, "rack P8")).length, `one place per class: nothing minted yet`);
+      // a person's name is one subject whatever class it's written under: the second earns the node, and the first class's claim moves onto it
+      await record(h, "alice", "e2e-adm46 tomaz one", "ops", [{ kind: "event", subject: { name: "Tomaz Reyesz", class: "e2e-adm-note2" }, class: "e2e-adm-note2", attribute: "completed", value: "training" }]);
+      await record(h, "alice", "e2e-adm47 tomaz two", "ops", [{ kind: "state", subject: { name: "Tomaz Reyesz", class: "e2e-adm-rack2" }, class: "e2e-adm-rack2", attribute: "can_run", value: "setups" }]);
+      const [tomaz] = await things(h, "Tomaz Reyesz");
+      h.check(tomaz, "two places, two classes: one thing");
+      h.check(!(await claimsOf(h, "e2e-adm46 tomaz one"))[0].unresolved && (await claimsOf(h, "e2e-adm47 tomaz two"))[0].dst === String(tomaz.rid), "both claims rest on it");
+    })),
+  },
+  {
+    name: "people, customers and machines written with a class are things on first mention; same-named people stay unsettled by the class route (NB4, B16)",
+    run: retiring(noDerivedFloor(async (ctx) => {
+      const h = harness(ctx);
+      await plainLinker(h);
+      for (const c of ["e2e-adm-x employment", "e2e-adm-x customer", "e2e-adm-x work center"]) await seedClass(h, c);
+      await record(h, "alice", "e2e-adm36 kayla", "ops", [{ kind: "state", subject: { name: "Kaylaz", class: "e2e-adm-x employment" }, class: "e2e-adm-x employment", attribute: "status", value: "permanent" }]);
+      const kayla = (await things(h, "Kaylaz"))[0];
+      h.check(kayla && kayla._thing_type === "person", `a person by the class: ${JSON.stringify([kayla, await claimsOf(h, "e2e-adm36 kayla")])}`);
+      h.check(!(await claimsOf(h, "e2e-adm36 kayla"))[0].unresolved, "the claim is on her");
+      await record(h, "alice", "e2e-adm37 corvane", "ops", [{ kind: "state", subject: { name: "Corvanez Medical", class: "e2e-adm-x customer" }, class: "e2e-adm-x customer", attribute: "status", value: "prospect" }]);
+      h.check((await things(h, "Corvanez Medical"))[0]?._thing_type === "customer", "a customer by its class");
+      await record(h, "alice", "e2e-adm38 cnc", "ops", [{ kind: "observation", subject: { name: "CNC 97", class: "e2e-adm-x work center" }, class: "e2e-adm-x work center", attribute: "fault", value: "spindle" }]);
+      h.check((await things(h, "CNC 97"))[0]?._thing_type === "machine", "a machine by its class and number");
+      await record(h, "alice", "e2e-adm39 not a person", "ops", [{ kind: "state", subject: { name: "shift coverage", class: "e2e-adm-x employment" }, class: "e2e-adm-x employment", attribute: "status", value: "x" }]);
+      h.check(!(await things(h, "shift coverage")).length, "a phrase in a person's class is no person");
+      await seedClass(h, "e2e-adm-hires");
+      const a = await seedThing(h, "Diep Cz", { homes: ["ops"], keys: ["mssql:dbo_Employee:C1"], type: "person", cls: "e2e-adm-hires" });
+      await h.tool("admin", "execute_graph", { language: "sql", command: "CREATE VERTEX Entity SET name = 'Diep Cz (seed2)', label = 'Diep Cz', _kind = 'thing', _norm = 'diep cz', _keys = ['mssql:dbo_Employee:C2'], _homes = ['ops'], _home = 'org', _thing_type = 'person'" });
+      for (const n of [1, 2]) {
+        await record(h, "alice", `e2e-adm40-${n}`, "ops", [{ kind: "state", subject: "Diep Cz", class: "e2e-adm-hires", attribute: "status", value: `v${n}` }]);
+        const [c] = await claimsOf(h, `e2e-adm40-${n}`);
+        h.check(c.unresolved, `a class stamp on one of two people settles nothing: ${JSON.stringify(c)}`);
+      }
+      h.check((await things(h, "Diep Cz")).length === 2, "and no third is made");
+      void a;
+    })),
+  },
+  {
+    name: "PO 78912 by every route: named twice, as a commitment, with a key the source doesn't hold, through a worker; a key the source holds is an instance (B17)",
+    run: retiring(noDerivedFloor(async (ctx) => {
+      const h = harness(ctx);
+      await plainLinker(h);
+      await startRowSource(h);
+      await seedClass(h, "e2e-adm-orders", "mssql:dbo_Order");
+      await seedClass(h, "e2e-adm-free");
+      const pos = async () => h.sql("SELECT label, _keys FROM Entity WHERE _kind = 'thing' AND (label LIKE '%78912%' OR _keys.asString() LIKE '%78912%')");
+      for (const n of [1, 2]) await record(h, "alice", `e2e-adm41-${n}`, "ops", [{ kind: "state", subject: { name: "PO 78912", class: "e2e-adm-orders" }, class: "e2e-adm-orders", attribute: "status", value: `v${n}` }]);
+      h.check(!(await pos()).length, "named twice under a table's class: no node");
+      for (const n of [1, 2]) await record(h, "alice", `e2e-adm42-${n}`, "ops", [{ kind: "commitment", subject: { name: "P.O. 78912", class: "e2e-adm-free" }, class: "e2e-adm-free", attribute: "due", value: `v${n}` }]);
+      h.check(!(await pos()).length, "named twice under a class with no table, as a commitment, spelled another way: no node");
+      await record(h, "alice", "e2e-adm43 po by key", "ops", [{ kind: "state", subject: { key: "mssql:dbo_Order:78912", name: "PO 78912", class: "e2e-adm-orders" }, class: "e2e-adm-orders", attribute: "status", value: "open" }]);
+      const [byKey] = await claimsOf(h, "e2e-adm43 po by key");
+      h.check(byKey.unresolved && !(await pos()).length, `a key the source doesn't hold mints nothing: ${JSON.stringify(byKey)}`);
+      await h.save("alice", "e2e-adm44 po worker", "PO 78912 again.");
+      const note = await h.entry("e2e-adm44 po worker");
+      await linkedUp(h, note);
+      const byName = await workerResolves(h, note, { name: "PO 78912", type: "order" });
+      h.check(byName.error && !(await pos()).length, `a worker's judgement doesn't make a row's number a node: ${JSON.stringify(byName).slice(0, 200)}`);
+      const noRow = await workerResolves(h, note, { name: "PO 78912", type: "order", key: "mssql:dbo_Order:78912" });
+      h.check(noRow.error && !(await pos()).length, `nor a key the source doesn't hold: ${JSON.stringify(noRow).slice(0, 200)}`);
+      // the source has this row: the key is an identity, and an instance is made of it
+      await record(h, "alice", "e2e-adm45 real order", "ops", [{ kind: "state", subject: { key: "mssql:dbo_Order:5500001", class: "e2e-adm-orders" }, class: "e2e-adm-orders", attribute: "status", value: "open" }]);
+      const [real] = await claimsOf(h, "e2e-adm45 real order");
+      h.check(!real.unresolved, `a row the source holds: ${JSON.stringify(real)}`);
+      const ok = await workerResolves(h, note, { name: "Order 5500002", type: "order", key: "mssql:dbo_Order:5500002" });
+      h.check(ok.minted === true && !ok.error, `a worker, with a row: ${JSON.stringify(ok).slice(0, 200)}`);
+      // a key minted later brings the earlier key-only claim onto the instance
+      const [early] = await claimsOf(h, "e2e-adm43 po by key");
+      h.check(early.unresolved, "still none for the PO: its row never appeared");
+    })),
+  },
+  {
+    name: "(the row source goes away)",
+    async run(ctx) {
+      if (!rowSource) return;
+      await rowSource.stop();
     },
   },
 ];

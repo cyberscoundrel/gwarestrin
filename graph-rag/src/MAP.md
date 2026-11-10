@@ -25,13 +25,14 @@ changes.
 | `sharing.js` | 425 | grants: `grantCache`, `grantAccess`, `revokeGrant`, `listGrants`, share proposals and the shares waiting on a pending write, `findShareable` | Authority |
 | `requests.js` | 466 | needs: questions as entries, how they meet assertions, the asker's and the owners' sides | Queries |
 | `ingest.js` | 274 | documents: `requestIngest`, `ingestDocument`, `extractFacts`, `readDocument`, the document store handle | Condenser |
-| `linker.js` | 228 | `linkMentions`, `jobMentions`, `findThing`, `findEntry`, `thingNamed`, the ABOUT edge helpers | Admission and resolution |
+| `linker.js` | 228 | `linkMentions`, `jobMentions`, `findEntry`, `thingNamed`, the ABOUT edge helpers | Admission and resolution |
 | `worker-pool.js` | 518 | the job queue (`enqueue`, `workerTick`), the thread pool (`claimThreads`, `finishThread`, `resumeThread`), questions, the proposals list, `logChange`, `createTask`, the worker's settings and `workerStatus` | Reconciliation and data entry |
 | `worker-tools.js` | 579 | a worker thread's tools (`workerUpsert`, `workerLink`, `workerMerge`, …) and their MCP registration | Reconciliation and data entry |
 | `triage.js` | 136 | `intakeWithTriage`, `recordTriageOutcome`, `triageStats` | Reconciliation and data entry (it feeds the master's batches; the decision model itself is `decisions.js`) |
 | `master-tools.js` | 343 | the master (`batchTick`, signals, `masterStartWorker`, …), handlers, and the MCP registration of the master, handler and liaison tools | Reconciliation and data entry |
 | `pruning.js` | 79 | `pruneExpired`, `prunePreview` | housekeeping; the integrator |
 | `org-policy.js` | 70 | the organization policy: `policy`, `loadPolicy`, `savePolicy`, `expiryRules`, `canEditPolicy` | Authority |
+| `tightening.js` | 217 | a rule that tightens re-homes what is already written: `settleTightening` | Authority |
 | `routes.js` | 459 | the express app: `/mcp` and every `/api/*` route | shared: each stream adds its own route group; the integrator merges |
 | `server.js` | 491 | the composition root: `createServer` (the MCP tool table) and `boot` | the integrator |
 

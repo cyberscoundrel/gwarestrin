@@ -12,16 +12,16 @@
  * (server.js still registers it for the worker role).
  */
 import { z } from "zod";
-import { effectiveHome } from "./positions.js";
+import { commonAncestor, effectiveHome, homeName } from "./positions.js";
 import { normalize, THING_TYPES } from "./things.js";
-import { sameKey } from "./resolve.js";
+import { isRecordNumber, sameKey } from "./resolve.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
-import { aboutOnce, findThing, linkMentions, thingSeenFrom } from "./linker.js";
+import { aboutOnce, everyReaderSees, heldSeen, linkMentions, repointClaim, seenThing, teach, thingSeenFrom } from "./linker.js";
 import { positionMap } from "./scope.js";
 import { liftRefusal, workerWriteFloor } from "./floor.js";
-import { actsForOf, assertNotWaiting, claimById, claimsOnAttribute, logChange, PROPOSED_NOTE, raiseQuestion, resolveSubjectStub, unresolvedNames } from "./worker-pool.js";
+import { actsForOf, assertNotWaiting, claimById, claimsOfSection, claimsOnAttribute, logChange, priorState, PROPOSED_NOTE, raiseQuestion, resolveSubjectStub, unresolvedNames } from "./worker-pool.js";
 import { ensureSourceRef, referTo } from "./audit.js";
-import { assertWritable, clientFor, columnFor, confirmAgainstRow, enterData, rowKeyFor, settleOpenAttempts } from "./data-entry.js";
+import { clientFor, confirmAgainstRow, enterData, fieldsForClaim, rowKeyFor, settleOpenAttempts } from "./data-entry.js";
 import { askerSeesClaim } from "./requests.js";
 import { closeIntervals, overlaps } from "./model/claims.js";
 import { parseKey } from "./model/schema.js";
@@ -32,24 +32,51 @@ export async function workerUpsert() {
   throw new Error("A reconciliation worker writes no entries: confirm a claim (confirm_claim), resolve its subject (resolve_subject), record a conflict (record_conflict), enter data into the source (enter_data), or ask (raise_question).");
 }
 
-/** a claim by id, or a plain refusal */
-async function needClaim(id) {
+/** the same answer for a claim that doesn't exist and one that isn't this worker's: an id is not a way to look */
+const notInBrief = (id) => new Error(`no claim ${id} in your brief: give a claim id from your brief`);
+
+/**
+ * A claim the worker's own section makes, or a plain refusal. Which claim it acts on is a model's word, and a
+ * claim decides who is acted for: so the claim must be one of this worker's section, which the token says.
+ */
+async function ownClaim(id, identity) {
   const c = await claimById(String(id ?? "").trim());
-  if (!c) throw new Error(`no claim ${id}: give a claim id from your brief`);
+  if (!c || c.section !== String(identity.role?.entry ?? "")) throw notInBrief(id);
   return c;
 }
 
 /**
- * The row a claim's subject means, among the thing's record keys: the one the claim names, else the one in
- * its class's table, else the only one (data-entry.js rowKeyFor). `why` says what's missing when none can
- * be determined.
+ * A claim the worker's brief shows it: its own section's, or the prior state beside one (another section's claim
+ * on the same subject and attribute, seen by the people of this section: priorState). For what takes two claims
+ * or reads one; nothing that writes to a source takes this.
+ */
+async function briefClaim(id, identity) {
+  const c = await claimById(String(id ?? "").trim());
+  const entry = String(identity.role?.entry ?? "");
+  if (c?.section === entry) return c;
+  if (c?.resolved && RID_RE.test(entry)) {
+    const home = effectiveHome(positionMap, (await adbQuery(`SELECT _home FROM ${entry}`).catch(() => []))[0]?._home);
+    for (const own of await claimsOfSection(entry)) {
+      if (!own.resolved || own.thing !== c.thing || own.attribute !== c.attribute) continue;
+      if ((await priorState(own, home, { limit: 20 })).some((p) => p.id === c.id)) return c;
+    }
+  }
+  throw notInBrief(id);
+}
+
+/**
+ * The row a claim's subject means, among the thing's record keys: the one the claim names, which the thing must
+ * hold; when it names none, the one in its class's table, else the only one (data-entry.js rowKeyFor). `why` says
+ * what's missing when none can be determined.
  */
 async function keyOf(claim) {
   if (!claim.resolved) return null;
-  const t = (await adbQuery(`SELECT label, _keys, _class FROM ${claim.thing}`).catch(() => []))[0];
-  const keys = (Array.isArray(t?._keys) ? t._keys : []).map((k) => parseKey(k)).filter(Boolean);
-  const cls = claim.class ? (await adbQuery("SELECT record_table FROM CommitmentClass WHERE name = :n AND status = 'confirmed' LIMIT 1", { n: claim.class }).catch(() => []))[0] : null;
-  return { thing: t, keys, ...rowKeyFor({ subjectKey: claim.subject?.key ?? null, keys, recordTable: cls?.record_table ?? null }) };
+  const row = (await adbQuery(`SELECT label, _keys, _class, _homes, _held_keys FROM ${claim.thing}`).catch(() => []))[0];
+  const home = await sectionHome(claim);
+  const t = row && !seenThing(row, home) ? { ...row, label: null } : row; // a thing homed where this section isn't seen: its label stays out of what's said here
+  const keys = [...(Array.isArray(t?._keys) ? t._keys : []), ...heldSeen(t?._held_keys, home)].map((k) => parseKey(k)).filter(Boolean);
+  const cls = claim.class ? (await adbQuery("SELECT record_table FROM CommitmentClass WHERE name = :n AND status = 'confirmed' LIMIT 1", { n: claim.class }))[0] : null;
+  return { thing: t, keys, ...rowKeyFor({ subjectKey: claim.subject?.key ?? null, keys, recordTable: cls?.record_table ?? null, scope: claim.subject?.scope ?? null }) };
 }
 
 /** a key a worker offers for an existing thing must be a row the source holds; anything else is refused, not stored */
@@ -72,7 +99,7 @@ async function sectionHome(claim) {
  * is reported, and entering the claim's value into the row is a separate, authorized act (enter_data).
  */
 async function workerConfirmClaim(args, identity) {
-  const claim = await needClaim(args.claim_id);
+  const claim = await ownClaim(args.claim_id, identity);
   if (!claim.resolved) throw new Error(`claim ${claim.id}'s subject is unresolved: resolve it first (resolve_subject), or ask`);
   const { thing, key, why } = await keyOf(claim);
   if (!key) throw new Error(`${thing?.label ?? claim.thing}: ${why}, so there's no source row to confirm against`);
@@ -105,7 +132,7 @@ async function workerConfirmClaim(args, identity) {
  */
 async function workerRecordConflict(args, identity) {
   await assertNotWaiting(identity);
-  const [a, b] = await Promise.all(args.claim_ids.map(needClaim));
+  const [a, b] = await Promise.all(args.claim_ids.map((id) => briefClaim(id, identity)));
   if (a.id === b.id) throw new Error("two different claims are needed");
   if (!a.resolved || !b.resolved) throw new Error("both claims need a resolved subject: resolve_subject first");
   if (a.thing !== b.thing) throw new Error(`not a conflict: the claims are about different subjects (${a.thing} and ${b.thing})`);
@@ -151,13 +178,15 @@ async function workerRecordConflict(args, identity) {
  */
 async function workerResolveSubject(args, identity) {
   await assertNotWaiting(identity);
-  const claim = args.claim_id ? await needClaim(args.claim_id) : null;
+  const claim = args.claim_id ? await ownClaim(args.claim_id, identity) : null;
   if (claim?.resolved) throw new Error(`claim ${claim.id}'s subject is already resolved (${claim.thing}); nothing to do`);
   if (!claim && !args.name) throw new Error("which subject: a claim_id from your brief, or an unresolved name");
   const sectionRid = claim ? claim.section : identity.role.entry;
   const want = { key: args.thing?.key ?? null, name: args.thing?.name ?? args.name ?? claim?.subject?.name ?? null, type: args.thing?.type ?? null };
   const key = want.key ? parseKey(want.key) : null;
   if (want.key && !key) throw new Error(`not a record key (system:table:row): ${want.key}`);
+  // which row a claim names is what its section said: resolving finds the thing, it doesn't change the row
+  if (key && claim?.subject?.key && !sameKey(key.key, String(claim.subject.key).trim())) throw new Error(`claim ${claim.id} names ${claim.subject.key}, not ${key.key}: a worker doesn't change which row a claim is about. Resolve it to the row it names, or report it.`);
   const home = claim ? await sectionHome(claim) : effectiveHome(positionMap, (await adbQuery(`SELECT _home FROM ${sectionRid}`).catch(() => []))[0]?._home);
   const { lift, floor } = workerWriteFloor(identity, home);
   let thing = await resolveSubjectStub({ key: key?.key ?? null, name: want.name }, floor);
@@ -173,35 +202,29 @@ async function workerResolveSubject(args, identity) {
     const type = String(want.type).toLowerCase();
     if (!THING_TYPES.includes(type)) throw new Error(`type must be one of ${THING_TYPES.join(", ")}`);
     if (lift) throw new Error(liftRefusal(want.name, lift));
+    if (!key && isRecordNumber(want.name)) throw new Error(`"${want.name}" is a row's number: resolve it by its record key, or leave it as content of the claim`);
+    // a key only names an instance if the source has the row: anything else is refused, not stored
+    if (key) await assertRowExists(key);
     // the worker vouches for the name: the linker mints it (and links the section to it) under its admission rules
     const [r] = await linkMentions(sectionRid, [{ name: want.name, type, role: "subject", ...(key ? { key: key.key } : {}) }], floor, { unsure: "skip", create: true, seen_by: identity.user });
     if (!r || (!r.created && !r.linked)) throw new Error(`the linker made nothing of "${want.name}": ${r?.skipped ?? r?.unsure ?? "no reason given"}`);
-    thing = await findThing({ name: want.name, type, ...(key ? { key: key.key } : {}) });
-    if (!thing) throw new Error(`"${want.name}" was linked but can't be found as one thing: give its key`);
+    // the thing the linker just linked, by its id: never a second search by name, which can land on what this worker can't see
+    thing = { rid: r.thing, label: want.name, _thing_type: type };
     minted = Boolean(r.created);
     if (claim && minted) await adbCommand(`UPDATE ${thing.rid} SET _class = :c`, "sql", { c: claim.class }).catch(() => {});
   } else {
-    // an existing thing learns the key and the class it was resolved under, and is seen from here
-    const cur = (await adbQuery(`SELECT _keys, _class FROM ${thing.rid}`).catch(() => []))[0] ?? {};
-    const keys = Array.isArray(cur._keys) ? cur._keys : [];
+    // an existing thing learns the key and the class it was resolved under, and is seen from here (if it can be: thingSeenFrom)
+    const cur = (await adbQuery(`SELECT _keys, _held_keys, _class, _homes FROM ${thing.rid}`).catch(() => []))[0] ?? {};
+    const keys = [...(Array.isArray(cur._keys) ? cur._keys : []), ...(Array.isArray(cur._held_keys) ? cur._held_keys.map((k) => String(k).split("\t").pop()) : [])];
     if (key && !keys.some((x) => sameKey(x, key.key))) await assertRowExists(key);
-    await adbCommand(`UPDATE ${thing.rid} SET _keys = :k, _class = :c`, "sql", {
-      k: key && !keys.some((x) => sameKey(x, key.key)) ? [...keys, key.key].slice(-10) : keys,
-      c: cur._class ?? claim?.class ?? null,
-    }).catch(() => {});
+    if (key) await teach(thing.rid, { key: key.key }, floor, { seen_by: identity.user });
+    if (!cur._class && claim?.class && everyReaderSees(cur, floor)) await adbCommand(`UPDATE ${thing.rid} SET _class = :c`, "sql", { c: claim.class }).catch(() => {});
     await thingSeenFrom(String(thing.rid), floor).catch(() => {});
   }
   const rid = String(thing.rid);
   if (claim) {
     // the claim now points at its instance: the same edge properties, a new end
-    const props = (await adbQuery(`SELECT id, kind, class, attribute, value, value_num, valid_from, valid_until, recorded_at, recorded_by, closed_by, _home, subject FROM ${claim.edge}`))[0];
-    if (!props) throw new Error("the claim's edge is gone");
-    await adbCommand(`DELETE FROM ${claim.edge}`);
-    await adbCommand(
-      `CREATE EDGE CLAIMS FROM ${claim.section} TO ${rid} SET id = :id, kind = :kind, class = :cls, attribute = :attr, value = :value, value_num = :num, valid_from = :vf, valid_until = :vu, recorded_at = :ra, recorded_by = :rb, closed_by = :cb, _home = :home, subject = :subject`,
-      "sql",
-      { id: props.id, kind: props.kind, cls: props.class, attr: props.attribute, value: props.value, num: props.value_num ?? null, vf: props.valid_from, vu: props.valid_until ?? null, ra: props.recorded_at, rb: props.recorded_by, cb: props.closed_by ?? null, home: props._home ?? null, subject: JSON.stringify({ ...(claim.subject ?? {}), key: key?.key ?? claim.subject?.key ?? null, name: want.name }) },
-    );
+    await repointClaim(claim.edge, claim.section, rid, { subject: JSON.stringify({ ...(claim.subject ?? {}), key: key?.key ?? claim.subject?.key ?? null, name: want.name }) });
   } else {
     // the name is settled: it leaves the entry's unresolved list, and the entry is about the thing (as when the linker mints)
     const row = (await adbQuery(`SELECT _unresolved FROM ${sectionRid}`).catch(() => []))[0];
@@ -210,7 +233,8 @@ async function workerResolveSubject(args, identity) {
     const left = unresolved.filter((u) => normalize(u.name) !== normalize(args.name));
     await adbCommand(`UPDATE ${sectionRid} SET _unresolved = :u`, "sql", { u: left.length ? JSON.stringify(left) : null }).catch(() => {});
   }
-  await logChange(identity, { kind: "resolve", ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, label: thing.label, minted, ...(key ? { key: key.key } : {}), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  await logChange(identity, { kind: "resolve", ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, ...(thing.hidden ? {} : { label: thing.label }), minted, ...(key ? { key: key.key } : {}), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
+  if (thing.hidden) return { ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, minted, key: key.key, note: "Resolved to the instance holding this key. It is homed where this section's people can't see it, so nothing more of it is shown here." };
   return { ...(claim ? { claim: claim.id } : { name: args.name }), thing: rid, label: thing.label, type: thing._thing_type, minted, ...(key ? { key: key.key } : {}), note: minted ? `Made ${thing.label} (${thing._thing_type}) and resolved to it.` : `Resolved to the existing ${thing.label} (${thing._thing_type}).` };
 }
 
@@ -238,7 +262,7 @@ export async function linkResolvedThing(sectionRid, thingRid, role, { about = ab
  */
 async function workerMarkNeedMet(args, identity) {
   await assertNotWaiting(identity);
-  const claim = await needClaim(args.claim_id);
+  const claim = await briefClaim(args.claim_id, identity);
   if (!claim.resolved) throw new Error(`claim ${claim.id}'s subject is unresolved: resolve it first`);
   const ref = String(args.need ?? "").trim();
   const need = RID_RE.test(ref)
@@ -259,14 +283,30 @@ async function workerMarkNeedMet(args, identity) {
 }
 
 /**
- * Enter data into the source row a claim is about: the claim's value into the row's column for its
- * attribute (or the fields given), for the person who put the section on record, under their position.
- * data-entry.js decides by authority: applied through the write-capable instance, proposed for someone
- * with authority, or refused; every outcome is audited (an AuditEvent WROTE to the row's SourceRef).
+ * Where an entry must wait for a person, because of this agent and not the person it acts for: what the agent read
+ * in the window reaches fewer people than the section does (the floor every worker write answers to), or the claim
+ * itself is seen from above its section. Null when neither: a value that reaches the source can't then carry
+ * anything the section's people couldn't see.
+ */
+async function heldAbove(claim, identity) {
+  const home = await sectionHome(claim);
+  const { lift } = workerWriteFloor(identity, home);
+  const seenFrom = claim.home ? effectiveHome(positionMap, claim.home) : home;
+  const at = commonAncestor(positionMap, [lift?.floor ?? home, seenFrom]);
+  if (at === home) return null;
+  return { home: at, why: lift ? `in the last hours this worker read entries at ${lift.read.join(", ") || homeName(positionMap, lift.floor)} that people at ${homeName(positionMap, home)} can't see` : `this claim is seen only from ${homeName(positionMap, seenFrom)}, above its section` };
+}
+
+/**
+ * Enter data into the source row a claim is about: the claim's own value into the row's column named for its
+ * attribute, for the person who put the section on record, under their position. Which claim is the worker's
+ * word; only one of its own section's will do. data-entry.js decides by authority: applied through the
+ * write-capable instance, proposed for someone with authority (always, when the agent's floor holds it), or
+ * refused; every outcome is audited (an AuditEvent WROTE to the row's SourceRef).
  */
 async function workerEnterData(args, identity) {
   await assertNotWaiting(identity);
-  const claim = await needClaim(args.claim_id);
+  const claim = await ownClaim(args.claim_id, identity);
   if (!claim.resolved) throw new Error(`claim ${claim.id}'s subject is unresolved: resolve it first`);
   const { thing, key, why } = await keyOf(claim);
   if (!key) throw new Error(`${thing?.label ?? claim.thing}: ${why}, so there's no source row to enter data into`);
@@ -276,21 +316,14 @@ async function workerEnterData(args, identity) {
   const { client } = await clientFor(key.key);
   const hit = await client.readRow(key.table, key.row_key, { key_column: args.key_column });
   if (!hit) throw new Error(`${key.key}: the source has no such row: the key may be wrong, or the row is gone. Report it.`);
-  let fields = args.fields && Object.keys(args.fields).length ? args.fields : null;
-  if (fields) assertWritable(fields, hit);
-  else {
-    const column = columnFor(claim.attribute, hit.row);
-    if (!column) throw new Error(`the row has no column named for ${claim.attribute} (it has ${Object.keys(hit.row).join(", ")}): give fields ({ column: value }) naming the column to write`);
-    if (confirmAgainstRow(claim, hit.row).confirmed) {
-      // a retry finds an earlier write's unfinished trail before it says there's nothing to do
-      const settled = await settleOpenAttempts(key.key, hit.row);
-      if (settled.length) return { claim: claim.id, key: key.key, outcome: "reconciled", settled, note: "The row holds the claimed value, and an earlier entry on it hadn't been settled on the trail: it now has." };
-      return { claim: claim.id, key: key.key, outcome: "unchanged", note: "The row already holds the claimed value: nothing to enter." };
-    }
-    fields = { [column]: claim.value_num ?? claim.value };
-    assertWritable(fields, hit);
+  const fields = fieldsForClaim(claim, args.fields, hit);
+  if (confirmAgainstRow(claim, hit.row).confirmed) {
+    // a retry finds an earlier write's unfinished trail before it says there's nothing to do
+    const settled = await settleOpenAttempts(key.key, hit.row);
+    if (settled.length) return { claim: claim.id, key: key.key, outcome: "reconciled", settled, note: "The row holds the claimed value, and an earlier entry on it hadn't been settled on the trail: it now has." };
+    return { claim: claim.id, key: key.key, outcome: "unchanged", note: "The row already holds the claimed value: nothing to enter." };
   }
-  const r = await enterData({ actsFor, by: identity.user, key: key.key, fields, cls: claim.class, attribute: claim.attribute, reason: args.reason, identity });
+  const r = await enterData({ actsFor, by: identity.user, key: key.key, fields, cls: claim.class, attribute: claim.attribute, reason: args.reason, identity, held: await heldAbove(claim, identity) });
   await logChange(identity, { kind: "data_entry", claim: claim.id, key: key.key, outcome: r.outcome, fields, ...(r.pendingId ? { pending: r.pendingId } : {}), ...(args.reason ? { reason: String(args.reason).slice(0, 300) } : {}) });
   return { claim: claim.id, key: key.key, fields, ...r, ...(r.outcome === "proposed" ? { note: `${r.note} ${PROPOSED_NOTE}` } : {}) };
 }
@@ -299,7 +332,7 @@ async function workerEnterData(args, identity) {
 export function registerWorkerTools(server, { identity, need }) {
   server.tool(
     "confirm_claim",
-    `Confirm a claim from your brief against the source row its subject refers to (read-only): the row is
+    `Confirm a claim your section makes against the source row its subject refers to (read-only): the row is
 looked up by the subject's record key and its primary key, and its column for the claim's attribute is
 compared with the claim's value. Nothing is written. key_column, if you give it, must be the table's
 primary key; anything else is refused.`,
@@ -350,12 +383,13 @@ answers it. The need meets the claim's section and closes.`,
   );
   server.tool(
     "enter_data",
-    `Enter a claim's value into the source row its subject refers to (the row's column named for the
-attribute, or the fields you give: real columns of that row, never its key), for the person who put the
-section on record, as they stand now. Applied when that person holds authority over the class, the
-attribute and every column written; proposed for someone who does otherwise (then END YOUR TURN: you
-resume with the decision); refused when they hold none, have left, or have moved. Every attempt is
-audited. Give a reason.`,
+    `Enter the value of a claim your section makes into the source row its subject refers to: the claim's
+value, into the column named for its attribute. Nothing else can be written: a row with no such column
+refuses, and fields, if you give them, can only restate that one column and value. For the person who put
+the section on record, as they stand now. Applied when that person holds authority over the class, the
+attribute and the column; proposed for someone who does otherwise, or when what you read reaches fewer
+people than the section does (then END YOUR TURN: you resume with the decision); refused when they hold
+none, have left, or have moved. Every attempt is audited. Give a reason.`,
     {
       claim_id: z.string().min(8).max(80),
       fields: z.record(z.union([z.string().max(2000), z.number(), z.boolean(), z.null()])).optional(),

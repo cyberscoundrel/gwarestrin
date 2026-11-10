@@ -48,7 +48,7 @@ const entry = async (name) => (await sql(`SELECT @rid AS rid, name, _home, _grad
 const thing = async (label) => (await sql(`SELECT @rid AS rid, name FROM Entity WHERE _kind = 'thing' AND label = '${label}'`))[0];
 /** what the linker left unresolved on an entry (the Admission stream: a bare name is a worker's or a person's to settle, never minted) */
 const unresolved = async (name) => JSON.parse((await sql(`SELECT _unresolved FROM Entity WHERE name = '${name}'`))[0]?._unresolved ?? "[]");
-const job = async (rid, kind = "mentions") => (await sql(`SELECT status, attempts, error, payload FROM Job WHERE kind = '${kind}' AND payload LIKE '%${rid}%' ORDER BY created_at DESC LIMIT 1`))[0];
+const job = async (rid, kind = "mentions") => (await sql(`SELECT status, attempts, error, payload FROM Job WHERE kind = '${kind}' AND payload LIKE '%"${rid}"%' ORDER BY created_at DESC LIMIT 1`))[0];
 
 async function until(label, fn, timeoutMs = 240_000) {
   const end = Date.now() + timeoutMs;
@@ -185,7 +185,8 @@ await scenario("with triage ahead, a bare name becomes a thing for nobody: triag
   check(String(intake.payload).includes(String(t2.rid)), `the investigation goes to the master: ${intake.payload}`);
   check(!(await thing("John Henry Foster")), "no thing made before a worker decides");
   check((await unresolved("e2e-t2 john henry quote [L2]")).some((u) => u.name === "John Henry Foster"), "the name waits on the entry for the master's worker");
-  check(!(await job(String(t1.rid), "intake")), "the plain one needs no worker");
+  const plainIntake = await job(String(t1.rid), "intake");
+  check(!plainIntake, `the plain one needs no worker: ${JSON.stringify(plainIntake)} (${t1.rid})`);
 });
 
 await scenario("a worker restricts an entry on its own, but asks before moving one a person placed", async () => {
@@ -549,8 +550,12 @@ const files = discoverScenarioFiles(E2E_DIR);
 // the harness's own stream last: its 62-note batch would surface in every later search and raise what people have read
 const streams = (await loadScenarioFiles(files)).sort((a, b) => Number(a.stream === "harness") - Number(b.stream === "harness"));
 if (files.length) console.log(`\n${streams.length} scenario${streams.length === 1 ? "" : "s"} from ${files.length} stream file${files.length === 1 ? "" : "s"}: ${files.map((f) => f.split("/").pop()).join(", ")}`);
+let lastStream = null;
 for (const s of streams) {
   if (!selected(s)) continue;
+  // a stream's fake source ends with it: to the next stream's scenarios a key that source doesn't hold is no row (linker.js)
+  if (lastStream && s.stream !== lastStream) await context.tool("admin", "execute_graph", { language: "sql", command: "DELETE FROM OrgPolicy WHERE scope = 'sources'" });
+  lastStream = s.stream;
   const reason = await skipReason(s, context);
   if (reason) {
     results.push({ name: s.name, ok: true, skipped: true, reason });
@@ -562,4 +567,8 @@ for (const s of streams) {
 
 const failed = results.filter((r) => !r.skipped && !r.ok);
 console.log(`\n${summaryLine(results)}`);
-process.exit(failed.length ? 1 : 0);
+// a SKIP or a run that selected nothing proves nothing: neither is a pass
+const nothing = results.length === 0;
+const skipped = results.filter((r) => r.skipped);
+if (nothing) console.log("no scenario ran (an ONLY= that matches nothing?)");
+process.exit(failed.length || skipped.length || nothing ? 1 : 0);

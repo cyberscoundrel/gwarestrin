@@ -36,25 +36,38 @@ import { normalizeAttribute } from "./claims.js";
 
 export const DECISIONS = ["direct", "propose", "hidden"];
 
+/** a class name as a policy key, normalized as an attribute's is: "Jobs" is a rule for jobs, "Work Center" for work_center */
+export const classKey = normalizeAttribute;
+
+/** the rule that decides class/attribute, most specific first: { authority, field } naming it in the map, or null */
+export function authorityRule(policy, cls, attribute) {
+  if (!policy || typeof policy !== "object") return null;
+  const key = cls ? (policy.classes?.[cls] ? cls : classKey(cls)) : null;
+  const c = key ? policy.classes?.[key] : undefined;
+  const a = normalizeAttribute(attribute) || null;
+  const pick = (v, field) => (typeof v === "string" && v ? { authority: v, field } : null);
+  return (c && a && pick(c.attributes?.[a], `classes.${key}.attributes.${a}`)) || (a && pick(policy.attributes?.[a], `attributes.${a}`)) || (c && pick(c.authority, `classes.${key}.authority`)) || pick(policy.default, "default");
+}
+
 /** the position holding authority over class/attribute, or null when no rule applies */
 export function authorityOf(policy, cls, attribute) {
-  if (!policy || typeof policy !== "object") return null;
-  const c = cls ? policy.classes?.[cls] : undefined;
-  const a = normalizeAttribute(attribute) || null;
-  const pick = (v) => (typeof v === "string" && v ? v : null);
-  if (c && a) {
-    const r = pick(c.attributes?.[a]);
-    if (r) return r;
-  }
-  if (a) {
-    const r = pick(policy.attributes?.[a]);
-    if (r) return r;
-  }
-  if (c) {
-    const r = pick(c.authority);
-    if (r) return r;
-  }
-  return pick(policy.default);
+  return authorityRule(policy, cls, attribute)?.authority ?? null;
+}
+
+/**
+ * Does going from map `prev` to map `next` tighten class/attribute: is there now an authority where
+ * there was none, or one that isn't below the old one? A rule moved down the tree, or removed, loosens;
+ * a rule moved to another branch tightens, since the old branch loses it. A stale position counts as
+ * the root (fail upward), as in decide.
+ */
+export function tightens(prev, next, cls, attribute, positions) {
+  const at = (map) => {
+    const a = authorityOf(map, cls, attribute);
+    return a === null ? null : positions.positions[a] ? a : positions.root;
+  };
+  const [from, to] = [at(prev), at(next)];
+  if (to === null || from === to) return false;
+  return from === null || !ancestors(positions, to).includes(from);
 }
 
 /**
@@ -120,8 +133,8 @@ export const staleAuthorities = (policy, positions) => namedAuthorities(policy).
  * A stale position is not a malformed policy. `allowStale` (a Set of positions) lets an edit keep
  * entries that were already stale, so changing one rule doesn't demand fixing another. `stored`
  * reads a policy as saved earlier: every stale entry stays (the rule fails it upward; dropping it
- * would fail open), two spellings of one attribute settle on the stricter position, and a key with
- * no attribute name in it is skipped.
+ * would fail open), two spellings of one class or attribute settle on the stricter position, and a
+ * key with no name in it is skipped.
  */
 export function validatePolicy(policy, positions, { stored = false, allowStale = null } = {}) {
   if (!policy || typeof policy !== "object" || Array.isArray(policy)) throw new Error("policy: must be an object");
@@ -132,18 +145,23 @@ export function validatePolicy(policy, positions, { stored = false, allowStale =
     return v;
   };
   const stricter = (a, b) => (positions.positions[a] && positions.positions[b] ? commonAncestor(positions, [a, b]) : positions.root || a);
-  const putAttribute = (into, raw, p, field) => {
-    if (!stored && String(raw).length > 80) throw new Error(`${field}: a name longer than 80 characters`);
-    const a = normalizeAttribute(raw);
-    if (!a) {
-      if (stored) return;
-      throw new Error(`${field}: no attribute name in "${raw}"`);
-    }
+  const put = (into, key, p, field, raw) => {
     const v = pos(p, field);
-    if (into[a] !== undefined && into[a] !== v) {
-      if (!stored) throw new Error(`${field}: "${raw}" is the same attribute as another rule, which names a different position`);
-      into[a] = stricter(into[a], v);
-    } else into[a] = v;
+    if (into[key] !== undefined && into[key] !== v) {
+      if (!stored) throw new Error(`${field}: "${raw}" is the same name as another rule, which names a different position`);
+      into[key] = stricter(into[key], v);
+    } else into[key] = v;
+  };
+  // the normalized form of a policy key; null when a stored key has no name in it
+  const keyOf = (raw, field) => {
+    if (!stored && String(raw).length > 80) throw new Error(`${field}: a name longer than 80 characters`);
+    const k = normalizeAttribute(raw);
+    if (!k && !stored) throw new Error(`${field}: no name in "${raw}"`);
+    return k || null;
+  };
+  const putAttribute = (into, raw, p, field) => {
+    const a = keyOf(raw, field);
+    if (a) put(into, a, p, field, raw);
   };
   const out = { classes: {}, attributes: {} };
   for (const [k, v] of Object.entries(policy)) {
@@ -155,16 +173,18 @@ export function validatePolicy(policy, positions, { stored = false, allowStale =
       if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("classes: must map class names to rules");
       for (const [c, rule] of Object.entries(v)) {
         if (!rule || typeof rule !== "object" || Array.isArray(rule)) throw new Error(`classes.${c}: must be an object`);
-        const r = {};
+        const key = keyOf(c, `classes.${c}`);
+        if (!key) continue;
+        // two spellings of one class are one rule: their entries meet here
+        const r = (out.classes[key] ??= {});
         for (const [rk, rv] of Object.entries(rule)) {
-          if (rk === "authority") r.authority = pos(rv, `classes.${c}.authority`);
+          if (rk === "authority") put(r, "authority", rv, `classes.${c}.authority`, c);
           else if (rk === "attributes") {
             if (!rv || typeof rv !== "object" || Array.isArray(rv)) throw new Error(`classes.${c}.attributes: must map attribute names to positions`);
-            r.attributes = {};
+            r.attributes ??= {};
             for (const [a, p] of Object.entries(rv)) putAttribute(r.attributes, a, p, `classes.${c}.attributes.${a}`);
           } else throw new Error(`classes.${c}.${rk}: unknown field`);
         }
-        out.classes[c] = r;
       }
     } else throw new Error(`${k}: unknown field`);
   }

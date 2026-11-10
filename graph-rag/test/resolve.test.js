@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { admits, classOfKey, confirmedClasses, hintType, memoryLookup, pickCandidate, resolveSubject, sameNamedPeople, subjectOf } from "../src/resolve.js";
+import { admits, classKind, hasDesignator, isRecordNumber, namesAnIndividual, classOfKey, confirmedClasses, hintType, memoryLookup, pickCandidate, resolveSubject, sameNamedPeople, subjectOf } from "../src/resolve.js";
 import { referTo, sourceRefOf, sourceRefsOf, touchSourceRef, SOURCE_REF_FIELDS } from "../src/sourceref.js";
 import { normalize } from "../src/things.js";
 
@@ -38,7 +38,8 @@ function store(seed = []) {
 test("admission: the batches' known failures", () => {
   assert.equal(admits({ name: "holiday schedule" }).admitted, false, "a schedule is content inside a claim");
   assert.equal(admits({ name: "deburr bench" }, { references: 1 }).admitted, false, "a bench named once is a place inside a claim");
-  assert.deepEqual(admits({ name: "break room coffee maker" }, { references: ["ux-at03", "ux-au03"] }).rule, 2, "referenced from two notes");
+  assert.equal(admits({ name: "break room coffee maker" }, { references: ["ux-at03", "ux-au03"] }).admitted, false, "two references earn a node only for a name that picks out an individual");
+  assert.deepEqual(admits({ name: "rack C1" }, { references: ["ux-ac13", "ux-ad15"] }).rule, 2, "a designated rack, referenced from two notes");
   assert.deepEqual(admits({ name: "4471", key: "mssql:dbo_Job:4471" }).rule, 1, "a record key is an identity");
   assert.equal(admits({ name: "job 4471" }, { hasKey: true }).admitted, true);
   assert.deepEqual(admits({ name: "Corvane sample order", kind: "commitment" }).rule, 3, "a commitment no source records");
@@ -379,4 +380,65 @@ test("an instance refers to its row: one REFERS_TO edge however often it is link
   assert.deepEqual((await sourceRefsOf("#1:8", db)).map((r) => r.key), ["mssql:dbo_Job:4471"]);
   await assert.rejects(referTo("nope", "mssql:dbo_Job:4471", { db }), /not a record id/);
   assert.deepEqual(await sourceRefsOf("nope", db), []);
+});
+
+
+test("admission: what a second mention can't earn (B14), and what a row's number can't earn on a name (B17)", () => {
+  for (const name of ["holiday schedule", "Holiday Schedule", "HOLIDAY SCHEDULES", "payroll", "Payroll", "Time Clock", "deburr bench", "Front Left Tire", "vacation calendar"]) {
+    assert.equal(admits({ name }, { references: 9 }).admitted, false, `${name}: never a node, however often named`);
+    assert.equal(admits({ name }, { references: 1, isCommitment: true }).admitted, false, `${name}: nor as a commitment's subject`);
+    assert.equal(admits({ name, actor: "customer" }).admitted, false, `${name}: nor by calling it an actor`);
+  }
+  for (const name of ["overtime policy", "Second Shift", "the shop", "forklift", "shipping pickups", "holiday party 2026", "anti-fatigue mats at CNC 3", "CNC 2 spindle bearing order", "Saturday Overtime"])
+    assert.equal(admits({ name }, { references: 3 }).admitted, false, `${name}: a phrase, not an individual`);
+  for (const name of ["PO 78912", "P.O. 78912", "po-78912", "PO#78912", "purchase order 78912", "Job 4471", "invoice 553", "part EPP-D98", "78912", "SO 12"]) {
+    assert.equal(isRecordNumber(name), true, `${name} is a row's number`);
+    assert.equal(admits({ name }, { references: 5, isCommitment: true }).admitted, false, name);
+    assert.equal(admits({ name, key: "mssql:dbo_Job:4471" }).rule, 1, `${name}: with its key it can be`);
+  }
+  for (const name of ["rack C1", "CNC 2", "Line 4", "Bench 4"]) assert.equal(admits({ name }, { references: 2 }).rule, 2, `${name}: designated`);
+  for (const name of ["Tomas Reyes", "Kayla", "Corvane Medical", "Andre (Staffmark temp)", "Darrin S."]) assert.equal(admits({ name }, { references: 2 }).rule, 2, `${name}: a proper name`);
+  assert.equal(admits({ name: "Tomas Reyes" }, { references: 1 }).admitted, false, "a proper name once isn't yet a thing");
+  assert.equal(admits({ name: "CNC 2" }, { identity: true }).rule, 1, "a machine by name");
+  assert.equal(namesAnIndividual("PO 78912"), false);
+  assert.equal(hasDesignator("PO 78912"), false);
+  assert.equal(hasDesignator("rack C1"), true);
+});
+
+test("classKind reads a class's head noun: the subject of a customer class is a customer, of a customer order isn't", () => {
+  assert.equal(classKind("customer"), "customer");
+  assert.equal(classKind("customer order"), null);
+  assert.equal(classKind("supplier invoice"), null);
+  assert.equal(classKind("vendor"), "supplier");
+  assert.equal(classKind("employment"), "person");
+  assert.equal(classKind("work center"), "machine");
+  assert.equal(classKind("equipment"), "machine");
+  assert.equal(classKind("training"), null);
+  assert.equal(classKind(null), null);
+});
+
+test("same-named people, by every route that can settle a name (B16)", async () => {
+  const twins = [thing("#1:1", "Diep C", { type: "person", keys: ["k:a:1"], cls: "hires" }), thing("#1:2", "Diep C", { type: "person", keys: ["k:a:2"] })];
+  const lookup = memoryLookup(twins);
+  const classes = [...confirmedClasses(CLASSES).values(), { name: "hires", status: "confirmed" }];
+  const stamped = await resolveSubject({ name: "Diep C", class: "hires" }, { classes, lookup });
+  assert.equal(stamped.how, "none", "the class route: one of them stamped doesn't make it that one");
+  assert.equal(sameNamedPeople(stamped), true);
+  assert.equal(stamped.candidates.length, 2);
+  const otherClass = memoryLookup([thing("#1:1", "Diep C", { type: "person", cls: "hires" }), thing("#1:2", "Diep C", { type: "person", cls: "leave" })]);
+  assert.equal((await resolveSubject({ name: "Diep C", class: "unconfirmed" }, { classes, lookup: otherClass })).how, "none", "the alias route, a class filtering one of them out or none");
+  const leaves = await resolveSubject({ name: "Diep C", class: "hires" }, { classes, lookup: otherClass });
+  assert.equal(sameNamedPeople(leaves), true, "class stamps tell no people apart");
+  assert.equal((await resolveSubject({ name: "Diep C", actor: "person" }, { classes, lookup })).how, "none", "the actor route");
+  assert.equal((await resolveSubject({ key: "k:a:1" }, { classes, lookup })).rid, "#1:1", "a key still says which");
+  const one = memoryLookup([thing("#1:1", "Solo", { type: "person", cls: "hires" }), thing("#1:2", "Solo", { type: "machine" })]);
+  assert.equal((await resolveSubject({ name: "Solo", class: "hires" }, { classes, lookup: one })).rid, "#1:1", "one person of that name and a machine: not same-named people");
+  const near = memoryLookup([thing("#1:1", "Nguyen Diep", { type: "person" }), thing("#1:2", "Nguyen Diep", { type: "person" })], { embed: () => 0.99 });
+  assert.equal(sameNamedPeople(await resolveSubject({ name: "Nguyen Diepp", actor: "person" }, { classes, lookup: near })), true, "the embedding route");
+});
+
+test("a keyless thing with a held key isn't keyless: a second key doesn't adopt it (B8)", async () => {
+  const held = { ...thing("#1:1", "Gantry", { type: "customer" }), _held_key: true };
+  const r = await resolveSubject({ key: "mssql:dbo_Customer:OTHER", name: "Gantry" }, { classes: CLASSES, lookup: memoryLookup([held]) });
+  assert.ok(r.mint, "a different row: its own instance");
 });

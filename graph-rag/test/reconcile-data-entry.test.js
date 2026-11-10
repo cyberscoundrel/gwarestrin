@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fakeDb, storing } from "./audit.test.js";
 import { dabTool } from "../e2e/fake-dab-core.mjs";
-import { applyProposedEntry, approvingPerson, assertWritable, authorityMapFor, authorityPolicy, columnFor, confirmAgainstRow, DAB_CALLS, decideWrite, decisionKeys, describeEntry, enterData, forgetAuthorityPolicy, forgetPrimaryKeys, forgetSources, mcpToolCall, odata, primaryKeyFrom, rowKeyFor, rowsOf, sameValue, settleOpenAttempts, sourceClient, sourcesConfig, standingOf } from "../src/data-entry.js";
+import { applyProposedEntry, approvingPerson, assertWritable, authorityMapFor, authorityPolicy, columnFor, confirmAgainstRow, DAB_CALLS, decideWrite, decisionKeys, describeEntry, enterData, fieldsForClaim, forgetAuthorityPolicy, forgetPrimaryKeys, forgetSources, mcpToolCall, odata, primaryKeyFrom, rowKeyFor, rowsOf, sameValue, settleOpenAttempts, sourceClient, sourcesConfig, standingOf } from "../src/data-entry.js";
 import { parseKey } from "../src/model/schema.js";
 import { parsePositionMap } from "../src/positions.js";
+import { decide } from "../src/model/authority.js";
 
 const read = (f) => JSON.parse(readFileSync(new URL(`./fixtures/${f}`, import.meta.url), "utf8"));
 const map = parsePositionMap(read("positions.json"));
@@ -45,6 +46,7 @@ const people = {
   alice: { positions: ["ops"], caps: { read: true, write: "direct", approve: true } },
   dana: { positions: ["floor"], caps: { read: true, write: "queued" } },
   gone: { positions: ["floor"], caps: { read: false, write: "deny" } },
+  hana: { positions: ["hr"], caps: { read: true, write: "direct" } },
 };
 const lookup = (name) => people[name];
 
@@ -90,6 +92,43 @@ test("B19: the row is the key the claim's subject names, the one in its class's 
   assert.match(several.why, /several record keys/);
   assert.equal(rowKeyFor({ subjectKey: null, keys: ["mssql:dbo_Job:1", "mssql:dbo_Job:2"].map(parseKey), recordTable: "mssql:dbo_Job" }).key, null, "several rows of its table: refused");
   assert.equal(rowKeyFor({ subjectKey: null, keys: [keys[1]], recordTable: "mssql:dbo_Job" }).key, null, "no key in its table: refused");
+});
+
+test("B19: a key the claim names must be the thing's; it never falls through to the key the thing has", () => {
+  const job4472 = parseKey("mssql:dbo_Job:4472");
+  for (const recordTable of [null, "mssql:dbo_Job"]) {
+    const r = rowKeyFor({ subjectKey: "mssql:dbo_Job:4471", keys: [job4472], recordTable });
+    assert.equal(r.key, null, "the claim says 4471, the thing is 4472: refused");
+    assert.match(r.why, /names mssql:dbo_Job:4471.*mssql:dbo_Job:4472.*disagree/);
+  }
+  assert.equal(rowKeyFor({ subjectKey: "mssql:dbo_Job:4471", keys: [], recordTable: null }).key, null, "a thing with no keys holds no key the claim names");
+  assert.equal(rowKeyFor({ subjectKey: "not a key", keys: [job4472], recordTable: null }).key, null, "a key that doesn't read as one names no row of this thing's");
+  // keys are one identity in any case; the row is the thing's own spelling of it
+  assert.equal(rowKeyFor({ subjectKey: "MSSQL:dbo_job:4472", keys: [job4472], recordTable: null }).key.key, "mssql:dbo_Job:4472");
+  const twoCases = ["mssql:dbo_Customer:abc", "mssql:dbo_Customer:ABC"].map(parseKey);
+  assert.equal(rowKeyFor({ subjectKey: "mssql:dbo_Customer:ABC", keys: twoCases, recordTable: null }).key.key, "mssql:dbo_Customer:ABC", "the one written exactly");
+  assert.equal(rowKeyFor({ subjectKey: "mssql:dbo_Customer:Abc", keys: twoCases, recordTable: null }).key, null, "two spellings, neither exact: can't tell which");
+  // with no key named, what already held still holds; a claim on the class as a whole is about no row
+  assert.equal(rowKeyFor({ subjectKey: null, keys: [job4472], recordTable: "mssql:dbo_Job" }).key.key, "mssql:dbo_Job:4472");
+  assert.match(rowKeyFor({ subjectKey: null, keys: [job4472], recordTable: null, scope: "class" }).why, /class as a whole/);
+});
+
+test("B19: the row answered is the row asked for, and its key can name it exactly", async () => {
+  // a source that answers with another row than the filter asked for
+  const dab = fakeDab([{ Job: 4471, Status: "a" }, { Job: 4472, Status: "b" }]);
+  const lying = async (url, init) => {
+    const res = await dab.fetch(url, init);
+    if (JSON.parse(init.body).params?.arguments?.first !== 2) return res;
+    const text = await res.text();
+    return { ...res, text: async () => text.replaceAll("4471", "4472") };
+  };
+  forgetPrimaryKeys();
+  const c = sourceClient("mssql", { read: "http://fake/lying", write: "http://fake/write" }, { fetch: lying });
+  await assert.rejects(() => c.readRow("dbo_Job", "4471"), /not the row asked for/);
+  // past 2^53 the JSON number is its neighbour: the update would name another row
+  assert.throws(() => assertWritable({ Status: "x" }, { row: { Job: 9007199254740992, Status: "a" }, key_column: "Job", key_value: 9007199254740992 }), /too large to name one row/);
+  assert.doesNotThrow(() => assertWritable({ Status: "x" }, { row: { Job: 9007199254740991, Status: "a" }, key_column: "Job", key_value: 9007199254740991 }));
+  assert.doesNotThrow(() => assertWritable({ Status: "x" }, { row: { Code: "9007199254740993", Status: "a" }, key_column: "Code", key_value: "9007199254740993" }), "a text key is exact");
 });
 
 test("B20: DAB's answers as they are: rows under result.value, the primary key out of the cursor, literals by column type", () => {
@@ -248,7 +287,7 @@ test("B2: a data entry decides on the person's current standing, never a name or
 test("B3: the decision covers every column written, under the claim's class and the table's", { skip: storing }, async () => {
   assert.deepEqual(decisionKeys("jobs", "stage", ["Price"], []), [{ cls: "jobs", attribute: "stage" }, { cls: "jobs", attribute: "price" }]);
   assert.deepEqual(decisionKeys("jobs", "stage", ["Stage"], []), [{ cls: "jobs", attribute: "stage" }], "the claim's own column isn't decided twice");
-  assert.deepEqual(decisionKeys("jobs", "status", ["Margin"], ["orders"]), [{ cls: "jobs", attribute: "status" }, { cls: "jobs", attribute: "margin" }, { cls: "orders", attribute: "margin" }]);
+  assert.deepEqual(decisionKeys("jobs", "status", ["Margin"], ["orders"]), [{ cls: "jobs", attribute: "status" }, { cls: "orders", attribute: "status" }, { cls: "jobs", attribute: "margin" }, { cls: "orders", attribute: "margin" }]);
   const db = policyDb(fakeDb());
   const dab = fakeDab([{ Job: 4471, Status: "run", Price: 12, Stage: "a" }, { Job: 4472, Status: "x", Price: 3, Stage: "b" }]);
   const queued = [];
@@ -294,14 +333,220 @@ test("B18: a write and its event can't diverge; no event means no write, and a r
   assert.equal(db.events.find((e) => e.id === r2.audit).outcome, "applied");
   assert.deepEqual(await settleOpenAttempts("mssql:dbo_Job:4471", dab.rows[0], db), [], "nothing left open");
   assert.equal(db.events.length, 1, "one write, one event");
-  // an attempt whose row doesn't hold its values is settled failed
+  // a row back at what it held before the attempt: the write didn't land
   const db2 = policyDb(fakeDb());
   db2.failSettle = () => true;
   const dab2 = fakeDab([{ Job: 4471, Status: "x" }, { Job: 4472, Status: "y" }]);
   await enterData({ actsFor: { person: "admin", position: "org" }, by: "w", key: "mssql:dbo_Job:4471", fields: { Status: "done" }, cls: "jobs", attribute: "stage", reason: "r" }, { db: db2, fetch: dab2.fetch, positions: map, people: lookup });
   db2.failSettle = null;
-  dab2.rows[0].Status = "other";
+  dab2.rows[0].Status = "x";
   assert.deepEqual(await settleOpenAttempts("mssql:dbo_Job:4471", dab2.rows[0], db2).then((s) => s.map((x) => x.outcome)), ["failed"]);
+});
+
+test("B18: a lost settle, then someone else's change: the landed write isn't called failed", { skip: storing }, async () => {
+  const db = policyDb(fakeDb());
+  db.failSettle = () => true;
+  const dab = fakeDab([{ Job: 4471, Status: "x" }, { Job: 4472, Status: "y" }]);
+  const r = await enterData({ actsFor: { person: "admin", position: "org" }, by: "w", key: "mssql:dbo_Job:4471", fields: { Status: "done" }, cls: "jobs", attribute: "stage", reason: "r" }, { db, fetch: dab.fetch, positions: map, people: lookup });
+  assert.equal(r.audit_unsettled, true);
+  db.failSettle = null;
+  dab.rows[0].Status = "a person changed it";
+  assert.deepEqual(await settleOpenAttempts("mssql:dbo_Job:4471", dab.rows[0], db), [], "nothing can be said of it");
+  const ev = db.events.find((e) => e.id === r.audit);
+  assert.equal(ev.outcome, "attempted", "neither applied nor failed");
+  assert.equal(JSON.parse(ev.change).row_moved_on, true, "and it says why");
+  // and it stays that way: a later row can't turn it into either
+  dab.rows[0].Status = "x";
+  assert.deepEqual(await settleOpenAttempts("mssql:dbo_Job:4471", dab.rows[0], db), []);
+  assert.equal(db.events.find((e) => e.id === r.audit).outcome, "attempted");
+  // an attempt with no record of what was there before can't be called failed either
+  const bare = policyDb(fakeDb());
+  bare.events.push({ rid: "#11:900", id: "ev-bare", key: "mssql:dbo_Job:4471", change: JSON.stringify({ fields: { Status: "done" } }), outcome: "attempted", at: "2026-11-08T10:00:00.000Z" });
+  assert.deepEqual(await settleOpenAttempts("mssql:dbo_Job:4471", dab.rows[0], bare), []);
+  assert.equal(bare.events[0].outcome, "attempted");
+});
+
+test("B3: a rule can't be missed by how a name is written, or by which entity the column is on", () => {
+  const rules = { classes: { orders: { authority: "ops", attributes: { price: "org" } }, jobs: { authority: "floor" }, quotes: { attributes: { price: "ops" } } }, attributes: { credit_limit: "ops" } };
+  const of = (...args) => decisionKeys(...args, rules).map((k) => `${k.cls}/${k.attribute}`);
+  assert.ok(of("jobs", "stage", ["CREDITLIMIT"], []).includes("jobs/credit_limit"), "CREDITLIMIT is credit_limit");
+  assert.ok(of("jobs", "stage", ["Credit Limit"], []).includes("jobs/credit_limit"));
+  assert.ok(of("jobs", "creditlimit", [], []).includes("jobs/credit_limit"), "so is an attribute spelled that way");
+  assert.ok(of("Orders", "quantity", ["Quantity"], []).includes("orders/quantity"), "a class spelled otherwise is the rule's class");
+  assert.ok(of("jobs", "stage", ["Price"], []).includes("orders/price"), "a rule on orders covers a Price column on another entity");
+  assert.ok(of("jobs", "stage", ["PRICE"], []).includes("quotes/price"), "every rule on that attribute");
+  // a class here with its own rule on the attribute: that rule is the one
+  assert.deepEqual(of("quotes", "price", ["Price"], []).filter((k) => k.endsWith("price")), ["quotes/price"]);
+  assert.deepEqual(of("jobs", "status", ["Status"], []), ["jobs/status"], "no rule anywhere on it: nothing added");
+  // the decision itself
+  const bob = { positions: ["floor"], caps: { write: "direct" } };
+  assert.ok(decisionKeys("jobs", "stage", ["PRICE"], [], rules).some((k) => decide(bob, k.cls, k.attribute, rules, map) !== "direct"), "and it reaches the answer");
+});
+
+test("B3: an entry writes what the claim says, in the one column its attribute names, or nothing", () => {
+  const hit = { row: { Job: 4471, Status: "running", CREDITLIMIT: 100, Note: "n", Price: 3 }, key_column: "Job", key_value: 4471 };
+  const claim = { attribute: "status", value: "done", value_num: null };
+  assert.deepEqual(fieldsForClaim(claim, null, hit), { Status: "done" });
+  assert.deepEqual(fieldsForClaim(claim, {}, hit), { Status: "done" });
+  assert.deepEqual(fieldsForClaim(claim, { Status: "DONE" }, hit), { Status: "done" }, "the claim's own value, not the worker's spelling of it");
+  assert.deepEqual(fieldsForClaim({ attribute: "credit_limit", value: "900", value_num: 900 }, { CREDITLIMIT: "900" }, hit), { CREDITLIMIT: 900 });
+  assert.throws(() => fieldsForClaim(claim, { Note: "Diep bonus is 99999" }, hit), /says nothing about Note/, "free text into a column the claim doesn't name");
+  assert.throws(() => fieldsForClaim(claim, { Note: "done" }, hit), /says nothing about Note/, "even the claim's value, in another column");
+  assert.throws(() => fieldsForClaim(claim, { Status: "done", Price: 1 }, hit), /says nothing about Price/, "a second column");
+  assert.throws(() => fieldsForClaim(claim, { Status: "paused" }, hit), /writes what the claim says/, "another value");
+  assert.throws(() => fieldsForClaim(claim, { Status: null }, hit), /writes what the claim says/, "or none");
+  assert.throws(() => fieldsForClaim({ attribute: "stage", value: "x" }, { Status: "x" }, hit), /no column named for stage/, "an attribute no column is named for: not the worker's to map");
+  assert.throws(() => fieldsForClaim({ attribute: "job", value: "9" }, null, hit), /row's key/);
+  assert.throws(() => fieldsForClaim(claim, { Nope: "done" }, hit), /has no column Nope/);
+});
+
+test("B3: a column spelled unlike its rule, and a rule on another class, hold the entry", { skip: storing }, async () => {
+  const propose = async (policy, row, fields, cls, attribute) => {
+    forgetPrimaryKeys();
+    forgetSources();
+    const dab = fakeDab([{ Job: 4471, ...row }, { Job: 4472, ...row }]);
+    const queued = [];
+    const r = await enterData({ actsFor: { person: "bob", position: "floor" }, by: "w", key: "mssql:dbo_Job:4471", fields, cls, attribute, reason: "r" }, { db: policyDb(fakeDb()), fetch: dab.fetch, positions: map, people: lookup, policy, queue: async (e) => (queued.push(e), { pendingId: "p1" }), proposal: () => ({}) });
+    return { r, wrote: dab.calls.some((c) => c.name === "update_record"), home: queued[0]?.home };
+  };
+  const spelling = await propose({ classes: {}, attributes: { credit_limit: "ops" } }, { CREDITLIMIT: 1 }, { CREDITLIMIT: 9 }, "jobs", "credit_limit");
+  assert.equal(spelling.r.outcome, "proposed");
+  assert.equal(spelling.wrote, false);
+  assert.equal(spelling.home, "ops", "waits where the authority is");
+  const across = await propose({ classes: { orders: { attributes: { price: "org" } } }, attributes: {} }, { Price: 1 }, { Price: 9 }, "jobs", "price");
+  assert.equal(across.r.outcome, "proposed", "a rule only on orders.price still covers Price on dbo_Job");
+  assert.equal(across.wrote, false);
+  assert.equal(across.home, "org");
+  const free = await propose({ classes: { orders: { attributes: { price: "org" } } }, attributes: {} }, { Status: "a" }, { Status: "b" }, "jobs", "status");
+  assert.equal(free.r.outcome, "applied", "a column no rule anywhere names is still bob's");
+});
+
+test("an authority map that can't be read or doesn't validate decides nothing direct", { skip: storing }, async () => {
+  const bob = { positions: ["floor"], caps: { write: "direct" } };
+  const stored = (scope, json) => {
+    const db = policyDb(fakeDb());
+    const orig = db.policyRows;
+    db.policyRows = (params, sql) => (sql.includes(`'${scope}'`) ? json : orig(params, sql));
+    return db;
+  };
+  const invalid = [
+    ["an invalid stored policy", stored("authority", [{ json: '{"classes":"not-an-object"}' }])],
+    ["stored policy that isn't JSON", stored("authority", [{ json: "{oops" }])],
+    ["an invalid authority map in the organization's settings", stored("org", [{ json: '{"authorityMap":{"classes":[1]}}' }])],
+    ["organization settings that aren't JSON", stored("org", [{ json: "{oops" }])],
+  ];
+  const broken = (scope) => {
+    const db = policyDb(fakeDb());
+    const orig = db.policyRows;
+    db.policyRows = (params, sql) => {
+      if (sql.includes(`'${scope}'`)) throw new Error("db down");
+      return orig(params, sql);
+    };
+    return db;
+  };
+  for (const [what, db] of [...invalid, ["an unreadable stored policy", broken("authority")], ["unreadable organization settings", broken("org")]]) {
+    forgetAuthorityPolicy();
+    await assert.rejects(authorityMapFor({ positions: map, db }), undefined, `${what}: the map says so`);
+    assert.equal(await decideWrite(bob, "jobs", "stage", { positions: map, db }), "propose", `${what}: proposed, never direct`);
+    assert.equal(await decideWrite(bob, "nothing", "ruled", { positions: map, db }), "propose", `${what}: and not only where a rule might be`);
+    forgetPrimaryKeys();
+    const dab = fakeDab([{ Job: 4471, Status: "a" }, { Job: 4472, Status: "b" }]);
+    const queued = [];
+    const r = await enterData({ actsFor: { person: "bob", position: "floor" }, by: "w", key: "mssql:dbo_Job:4471", fields: { Status: "c" }, cls: "jobs", attribute: "status", reason: "r" }, { db, fetch: dab.fetch, positions: map, people: lookup, queue: async (e) => (queued.push(e), { pendingId: "p1" }), proposal: () => ({}) });
+    assert.equal(r.outcome, "proposed", what);
+    assert.match(r.note, /authority map can't be read/);
+    assert.equal(queued[0].home, "org", `${what}: for the root to decide`);
+    assert.equal(dab.calls.some((c) => c.name === "update_record"), false, what);
+    forgetAuthorityPolicy();
+  }
+  // a failure isn't remembered: once it reads, it decides
+  const db = stored("authority", [{ json: "{oops" }]);
+  assert.equal(await decideWrite(bob, "jobs", "stage", { positions: map, db }), "propose");
+  db.policyRows = policyDb(fakeDb()).policyRows;
+  assert.equal(await decideWrite(bob, "jobs", "stage", { positions: map, db }), "direct");
+  // nothing stored at all is no rule, which is the writer's own: not a failure
+  forgetAuthorityPolicy();
+  assert.equal(await decideWrite(bob, "orders", "price", { positions: map, db: fakeDb() }), "direct");
+});
+
+test("B2: a proposal waits where the authority is, and only someone holding it can approve it", { skip: storing }, async () => {
+  const payload = { kind: "data_entry", key: "mssql:dbo_Job:4471", fields: { Quantity: 700 }, class: "orders", attribute: "quantity", by: "w", acts_for: { person: "bob", position: "floor" }, reason: "r" };
+  const attempt = async (approver, extra = {}) => {
+    forgetPrimaryKeys();
+    forgetAuthorityPolicy();
+    const db = extra.db ?? policyDb(fakeDb());
+    db.events.push({ rid: "#11:1", id: "ev", key: payload.key, pending_id: "p1", outcome: "proposed", at: "2026-11-08T10:00:00.000Z", change: "{}" });
+    const dab = fakeDab([{ Job: 4471, Quantity: 1 }, { Job: 4472, Quantity: 2 }]);
+    const r = await applyProposedEntry(extra.payload ?? payload, "p1", approver, { db, fetch: dab.fetch, people: lookup, positions: map }).catch((e) => ({ threw: e.message }));
+    return { r, wrote: dab.calls.some((c) => c.name === "update_record"), ev: db.events[0], row: dab.rows[0] };
+  };
+  // bob (floor) can see a proposal homed at the floor; authority over orders lies with ops
+  const below = await attempt("bob");
+  assert.match(below.r.threw, /doesn't hold the authority/);
+  assert.equal(below.wrote, false);
+  assert.equal(below.ev.outcome, "refused", "the proposal's event says so");
+  // a person on the column's rule, not just the claim's: the column decides too
+  const column = await attempt("alice", { payload: { ...payload, fields: { Price: 1 } } });
+  assert.match(column.r.threw, /doesn't hold the authority/, "ops holds orders, but price is the org's");
+  assert.equal(column.wrote, false);
+  // no name to hang it on, someone gone, a queued person
+  assert.match((await attempt(undefined)).r.threw, /needs the person who approved/);
+  assert.match((await attempt("nobody")).r.threw, /no longer in the organization/);
+  assert.match((await attempt("gone")).r.threw, /no longer in the organization/);
+  assert.match((await attempt("dana")).r.threw, /doesn't hold the authority/);
+  // whoever holds it can: at the authority, above it, through an agent of theirs
+  for (const who of ["alice", "admin", "admin/liaison:abcd1234", "admin (on the operator's word)"]) {
+    const ok = await attempt(who);
+    assert.equal(ok.r.outcome, "applied", who);
+    assert.equal(ok.row.Quantity, 700, who);
+  }
+  // a map that can't be read: only the root
+  const unreadable = () => {
+    const db = policyDb(fakeDb());
+    const orig = db.policyRows;
+    db.policyRows = (params, sql) => (sql.includes("'authority'") ? [{ json: "{oops" }] : orig(params, sql));
+    return db;
+  };
+  assert.match((await attempt("alice", { db: unreadable() })).r.threw, /can't be read/);
+  assert.equal((await attempt("admin", { db: unreadable() })).r.outcome, "applied");
+});
+
+test("B2: a person whose write capability isn't stated can't authorize one", () => {
+  assert.equal(standingOf({ person: "x", position: "floor" }, { positions: ["floor"], caps: { read: true } }, map).ok, false);
+  assert.equal(standingOf({ person: "x", position: "floor" }, { positions: ["floor"], caps: { read: true, write: "maybe" } }, map).ok, false);
+  assert.equal(standingOf({ person: "x", position: "floor" }, { positions: ["floor"] }, map).ok, false);
+  assert.equal(standingOf({ person: "x", position: "floor" }, { positions: ["floor"], caps: { read: true, write: "queued" } }, map).ok, true);
+});
+
+test("NB5: what the agent read holds the entry, whoever it acts for", { skip: storing }, async () => {
+  // a tree with a branch beside Operations, for someone the authority can't be reached from
+  const branched = parsePositionMap({ root: "org", positions: { org: { name: "org" }, ops: { name: "ops", parent: "org" }, floor: { name: "floor", parent: "ops" }, hr: { name: "hr", parent: "org" } } });
+  const run = async (who, extra = {}) => {
+    forgetPrimaryKeys();
+    forgetSources();
+    forgetAuthorityPolicy();
+    const db = policyDb(fakeDb());
+    const dab = fakeDab([{ Job: 4471, Status: "a" }, { Job: 4472, Status: "b" }]);
+    const queued = [];
+    const r = await enterData({ actsFor: who, by: "admin/worker:1", key: "mssql:dbo_Job:4471", fields: { Status: "c" }, cls: "jobs", attribute: "status", reason: "r", ...extra }, { db, fetch: dab.fetch, positions: branched, people: lookup, queue: async (e) => (queued.push(e), { pendingId: "p1" }), proposal: () => ({}) });
+    return { r, wrote: dab.calls.some((c) => c.name === "update_record"), home: queued[0]?.home, event: db.events.at(-1) };
+  };
+  const bob = { person: "bob", position: "floor" };
+  assert.equal((await run(bob)).r.outcome, "applied", "control: bob holds jobs");
+  const held = { home: "org", why: "this worker read entries people at the floor can't see" };
+  const h = await run(bob, { held });
+  assert.equal(h.r.outcome, "proposed");
+  assert.equal(h.wrote, false);
+  assert.equal(h.home, "org", "someone who can see what it read decides");
+  assert.match(h.r.note, /can't see/);
+  assert.deepEqual(JSON.parse(h.event.change).held, held, "the trail says why");
+  // a person who could commit it alone is held all the same: the limit is the agent's
+  assert.equal((await run({ person: "admin", position: "org" }, { held })).r.outcome, "proposed");
+  // and a stricter answer stays stricter: on another branch from the authority, it is refused, not proposed
+  const beside = await run({ person: "hana", position: "hr" }, { held, cls: "orders", attribute: "quantity" });
+  assert.equal(beside.r.outcome, "refused");
+  assert.equal(beside.r.decision, "hidden", "by the rule, not for holding no position");
+  assert.equal(beside.wrote, false);
 });
 
 test("B18: a transport error during the write is settled by what the row holds", { skip: storing }, async () => {
@@ -376,7 +621,7 @@ test("data entry for a floor person on an Operations class is proposed and audit
   assert.equal(floor.outcome, "proposed");
   assert.equal(floor.pendingId, "pend-1");
   assert.equal(queued[0].kind, "data_entry");
-  assert.equal(queued[0].home, "floor");
+  assert.equal(queued[0].home, "ops", "the proposal waits where the authority is");
   assert.equal(queued[0].job, "j1");
   assert.deepEqual(JSON.parse(queued[0].payload).fields, { Quantity: 600 });
   assert.equal(dab.rows[0].Quantity, 500, "nothing written to the source");

@@ -10,45 +10,21 @@ fixtures every stream shares in `test/fixtures/` (`classes.json`,
 
 ## Shapes
 
-**The rule**: an instance is an entity that has an instance relationship to a
-class, and classes are of anything, in one tree. `docs/ORGANIZATION-MODEL.md`,
-"Classes and instances", is the full text; what follows is the shapes. The
-writers and readers have not moved yet: `CommitmentClass`, `_class`,
-`_thing_type` and `ACTOR_TYPES` stay in use until they do.
+**Class** (`CommitmentClass` vertex; fixture `classes.json`): a confirmed
+commitment pattern. `name` (unique; what claims and policy use), `stages`
+(in order), `record_table` (`system:table`, e.g. `mssql:dbo_Order`, or null
+when no source system records it), `status` (proposed | confirmed |
+retired), `confirmed_by`, `confirmed_at`. Nothing maps onto a class until a
+person confirms it.
 
-**Class** (an `Entity` with `_kind: 'class'`, scoped by `_home` and `_homes` like
-any node; `schema.validateClass`; fixture `classes.json`): a kind the organization
-recognizes. Stored as `_class_name` (unique; what claims and policy use), `_stages`
-(in order; optional), `_record_table` (`system:table`, e.g. `mssql:dbo_Order`, or
-null when no source system records it), `_status` (proposed | confirmed | retired),
-`_attributes`, `_confirmed_by`, `_confirmed_at`, `_evidence`, `_discovered_as`,
-`_homed_by`. `_confirmed_by` is a person, or `discovery` for what a read-only run
-made, usable at once with no person. `schema.CLASS_SELECT` and `classFromRow` read
-those columns into the plain shape the pure functions take (`name`, `status`,
-`parent`, `parent_by`, ...). The four primitives are the only roots and the only
-classes nobody confirms (`schema.rootClassStatements(root)`).
-
-**Tree** (`SUBCLASS_OF`, class to parent; `schema.classChain`,
-`classAndSubclasses`, `assertSubclassLink`): one confirmed parent per class, a
-link confirmed by a discovery run or a person, confirmed from the top, no cycles. A class counts only
-when its chain reaches a root through confirmed classes. Rules, stage lists and
-attributes inherit, the nearest class winning (`effectiveStages`,
-`effectiveAttributes`, `effectiveRecordTable`, `authorityInChain`). A class's
-primitive is its root, never stored.
-
-**Instance**: an `Entity` with one `INSTANCE_OF` edge per class, and its record
-key in `_keys` when a source system holds it (`system:table:row`,
-`mssql:dbo_Job:4471`, the convention `things.js` already resolves by;
-`schema.recordKey(cls, row)` builds one). A class in `confirmed` or `retired`
-makes an instance; an edge to a `proposed` class is held and doesn't. An instance
-with no record table is keyed by name and origin. Nothing else about the instance
-lives in the graph.
+**Instance**: an `Entity` with `_kind: 'thing'`, `_class` naming its class,
+and its record key in `_keys` (`system:table:row`, `mssql:dbo_Job:4471`,
+the convention `things.js` already resolves by; `schema.recordKey(cls, row)`
+builds one). An instance with no record table is keyed by name and origin
+like any thing. Nothing else about the instance lives in the graph.
 
 **Claim** (`CLAIMS` edge, out = the section or entry it was extracted from,
-in = the instance, or the class for a class subject, or the section again
-while the subject is a value): one primitive bound to a subject with an
-interval. While the subject is a value the edge also carries `subject` (JSON),
-`subject_norm` and `unresolved` (no-class | no-row | ambiguous).
+in = the subject thing): one primitive bound to a subject with an interval.
 
 ```
 { kind: commitment | event | state | observation,
@@ -57,17 +33,15 @@ interval. While the subject is a value the edge also carries `subject` (JSON),
   valid_from, valid_until | null, recorded_at, recorded_by, section }
 ```
 
-A subject is an instance (`class` stating what the subject is, with a `key`
-or a `name`), or the class itself (`scope: "class"`, an optional qualifying
-`name`: an aggregate observation or a need on a process, which is what the
-oracle's residue needed). An older `actor` field reads as `class` at the gate
-and goes when the writers move. The condenser may give a subject as a string: a key when it parses
-as one, else a name. The claim's own `class` is what the claim bears on and
-never stands in for the subject's (a pay claim about Tomas is `hires` / `pay`,
-and Tomas is a person; today's `claims.normalizeSubject` still defaults one
-from the other, until the writers move). `attribute` is snake_case; `stage` is
-the attribute a class with a stage list in force has, and its value must be
-one of those stages. `value` is
+A subject is an instance (`class`, defaulting to the claim's, with a `key`
+or a `name`), an actor (`actor`: person | position | customer | supplier |
+agent, with a name or key), or the class itself (`scope: "class"`, an
+optional qualifying `name`: an aggregate observation or a need on a
+process, which is what the oracle's residue needed). The condenser may give
+a subject as a string: a key when it parses as one, else a name. A claim
+about an actor still names the class it bears on (a pay claim about Tomas
+is `hires` / `pay`). `attribute` is snake_case; `stage` is the attribute
+every class has and its value must be one of the class's stages. `value` is
 stored as a string (numbers and booleans JSON-encoded), with `value_num`
 when it is a number. Dates are ISO, or relative to the recording
 (`recorded_at`, `recorded_at+14d`; d, w, m, y); a date without a zone is
@@ -102,32 +76,6 @@ admin edits. `classes[name].authority`, `classes[name].attributes[attr]`,
 
 ## Invariants
 
-- **No class, no instance.** `schema.instanceClass(subject, classes)` is the
-  gate, asked only after looking finds no instance: a key by the class whose
-  record table holds it, or the subclass of it named; a confirmed class stated for
-  the subject, which needs the row when a table is in force. Otherwise the subject
-  is a value on its claim, and `reason` says why. A primitive holds no instances
-  directly, and nobody is exempt: a person before any class exists is a value. The gate is about classes, not who may mint: a key, a person, a worker.
-- **The edge is the only record.** A mint writes entity and first edge in one
-  transaction; nothing stores a class name beside it, and a read of a class filters
-  by `authority.visible`.
-- **Discovery is unattended and read-only.** `schema.planDiscoveryClass` says what a
-  run does with each class it finds: create it, settle a proposal, refresh its own
-  work, add evidence to a person's, or skip what a person retired. Evidence is
-  required (`normalizeEvidence`) and rows are cited by key. Read-only is an exact
-  tool list (`DISCOVERY_SOURCE_TOOLS`, `isDiscoveryReadTool`), enforced on the token,
-  not by prompt.
-- **A class is seen like any node.** `discoveredHome` homes what a discovery pass
-  writes no lower than the pass, its evidence and what the run read. Every read
-  honours the class's homes: `listedClasses` for lists, and what the gate is asked
-  with (a class a writer can't see is `no-class`), `shownClasses` for an instance's
-  classes (the nearest one the reader can see). A class's home says who can see it
-  exists; the authority map says who may commit against it. Outside discovery a class
-  still needs a person.
-- **Migration is a plan, and idempotent.** `schema.planInstanceMigration` turns
-  `_class`, `_thing_type` and `CommitmentClass` rows into new classes and edges.
-  It never confirms a class. Run it twice and the second plan is empty.
-  `schema.instanceEdgeSql` makes each edge, safe to repeat.
 - **Reference, never copy.** The graph holds keys, claims and provenance;
   rows stay in the source system. A claim's `value` is what was said, not a
   cached column.
@@ -160,13 +108,16 @@ admin edits. `classes[name].authority`, `classes[name].attributes[attr]`,
   is homed no lower than its most restricted claim and no lower than its
   document (decision 5), the stricter winning (`positions.commonAncestor`).
   The grader runs on text no rule covers: a section with no claim, a claim
-  with no rule (decision 2), or a sentence no ruled claim states; its verdict
-  can only restrict further than the claims' placement (`placement.claimsSettle`).
-  A policy's attribute names are normalized as a claim's are. An authority
+  with no rule (decision 2), or any word of its text, heading or entry name
+  that isn't one of its claims' or filler; its verdict can only restrict
+  further than the claims' placement (`placement.claimsSettle`). A policy's
+  class and attribute names are normalized as a claim's attribute is. An authority
   a policy names that the tree no longer has stays in the map and counts as
   the root (`staleAuthorities` lists them; `policy.normalizeStored` logs them).
 - **Provenance sets the home; nothing widens it.** `claimHome` never returns
-  a position below the origin. Unknown anything fails upward.
+  a position below the origin. Unknown anything fails upward. A claim's stored
+  home follows its section whenever the section moves, no lower than the
+  claim's authority (`floor.claimsFollowEntry`).
 - **Errors name the field.** `ClaimError.field` is a path
   (`sections[1].claims[0].value`); `validateDocument` returns every claim's
   error at once; `validatePolicy` throws with the field.

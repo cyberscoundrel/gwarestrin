@@ -28,9 +28,9 @@ export default [
   and look nothing up by a name another stream might also write.
 - `skip` (optional): a reason string, `true`, or an `async (ctx)` returning
   a reason or `null` to run. A skipped scenario prints `SKIP name [file]:
-  reason` and is left out of the count, so a scenario waiting on another
-  stream's route lands green and switches itself on when the route appears
-  (`scenarios-harness.mjs` does this for the Condenser's ingest tool).
+  reason`, is left out of the count, and fails the run: a run with a SKIP in
+  it exits non-zero, since it proved nothing about that scenario. So does a
+  run that selects nothing (`ONLY=` matching no scenario).
 
 A file that fails to import, or exports the wrong shape, counts as one
 failed scenario named `load scenarios-<stream>.mjs`; the rest still run.

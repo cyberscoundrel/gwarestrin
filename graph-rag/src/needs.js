@@ -191,69 +191,83 @@ const STOP = new Set(
     " ",
   ),
 );
-/** words saying the question is about another time, a hypothetical or a negation: not what holds now */
-const NOT_NOW = new Set(
-  "was were did had ago yesterday tomorrow last next previous previously before after since until ever originally former prior earlier later history past future used will would should could might may must shall not never no if without january february march april may june july august september october november december monday tuesday wednesday thursday friday saturday sunday".split(
-    " ",
-  ),
-);
-/** questions an attribute's value doesn't answer: who, when, where, why, how, and yes-no */
-const OTHER_ASK = /^(who|whose|whom|when|where|why|how|is|are|was|were|do|does|did|can|could|will|would|should|has|have|had|may|might|shall|must)( |$)/;
-/** how a question asking for a value opens: "what stage ...", "which machine ...", or the attribute named outright ("current status of X") */
-const ASKS_VALUE = /^((what|which|current|latest) |[a-z0-9_ ]{1,40} of )/;
-
-/**
- * Is this question (normalized) asking for the value something has now? A what/which question, or
- * a bare "<attribute> of X", about the present: anything else asks something an attribute's value
- * doesn't answer, and a question about another time isn't the current state (a date, or a year
- * read as one: "in 2024"; a bare four-digit number stays a row number). Deliberately narrow: what
- * this refuses goes to the embedding path and an owner.
- */
-export function asksCurrentValue(norm) {
-  const words = norm.split(" ");
-  const year = (i) => /^(19|20)\d{2}$/.test(words[i]) && (["in", "during"].includes(words[i - 1]) || /^\d{1,2}$/.test(words[i + 1] ?? ""));
-  if (words.some((w, i) => NOT_NOW.has(w) || year(i))) return false;
-  return !OTHER_ASK.test(norm) && ASKS_VALUE.test(norm);
-}
-
-/**
- * Does the question ask only for this attribute of this thing? Every word has to be a stop word,
- * the attribute's, or the thing's (its name, its key, its class): anything left over ("the key" in
- * "who holds the key to rack Z1") means the question is about something else. Pure; `thing` is
- * { name, keys, class }.
- */
-export function asksOnly(norm, attribute, thing) {
-  const words = new Set(attribute.split("_"));
-  for (const w of normalize(thing.name ?? "").split(" ")) words.add(w);
-  for (const k of thing.keys ?? []) for (const w of normalize(k).split(" ")) words.add(w);
-  for (const w of normalize(thing.class ?? "").split(" ")) words.add(w);
-  const known = (w) => STOP.has(w) || words.has(w) || words.has(w.replace(/s$/, "")) || words.has(w.replace(/es$/, "")) || words.has(`${w}s`);
-  return norm.split(" ").filter(Boolean).every(known);
-}
-
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const KEY_IN_TEXT = /[a-z0-9_-]{1,40}:[^\s:]{1,120}:[^\s]{1,160}/gi;
 
+const CURRENT = "(?:(?:current|latest) )?";
+const OPEN = `^(?:what|which) (?:is )?(?:the )?${CURRENT}`;
+const NOW = "(?: (?:right now|now|currently|today|at present|at the moment))?";
+const IN_PLACE = "(?: (?:currently|now))?(?: (?:at|on|in|for))?";
+
 /**
- * A question read as a state query: the attribute it names (one the graph's claims use, the longest
- * match winning: "pay rate" before "pay") and the things it may be about, as subject references for
+ * The questions an attribute's current value answers, over a normalized question. Nothing else is
+ * answered from state: a question that doesn't fit one of these whole reaches the embedding path
+ * and an owner. This is an allow list on purpose. A list of words that disqualify a question ("was",
+ * "ever", "has"...) is always one word short; here a tense, a plural, an "all", a "can" or a second
+ * question simply fits no shape, or leaves words in `thing` that aren't the thing's (namesOnly).
+ *   what is the stage of job 4471 / what stage of job 4471
+ *   what stage is job 4471 at / which machine is job 4471 on
+ *   stage of job 4471 / current stage job 4471
+ *   what is job 4471 stage (what's job 4471's stage)
+ * The attribute is singular: a plural asks for several values, and state gives one.
+ */
+const shapes = (attr) => [
+  `${OPEN}${attr} (?:of|for|on) (?<thing>.+?)${NOW}$`,
+  `^(?:what|which) ${CURRENT}${attr} is (?<thing>.+?)${IN_PLACE}${NOW}$`,
+  `^${attr} (?:of|for) (?<thing>.+?)${NOW}$`,
+  `^(?:current|latest) ${attr}(?: (?:of|for))? (?<thing>.+?)${NOW}$`,
+  `${OPEN}(?<thing>.+?) ${attr}${NOW}$`,
+];
+
+/** the part of a normalized question naming what it asks about, when it asks for this attribute's current value; null when it doesn't fit */
+function askedAbout(norm, attribute) {
+  const attr = attribute.split("_").filter(Boolean).map(escapeRe).join(" ");
+  if (!attr) return null;
+  for (const shape of shapes(attr)) {
+    const thing = new RegExp(shape).exec(norm)?.groups?.thing?.replace(/^(?:the|a|an) /, "");
+    if (thing) return thing;
+  }
+  return null;
+}
+
+/**
+ * Is `about` (the words a question names its subject with) only this thing: every word is in its
+ * name, one of its keys or its class? Words left over mean the question is about something else or
+ * something more ("the key to rack Z1", "job 4471 and who ran it", "job 4471 in 2024"). Pure; `thing`
+ * is { name, keys, class }.
+ */
+export function namesOnly(about, thing) {
+  const words = new Set();
+  for (const w of normalize(thing.name ?? "").split(" ")) words.add(w);
+  for (const k of thing.keys ?? []) for (const w of normalize(k).split(" ")) words.add(w);
+  for (const w of normalize(thing.class ?? "").split(" ")) words.add(w);
+  const known = (w) => words.has(w) || words.has(w.replace(/s$/, "")) || words.has(w.replace(/es$/, "")) || words.has(`${w}s`);
+  return String(about).split(" ").filter(Boolean).every(known);
+}
+
+/**
+ * A question read as a state query: the attribute it asks for (one the graph's claims use, the
+ * longest that fits winning: "pay rate" before "pay"), `about` (the words naming its subject, for
+ * namesOnly once the thing is known) and the things those words may be, as subject references for
  * state.js (`{ key }` or `{ name }`): record keys written out, "job 4471"-style row numbers turned
  * into the record key of every class with a record table (`classes`: [{ name, record_table }]) and
  * kept as names too, and every run of one to three words that does not start or end on a stop word.
- * Null when no known attribute is named, or the question doesn't ask for a current value (asksCurrentValue): then
- * the question is for the embedding path and an owner.
+ * Null when the question isn't one of the shapes an attribute's current value answers (shapes):
+ * then it is for the embedding path and an owner.
  */
 export function parseStateQuestion(question, { attributes = [], classes = [] } = {}) {
   const text = String(question ?? "").replace(/['’]s\b/g, "");
   const norm = normalize(text);
-  if (!norm || !asksCurrentValue(norm)) return null;
+  if (!norm) return null;
+  const longestFirst = [...attributes].map((a) => String(a ?? "")).sort((a, b) => b.split("_").length - a.split("_").length || b.length - a.length);
   let attribute = null;
-  for (const a of attributes) {
-    const words = String(a ?? "").split("_").filter(Boolean);
-    if (!words.length) continue;
-    if (!new RegExp(`(^| )${words.map(escapeRe).join(" ")}(s|es)?( |$)`).test(norm)) continue;
-    const prev = attribute ? attribute.split("_").length : 0;
-    if (!attribute || words.length > prev || (words.length === prev && a.length > attribute.length)) attribute = a;
+  let about = null;
+  for (const a of longestFirst) {
+    about = askedAbout(norm, a);
+    if (about) {
+      attribute = a;
+      break;
+    }
   }
   if (!attribute) return null;
   const attrWords = new Set(attribute.split("_"));
@@ -266,7 +280,7 @@ export function parseStateQuestion(question, { attributes = [], classes = [] } =
     subjects.push(s);
   };
   for (const m of text.match(KEY_IN_TEXT) ?? []) if (parseKey(m)) push({ key: m });
-  const tokens = norm.split(" ").filter(Boolean);
+  const tokens = about.split(" ").filter(Boolean);
   tokens.forEach((t, i) => {
     if (!/^\d{2,}$/.test(t)) return;
     // a row number: that row in every class's record table, and the words around it as names
@@ -285,7 +299,7 @@ export function parseStateQuestion(question, { attributes = [], classes = [] } =
       push({ name: gram.join(" ") });
     }
   }
-  return { attribute, subjects };
+  return { attribute, subjects, about };
 }
 
 /**

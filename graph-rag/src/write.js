@@ -15,12 +15,13 @@ import { adbCommand, adbQuery, ensureFullText, ensureIndex, ENTITY_LABEL, esc, k
 import { embedBatch } from "./models.js";
 import { homeFilter, isPerson, positionId, positionMap, SCOPED } from "./scope.js";
 import { identityText, publicProps } from "./search.js";
-import { askAboutPlacement, claimsOfEntry, derivedFloor, heldNote, placeEntities, workerWriteFloor } from "./floor.js";
+import { askAboutPlacement, claimsFollowEntry, claimsOfEntry, derivedFloor, heldNote, placeEntities, workerWriteFloor } from "./floor.js";
 import { policy } from "./org-policy.js";
 import { dropWaitingShares, refreshGrants, resolveWaitingShares, storeGrant } from "./sharing.js";
 import { ASSERTIONS, meetAssertion } from "./requests.js";
 import { docStore, startIngest } from "./ingest.js";
 import { aboutOnce, ENTRY_KINDS, thingSeenFrom } from "./linker.js";
+import { settleDocument } from "./document-home.js";
 import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, worker, workerModel } from "./worker-pool.js";
 
 /**
@@ -32,9 +33,10 @@ import { assertNotWaiting, enqueue, logChange, PROPOSED_NOTE, resumeThread, work
  *
  *   decideWrite(identity, { kind, cls, attribute, claims, lives }, ctx)
  *     kind       upsert | rehome | grant | merge | fold | delete_entry | typed_update | command | ingest | backfill | data_entry
- *                (any other kind takes the class rule, queuing and ctx.propose alone: data_entry, a write to a
- *                source system, is decided by authority over its class, with no derived-floor lift, since it
- *                writes no graph content; the lift applies to upsert, typed_update and ingest only)
+ *                (any other kind takes the class rule, queuing and ctx.propose alone. data_entry is decided here
+ *                for the person the agent acts for, whose reads aren't the agent's: the agent's floor bounds what
+ *                reaches a source system just as it bounds the graph, and worker-tools.js applies it to enter_data.
+ *                The lift below applies to upsert, typed_update and ingest only)
  *     cls, attribute   the commitment class and attribute the write bears on (null: residue, no class)
  *     claims     instead of one class: the claims the write carries (the strictest decides)
  *     lives      where the entry lives (its home) for a write to an existing entry; undefined for a new one
@@ -102,13 +104,14 @@ export function decideWrite(identity, { kind, cls = null, attribute = null, clai
 }
 
 /** `home` is already resolved by the caller (resolveWriteHome); undefined = unscoped */
-export async function upsertEntities({ entities, home, floor, written_at, from_worker, written_by }) {
+export async function upsertEntities({ entities, home, floor, regrade_floor, written_at, from_worker, written_by, decided }) {
   if (!Array.isArray(entities) || entities.length === 0) throw new Error("entities[] required");
   if (entities.length > 64) throw new Error("max 64 entities per call");
   // dates in the content ("next Friday") mean the day it was written, not approved
   const writtenAt = Number.isFinite(Date.parse(written_at)) ? Date.parse(written_at) : Date.now();
   // scoped: `home` is the origin; grading decides where each entity is seen from
-  const graded = home === undefined || !positionMap ? null : await placeEntities(entities, home, floor ?? home, writtenAt);
+  // `decided`: placed already by the caller (a document's entry, ingest.js), not graded twice
+  const graded = decided ?? (home === undefined || !positionMap ? null : await placeEntities(entities, home, floor ?? home, writtenAt));
   // a worker's update (direct, or a proposal someone approved) never hides an entry from the people
   // who see it: its text is mostly the worker's own reading. Hiding it is a set_home, said on purpose
   const placements = graded?.map((p) => (from_worker && p?.restricted ? { ...p, home: p.restricted.from, note: heldNote(p.restricted.from, p.restricted.reason), restricted: undefined } : p));
@@ -140,7 +143,7 @@ export async function upsertEntities({ entities, home, floor, written_at, from_w
     const place = placements?.[idx];
     // awaiting grading: what it needs to be graded again (regradeTick); graded now: no longer awaiting
     const ungradedSql = place?.ungraded
-      ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString() }))}'`
+      ? `, n.\`_ungraded\` = '${esc(JSON.stringify({ origin: home, floor: regrade_floor ?? floor ?? home, held: place.home, written_at: new Date(writtenAt).toISOString(), ...(typeof e._text === "string" ? { text: e._text.slice(0, 6000) } : {}) }))}'`
       : place?.graded || place?.claims // graded now, or settled by its claims: no longer awaiting
         ? ", n.`_ungraded` = null"
         : "";
@@ -156,8 +159,10 @@ export async function upsertEntities({ entities, home, floor, written_at, from_w
       .join("");
     // its end date: the writer's word, else the grader's, else unchanged
     const stored = (
-      await adbQuery(`SELECT _valid_until, _valid_by FROM ${ENTITY_LABEL} WHERE name = :name${home === undefined ? "" : " AND _origin = :origin"} LIMIT 1`, { name: e.name, origin: home })
+      await adbQuery(`SELECT @rid AS rid, _home, _valid_until, _valid_by FROM ${ENTITY_LABEL} WHERE name = :name${home === undefined ? "" : " AND _origin = :origin"} LIMIT 1`, { name: e.name, origin: home })
     )[0];
+    // an update that moves an entry takes its claims along
+    if (stored && place && stored._home !== place.home) await claimsFollowEntry(String(stored.rid), place.home);
     const validity = chooseValidity(
       parseValidUntil(e.valid_until, writtenAt),
       stored ? { valid_until: stored._valid_until ?? null, valid_by: stored._valid_by ?? null } : undefined,
@@ -382,16 +387,20 @@ export async function setHome({ entities, to, reason, propose }, identity, scope
 
 async function applyRehome({ rid, name, from, to, placedBy }) {
   if (!RID_RE.test(rid)) throw new Error("invalid record id");
-  const rows = await adbQuery(`SELECT _home, name FROM ${rid}`);
+  const rows = await adbQuery(`SELECT _home, name, _kind, _doc_id FROM ${rid}`);
   // a record id can be handed to another record once its own is gone: check it's still this entry
   if (!rows.length || (name && rows[0].name !== name)) throw new Error(`entity ${name} no longer exists`);
   if (effectiveHome(positionMap, rows[0]._home) !== from) throw new Error(`entity ${name} moved since the request`);
   // a person's move is recorded: a worker can't move the entry again without asking (setHome)
   if (placedBy) await adbCommand(`UPDATE ${rid} SET _home = :to, _placed_by = :who, _placed_at = :at`, "sql", { to, who: placedBy, at: new Date().toISOString() });
   else await adbCommand(`UPDATE ${rid} SET _home = :to`, "sql", { to });
+  await claimsFollowEntry(rid, to);
+  // a document's title goes with its most restricted section (document-home.js); moving the entry itself is where it now belongs
+  if (rows[0]._kind === "document") await adbCommand(`UPDATE ${rid} SET _doc_base = :to`, "sql", { to });
+  if (rows[0]._doc_id) await settleDocument(rows[0]._doc_id).catch((e) => log.warn(`document ${rows[0]._doc_id} not settled after a move: ${String(e).slice(0, 160)}`));
   // seen from its new home: so are the things it's about
   const about = await adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${rid})`).catch(() => []);
-  for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to).catch(() => {});
+  for (const a of about) if (RID_RE.test(String(a.dst))) await thingSeenFrom(String(a.dst), to, { from }).catch(() => {});
   log.info(`entity ${name} rehomed ${homeName(positionMap, from)} -> ${homeName(positionMap, to)}`);
   return { moved: true, from: homeName(positionMap, from), to: homeName(positionMap, to) };
 }
@@ -400,7 +409,7 @@ async function applyRehome({ rid, name, from, to, placedBy }) {
 export async function foldEntries({ keep, drop }) {
   if (!RID_RE.test(String(keep)) || !RID_RE.test(String(drop))) throw new Error("invalid fold");
   const k = (await adbQuery(`SELECT _home FROM ${keep} WHERE ${ENTRY_KINDS}`))[0];
-  const d = (await adbQuery(`SELECT name FROM ${drop} WHERE ${ENTRY_KINDS}`))[0];
+  const d = (await adbQuery(`SELECT name, _home FROM ${drop} WHERE ${ENTRY_KINDS}`))[0];
   if (!k || !d) throw new Error("one of the entries is gone");
   const edges = await adbQuery(`SELECT @in AS dst, role FROM (SELECT expand(outE('ABOUT')) FROM ${drop})`).catch(() => []);
   const home = effectiveHome(positionMap, k._home);
@@ -409,7 +418,7 @@ export async function foldEntries({ keep, drop }) {
     const dst = String(e.dst);
     if (!RID_RE.test(dst)) continue;
     await aboutOnce(keep, dst, e.role ?? "mentions");
-    await thingSeenFrom(dst, home);
+    await thingSeenFrom(dst, home, { from: effectiveHome(positionMap, d._home) });
     moved++;
   }
   await adbCommand(`DELETE FROM ${ENTITY_LABEL} WHERE @rid = ${drop}`);
@@ -496,12 +505,14 @@ export async function refusePending(rec) {
 /** approved merge: the dropped thing's links move to the kept one */
 export async function mergeThings({ keep, drop, drop_name }) {
   if (!RID_RE.test(String(keep)) || !RID_RE.test(String(drop))) throw new Error("invalid merge");
-  const k = (await adbQuery(`SELECT _homes, _alias_norms FROM ${keep}`))[0];
-  const d = (await adbQuery(`SELECT _homes, _alias_norms, _norm FROM ${drop}`))[0];
+  const k = (await adbQuery(`SELECT _homes, _alias_norms, _held_aliases, _held_keys FROM ${keep}`))[0];
+  const d = (await adbQuery(`SELECT _homes, _alias_norms, _norm, _held_aliases, _held_keys FROM ${drop}`))[0];
   if (!k || !d) throw new Error("one of the things is gone");
   const edges = await adbQuery(`SELECT @out AS src, role FROM (SELECT expand(inE('ABOUT')) FROM ${drop})`).catch(() => []);
   for (const e of edges) await aboutOnce(String(e.src), keep, e.role ?? "mentions");
-  await adbCommand(`UPDATE ${keep} SET _homes = :homes, _alias_norms = :aliases`, "sql", {
+  await adbCommand(`UPDATE ${keep} SET _homes = :homes, _alias_norms = :aliases, _held_aliases = :ha, _held_keys = :hk`, "sql", {
+    ha: [...new Set([...(k._held_aliases ?? []), ...(d._held_aliases ?? [])])],
+    hk: [...new Set([...(k._held_keys ?? []), ...(d._held_keys ?? [])])],
     homes: [...new Set([...(k._homes ?? []), ...(d._homes ?? [])])],
     aliases: [...new Set([...(k._alias_norms ?? []), ...(d._alias_norms ?? []), d._norm, normalize(drop_name)].filter(Boolean))],
   });

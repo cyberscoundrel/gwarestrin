@@ -1,8 +1,8 @@
 /**
  * Off record is enforced where the graph's tools are, not in the agent's
  * prompt (docs/ORGANIZATION-MODEL.md, "On record is a deliberate act"):
- * graph-rag gives a chat agent no write tool unless its current thread is on
- * record, and this is how it learns: PUT /api/thread-record, with the
+ * graph-rag refuses every write from a chat agent unless its current thread
+ * is on record, and this is how it learns: PUT /api/thread-record, with the
  * instance's own token. The agent has only its delegated token, which that
  * route refuses, so it can't switch itself on.
  */

@@ -29,10 +29,10 @@ test("the longest attribute wins, possessives drop, record keys are read as writ
   assert.equal(k.attribute, "status");
   assert.deepEqual(keys(k), ["mssql:dbo_Work_Center:INSPECT-2"]);
   assert.equal(parseStateQuestion("When does Kayla's assignment end?", { attributes }), null, "'end' is not the attribute 'ends' (only a plural of the attribute's words counts)");
-  assert.equal(parseStateQuestion("What are the stages of the Toro order?", { attributes }).attribute, "stage");
+  assert.equal(parseStateQuestion("What are the stages of the Toro order?", { attributes }), null, "a plural asks for several values, and state gives one");
   assert.equal(parseStateQuestion("Who is the Toro guy?", { attributes }), null, "no attribute named: the embedding path");
   assert.equal(parseStateQuestion("", { attributes }), null);
-  assert.equal(parseStateQuestion("what stage", { attributes }).subjects.length, 0, "an attribute with nothing it could be about");
+  assert.equal(parseStateQuestion("what stage", { attributes }), null, "an attribute with nothing it could be about");
 });
 
 test("names are runs of up to three words, never starting or ending on a stop word", () => {

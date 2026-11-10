@@ -9,6 +9,7 @@
 // The batch file's shape is documented in test/fixtures/conversations/README.md.
 import { claimHome } from "../src/model/authority.js";
 import { claimsOf, normalizeDocument, normalizeName } from "../src/model/claims.js";
+import { parseKey } from "../src/model/schema.js";
 import { ancestors, commonAncestor, parsePositionMap } from "../src/positions.js";
 
 export const BATCH_SHAPE = 1;
@@ -142,7 +143,8 @@ export function conversationOf(note, recordedAt, tree = parsePositionMap(TREE)) 
       document,
       sections: sections.map((s) => ({ index: s.index, heading: s.heading, authority: s.authority, home: sectionHome(s) })),
       placements,
-      document_home: origin,
+      // a document's title is seen no lower than its most restricted section (src/document-home.js)
+      document_home: commonAncestor(tree, [origin, ...sections.map(sectionHome)]),
     },
   };
 }
@@ -176,13 +178,18 @@ export function generateBatch(oracle, { recordedAt = "2026-11-06T09:00:00.000Z",
 }
 
 /**
- * A copy of a batch whose document titles, headings, conversation ids and
- * claim ids carry a prefix, so two scenarios can store the same conversations
- * in one graph without one replacing the other's documents or colliding on
- * the unique CLAIMS.id index. Placements and section homes are unchanged.
+ * A copy of a batch whose document titles, headings, conversation ids, claim
+ * ids and claim subjects carry a prefix, so two scenarios can store the same
+ * conversations in one graph without one replacing the other's documents,
+ * colliding on the unique CLAIMS.id index, or landing on the other's things.
+ * Placements and section homes are unchanged.
  */
 export function prefixed(batch, prefix) {
   const head = (h) => (h ? `${prefix} ${h}` : h);
+  const subject = (s) => {
+    if (typeof s === "string") return parseKey(s) ? s.replace(/:([^:]+)$/, (_, row) => `:${prefix}-${row}`) : `${prefix} ${s}`;
+    return s?.name ? { ...s, name: `${prefix} ${s.name}` } : s;
+  };
   return {
     ...batch,
     conversations: batch.conversations.map((c) => ({
@@ -193,13 +200,69 @@ export function prefixed(batch, prefix) {
         document: {
           ...c.expected.document,
           title: `${prefix} ${c.expected.document.title}`,
-          sections: c.expected.document.sections.map((s) => ({ ...s, heading: head(s.heading), claims: (s.claims ?? []).map((cl) => ({ ...cl, id: `${prefix}:${cl.id}` })) })),
+          sections: c.expected.document.sections.map((s) => ({ ...s, heading: head(s.heading), claims: (s.claims ?? []).map((cl) => ({ ...cl, id: `${prefix}:${cl.id}`, subject: subject(cl.subject) })) })),
         },
         sections: c.expected.sections.map((s) => ({ ...s, heading: head(s.heading) })),
         placements: c.expected.placements.map((p) => ({ ...p, id: `${prefix}:${p.id}` })),
       },
     })),
   };
+}
+
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}/;
+
+/**
+ * A copy of a batch moved to a run's own day: every absolute date in the
+ * expected documents, and the batch's recording times, move by the same whole
+ * number of days, so the batch's first day is today. The record path stamps the
+ * real recording time (B2), and the oracle's dates are fixed in Nov 2026 to Mar
+ * 2027: a claim "from the recording until 2026-12-01" ends before it starts
+ * once the real date passes that, whatever is true of the code. Relative dates
+ * ("recorded_at+14d") need nothing; day counts between dates are unchanged.
+ */
+export function rebaseBatch(batch, now = Date.now()) {
+  const days = Math.floor((now - Date.parse(batch.conversations[0].recorded_at)) / 86_400_000);
+  const move = (v) => {
+    if (typeof v !== "string" || !ISO_DAY.test(v)) return v;
+    const at = new Date(Date.parse(v) + days * 86_400_000).toISOString();
+    return v.length === 10 ? at.slice(0, 10) : at;
+  };
+  const claim = (c) => ({ ...c, ...(Object.fromEntries(["valid_from", "valid_until", "at"].filter((k) => k in c).map((k) => [k, move(c[k])]))) });
+  return {
+    ...batch,
+    conversations: batch.conversations.map((c) => ({
+      ...c,
+      recorded_at: move(c.recorded_at),
+      expected: { ...c.expected, document: { ...c.expected.document, recorded_at: move(c.expected.document.recorded_at), sections: c.expected.document.sections.map((s) => ({ ...s, claims: (s.claims ?? []).map(claim) })) } },
+    })),
+  };
+}
+
+/**
+ * The batch as expected under the shipped default authority map (empty): no
+ * rule places any claim, so everything stays at the writer's own position,
+ * where the (fake) grader leaves it.
+ */
+export function underDefaultMap(batch) {
+  return {
+    ...batch,
+    conversations: batch.conversations.map((c) => ({
+      ...c,
+      expected: {
+        ...c.expected,
+        sections: c.expected.sections.map((s) => ({ ...s, home: c.position })),
+        placements: c.expected.placements.map((p) => ({ ...p, home: c.position })),
+        document_home: c.position,
+      },
+    })),
+  };
+}
+
+/** what is in the graph before a run writes: the bar then knows which things and claims are that run's */
+export async function graphSnapshot(query) {
+  const claims = (await query("SELECT id FROM CLAIMS").catch(() => [])) ?? [];
+  const things = (await query("SELECT @rid AS rid FROM Entity WHERE _kind = 'thing'").catch(() => [])) ?? [];
+  return { claims: new Set(claims.map((c) => String(c.id))), things: new Set(things.map((t) => String(t.rid))) };
 }
 
 /**
@@ -335,8 +398,42 @@ function statedSubjectProblem(want, claim) {
     /* nothing readable on the edge */
   }
   if (!stated) return "left without a thing and no subject written on the claim";
-  const same = normalizeName(stated.name) === normalizeName(want.name) && (stated.scope ?? null) === (want.scope ?? null) && (stated.class ?? null) === (want.class ?? null);
-  return same ? null : `written as ${JSON.stringify(stated)}, expected ${JSON.stringify({ name: want.name, class: want.class, scope: want.scope })}`;
+  return sameStated(stated, want) ? null : `written as ${JSON.stringify(stated)}, expected ${JSON.stringify({ name: want.name, class: want.class, scope: want.scope })}`;
+}
+
+const sameStated = (stated, want) => normalizeName(stated.name) === normalizeName(want.name) && (stated.scope ?? null) === (want.scope ?? null) && (stated.class ?? null) === (want.class ?? null);
+
+/** a subject written on a claim that has a thing (the writer writes none; a worker's resolve keeps what was written): if it is there it must name that subject */
+function statedBeside(want, claim) {
+  if (claim.subject === null || claim.subject === undefined || claim.subject === "") return null;
+  let stated = null;
+  try {
+    stated = JSON.parse(claim.subject);
+  } catch {
+    return `has a thing, and an unreadable subject written beside it: ${JSON.stringify(claim.subject)}`;
+  }
+  if (want.key) return stated?.key === want.key ? null : `has the row ${want.key}, and ${JSON.stringify(stated)} written beside it`;
+  return stated && sameStated(stated, want) ? null : `has its thing, and ${JSON.stringify(stated)} written beside it`;
+}
+
+/**
+ * Another thing holding the same row, or a keyless thing of the same name and class: a subject in two pieces. Given
+ * what was there before a run, two things that both predate it are not that run's doing; a landed thing that is new
+ * beside an older one, or two new ones, are.
+ */
+function secondThing(want, thing, things, before) {
+  if (!thing) return null;
+  const old = (t) => before?.things.has(String(t.rid));
+  const others = [...things.values()].filter((t) => String(t.rid) !== String(thing.rid) && !(old(thing) && old(t)));
+  if (want.key) {
+    const same = others.filter((t) => (t._keys ?? []).some((k) => String(k).toLowerCase() === want.key.toLowerCase()));
+    return same.length ? `a second thing holds ${want.key}: ${same.map((t) => t.rid).join(", ")}` : null;
+  }
+  if ((thing._keys ?? []).length) return null;
+  // a name never binds to a thing its writer can't see (NB2): one seen from none of the same homes is another's, not a second piece of this one
+  const sharesHome = (t) => (t._homes ?? []).some((h) => (thing._homes ?? []).includes(h));
+  const same = others.filter((t) => !(t._keys ?? []).length && t._norm && t._norm === thing._norm && (t._class ?? null) === (thing._class ?? null) && sharesHome(t));
+  return same.length ? `a second keyless thing of this name and class: ${same.map((t) => t.rid).join(", ")}` : null;
 }
 
 /**
@@ -346,7 +443,8 @@ function statedSubjectProblem(want, claim) {
  *   documents: [{ rid, name, _home, _origin, _placed_by, _doc_id, _on_record, _recorded_by, _recorded_at, _record_position }]
  *   sections:  [{ rid, name, _doc_title, _section, _home, _placed_by, text }]
  *   claims:    [{ id, kind, class, attribute, value, valid_from, valid_until, recorded_at, recorded_by, subject, _home, out_rid, in_rid }]   (CLAIMS edges; [] when the type does not exist)
- *   things:    [{ rid, name, label, _keys }]                (every claim's subject)
+ *   things:    [{ rid, name, label, _keys, _norm, _class, _homes }]   (every thing in the graph)
+ *   allClaims: [{ id, out_rid }]                            (every CLAIMS edge, to see one from outside a batch)
  *   rescues:   [{ kind, status, approved_by, payload }]     (approved rehomes and other person-approved moves)
  * Five checks, each a list of findings, and `ok` when all five are empty:
  *   rescues:    a person moved or approved a move of a batch entry (`_placed_by`, an approved rehome naming it)
@@ -356,12 +454,13 @@ function statedSubjectProblem(want, claim) {
  *   content:    a landed claim that does not say what the oracle says (subject, kind, class, attribute, value, dates,
  *               recorder, the section it came from), a claim on a batch section the oracle does not have, or a
  *               document whose on-record marker is wrong
+ * Not compared: a thing's `_home`, which every writer sets to the root (scoping reads `_homes`).
  * The recording time is the server's (a condenser's word for it is ignored): a document must carry one no earlier
  * than the batch says, or no earlier than `recordedSince` (ms) when given, which a run that started just now
  * passes so a time merely copied from the document fails; its claims must carry the same time, and their relative
  * dates are read against it.
  */
-export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince = null } = {}) {
+export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince = null, before = null } = {}) {
   const tree = parsePositionMap(treeDoc);
   const isAbove = (home, than) => home !== than && ancestors(tree, than).includes(home);
   const findings = { rescues: [], misplaced: [], lost: [], hidden: [], content: [] };
@@ -389,6 +488,8 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince =
       if (doc._placed_by) findings.rescues.push(`${c.id}: a person placed the document (${doc._placed_by})`);
       if (doc._home !== x.document_home) findings.misplaced.push(`${c.id}: the document seen from ${doc._home}, expected ${x.document_home}`);
       if (doc._on_record !== true) findings.content.push(`${c.id}: the document is not marked on record`);
+      if (doc._doc_status !== "ready") findings.content.push(`${c.id}: the document's status is ${JSON.stringify(doc._doc_status ?? null)}, expected "ready"`);
+      if (doc._origin !== c.position) findings.content.push(`${c.id}: the document's origin is ${JSON.stringify(doc._origin ?? null)}, expected ${JSON.stringify(c.position)}`);
       if (doc._recorded_by !== x.document.recorded_by) findings.content.push(`${c.id}: the document recorded by ${JSON.stringify(doc._recorded_by)}, expected ${JSON.stringify(x.document.recorded_by)}`);
       if (doc._record_position !== x.document.position) findings.content.push(`${c.id}: the document recorded under ${JSON.stringify(doc._record_position)}, expected ${JSON.stringify(x.document.position)}`);
       const earliest = recordedSince ?? Date.parse(x.document.recorded_at);
@@ -396,6 +497,7 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince =
       if (Number.isNaN(at) || at < earliest) findings.content.push(`${c.id}: the document recorded at ${JSON.stringify(doc._recorded_at ?? null)}, expected ${new Date(earliest).toISOString()} or later`);
     }
     const own = sections.filter((s) => s._doc_title === x.document.title || (doc && s._doc_id && s._doc_id === doc._doc_id));
+    for (const s of own) if (!x.sections.some((es) => es.index === Number(s._section))) findings.content.push(`${c.id}: an unexpected section "${s.name}"`);
     for (const es of x.sections) {
       const s = own.find((r) => Number(r._section) === es.index);
       const want = fold(x.document.sections[es.index].text);
@@ -406,13 +508,16 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince =
       named.push({ name: s.name, home: s._home, kind: "section", heading: es.heading });
       if (s._placed_by) findings.rescues.push(`${c.id} §${es.index + 1}: a person placed the section (${s._placed_by})`);
       if (s._home !== es.home) findings.misplaced.push(`${c.id} §${es.index + 1}: seen from ${s._home}, expected ${es.home}`);
+      if (s._origin !== c.position) findings.content.push(`${c.id} §${es.index + 1}: origin ${JSON.stringify(s._origin ?? null)}, expected ${JSON.stringify(c.position)}`);
+      if (doc && s._doc_id !== doc._doc_id) findings.content.push(`${c.id} §${es.index + 1}: _doc_id ${JSON.stringify(s._doc_id ?? null)} is not its document's`);
       // a recorded section may be stored with its heading first ("## heading", then the body; the stored preview folds
       // the newline between them to a space), a manual's chunk is not: compare the body
       let have = fold(s.text);
       const hd = fold(x.document.sections[es.index].heading ?? "");
       if (hd && have.startsWith(`## ${hd}`)) have = have.slice(3 + hd.length).trim();
       else have = have.replace(/^##\s+\S[^\n]*?\s+(?=\S)/, (m) => (want.startsWith(fold(m)) ? m : ""));
-      if (!have.startsWith(want.slice(0, Math.min(PREVIEW_CHARS, want.length)))) findings.lost.push(`${c.id} §${es.index + 1}: stored text differs ("${have.slice(0, 60)}…")`);
+      // the whole text when it fits in the stored preview, else as much of it as the preview holds
+      if (want.length <= PREVIEW_CHARS ? have !== want : !have.startsWith(want.slice(0, PREVIEW_CHARS))) findings.lost.push(`${c.id} §${es.index + 1}: stored text differs ("${have.slice(0, 60)}…")`);
     }
     for (const pl of x.placements) {
       expectedCount++;
@@ -423,10 +528,11 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince =
       }
       foundCount++;
       const sec = sectionByRid.get(String(cl.out_rid));
-      const home = cl._home ?? sec?._home ?? null;
+      const home = cl._home ?? null;
       if (home !== pl.home) findings.misplaced.push(`${c.id} claim ${pl.id}: seen from ${home}, expected ${pl.home}`);
       if (!sec) findings.content.push(`${c.id} claim ${pl.id}: not from a section of this batch`);
-      else if (sec._doc_title !== x.document.title) findings.content.push(`${c.id} claim ${pl.id}: from a section of "${sec._doc_title}", expected "${x.document.title}"`);
+      // a section below its document's title shows none of it (src/document-home.js): its document is its _doc_id
+      else if (sec._doc_title !== x.document.title && !(doc && sec._doc_id === doc._doc_id)) findings.content.push(`${c.id} claim ${pl.id}: from a section of "${sec._doc_title}", expected "${x.document.title}"`);
       else if (Number(sec._section) !== pl.section) findings.misplaced.push(`${c.id} claim ${pl.id}: from §${Number(sec._section) + 1}, expected §${pl.section + 1}`);
       const want = wanted.get(pl.id);
       if (!want) {
@@ -436,6 +542,14 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince =
       const wrong = (field, have, exp) => findings.content.push(`${c.id} claim ${pl.id}: ${field} ${JSON.stringify(have ?? null)}, expected ${JSON.stringify(exp ?? null)}`);
       const subject = String(cl.in_rid) === String(cl.out_rid) ? statedSubjectProblem(want.subject, cl) : subjectProblem(want.subject, things.get(String(cl.in_rid)), batchKeys);
       if (subject) findings.content.push(`${c.id} claim ${pl.id}: subject: ${subject}`);
+      if (String(cl.in_rid) !== String(cl.out_rid)) {
+        const thing = things.get(String(cl.in_rid));
+        for (const problem of [statedBeside(want.subject, cl), secondThing(want.subject, thing, things, before)]) if (problem) findings.content.push(`${c.id} claim ${pl.id}: subject: ${problem}`);
+        // a key reaches a thing above its claim without bringing it down (B9); a name only ever lands on one seen from its claim
+        const homes = thing?._homes ?? [];
+        if (thing && !homes.includes(pl.home) && !(want.subject.key && homes.some((h) => isAbove(h, pl.home)))) findings.content.push(`${c.id} claim ${pl.id}: subject: its thing is not seen from ${pl.home} (${JSON.stringify(thing._homes ?? [])})`);
+      }
+      if (cl.closed_by !== null && cl.closed_by !== undefined && cl.closed_by !== "") findings.content.push(`${c.id} claim ${pl.id}: closed_by ${JSON.stringify(cl.closed_by)}: a write closed it; closing is a read`);
       for (const field of ["kind", "class", "attribute", "value", "recorded_by"]) if (cl[field] !== want[field]) wrong(field, cl[field], want[field]);
       for (const field of ["valid_from", "valid_until", "recorded_at"]) if (!sameDate(cl[field], want[field])) wrong(field, cl[field], want[field]);
     }
@@ -446,6 +560,18 @@ export function bar(batch, rows, treeDoc = batch.tree ?? TREE, { recordedSince =
     if (expectedIds.has(cl.id)) continue;
     const sec = sectionByRid.get(String(cl.out_rid));
     if (sec) findings.content.push(`"${sec.name}": an unexpected claim ${cl.id} (${cl.class}/${cl.attribute})`);
+  }
+  if (before) {
+    // a run's claims and things: nothing else is new, and a thing this run minted is seen from nowhere its claims aren't
+    for (const c of rows.allClaims ?? []) if (!before.claims.has(String(c.id)) && !expectedIds.has(String(c.id))) findings.content.push(`a claim from outside the batch: ${c.id} (from ${c.out_rid})`);
+    const homesOf = new Map();
+    for (const cl of rows.claims ?? []) if (expectedIds.has(String(cl.id)) && String(cl.in_rid) !== String(cl.out_rid)) homesOf.set(String(cl.in_rid), [...(homesOf.get(String(cl.in_rid)) ?? []), cl._home]);
+    for (const [rid, homes] of homesOf) {
+      if (before.things.has(rid)) continue;
+      const thing = things.get(rid);
+      const extra = (thing?._homes ?? []).filter((h) => !homes.includes(h));
+      if (extra.length) findings.content.push(`thing ${rid} (${thing.label}): seen from ${extra.join(", ")}, where none of its claims is`);
+    }
   }
   // operator rescues recorded as approved moves naming a batch entry
   const names = named.map((n) => n.name);
@@ -499,7 +625,8 @@ export async function collectRows(batch, query) {
   const titles = batch.conversations.map((c) => c.expected.document.title);
   const claimIds = batch.conversations.flatMap((c) => c.expected.placements.map((p) => p.id));
   const documents = (await query(`SELECT @rid AS rid, name, _home, _origin, _placed_by, _doc_id, _doc_status, _on_record, _recorded_by, _recorded_at, _record_position FROM Entity WHERE _kind = 'document' AND name IN ${inList(titles)}`)) ?? [];
-  const sections = (await query(`SELECT @rid AS rid, name, _doc_title, _doc_id, _section, _home, _placed_by, text_identity AS text FROM Entity WHERE _kind = 'section' AND _doc_title IN ${inList(titles)}`)) ?? [];
+  const docIds = documents.map((d) => d._doc_id).filter(Boolean);
+  const sections = (await query(`SELECT @rid AS rid, name, _doc_title, _doc_id, _section, _home, _origin, _placed_by, text_identity AS text FROM Entity WHERE _kind = 'section' AND (_doc_title IN ${inList(titles)}${docIds.length ? ` OR _doc_id IN ${inList(docIds)}` : ""})`)) ?? [];
   const byId = new Map();
   const add = (list) => (list ?? []).forEach((c) => byId.set(String(c.id), c));
   if (claimIds.length) {
@@ -518,8 +645,9 @@ export async function collectRows(batch, query) {
     }
   }
   const claims = [...byId.values()];
-  const thingRids = [...new Set(claims.map((c) => String(c.in_rid)).filter((r) => /^#\d+:\d+$/.test(r)))];
-  const things = thingRids.length ? ((await query(`SELECT @rid AS rid, name, label, _keys FROM [${thingRids.join(", ")}]`).catch(() => [])) ?? []) : [];
+  // every thing, not only the claims' subjects: a second thing holding a row shows up here
+  const things = (await query("SELECT @rid AS rid, name, label, _keys, _norm, _class, _homes FROM Entity WHERE _kind = 'thing'").catch(() => [])) ?? [];
+  const allClaims = (await query("SELECT id, @out AS out_rid FROM CLAIMS").catch(() => [])) ?? [];
   const rescues = (await query("SELECT kind, status, approved_by, payload FROM PendingWrite WHERE kind = 'rehome' AND status = 'approved'").catch(() => [])) ?? [];
-  return { documents, sections, claims, things, rescues };
+  return { documents, sections, claims, things, allClaims, rescues };
 }

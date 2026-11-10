@@ -116,11 +116,13 @@ export const scenarios = [
       const h = helpers(given);
       await withPolicy(h, MAP, async () => {
         const before = await graderCalls(h);
-        const r = await saveClaims(h, "alice", nm("e2e-au2 exatron quantity"), "Exatron's repeat order is 1,200 pieces, due mid December.", [
+        // nothing but the claim, in its name and its text: any other word is the grader's (placement.js claimsSettle)
+        const name = "order 3260357 quantity";
+        const r = await saveClaims(h, "alice", name, "The quantity of order 3260357 is 1,200.", [
           { kind: "commitment", subject: { key: "mssql:dbo_Job:3260357", class: "orders" }, attribute: "quantity", value: 1200, valid_until: "2026-12-15" },
         ]);
         h.check(!r.error && !r.pendingId, `alice holds Operations, which holds orders: written directly (${JSON.stringify(r).slice(0, 300)})`);
-        const e = await h.entry(nm("e2e-au2 exatron quantity"));
+        const e = await h.entry(name);
         h.check(e?._home === POS.ops, `placed at its origin, got ${e?._home} (${e?._grade})`);
         h.check(/placed by its claims/.test(e?._grade ?? ""), `placed by the rule, not the grader: ${e?._grade}`);
         h.check(e?._authority === POS.ops, `the authority that placed it is recorded: ${e?._authority}`);
