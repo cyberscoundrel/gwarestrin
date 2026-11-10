@@ -5,10 +5,11 @@ version, and none will be until the user has read it. After that, the smallest v
 that can run on real models is built.
 
 **How to read it.** Every decided statement is the user's: quoted, or marked with
-its ruling, R1 to R10 (`~/reviews/design-rulings.md`). "Earlier" marks the rulings
-that came before those nine, listed at the top of the same file. Anything else is
-in [Open](#open) and is not decided. The two [proposals](#proposals-from-the-assistant-not-rulings)
-at the end are the assistant's.
+its ruling, R1 to R11 (`~/reviews/design-rulings.md`). "Earlier" marks the rulings
+that came before R1, listed at the top of the same file. R11 statements are answers
+the assistant recommended to fourteen open questions, which the user accepted with
+"They stand". The one question left is in [Open](#open) and is not decided. The two
+[proposals](#proposals-from-the-assistant-not-rulings) at the end are the assistant's.
 
 ## What an organization is
 
@@ -19,6 +20,8 @@ at the end are the assistant's.
 Four primary primitives are the roots: **agent**, **commitment**, **event** and
 **resource** (R1).
 
+- A commitment is an obligation one agent has to another to do or deliver something by
+  some time. An event is something that happened at a time (R11).
 - Decisions and actions are subclasses of event (R1).
 - Agent is the user's word, replacing actor. The AI agents are instances under it (R1).
 - Resource is anything of value the organization controls: vehicles, buildings,
@@ -42,6 +45,9 @@ Four primary primitives are the roots: **agent**, **commitment**, **event** and
 - Classes can be of anything and form a tree with subclasses (earlier).
 - A class may have several parents. Where parents conflict, the strictest rule wins (R9).
 - A class is scoped by home like any other node (earlier).
+- A class holds its name, parents, home, description, evidence, whether its rows become
+  nodes, its source table if any, and, for commitment classes, optional stages. Other
+  attributes stay in the source (R11).
 - There is no person gate on classes. People can correct afterwards (R5).
 - A class is never negotiated in a record or a conversation. The chat agent and the
   condenser deal in text, not class vocabulary (R5).
@@ -88,6 +94,9 @@ agent. A timeline is read from times plus dependency (R1).
 - The condensed document and its sections are the record. Sections relate to
   instances. The user does not need model-free answers from the graph (R2).
 - The pipeline is: condense, one typed check per section, worker files (R4).
+- The person chooses on or off record in the chat, and threads default to off record.
+  Nothing from an off-record thread reaches the graph or any source, enforced by the
+  tools. A file uploaded on record is a record and gets a worker (R11).
 
 ## How workers file a record
 
@@ -98,7 +107,11 @@ Workers are responsible for filing incoming records. Information is committed to
 relevant source by whatever means that source takes; for SQL Server, a write. Each
 source declares how it is committed to (R2).
 
-Each piece of a record ends in one outcome on record (R2):
+Each piece of a record ends in one outcome on record (R2). A piece is whatever one
+filing-log entry covers. The worker decides the split while filing, and nothing is
+stored to divide sections (R11). For example, a section saying a job moved machines and
+a customer wants fifty more parts by Friday is two entries, because they go to two
+places.
 
 | Outcome | Meaning |
 |---|---|
@@ -108,8 +121,13 @@ Each piece of a record ends in one outcome on record (R2):
 | **Kept** | No system holds it. The document is the source, linked to instances. |
 
 **Data with no source.** R2 raised this as its open part and settled the outcome: it is
-Kept, and recurring Kept is a signal for a discovered class. What follows from that is
-item 4 under Open.
+Kept, and recurring Kept is a signal for a discovered class. When a fitting class or
+source appears, the orchestrator re-files the matching Kept pieces in a later batch. It
+judges what counts as recurring; there is no fixed number. Nothing Kept is deleted (R11).
+
+**Who authorizes.** The authority that counts is the recorder's, never the agent's. A
+class missing from the map means Proposed. A person with authority for that class
+approves a Proposed piece; the orchestrator never approves (R11).
 
 Workers resolve names against the source with read tools. If the source is
 unreachable, the piece is Held (R3).
@@ -130,6 +148,8 @@ source writes. There are no audit nodes (R9).
 - A worker starts with a brief: the record, the relevant class tree, connected
   instances, and how each source is committed to (R7).
 - A brief contains only what the record audience can see, enforced in code (R7).
+- A record with sections at different homes is split by home: one worker per home, each
+  seeing only its own audience (R11).
 - The continuous briefing agent per profile comes after the first real batch. Briefing
   content is treated as data and sanitized (R7).
 
@@ -143,6 +163,10 @@ source writes. There are no audit nodes (R9).
   what it did, and the orchestrator evaluates that account (R10).
 - So when no existing class fits, the worker requests one from the orchestrator and
   does not resolve that piece itself (R10).
+- Low stakes is anything reversible and confined to its own record: relating to existing
+  instances, Kept, and Held questions to the recorder. High stakes is new classes or
+  subclasses, and conflicts with a source. The orchestrator checks a worker's account
+  against the source itself (R11).
 
 ## Discovery
 
@@ -154,16 +178,30 @@ source writes. There are no audit nodes (R9).
 
 - The new version starts on an empty graph, and discovery builds from the connected
   systems (R8).
+- Discovery is the orchestrator running with read tools only, plus workers it starts
+  for parts of it (R11).
 - Discovery seeds only what organizational structure needs (R3).
 - Reruns and new tables count as discovery (R9).
 - The old development notes are read-only history for discovery, with restrictions
   respected through home from evidence (R8).
+- A class found in a table gets the home of the connection that can read that table. A
+  class found in notes gets the strictest home among those notes. Either is wider only
+  if wider evidence independently supports it (R11).
+- A person corrects in the admin panel or by telling the orchestrator. Corrections are
+  stored and reruns respect them. A retired class never returns on its own (R11).
 - The development volume is snapshotted first, only when the user says so. The demo
   instance is unaffected (R8).
 
 ## Visibility, and the map that chooses Filed or Proposed
 
 - Visibility is the section's position home plus the restrict-only check (R6).
+- A section starts at the position of the person who put it on record, and the check
+  can only raise it (R11).
+- An instance is visible wherever a section about it is. A dependency edge is visible
+  only to someone who can see both ends (R11).
+- A document's title takes the strictest home among its sections (R11).
+- An agent cannot write lower than what it read, but a person's own notes do not raise
+  their level (R11).
 - A map from classes to positions is used only to choose Filed or Proposed (R6).
 - Positions are mirrored as classes under agent, with people as instances. The sync
   is one-way from authentik, which keeps granting access (R6).
@@ -176,6 +214,10 @@ One write-time sensitivity check stays. It is independent of the agents that rea
 content, for trust and timing. It runs once per section, can only restrict, uses
 closed categories, and is a typed decision model with real probabilities, so
 uncertainty holds the section higher (R4).
+
+It starts with the nine categories already in code, which an admin can edit. An
+uncertain answer holds the section one level higher and flags it. No answer keeps the
+section admin-only until it is checked (R11).
 
 A locally served decision model for on-prem is unproven and should be tested in the
 first real batch (R4).
@@ -194,57 +236,14 @@ first real batch (R4).
 | Audit nodes | R9 |
 | One parent per class | R9 |
 | The 62-note oracle as the acceptance standard. Its notes stay as test input, and the first real run is judged on filing outcomes and tree quality | R9 |
+| The oracle's need ux-t07, which falls away with claims | R11 |
 
 ## Open
 
-None of this is decided.
-
-1. **What a piece of a record is (R2). The assistant's proposal, to approve or reject:**
-   a piece is simply whatever one filing-log entry covers. A section saying a job moved
-   machines and a customer wants fifty more parts by Friday is two entries, because they
-   go to two places. The worker decides the split while filing, and nothing is stored to
-   divide sections.
-2. **Where low stakes ends (R10). The assistant's proposal, to approve or reject:** low
-   stakes is anything reversible and confined to its own record: relating to existing
-   instances, Kept, and Held questions to the recorder. High stakes is anything that
-   shapes other records or can't easily be undone: new classes or subclasses, and
-   conflicts with a source. Also proposed: the orchestrator checks a worker's account
-   against the source itself rather than taking the account's word, since a model can
-   misreport what it did.
-3. **Who runs discovery (R7).** Only the orchestrator and workers mint (R7), yet discovery
-   creates classes. It needs saying whether discovery is those two agents running read-only.
-4. **Kept, later (R2).** Whether anything goes back when a class or source appears for
-   Kept data, and how often counts as recurring. Without this, Kept can only grow.
-5. **Where a section starts (R6).** The check only raises a home, so the starting home
-   is the widest a section can be after the check. Today it is the recorder's position;
-   no ruling says so.
-6. **A record with sections at different homes (R4, R7).** One worker per record, but a
-   brief holds only what the record audience can see. Which audience applies decides
-   what a worker can read and file.
-7. **Filed or Proposed in detail (R2, R6).** Whose authority counts, what a class absent
-   from the map means, and who decides a Proposed piece. Filing cannot run without these.
-8. **Homes of instances and dependency edges (R1, R6).** The rulings home sections and
-   classes. A dependency between something visible and something hidden can reveal the
-   hidden one.
-9. **Home from evidence (R8).** How a discovery run sets it when it reads above where it
-   writes. This decides whether a restricted table's class name can reach a lower position.
-10. **Corrections and reruns (R5, R9).** How a person corrects, and whether a rerun must
-    respect it. Otherwise a rerun can undo a correction.
-11. **The check's list, threshold and failure (R4).** Which closed categories, how
-    uncertain is too uncertain, and what happens if the model cannot answer at all, now
-    that the fallback is gone. Nine categories exist in code; the rulings name none.
-12. **Off record, and uploaded files.** The user's words give the choice but not who
-    makes it or what it guarantees. Whether an uploaded document is a record that gets
-    a worker is also unruled.
-13. **Three items from the integration report.** Whether a writer's own notes raise
-    their derived floor, and whether that floor stays at all under R6; the need ux-t07,
-    which may fall away with claims; and whether a document's title moves when a section
-    is re-homed. Each changes who sees what.
-14. **What primitives and classes contain.** Commitment and event are named but not
-    defined, and the earlier stage lists and attributes are unruled. Workers and
-    discovery need to know what a class holds.
-15. **The first run's data and models.** See proposal B. A copy of real records would
-    reach whichever models run it.
+**The first run's data and models (R11).** Which database the first real-model run
+copies, and which models may see that copy (see proposal B). A copy of real records
+would reach whichever models run it. The host runs two containers, `mssql-server` and
+`tcmautomation`, and neither has been inspected.
 
 ## Proposals from the assistant (not rulings)
 
@@ -321,6 +320,4 @@ least two, and run each three times to see variation.
 No pass mark is proposed, since this run is to find out what happens. The exceptions
 are zero tolerance: any brief leak, and any source row changed without a Filed entry.
 
-**To answer first:** which database to copy, and which models may see that copy. A
-`mssql-server` container runs on the host. This work did not open it, so whether it
-holds production data is unknown.
+**To answer first:** the one question under [Open](#open).
