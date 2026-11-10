@@ -1,32 +1,19 @@
 /**
- * Documents (see documents.js and docstore.js): ingesting a stored text into an entry, sections and extracted
- * facts; reading it back. A condensed document (docs/ORGANIZATION-MODEL.md, "Inputs: on record, condensed,
- * per claim") takes the same path: its sections are given rather than chunked, the document entry carries the
- * on-record marker, and each claim becomes a CLAIMS edge from its section (model/schema.js) homed no lower
- * than the section.
+ * Documents (see documents.js and docstore.js): ingesting a stored text into an entry and its sections; reading
+ * it back. A condensed document (R2: the condensed document and its sections are the record) takes the same
+ * path: its sections are given rather than chunked, and the document entry carries the on-record marker.
  */
 import { randomUUID } from "node:crypto";
-import { commonAncestor, effectiveHome, homeName } from "./positions.js";
+import { effectiveHome, homeName } from "./positions.js";
 import { liveClause, parseValidUntil } from "./extent.js";
 import { createDocStore } from "./docstore.js";
-import { chunk, extractionPrompt, MAX_CHARS, MAX_SECTIONS, parseExtraction, parseRecordText, prepareRecord, preview, recordId, renderRecord, sectionChunks, sectionName, stableUuid } from "./documents.js";
-import { authorityOf, claimHome } from "./model/authority.js";
-import { statements, TYPES } from "./model/schema.js";
-import { DOC_STORE, EXTRACT_MODEL, GRADER_MODEL, log } from "./context.js";
-import { adbCommand, adbQuery, ensureIndex, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.js";
-import { chat, embedBatch } from "./models.js";
+import { chunk, MAX_CHARS, MAX_SECTIONS, parseRecordText, prepareRecord, preview, recordId, renderRecord, sectionChunks, sectionName } from "./documents.js";
+import { DOC_STORE, log } from "./context.js";
+import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE } from "./db.js";
 import { homeFilter, personOf, positionMap, resolveWriteHome, writerOf } from "./scope.js";
-import { claimsFollowEntry, derivedFloor, placeEntities, recordReads } from "./floor.js";
-import { queueWrite, upsertEntities } from "./write.js";
-// the Authority stream's exports, once merged (docs/ORGANIZATION-MODEL.md; MAP.md): decideWrite in write.js
-// decides a record's write by its claims' authority, placeByClaims in placement.js homes an entity by the
-// claims it carries. Read through namespaces so this module runs on main as it is and takes them when present.
-import * as writeRules from "./write.js";
-import * as placementRules from "./placement.js";
-import { policy } from "./org-policy.js";
-import { recordSubject } from "./linker.js";
+import { derivedFloor, placeEntities, recordReads } from "./floor.js";
+import { decideWrite, queueWrite, upsertEntities } from "./write.js";
 import { settleDocument, untitled } from "./document-home.js";
-import { normalize } from "./things.js";
 
 /** ---- documents (see documents.js and docstore.js) ---- */
 
@@ -38,10 +25,7 @@ export async function ensureDocumentSchema() {
   for (const prop of ["_doc_id", "_doc_title", "_doc_status", "_doc_base", "_heading_own"]) await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._section IF NOT EXISTS INTEGER`).catch(() => {});
   await adbCommand(`CREATE INDEX IF NOT EXISTS ON ${ENTITY_LABEL} (_doc_id) NOTUNIQUE`).catch(() => {});
-  for (const t of ["PART_OF", "NEXT", "SOURCED_FROM"]) await adbCommand(`CREATE EDGE TYPE ${t} IF NOT EXISTS`).catch(() => {});
-  // the organization model's shapes a record needs (idempotent DDL from the contract): the on-record marker
-  // on a document, the CLAIMS edge, and the class type claims are checked against
-  for (const sql of statements({ Entity: TYPES.Entity, CLAIMS: TYPES.CLAIMS, CommitmentClass: TYPES.CommitmentClass })) await adbCommand(sql).catch(() => {});
+  for (const t of ["PART_OF", "NEXT"]) await adbCommand(`CREATE EDGE TYPE ${t} IF NOT EXISTS`).catch(() => {});
 }
 
 async function storedChunks(docId) {
@@ -78,10 +62,9 @@ async function recordTitle(base, docId, origin, spans) {
 /**
  * Ingest a stored document: its sections (graded, never below the entry's
  * grade, named for no one until they are placed), then its entry (no lower
- * than its most restricted section: settleDocument), their links, and, only
- * when the ingest said so, extracted facts. Re-ingesting a manual's title replaces the manual's sections; a
- * record is never replaced, and running one again (a retry, a failed ingest)
- * finishes what is missing and adds nothing (recordClaims).
+ * than its most restricted section: settleDocument) and their links. Re-ingesting a
+ * manual's title replaces the manual's sections; a record is never replaced, and
+ * running one again (a retry, a failed ingest) finishes what is missing and adds nothing.
  */
 async function ingestDocument(p) {
   const writtenAt = Date.parse(p.written_at) || Date.now();
@@ -101,7 +84,7 @@ async function ingestDocument(p) {
   const docEntry = {
     name: p.title,
     facets: { identity: `${p.title}: ${p.description}` },
-    properties: { description: p.description, sections: chunks.length, characters: text.length, extracted: Boolean(p.extract), ...(p.record ? { on_record: true } : {}) },
+    properties: { description: p.description, sections: chunks.length, characters: text.length, ...(p.record ? { on_record: true } : {}) },
     ...(vu ? { valid_until: vu } : {}),
   };
   // the entry's title is graded now and written once its sections are placed: until then no reader below a section that turns out restricted can find it
@@ -117,24 +100,14 @@ async function ingestDocument(p) {
     return rows.find((r) => [sectionName(p.title, c.index, c.heading), sectionName(untitled(r._doc_id), c.index, c.heading)].includes(r.name))?.name;
   };
   const nameOf = (c) => heldName(c) ?? sectionName(untitled(p.doc_id), c.index, c.heading);
-  // a condensed document's sections with claims are not the grader's to judge (the grader runs only on
-  // text that maps to no class): they are written where their claims put them; the rest go the usual way
-  const claimsOfSection = new Map(p.record ? p.record.sections.filter((sec) => (sec.claims ?? []).length > 0).map((sec) => [sec.index, sec.claims]) : []);
-  // with the Authority stream's placement, an entity carrying `claims` is homed by them inside upsertEntities
-  // (never graded, _claim_classes and _authority stored); until then this module writes them itself
-  const byClaims = typeof placementRules.placeByClaims === "function";
-  if (!byClaims) for (const c of chunks) if (claimsOfSection.has(c.index)) await writeClaimedSection(p, c, docHome, vu, nameOf(c));
-  const graded = byClaims ? chunks : chunks.filter((c) => !claimsOfSection.has(c.index));
-  for (let i = 0; i < graded.length; i += 32) {
+  for (let i = 0; i < chunks.length; i += 32) {
     await upsertEntities({
-      entities: graded.slice(i, i + 32).map((c) => ({
+      entities: chunks.slice(i, i + 32).map((c) => ({
         name: nameOf(c),
         facets: { identity: preview(c.text) },
         _embed: { identity: c.embedText },
         ...(c.heading ? { properties: { heading: c.heading } } : {}),
         ...(vu ? { valid_until: vu } : {}),
-        // its whole text goes with its claims: the facet is a preview, and what they don't account for is the grader's
-        ...(byClaims && claimsOfSection.has(c.index) ? { claims: claimsOfSection.get(c.index), _text: c.text } : {}),
         _system: { _kind: "section", _doc_id: p.doc_id, _doc_title: untitled(p.doc_id), _section: c.index },
       })),
       home: p.home,
@@ -183,189 +156,9 @@ async function ingestDocument(p) {
     await docStore.remove(before._doc_id).catch(() => {});
     chunkCache.delete(before._doc_id);
   }
-  let facts = 0;
-  if (p.extract) facts = await extractFacts(p, chunks, sections, writtenAt);
-  // a condensed document's claims, extracted once by the condenser: a CLAIMS edge from each section
-  const claims = p.record ? await recordClaims(p, sections) : 0;
-  // a claim's authority can have raised its section
-  if (p.record) await settleDocument(p.doc_id);
-  await adbCommand(`UPDATE ${String(doc.rid)} SET _doc_status = 'ready', facts = :facts${p.record ? ", claims = :claims" : ""}`, "sql", { facts, claims });
-  log.info(
-    `document "${p.title}" (${p.doc_id}): ${sections.length} sections${p.record ? `, on record by ${p.record.recorded_by}, ${claims} claims` : p.extract ? `, ${facts} extracted facts` : ", no extraction (as asked)"}`,
-  );
-  return { doc_id: p.doc_id, sections: sections.length, facts, ...(p.record ? { claims, on_record: true } : {}) };
-}
-
-/**
- * A section with claims, written as upsertEntities writes a section but without grading and without the
- * linker's queue (its subjects are its claims'): homed where the document is, and raised to a claim's
- * authority position by recordClaims once the policy names one. Re-ingesting the same title updates it
- * in place, like any section ((name, origin) is the key).
- */
-async function writeClaimedSection(p, c, home, vu, name) {
-  await ensureIndex("identity");
-  await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}.heading IF NOT EXISTS STRING`).catch(() => {});
-  const [vec] = await embedBatch([c.embedText.slice(0, 6000)]);
-  const validUntil = vu && vu !== "lasting" ? vu : null;
-  // (name, origin) is the key, as upsertEntities writes it: update in place, else a new vertex
-  const existing = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :s_name AND _origin = :s_origin LIMIT 1`, { s_name: name, s_origin: p.home }))[0];
-  const set = `updated_at = :s_now, _home = :s_home, _grade = :s_grade, _ungraded = null, _kind = 'section', _doc_id = :s_doc, _doc_title = :s_title, _section = :s_index${p.written_by ? ", _written_by = :s_writer" : ""}${c.heading ? ", heading = :s_heading" : ""}${validUntil ? ", _valid_until = :s_until, _valid_by = 'writer'" : ""}, text_identity = :s_text, embed_identity = [${vec.join(",")}]`;
-  const params = {
-    s_now: new Date().toISOString(),
-    s_home: home,
-    s_grade: "a section with claims: homed by them, no lower than the document (not graded)",
-    s_doc: p.doc_id,
-    s_title: untitled(p.doc_id),
-    s_index: c.index,
-    s_writer: p.written_by,
-    s_heading: c.heading,
-    s_until: validUntil,
-    s_text: preview(c.text).slice(0, 4000),
-    s_name: name,
-    s_origin: p.home,
-  };
-  if (existing) await adbCommand(`UPDATE ${String(existing.rid)} SET ${set}`, "sql", params);
-  else await adbCommand(`CREATE VERTEX ${ENTITY_LABEL} SET name = :s_name, _origin = :s_origin, ${set}`, "sql", params);
-}
-
-/** the policy's authority map (classes and attributes to positions; policy.authorityMap once the Authority stream stores one); null until then */
-const authorityPolicy = () => {
-  const m = policy?.authorityMap ?? (policy && (policy.classes || policy.attributes || policy.default) ? { classes: policy.classes ?? {}, attributes: policy.attributes ?? {}, default: policy.default } : null);
-  return m && (Object.keys(m.classes ?? {}).length || Object.keys(m.attributes ?? {}).length || m.default) ? m : null;
-};
-
-/**
- * The thing a claim is about, or null when it has none (linker.js `recordSubject`: resolved as any mention
- * is, minted only when admission says the subject earned a node). Per record, once per subject: the same
- * name under two classes is two subjects.
- */
-async function subjectThing(subject, home, cache, { kind } = {}, notFrom) {
-  const id = subject.key ? `key|${subject.key.toLowerCase()}` : `${subject.scope === "class" ? "class|" : ""}${subject.class ?? ""}|${subject.actor ?? ""}|${normalize(subject.name ?? "")}`;
-  if (cache.has(id)) return cache.get(id);
-  const rid = await recordSubject(subject, home, { kind, notFrom });
-  if (rid && !RID_RE.test(String(rid))) throw new Error(`no thing for the subject ${subject.name ?? subject.key}`);
-  cache.set(id, rid);
-  return rid;
-}
-
-/**
- * The claims of a condensed document: one CLAIMS edge from the section each was extracted from to its
- * subject, carrying the primitive, class, attribute, value and interval, homed where the section is (a claim
- * is seen by whoever sees its section, decision 5) and raised to its class's authority position once the
- * policy names one, in which case the section is raised with it (no lower than its most restricted claim).
- * The next claim on the same attribute closing an open one (decision 3) is a read: state.js closes
- * intervals per reader over what that reader sees, so nothing here touches earlier claims.
- */
-async function recordClaims(p, sections) {
-  const byIndex = new Map(sections.map((s) => [Number(s._section), { rid: String(s.rid), home: effectiveHome(positionMap, s._home) }]));
-  // the thing a claim is about is seen from where that claim is: one lookup per subject per home
-  const thingsAt = new Map();
-  const thingsFor = (home) => {
-    if (!thingsAt.has(home)) thingsAt.set(home, new Map());
-    return thingsAt.get(home);
-  };
-  const ownSections = new Set([...byIndex.values()].map((s) => s.rid)); // one document is one place, however many times it runs
-  let n = 0;
-  for (const section of p.record.sections) {
-    const s = byIndex.get(section.index);
-    if (!s) continue;
-    // the rule and the section as they stand now: a rule may have tightened while this ran (tightening.js)
-    const authority = authorityPolicy();
-    const current = (await adbQuery(`SELECT _home FROM ${s.rid}`))[0];
-    if (current) s.home = effectiveHome(positionMap, current._home);
-    // a claim's id is the one it was given, else its place in this document: running the document again finds what is already written
-    const written = new Set((await adbQuery(`SELECT id FROM (SELECT expand(outE('CLAIMS')) FROM ${s.rid})`)).map((r) => r.id));
-    for (const [j, c] of (section.claims ?? []).entries()) {
-      let home = s.home;
-      if (authority && positionMap) {
-        // the stricter of the section's home and the claim's authority home
-        const raised = commonAncestor(positionMap, [s.home, claimHome(positionMap, s.home, authorityOf(authority, c.class, c.attribute))]);
-        if (raised !== s.home) {
-          home = raised;
-          await adbCommand(`UPDATE ${s.rid} SET _home = :h, _grade = :g`, "sql", { h: raised, g: `raised to ${homeName(positionMap, raised)}: a claim on ${c.class}/${c.attribute}` }).catch(() => {});
-          s.home = raised;
-        }
-      }
-      // no thing: the claim points back at its section with its subject as written, the shape worker-pool.js reads as unresolved
-      const thing = await subjectThing(c.subject, home, thingsFor(home), c, ownSections);
-      const id = c.id ?? stableUuid("claim", p.doc_id, section.index, j);
-      if (!written.has(id)) await adbCommand(
-        `CREATE EDGE CLAIMS FROM ${s.rid} TO ${thing ?? s.rid} SET id = :c_id, kind = :c_kind, class = :c_class, attribute = :c_attribute, value = :c_value${c.value_num === null || c.value_num === undefined ? "" : ", value_num = :c_num"}, valid_from = :c_from${c.valid_until ? ", valid_until = :c_until" : ""}, recorded_at = :c_at, recorded_by = :c_by, _home = :c_home${thing ? "" : ", subject = :c_subject, subject_norm = :c_norm"}`,
-        "sql",
-        { c_id: id, c_kind: c.kind, c_class: c.class, c_attribute: c.attribute, c_value: c.value, c_num: c.value_num, c_from: c.valid_from, c_until: c.valid_until, c_at: c.recorded_at, c_by: c.recorded_by, c_home: home, c_subject: JSON.stringify(c.subject), c_norm: normalize(c.subject.name ?? "") },
-      );
-      // no write closes an earlier claim: decision 3 is applied per reader at read time (state.js), over
-      // only the claims that reader sees, so a claim above someone can't end what they see
-      n++;
-    }
-    // the section as it stands now: raised by a later claim here, moved by a regrade while this ran, or
-    // settled differently on a retry than when its earlier claims were written
-    const now = (await adbQuery(`SELECT _home FROM ${s.rid}`))[0];
-    if (now) await claimsFollowEntry(s.rid, effectiveHome(positionMap, now._home));
-  }
-  return n;
-}
-
-/** the confirmed classes claims are checked against; none yet means no claim can name one (decision 2: the section is stored, with no claim) */
-async function confirmedClasses() {
-  const rows = await adbQuery("SELECT name, stages, record_table FROM CommitmentClass WHERE status = 'confirmed' LIMIT 500").catch(() => []);
-  return rows.map((r) => ({ name: r.name, stages: Array.isArray(r.stages) ? r.stages : [], record_table: r.record_table ?? null }));
-}
-
-/** extracted facts: ordinary entries, filed no lower than their section, linked to it */
-async function extractFacts(p, chunks, sections, writtenAt) {
-  const model = EXTRACT_MODEL || GRADER_MODEL;
-  if (!model) {
-    log.warn(`document "${p.title}": extraction asked for, but no EXTRACT_MODEL or GRADER_MODEL is set`);
-    return 0;
-  }
-  const homeOf = new Map(sections.map((s) => [Number(s._section), { rid: String(s.rid), home: effectiveHome(positionMap, s._home) }]));
-  // a fact is filed at its section: it may repeat only the title that section shows
-  const titleOf = new Map(sections.map((s) => [Number(s._section), s._doc_title ?? p.title]));
-  const all = [];
-  for (let i = 0; i < chunks.length; i += 4) {
-    const group = chunks.slice(i, i + 4);
-    try {
-      const shown = group.every((c) => titleOf.get(c.index) === p.title) ? p.title : untitled(p.doc_id);
-      all.push(...parseExtraction(await chat(model, extractionPrompt(shown, group, writtenAt)), group, writtenAt));
-    } catch (e) {
-      log.warn(`document "${p.title}": extraction of sections ${i + 1}-${i + group.length} failed: ${String(e).slice(0, 120)}`);
-    }
-  }
-  // one write per section home (grading runs per write), floored at that home
-  const byHome = new Map();
-  for (const f of all) {
-    const s = homeOf.get(f.section);
-    if (!s) continue;
-    if (!byHome.has(s.home)) byHome.set(s.home, []);
-    byHome.get(s.home).push({ ...f, sectionRid: s.rid });
-  }
-  let n = 0;
-  for (const [home, list] of byHome) {
-    for (let i = 0; i < list.length; i += 32) {
-      const batch = list.slice(i, i + 32);
-      await upsertEntities({
-        entities: batch.map((f) => ({
-          name: f.name,
-          facets: { identity: f.statement },
-          properties: { source: `${titleOf.get(f.section) ?? untitled(p.doc_id)} §${f.section + 1}` },
-          ...(f.until ? { valid_until: f.until } : {}),
-        })),
-        home: p.home,
-        written_by: p.written_by,
-        floor: home,
-        written_at: p.written_at,
-      });
-      for (const f of batch) {
-        const row = (await adbQuery(`SELECT @rid AS rid FROM ${ENTITY_LABEL} WHERE name = :name AND _origin = :origin AND _kind IS NULL LIMIT 1`, { name: f.name, origin: p.home }))[0];
-        if (row) {
-          await edgeOnce("SOURCED_FROM", String(row.rid), f.sectionRid);
-          n++;
-        }
-      }
-    }
-  }
-  return n;
+  await adbCommand(`UPDATE ${String(doc.rid)} SET _doc_status = 'ready'`);
+  log.info(`document "${p.title}" (${p.doc_id}): ${sections.length} sections${p.record ? `, on record by ${p.record.recorded_by}` : ""}`);
+  return { doc_id: p.doc_id, sections: sections.length, ...(p.record ? { on_record: true } : {}) };
 }
 
 /**
@@ -413,31 +206,28 @@ export function startIngest(p) {
 }
 
 /**
- * A condensed document put on record (docs/ORGANIZATION-MODEL.md, "Inputs"): the contract's document shape
- * (model/claims.js), validated here before anything is stored, with its claims. The tool call's title and
- * description fill what the document left out; the recording person, position and time are the server's.
- * Stored and ingested like a manual (after approval for queued writers), with the on-record marker and a
- * CLAIMS edge per claim. Reachable today through ingest_document with the document as JSON in `text`
- * (the tool table in server.js isn't this module's); a dedicated tool can call this directly.
+ * A condensed document put on record: the contract's document shape (model/record.js), validated here before
+ * anything is stored. The tool call's title and description fill what the document left out; the recording
+ * person, position and time are the server's. Stored and ingested like a manual (after approval for queued
+ * writers), with the on-record marker. Also reachable through ingest_document with the document as JSON in `text`.
  */
 export async function recordDocument(raw, identity, scope, { title, description, home: requestedHome, valid_until } = {}) {
   if (!docStore) throw new Error("no document store is configured (DOC_STORE)");
   const home = resolveWriteHome(scope, requestedHome);
   let now = Date.now();
-  const classes = await confirmedClasses();
   // who recorded it, under which position and when are the server's: an agent's record counts as the person it
-  // acts for (model/schema.js), at the position its token holds, now, whatever the document or its claims say.
+  // acts for, at the position its token holds, now, whatever the document says.
   // Only in open mode (no identities, standalone development) does the condenser's word stand.
   const person = identity.open ? null : personOf(identity.user);
   const position = identity.positions?.includes(home) ? home : (identity.positions?.[0] ?? home ?? "unscoped");
-  const prepare = (at) => prepareRecord(raw, { title, description, recorded_by: person ?? undefined, position, classes, now: at, stamp: person ? { recorded_by: person, position, recorded_at: new Date(at).toISOString() } : undefined });
+  const prepare = (at) => prepareRecord(raw, { title, description, recorded_by: person ?? undefined, position, now: at, stamp: person ? { recorded_by: person, position, recorded_at: new Date(at).toISOString() } : undefined });
   let document = prepare(now);
   // a re-send is the same document: finished once it is not ingested again, and a failed run continues from its
-  // first recording, so the claims it already wrote stay as they are
+  // first recording
   const doc_id = recordId(raw, { person: document.recorded_by, home, title: document.title });
-  const existing = (await adbQuery(`SELECT name, _doc_status, _recorded_at, sections, claims FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: doc_id }))[0];
+  const existing = (await adbQuery(`SELECT name, _doc_status, _recorded_at, sections FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: doc_id }))[0];
   if (existing?._doc_status === "ready") {
-    return { already_on_record: true, doc_id, title: existing.name, sections: Number(existing.sections) || document.sections.length, claims: Number(existing.claims) || 0, note: "this document is already on record; nothing was added" };
+    return { already_on_record: true, doc_id, title: existing.name, sections: Number(existing.sections) || document.sections.length, note: "this document is already on record; nothing was added" };
   }
   if (existing?._recorded_at) {
     now = Date.parse(existing._recorded_at) || now;
@@ -447,63 +237,50 @@ export async function recordDocument(raw, identity, scope, { title, description,
   if (text.length > MAX_CHARS) throw new Error(`documents are limited to ${MAX_CHARS} characters`);
   if (spans.length > MAX_SECTIONS) throw new Error(`documents are limited to ${MAX_SECTIONS} sections (this one has ${spans.length})`);
   const v = parseValidUntil(valid_until, now);
-  const allClaims = document.sections.flatMap((s) => s.claims);
-  const claims = allClaims.length;
-  // the write-or-propose decision: the Authority stream's one rule over the claims' classes when it is
-  // merged (a record whose claims lie with a higher authority is proposed there), today's site rule until then
-  const decision = typeof writeRules.decideWrite === "function" ? writeRules.decideWrite(identity, { kind: "ingest", claims: allClaims }, { origin: home }) : null;
-  const queued = decision ? decision.action !== "direct" : identity.caps.write === "queued";
-  // the document's floor is the writer's derived floor alone, as a manual's is: the decision's floor spans every
-  // claim in the record (the common ancestor of their authorities), and applying it to the document would lift
-  // every section to the most restricted claim's home. Each section is homed by its own claims inside
-  // upsertEntities (model/README.md: no lower than its most restricted claim and no lower than its document),
-  // the free-text sections by the grader; the decision's home is where the proposal is reviewed.
-  // the name it goes under (checked again when the ingest runs: an earlier record keeps its title and its claims)
+  // the write-or-propose decision: queuing and the derived floor (write.js decideWrite)
+  const decision = decideWrite(identity, { kind: "ingest" }, { origin: home });
+  const queued = decision.action !== "direct";
+  // the name it goes under (checked again when the ingest runs: an earlier record keeps its title)
   const recordName = await recordTitle(document.title, doc_id, home, spans);
   const payload = {
     doc_id,
     title: recordName,
     description: (document.description ?? `${document.title}, put on record by ${document.recorded_by}`).slice(0, 500),
-    extract: false,
     home,
     floor: derivedFloor(identity, home),
     written_at: document.recorded_at,
     ...(v ? { valid_until: v.valid_until ?? "lasting" } : {}),
     chars: text.length,
     sections: spans.length,
-    // the record itself: who, under which position, why, and the claims per section (the approval runs this payload)
-    record: { recorded_by: document.recorded_by, recorded_at: document.recorded_at, position: document.position, reason: document.reason, sections: document.sections.map((s) => ({ index: s.index, claims: s.claims })) },
+    // the record itself: who, under which position, why (the approval runs this payload)
+    record: { recorded_by: document.recorded_by, recorded_at: document.recorded_at, position: document.position, reason: document.reason },
     ...writerOf(identity),
   };
   await docStore.put(doc_id, text, { title: payload.title, by: identity.user, at: payload.written_at, on_record: true, sections: spans });
-  const checked = classes ? { classes: `checked against ${classes.length} confirmed class${classes.length === 1 ? "" : "es"}` } : { classes: "no confirmed classes in the graph yet: class names unchecked" };
   if (queued) {
     // a re-send while the first waits for approval is that same proposal
     const waiting = (await adbQuery("SELECT id FROM PendingWrite WHERE kind = 'ingest' AND status = 'pending' AND payload LIKE :p LIMIT 1", { p: `%"doc_id":"${doc_id}"%` }))[0];
-    const q = waiting ? { queued: true, pendingId: waiting.id } : await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home: decision?.home ?? home });
+    const q = waiting ? { queued: true, pendingId: waiting.id } : await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home: decision.home ?? home });
     return {
       ...q,
       doc_id,
       title: recordName,
       on_record: true,
       sections: spans.length,
-      claims,
-      ...checked,
-      ...(decision?.reason ? { reason: decision.reason } : {}),
+      ...(decision.reason ? { reason: decision.reason } : {}),
       note: "the record is stored; it's added to the knowledge graph once the ingest is approved",
     };
   }
   void startIngest(payload);
-  return { ingesting: true, doc_id, title: recordName, on_record: true, sections: spans.length, claims, ...checked, note: "sections are being graded and embedded and the claims written; search finds them in a minute or two" };
+  return { ingesting: true, doc_id, title: recordName, on_record: true, sections: spans.length, note: "sections are being graded and embedded; search finds them in a minute or two" };
 }
 
 /** an ingest from a tool call: stored now; ingested now, or after approval for queued writers */
-export async function requestIngest({ title, description, text, extract, home: requestedHome, valid_until }, identity, scope) {
+export async function requestIngest({ title, description, text, home: requestedHome, valid_until }, identity, scope) {
   if (!docStore) throw new Error("no document store is configured (DOC_STORE)");
   // a condensed document rides in text as JSON: the record path, not the chunker
   const record = parseRecordText(text);
   if (record) return recordDocument(record, identity, scope, { title, description, home: requestedHome, valid_until });
-  if (typeof extract !== "boolean") throw new Error('say whether to extract facts: extract: true or false (ask the person if they haven\'t said)');
   const body = String(text ?? "");
   if (body.trim().length < 20) throw new Error("the document text is empty");
   if (body.length > MAX_CHARS) throw new Error(`documents are limited to ${MAX_CHARS} characters`);
@@ -513,14 +290,12 @@ export async function requestIngest({ title, description, text, extract, home: r
   const now = Date.now();
   const v = parseValidUntil(valid_until, now);
   const doc_id = randomUUID();
-  // the one write-or-propose rule (write.js decideWrite, MAP.md): a manual carries no claims, so the identity's
-  // queuing and the derived floor decide
-  const decision = writeRules.decideWrite(identity, { kind: "ingest", claims: [] }, { origin: home });
+  // the one write-or-propose rule (write.js decideWrite): the identity's queuing and the derived floor
+  const decision = decideWrite(identity, { kind: "ingest" }, { origin: home });
   const payload = {
     doc_id,
     title: String(title).trim().slice(0, 200),
     description: String(description).trim().slice(0, 500),
-    extract,
     home,
     floor: decision.floor ?? derivedFloor(identity, home),
     written_at: new Date(now).toISOString(),
@@ -532,10 +307,10 @@ export async function requestIngest({ title, description, text, extract, home: r
   await docStore.put(doc_id, body, { title: payload.title, by: identity.user, at: payload.written_at });
   if (decision.action !== "direct") {
     const q = await queueWrite({ kind: "ingest", payload: JSON.stringify(payload), user: identity.user, home: decision.home ?? home });
-    return { ...q, doc_id, sections: chunks.length, extract, note: "the document is stored; it's added to the knowledge graph once the ingest is approved" };
+    return { ...q, doc_id, sections: chunks.length, note: "the document is stored; it's added to the knowledge graph once the ingest is approved" };
   }
   void startIngest(payload);
-  return { ingesting: true, doc_id, sections: chunks.length, extract, note: "sections are being graded and embedded; search finds them in a minute or two" };
+  return { ingesting: true, doc_id, sections: chunks.length, note: "sections are being graded and embedded; search finds them in a minute or two" };
 }
 
 /** read a document's sections the caller can see (text from the document store) */
