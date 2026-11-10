@@ -11,6 +11,7 @@
 //   ABOUT (edge)           section -> instance: sections relate to instances (R2)
 //   FilingEntry (document) the filing log (filing.js); outside the graph: no edges, no graph read (R9)
 //   WorkerRequest (document) a worker's request of the orchestrator (filing.js, R10)
+//   DiscoveryRun (document) a discovery run and the tables it examined (classes.js, R9)
 //
 // Gone (R2, R3, R9): CLAIMS, SourceRef, REFERS_TO, AuditEvent, WROTE, CommitmentClass.
 // The classes and discovery stream moves discovery's drafts off CommitmentClass (discovery.js keeps its
@@ -63,6 +64,9 @@ export const TYPES = {
       _record_table: "STRING", // system:table, or null when no source holds it
       _stages: "LIST", // commitment classes only, optional (R11)
       _status: "STRING", // active | retired (R11: a retired class never returns on its own)
+      _corrections: "STRING", // a class: JSON, the people's corrections kept on it (classes.js, R11)
+      _run: "STRING", // a class or instance a discovery run wrote: the run's id, so a run can be undone whole
+      _discovery_run: "STRING", // a task entry that is a part of a discovery run (its worker is held to the discovery tools)
       _on_record: "BOOLEAN", // a document: a person put it on record
       _recorded_by: "STRING",
       _recorded_at: "STRING",
@@ -132,6 +136,12 @@ export const TYPES = {
       { properties: ["record"], unique: false },
       { properties: ["outcome"], unique: false },
     ],
+  },
+  DiscoveryRun: {
+    kind: "document",
+    doc: "a discovery run (classes.js): who started it, and every table it examined, so a rerun reads only new ones (R9)",
+    properties: { id: "STRING", started_by: "STRING", started_at: "STRING", focus: "STRING", examined: "LIST" },
+    indexes: [{ properties: ["id"], unique: true }],
   },
   WorkerRequest: {
     kind: "document",

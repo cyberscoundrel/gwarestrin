@@ -36,6 +36,9 @@ import { ensurePruneSchema, pruneExpired, pruneSink } from "./pruning.js";
 import { ensurePolicySchema, loadPolicy, policy } from "./org-policy.js";
 import { settleTightening } from "./tightening.js";
 import { app } from "./routes.js";
+import { registerClassTools } from "./routes-classes.js";
+import { gateDiscoveryTools } from "./discovery.js";
+import { discoveryRunOf } from "./classes.js";
 
 /** ---- MCP server (fresh instance per request: stateless) ---- */
 const facetDoc = Object.entries(FACETS)
@@ -67,7 +70,8 @@ export function createServer(identity) {
   const homeNote = SCOPED
     ? `\nEach entity has a home position; you only see entities homed at your positions or below them.`
     : "";
-  const server = gateOffRecordTools(new McpServer({ name: "graph-rag", version: "0.3.0" }), identity);
+  // a discovery run is held to read tools, the class tree and instances (discovery.js, R11)
+  const server = gateDiscoveryTools(gateOffRecordTools(new McpServer({ name: "graph-rag", version: "0.3.0" }), identity), identity, { isDiscoveryEntry: async (rid) => Boolean(await discoveryRunOf(rid)) });
   // each identity is only shown the tools its capabilities allow (the
   // handlers check again: listing is not the boundary)
 
@@ -274,6 +278,9 @@ questions, and to find related entries after a search.${role === "worker" ? " Li
 
   // ---- a person's chat agent puts a condensed section of an on-record thread on record (record-tools.js) ----
   if (SCOPED && writable && !role) registerRecordTools(server, { identity, scope, need });
+
+  // ---- the class tree, instances and dependency, by role (routes-classes.js) ----
+  if (SCOPED) registerClassTools(server, { identity, scope, need, readScope });
 
   // ---- the master's tools: start workers, settle stops, hand the rest to the operator ----
   if (SCOPED && role === "master") registerMasterTools(server, { identity });
