@@ -20,6 +20,7 @@ import { canEditPolicy, policy, policyDefaults, policyMeta, savePolicy } from ".
 import { tighteningRunning } from "./tightening.js";
 import { createServer } from "./server.js";
 import { isOffRecord, OFF_RECORD_REFUSAL } from "./record-state.js";
+import { registerClassRoutes } from "./routes-classes.js";
 
 /** ---- http ---- */
 export const app = express();
@@ -55,6 +56,7 @@ app.post("/mcp", async (req, res) => {
 
 app.get("/mcp", (_req, res) => res.status(405).json({ error: "POST only (stateless)" }));
 app.get("/health", (_req, res) => res.json({ ok: true, facets_indexed: [...knownIndexes] }));
+registerClassRoutes(app);
 
 /** write-approval queue HTTP (for review UIs); approve-capability required */
 function queueIdentity(req) {

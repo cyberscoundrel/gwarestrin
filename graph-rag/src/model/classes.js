@@ -10,9 +10,9 @@
 // Rulings: four primitives are the only roots (R1); a class may have several parents and where parents
 // conflict the strictest rule wins (R9, class-map.js); a class is scoped by home like any other node
 // (earlier ruling); what a class holds (R11); whether a class's rows become nodes is its own setting (R3).
-import { EVERYONE } from "../positions.js";
+import { ancestors, commonAncestor, effectiveHome, EVERYONE } from "../positions.js";
 import { clip, isoDate, nonEmpty, ShapeError, snakeCase } from "./text.js";
-import { TABLE_RE } from "./schema.js";
+import { parseKey, parseTable, TABLE_RE } from "./schema.js";
 
 export const CLASS_KIND = "class";
 /** the four primary primitives, the only roots (R1; "agent" is the user's word, replacing actor) */
@@ -21,15 +21,22 @@ export const PRIMITIVES = ["agent", "commitment", "event", "resource"];
 export const CLASS_STATUSES = ["active", "retired"];
 /** who states a dependency (R1) */
 export const STATED_AS = ["person", "record", "agent"];
-/** what a piece of evidence for a class is; rows are cited by key, never copied */
+/**
+ * what a piece of evidence for a class is; rows are cited by key, never copied.
+ * NEEDS A RULING (evidence kinds): R11 lists evidence among what a class holds and names no kinds.
+ * Smallest choice: this closed list of five, which home from evidence (R11) knows how to read.
+ */
 export const EVIDENCE_KINDS = ["table", "columns", "rows", "notes", "correction"];
 
 /** a class name as an identity: "Leased building", "leased_building" and "Leased-Building" are one class */
 export const classKey = snakeCase;
 
 /**
- * NEEDS A RULING (class names): a name is unique in the organization (by `classKey`), whatever the
- * homes. Smallest reversible choice: two homes can't each hold their own class of one name.
+ * NEEDS A RULING (class names): a name is unique in the organization (by `classKey`), whatever the homes.
+ * Only the orchestrator creates classes, and it sees every home, so a name taken elsewhere tells it nothing
+ * it can't see; a writer that sees less is told only that the name is taken, never which class has it.
+ * (Per-home names were tried and undone: they let a rerun re-create a re-homed class, duplicated the roots
+ * under a race, and made a class map entry ambiguous; review of 4bd1154, C-B1 and C-B3.)
  */
 export const NAMES_UNIQUE = true;
 
@@ -49,7 +56,7 @@ export function normalizeEvidence(raw, field = "evidence") {
  * checks the home. Parents are names; whether they exist and close no cycle is `assertParents`.
  * A primitive is a root and has no parents; every other class has at least one parent.
  */
-export function normalizeClass(raw, { positions } = {}) {
+export function normalizeClass(raw, { positions, index } = {}) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ShapeError("class", "must be an object");
   if (!nonEmpty(raw.name)) throw new ShapeError("name", "needs a name");
   const name = clip(raw.name, 80);
@@ -74,6 +81,14 @@ export function normalizeClass(raw, { positions } = {}) {
   if (!Array.isArray(evidence)) throw new ShapeError("evidence", "must be a list");
   const stages = raw.stages === undefined || raw.stages === null ? [] : raw.stages;
   if (!Array.isArray(stages) || stages.some((s) => !nonEmpty(s))) throw new ShapeError("stages", "must be a list of stage names");
+  // stages belong to commitment classes only (R11): checked against the tree (`index`, the seeded classes
+  // when none is given); a parent the tree doesn't know leaves it undecidable, so it is refused
+  if (stages.length && !root) {
+    const tree = index ?? classIndex([]);
+    const unknown = parentKeys.filter((p) => !tree.has(p));
+    if (unknown.length) throw new ShapeError("stages", `can't tell whether ${name} is under commitment: ${unknown.join(", ")} isn't in the class tree given`);
+    if (!mayHaveStages(key, new Map([...tree, [key, { key, parents: parentKeys, status: "active" }]]))) throw new ShapeError("stages", "only a class under commitment has stages (R11)");
+  }
   if (raw.rows_are_nodes !== undefined && typeof raw.rows_are_nodes !== "boolean") throw new ShapeError("rows_are_nodes", "must be true or false");
   const status = raw.status === undefined || raw.status === null ? "active" : String(raw.status);
   if (!CLASS_STATUSES.includes(status)) throw new ShapeError("status", `must be one of ${CLASS_STATUSES.join(", ")}`);
@@ -96,9 +111,22 @@ export function normalizeClass(raw, { positions } = {}) {
 /** the four roots as classes. NEEDS A RULING (roots' home): smallest choice, everyone sees them */
 export const rootClasses = () => PRIMITIVES.map((name) => ({ name, key: name, parents: [], home: EVERYONE, description: null, evidence: [], rows_are_nodes: false, record_table: null, stages: [], status: "active" }));
 
-/** classes by key: a list of normalized classes, with the roots added when missing */
+/** decisions and actions are subclasses of event (R1); seeded with the roots, at the roots' home */
+export const SEEDED_SUBCLASSES = [
+  { name: "decision", parents: ["event"] },
+  { name: "action", parents: ["event"] },
+];
+
+/** what discovery seeds before it reads anything: the four roots, and decision and action under event (R1) */
+export const seedClasses = () => [
+  ...rootClasses(),
+  ...SEEDED_SUBCLASSES.map(({ name, parents }) => ({ name, key: name, parents, home: EVERYONE, description: null, evidence: [], rows_are_nodes: false, record_table: null, stages: [], status: "active" })),
+];
+export const SEEDED_KEYS = seedClasses().map((c) => c.key);
+
+/** classes by key: a list of normalized classes, with the seeded ones added when missing */
 export function classIndex(classes) {
-  const out = new Map(rootClasses().map((c) => [c.key, c]));
+  const out = new Map(seedClasses().map((c) => [c.key, c]));
   for (const c of classes ?? []) if (c?.key) out.set(c.key, c);
   return out;
 }
@@ -150,6 +178,8 @@ export function assertParents(key, parents, index) {
   for (const p of list) {
     const c = index.get(p);
     if (!c) throw new ShapeError("parents", `no class ${p}`);
+    // NEEDS A RULING (a retired parent): R11 says only that a retired class never returns on its own.
+    // Smallest choice: nothing new goes under it either.
     if (c.status === "retired") throw new ShapeError("parents", `${p} is retired`);
     if (p === key || below.has(p)) throw new ShapeError("parents", `${p} is ${p === key ? "the class itself" : "below it"}: a cycle`);
   }
@@ -214,3 +244,346 @@ export function normalizeDependency(raw) {
 
 /** R11: a dependency edge is visible only to someone who can see both ends (`sees`: instance -> boolean) */
 export const dependencyVisible = (edge, sees) => Boolean(sees(edge.from) && sees(edge.to));
+
+/* ---------------------------------------------------------------------------------------------------
+ * Home from evidence (R11: "A class from a table gets the home of the connection that can read that
+ * table; from notes, the strictest home among them; wider only if wider evidence independently supports
+ * it"). Computed here, never chosen by a model. Unknown anything fails upward to the root.
+ * ------------------------------------------------------------------------------------------------- */
+
+/** is `a` at or above `b` in the tree (everyone sits below every position) */
+const atOrAbove = (positions, a, b) => a === b || (a !== EVERYONE && (b === EVERYONE || ancestors(positions, b).includes(a)));
+
+/**
+ * The widest of several homes, each of which independently supports the class.
+ * NEEDS A RULING (evidence on different branches): when the homes lie on one chain the deepest wins
+ * (`everyone` beats every position); when they sit on different branches neither is wider, so their
+ * common ancestor, the strictest choice, wins.
+ */
+export function widestHome(positions, homes) {
+  const list = [...new Set(homes.map((h) => effectiveHome(positions, h)))];
+  if (!list.length) return positions.root;
+  if (list.includes(EVERYONE)) return EVERYONE;
+  const chain = list.every((a) => list.every((b) => atOrAbove(positions, a, b) || atOrAbove(positions, b, a)));
+  if (!chain) return commonAncestor(positions, list);
+  return list.sort((a, b) => ancestors(positions, b).length - ancestors(positions, a).length)[0];
+}
+
+/** the strictest of several homes: the deepest point at or above all of them (positions.commonAncestor) */
+export const strictestHome = (positions, homes) => commonAncestor(positions, homes);
+
+/** the system a piece of evidence reads from: a table (`system:table`) or a row (`system:table:row`) */
+export const evidenceSystem = (e) => parseTable(e?.ref)?.system ?? parseKey(e?.ref)?.system ?? null;
+
+/**
+ * A class's home from its evidence (R11). `connectionHome(system)` is the home of the connection that
+ * reads a system (null or unknown: the root); `noteHome(ref)` is the home of a note or section (null:
+ * unknown, the root). Each table, column or row citation is one independent group, at its connection's
+ * home; every note together is one group, at the strictest home among them. The class takes the widest
+ * group (widestHome). No usable evidence: the root.
+ */
+export function homeFromEvidence(evidence, { positions, connectionHome = () => null, noteHome = () => null }) {
+  const groups = [];
+  const notes = [];
+  for (const e of evidence ?? []) {
+    if (e.kind === "correction") continue; // a person's correction pins a home itself (corrections below)
+    if (e.kind === "notes") {
+      notes.push((e.ref && noteHome(e.ref)) || positions.root);
+      continue;
+    }
+    const system = evidenceSystem(e);
+    groups.push((system && connectionHome(system)) || positions.root);
+  }
+  if (notes.length) groups.push(strictestHome(positions, notes));
+  return groups.length ? widestHome(positions, groups) : positions.root;
+}
+
+/**
+ * The home a class is stored at: its own (from evidence, or a person's correction) made no wider than
+ * any parent's (R9: where parents conflict the strictest rule wins).
+ * NEEDS A RULING (what "strictest rule" covers): smallest choice, the home is inherited strictest-wins,
+ * so a class is never seen where one of its parents is not; rows_are_nodes is the class's own and is not
+ * inherited.
+ */
+export const classHome = (ownHome, parentHomes, positions) => strictestHome(positions, [ownHome, ...parentHomes]);
+
+/**
+ * Every class's stored home, parents first: `own(c)` gives a class's own home. Returns Map key -> home.
+ * The seeded classes keep theirs.
+ */
+export function treeHomes(index, own, positions) {
+  const out = new Map();
+  const visit = (key, stack) => {
+    if (out.has(key)) return out.get(key);
+    const c = index.get(key);
+    if (!c || stack.has(key)) return positions.root; // a cycle can't be stored (assertParents); fail upward if one is
+    stack.add(key);
+    const home = SEEDED_KEYS.includes(key) ? c.home : classHome(own(c), c.parents.map((p) => visit(p, stack)), positions);
+    stack.delete(key);
+    out.set(key, home);
+    return home;
+  };
+  for (const key of index.keys()) visit(key, new Set());
+  return out;
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * Corrections (R11: "A person corrects in the admin panel or by telling the orchestrator; corrections
+ * are stored and reruns respect them; a retired class never returns on its own"). A correction is kept
+ * on the class it corrects; what it set is pinned, and nothing but another correction changes it.
+ * ------------------------------------------------------------------------------------------------- */
+
+/**
+ * NEEDS A RULING (correction kinds): R11 says corrections are stored and names none. Smallest choice: one
+ * per field a class holds (R11.14), plus retire, restore and taking an instance out of a class.
+ */
+export const CORRECTION_KINDS = ["retire", "restore", "rename", "parents", "home", "rows_are_nodes", "description", "stages", "record_table", "unrelate"];
+/** the field each pinning correction sets */
+export const PINS = { rename: "name", parents: "parents", home: "home", rows_are_nodes: "rows_are_nodes", description: "description", stages: "stages", record_table: "record_table" };
+
+/** one correction, normalized: { kind, value?, from?, instance?, by, at, reason } */
+export function normalizeCorrection(raw, { positions } = {}) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new ShapeError("correction", "must be an object");
+  const kind = String(raw.kind ?? "").trim();
+  if (!CORRECTION_KINDS.includes(kind)) throw new ShapeError("kind", `must be one of ${CORRECTION_KINDS.join(", ")}`);
+  if (!nonEmpty(raw.by)) throw new ShapeError("by", "needs the person who corrected it");
+  const at = isoDate(raw.at ?? Date.now());
+  if (!at) throw new ShapeError("at", `not a date: ${raw.at}`);
+  const out = { kind, by: clip(raw.by, 120), at, reason: nonEmpty(raw.reason) ? clip(raw.reason, 600) : null };
+  const v = raw.value;
+  if (kind === "rename") {
+    if (!nonEmpty(v) || !classKey(v)) throw new ShapeError("value", "needs the new name");
+    out.value = clip(v, 80);
+    out.from = nonEmpty(raw.from) ? clip(raw.from, 80) : null;
+  } else if (kind === "parents") {
+    if (!Array.isArray(v) || !v.length || v.some((p) => !nonEmpty(p))) throw new ShapeError("value", "needs the parents' names");
+    out.value = [...new Set(v.map(classKey))];
+  } else if (kind === "home") {
+    if (!nonEmpty(v)) throw new ShapeError("value", "needs a home");
+    if (positions && v !== EVERYONE && !positions.positions[v]) throw new ShapeError("value", `unknown position: ${v}`);
+    out.value = String(v).trim();
+  } else if (kind === "rows_are_nodes") {
+    if (typeof v !== "boolean") throw new ShapeError("value", "must be true or false");
+    out.value = v;
+  } else if (kind === "description") {
+    out.value = nonEmpty(v) ? clip(v, 1000) : null;
+  } else if (kind === "stages") {
+    if (!Array.isArray(v) || v.some((s) => !nonEmpty(s))) throw new ShapeError("value", "must be a list of stage names");
+    out.value = v.map((s) => clip(s, 60));
+  } else if (kind === "record_table") {
+    if (v !== null && (!nonEmpty(v) || !TABLE_RE.test(String(v).trim()))) throw new ShapeError("value", "system:table, or null");
+    out.value = v === null ? null : String(v).trim();
+  } else if (kind === "unrelate") {
+    if (!nonEmpty(raw.instance)) throw new ShapeError("instance", "needs the instance (its record id or record key)");
+    out.instance = clip(raw.instance, 200);
+  }
+  return out;
+}
+
+/** the fields corrections pinned on a class, the latest winning: { name?, parents?, home?, ... } */
+export function pinned(corrections) {
+  const out = {};
+  for (const c of corrections ?? []) if (PINS[c.kind]) out[PINS[c.kind]] = c.value;
+  return out;
+}
+
+/** is the class retired by its corrections (the latest of retire and restore wins) */
+export function retiredBy(corrections) {
+  let retired = false;
+  for (const c of corrections ?? []) {
+    if (c.kind === "retire") retired = true;
+    if (c.kind === "restore") retired = false;
+  }
+  return retired;
+}
+
+/** the keys a class was known by before a person renamed it */
+export const formerKeys = (cls) => (cls.corrections ?? []).filter((c) => c.kind === "rename" && c.from).map((c) => classKey(c.from)).filter((k) => k !== cls.key);
+
+/** the instances a person took out of a class (record ids or keys, lower-cased): nothing puts them back on its own */
+export const unrelated = (cls) => new Set((cls.corrections ?? []).filter((c) => c.kind === "unrelate").map((c) => c.instance.toLowerCase()));
+
+/**
+ * May the orchestrator create this class (R11: corrections are respected, a retired class never returns
+ * on its own)? `classes` are every stored class with their corrections applied. Throws ShapeError naming
+ * what it collides with: a retired class by name or table, a class a person renamed, or one that exists.
+ * NEEDS A RULING (what "the same class" is on a rerun): smallest choice, the same name (classKey) or the
+ * same record table, wherever the class now lives: a person's re-homing never lets a rerun make it again.
+ * A class the writer can't see (`sees(home)`) still takes its name, but the refusal never names it.
+ */
+export function assertCreatable(cls, classes, { sees = () => true } = {}) {
+  for (const c of classes) {
+    const sameName = c.key === cls.key;
+    // a class the writer can't see blocks the name, and is never named to it (NAMES_UNIQUE)
+    if (!sees(c.home)) {
+      if (sameName || formerKeys(c).includes(cls.key)) throw new ShapeError("name", `the name ${cls.name} is taken`);
+      continue;
+    }
+    const sameTable = Boolean(cls.record_table && c.record_table && c.record_table.toLowerCase() === cls.record_table.toLowerCase());
+    if ((sameName || sameTable) && c.status === "retired") throw new ShapeError(sameName ? "name" : "record_table", `${c.name} was retired by a person: it never returns on its own`);
+    if (formerKeys(c).includes(cls.key)) throw new ShapeError("name", `a person renamed ${cls.name} to ${c.name}: use ${c.name}`);
+    if (sameName) throw new ShapeError("name", `${c.name} exists already`);
+  }
+}
+
+/** may the orchestrator change this field of a class: not when it is retired, nor when a person pinned the field */
+export function assertUnpinned(cls, field) {
+  if (cls.status === "retired") throw new ShapeError("class", `${cls.name} was retired by a person`);
+  if (field in pinned(cls.corrections)) throw new ShapeError(field, `a person set ${cls.name}'s ${field}: only a person changes it`);
+}
+
+/** a class with its corrections applied: pinned fields take the person's value, the status the latest retire or restore */
+export function applyCorrections(cls) {
+  const p = pinned(cls.corrections);
+  const out = { ...cls, ...p };
+  if (p.name) out.key = classKey(p.name);
+  if ((cls.corrections ?? []).some((c) => c.kind === "retire" || c.kind === "restore")) out.status = retiredBy(cls.corrections) ? "retired" : "active";
+  return out;
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * What earns a node (R3): "A row earns a node when the graph must say something the source cannot hold
+ * (for example a dependency), created by the worker, referring back by key."
+ * ------------------------------------------------------------------------------------------------- */
+
+/**
+ * May a row of this class's table become an instance node? Yes when the class says its rows are nodes,
+ * or the node is made for a dependency.
+ * NEEDS A RULING (a row's node for other reasons): smallest choice, also yes with a stated reason of what
+ * the graph must hold that the source can't. A class with no record table has no rows: its instances are
+ * always nodes.
+ */
+export function mayMakeNode(cls, { key = null, dependency = false, reason = null } = {}) {
+  if (!cls.record_table || cls.rows_are_nodes) return { ok: true };
+  const k = parseKey(key);
+  // a row of another table isn't this class's row: what governs it is that table's class (R3)
+  if (k && `${k.system}:${k.table}`.toLowerCase() !== cls.record_table.toLowerCase()) return { ok: false, reason: `${key} isn't a row of ${cls.name}'s table (${cls.record_table})` };
+  if (dependency) return { ok: true, why: "a dependency the source can't hold" };
+  if (nonEmpty(reason)) return { ok: true, why: clip(reason, 300) };
+  return { ok: false, reason: `${cls.name}'s rows stay in ${cls.record_table}, and a section stores the key: a row gets a node only when the graph must say something the source can't hold (a dependency, or give the reason)` };
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * The timeline (R1: "read a timeline from times plus dependency").
+ * ------------------------------------------------------------------------------------------------- */
+
+/**
+ * Order instances by their times and their dependencies: whatever another depends on comes first, and
+ * among those free to come next the earliest time does (no time: after those with one, then by id).
+ * `items`: [{ id, at? }]; `deps`: [{ from, to }] (from depends on to). Dependencies on items not given are
+ * ignored. A cycle can't be ordered: its members come last, by time, marked `cycle: true`.
+ */
+export function timeline(items, deps) {
+  const before = new Map(items.map((i) => [i.id, new Set()]));
+  for (const d of deps ?? []) if (before.has(d.from) && before.has(d.to) && d.from !== d.to) before.get(d.from).add(d.to);
+  const cmp = (a, b) => {
+    const ta = isoDate(a.at);
+    const tb = isoDate(b.at);
+    if (ta && tb && ta !== tb) return ta < tb ? -1 : 1;
+    if (ta && !tb) return -1;
+    if (!ta && tb) return 1;
+    return String(a.id).localeCompare(String(b.id));
+  };
+  const done = new Set();
+  const out = [];
+  for (;;) {
+    const next = items.filter((i) => !done.has(i.id) && [...before.get(i.id)].every((d) => done.has(d))).sort(cmp)[0];
+    if (!next) break;
+    done.add(next.id);
+    out.push({ ...next, after: [...before.get(next.id)] });
+  }
+  for (const i of items.filter((x) => !done.has(x.id)).sort(cmp)) out.push({ ...i, after: [...before.get(i.id)], cycle: true });
+  return out;
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * The tree, as a person reads it (R5: "measure tree quality on real models early").
+ * ------------------------------------------------------------------------------------------------- */
+
+/**
+ * One page: each class under its parents (a class with several parents is listed under each, marked),
+ * with its home, its table and whether its rows are nodes, its instance count and its evidence, for a
+ * person to mark right, wrong or missing. `counts`: Map key -> instances; `homeName(home)` for people.
+ */
+export function treeReport(index, { counts = new Map(), homeName = (h) => h } = {}) {
+  const lines = [];
+  const kids = (key) => [...index.values()].filter((c) => c.parents.includes(key)).sort((a, b) => a.key.localeCompare(b.key));
+  const walk = (c, depth, via) => {
+    const n = counts.get(c.key) ?? 0;
+    const facts = [
+      `home: ${homeName(c.home)}`,
+      c.record_table ? `table ${c.record_table}, rows ${c.rows_are_nodes ? "are" : "are not"} nodes` : null,
+      `${n} instance${n === 1 ? "" : "s"}`,
+      c.parents.length > 1 ? `also under ${c.parents.filter((p) => p !== via).join(", ")}` : null,
+    ].filter(Boolean);
+    lines.push(`${"  ".repeat(depth)}- ${c.name}${c.status === "retired" ? " [retired by a person]" : ""} (${facts.join("; ")})`);
+    for (const e of c.evidence ?? []) lines.push(`${"  ".repeat(depth + 1)}evidence: ${e.kind}${e.ref ? ` ${e.ref}` : ""}${e.note ? `: ${e.note}` : ""}`);
+    for (const k of kids(c.key)) walk(k, depth + 1, c.key);
+  };
+  for (const p of PRIMITIVES) walk(index.get(p), 0, null);
+  const retired = [...index.values()].filter((c) => c.status === "retired");
+  if (retired.length) lines.push("", "Retired by a person:", ...retired.map((c) => `- ${c.name}`));
+  return lines.join("\n");
+}
+
+/* ---------------------------------------------------------------------------------------------------
+ * Mirrored under agent: positions as classes with people as their instances (R6: "Positions are
+ * mirrored as classes under agent with people as instances (one-way sync from authentik, which keeps
+ * granting access)"), and the AI agents as instances (R1: "The AI agents are instances under agent").
+ * Only the sync writes these; the orchestrator and corrections leave them alone.
+ * ------------------------------------------------------------------------------------------------- */
+
+/**
+ * NEEDS A RULING (where the mirror is seen): smallest choice, everyone, for the positions' classes and for the
+ * people as their instances alike. Position names are already shown to everyone wherever a home is named, and
+ * a position's class nested under its parent's would otherwise be raised to the root by strictest-wins (R9).
+ * That also makes who holds which position visible to everyone, which no ruling says; homing each person at
+ * their own position is the other choice.
+ */
+export const MIRROR_HOME = EVERYONE;
+/** the record-key system the mirror's instances are keyed under: what the one-way sync reads from */
+export const MIRROR_SYSTEM = "authentik";
+
+/** the positions of a parsed position map as classes, parents first: the root's under agent, each other under its parent's */
+export function positionClasses(map) {
+  const out = [];
+  const keyOf = (id) => classKey(map.positions[id].name);
+  const queue = [map.root];
+  const seen = new Set();
+  while (queue.length) {
+    const id = queue.shift();
+    if (seen.has(id) || !map.positions[id]) continue;
+    seen.add(id);
+    const parent = map.positions[id].parent;
+    out.push({ name: clip(map.positions[id].name, 80), key: keyOf(id), parents: [parent && map.positions[parent] ? keyOf(parent) : "agent"], home: MIRROR_HOME, position: id, description: nonEmpty(map.positions[id].description) ? clip(map.positions[id].description, 1000) : null });
+    for (const [kid, p] of Object.entries(map.positions)) if (p.parent === id) queue.push(kid);
+  }
+  return out;
+}
+
+/**
+ * The people who hold positions, as instances of those positions' classes: `people` is [{ user, positions }]
+ * (the token map's people; agents, whose names carry a slash, are left out). Keyed `authentik:user:<user>`.
+ */
+export function peopleInstances(map, people) {
+  const out = [];
+  for (const p of people ?? []) {
+    const user = String(p?.user ?? "").trim();
+    if (!user || user.includes("/")) continue;
+    const held = (p.positions ?? []).filter((id) => map.positions[id]);
+    if (!held.length) continue;
+    out.push({ name: user, key: `${MIRROR_SYSTEM}:user:${user}`, classes: [...new Set(held.map((id) => classKey(map.positions[id].name)))], home: MIRROR_HOME });
+  }
+  return out;
+}
+
+/**
+ * The AI agents as instances under agent (R1).
+ * NEEDS A RULING (which AI agents): smallest choice, the plan's: one instance for the orchestrator and one per
+ * agent profile graph-rag knows of, the Graph worker profile its workers, handlers and liaison run from; not
+ * one per thread, since threads don't last.
+ */
+export const AI_AGENTS = [
+  { name: "Orchestrator", key: "graph-rag:agent:orchestrator", classes: ["agent"], home: MIRROR_HOME },
+  { name: "Graph worker", key: "graph-rag:agent:graph-worker", classes: ["agent"], home: MIRROR_HOME },
+];
