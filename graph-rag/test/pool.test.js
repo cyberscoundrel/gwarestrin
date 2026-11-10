@@ -32,7 +32,7 @@ const brief = (over = {}) => ({
   sections: [section()],
   classes: [{ key: "jobs", name: "jobs", parents: ["commitment"], home: "floor", record_table: "mssql:dbo_Job", rows_are_nodes: false, description: "a production job" }],
   instances: [{ rid: "#80:1", label: "Toro", homes: ["floor"], keys: ["mssql:dbo_Customer:TORO"], classes: ["customers"] }],
-  sources: [{ system: "mssql", description: null, commits: true, actions: ["update"], tables: null }, { system: "erp2", description: null, commits: false, actions: [], tables: null }],
+  sources: [{ system: "mssql", description: null, commits: true, actions: ["update", "create"], tables: ["dbo_Job", "dbo_Maintenance"] }, { system: "erp2", description: null, commits: false, actions: [], tables: null }],
   ...over,
 });
 
@@ -49,7 +49,7 @@ test("a filing brief (R7): the record, its sections, the class tree, connected i
   assert.match(b, /- jobs < commitment, table mssql:dbo_Job, rows stay in the source: a production job/);
   assert.match(b, /- #80:1 Toro \(customers\), mssql:dbo_Customer:TORO/);
   assert.match(b, /#80:1 depends on #80:2: waits on the plating/);
-  assert.match(b, /- mssql: takes writes \(update\)/);
+  assert.match(b, /- mssql: takes update and create writes on dbo_Job, dbo_Maintenance only; a piece for another table is Proposed/, "what the declaration allows, not a blanket update");
   assert.match(b, /- erp2: read-only: a clear piece for it is Proposed/);
   for (const t of ["graph-rag_file_to_source", "graph-rag_hold_piece", "graph-rag_keep_piece", "graph-rag_request", "graph-rag_give_account", "graph-rag_resolve_name"]) assert.match(b, new RegExp(t), t);
   for (const gone of REMOVED_WORKER_TOOLS) assert.doesNotMatch(b, new RegExp(`graph-rag_${gone}\\b`), `${gone} is gone`);

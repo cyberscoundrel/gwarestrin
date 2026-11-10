@@ -89,7 +89,7 @@ export function taskBrief({ brief, dropped = {}, dependencies = [], refile = [],
   if (!brief.instances.length) lines.push("- none yet");
   for (const d of dependencies) lines.push(`- ${d.from} depends on ${d.to}${d.note ? `: ${d.note}` : ""}`);
   lines.push("Sources, and how each is committed to:");
-  for (const s of brief.sources) lines.push(`- ${s.system}: ${s.commits ? `takes writes (${(s.actions ?? []).join(", ") || "update"}${s.tables ? ` on ${s.tables.join(", ")}` : ""})` : "read-only: a clear piece for it is Proposed"}${s.description ? `. ${s.description}` : ""}`);
+  for (const s of brief.sources) lines.push(`- ${s.system}: ${s.commits ? `takes ${(s.actions ?? []).join(" and ") || "no"} writes ${s.tables ? `on ${s.tables.join(", ")} only` : "on any table it grants"}; a piece for another table is Proposed` : "read-only: a clear piece for it is Proposed"}${s.description ? `. ${s.description}` : ""}`);
   if (!brief.sources.length) lines.push("- none connected: a piece no system holds is Kept");
   if (refile.length) {
     lines.push("Pieces to file again, now that a fitting class or source may exist (give refiles: <entry> when you file each):");

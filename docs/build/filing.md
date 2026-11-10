@@ -420,3 +420,11 @@ F1 to F17 stand as phase 0 set them, except where noted. Each is marked `NEEDS A
 - **Tests:** `test/filing.test.js` checks what filing hands the classes stream (the scope, the home, the
   identity), that no node is made without its row, and that filing writes no vertex or instance or dependency edge
   itself. The e2e scenarios make instances through the real `relateInstance`.
+
+## After 7f8bf0c: the brief's sources as declared
+
+- The brief lists each source as its declaration allows it (`model/sources.js briefSource`): whether it takes
+  writes, its actions and its tables, and only the sources whose read home the worker's audience sees (no home:
+  the root). It no longer tells every worker "update, any table". The text names the tables ("takes update writes
+  on dbo_Job only") and says a piece for another table is Proposed. F14 is settled by the sources stream's
+  declarations: the mark is gone.

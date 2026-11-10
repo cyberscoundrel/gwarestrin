@@ -408,7 +408,13 @@ function graphDb({ onRecord = true, ungraded = null, docHome = "floor", jobs = [
 
 test("a brief holds only what its audience sees (R7, R11): marked items above the floor never reach a floor worker's brief", async () => {
   const db = graphDb({ docHome: "ops" });
-  const composed = await composeFilingBrief({ record: "doc-1", home: "floor", sections: ["#71:3"] }, { db, positions: map, sources: { mssql: { read: "http://r", write: "http://w" } }, entries: async () => [] });
+  // the declarations (model/sources.js): one read at the floor's home, one read at the top (above a floor worker)
+  const sources = {
+    mssql: { system: "mssql", description: null, read: { via: "dab-mcp", url: "http://r", home: "floor" }, commit: { via: "dab-mcp", url: "http://w", tables: ["dbo_Job"], actions: ["update"] } },
+    zebra: { system: "zebra", description: "ZEBRA-PAYROLL-SOURCE", read: { via: "dab-mcp", url: "http://z", home: "org" }, commit: { via: "none" } },
+  };
+  const composed = await composeFilingBrief({ record: "doc-1", home: "floor", sections: ["#71:3"] }, { db, positions: map, sources, entries: async () => [] });
+  assert.deepEqual(composed.brief.sources, [{ system: "mssql", description: null, commits: true, actions: ["update"], tables: ["dbo_Job"] }], "each source as declared, only those read within the audience");
   const text = taskBrief(composed);
   assert.doesNotMatch(text, /ZEBRA/, "no class, instance, edge, title or section text above the audience");
   assert.match(text, /Job 4471 is done/);

@@ -8,13 +8,14 @@
  * owns this module and builds filing on it (model/filing.js, model/brief.js).
  */
 import { randomUUID } from "node:crypto";
-import { effectiveHome, EVERYONE, homeName, moveKind } from "./positions.js";
+import { canSee, effectiveHome, EVERYONE, homeName, moveKind } from "./positions.js";
 import { checkBriefFloor, POOL_DEFAULTS, poolSettings, resumeBrief, taskBrief, taskThreadBrief } from "./pool.js";
 import { EMBED_MODEL, health, log, loops, WORKER_DAILY_CALLS, WORKER_MODEL, WORKER_TIMEOUT_MS } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.js";
 import { chat } from "./models.js";
 import { recordReads } from "./floor.js";
 import { assertBrief, scopeBrief } from "./model/brief.js";
+import { briefSource } from "./model/sources.js";
 import { accountGiven, ensureFilingSchema, liveEnv, settleProposals } from "./filing.js";
 import { entriesByUser, positionMap, SCOPED } from "./scope.js";
 import { emitSignal, MASTER, masterStatus, openItems } from "./master-tools.js";
@@ -287,9 +288,12 @@ export async function composeFilingBrief(payload, { db = { adbQuery }, positions
     const of = await db.adbQuery(`SELECT _class_key AS key FROM (SELECT expand(out('INSTANCE_OF')) FROM ${r.rid})`).catch(() => []);
     instances.push({ rid: String(r.rid), label: r.label ?? null, homes: Array.isArray(r._homes) ? r._homes : [], keys: Array.isArray(r._keys) ? r._keys : [], classes: of.map((x) => x.key).filter(Boolean) });
   }
-  const cfg = sources ?? (await (await import("./data-entry.js")).sourcesConfig().catch(() => ({})));
-  // NEEDS A RULING (F14): no source declares a home yet, so every source is listed; the sources stream's declarations restrict this
-  const srcs = Object.entries(cfg).map(([system, u]) => ({ system, description: null, commits: Boolean(u?.write), actions: u?.write ? ["update"] : [], tables: null }));
+  // how each source is committed to (R7), from its declaration: its tables and actions as declared, and only the
+  // sources whose read home the audience sees (R11.6, R11.9; no home: the root). Never a URL (briefSource).
+  const decls = sources ?? (await (await import("./sources.js")).loadSources(undefined, { ttlMs: 0 }).catch(() => ({})));
+  const srcs = Object.values(decls)
+    .filter((d) => d && canSee(positions, [home], d.read?.home ?? positions.root))
+    .map(briefSource);
   const { brief, dropped } = scopeBrief({ audience: home, record, sections, classes, instances, sources: srcs }, positions);
   // a dependency is seen only by someone who sees both ends (R11): only between instances the brief keeps
   const kept = new Set(brief.instances.map((i) => i.rid));
