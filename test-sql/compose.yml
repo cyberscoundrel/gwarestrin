@@ -1,0 +1,69 @@
+# The synthetic test SQL Server (invented data) and the two Data API builder instances that reach it.
+# Its own compose project, two internal networks, no published port. Start it with test-sql/up.sh, never by
+# hand: up.sh makes the untracked env file this reads (passwords) and renders the DAB configs into .run/.
+#
+#   db   SQL Server and the two DABs only: nothing else can reach the database
+#   api  the two DABs and whatever runs against them (a graph-rag under test joins this network)
+#
+# Both networks are internal: no route out, and nothing on the host reaches in.
+name: ${GWSYNTH_PROJECT:-gwsynth}
+
+x-dab: &dab
+  image: gwsynth-dab:2.0.12   # built from ../dab by up.sh (docker build --network host, as the main compose's dab)
+  user: "1000:1000"
+  working_dir: /etc/dab
+  depends_on:
+    sql:
+      condition: service_healthy
+  networks: [db, api]
+  restart: "no"
+
+services:
+  sql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    hostname: ${GWSYNTH_SERVER:-gwsynth-sql}
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: ${GWSYNTH_SA_PASSWORD:?run test-sql/up.sh}
+      # sqlcmd inside the container reads these: the seed's logins take their passwords from here, so no
+      # password is ever on a command line or in the seed's text
+      SQLCMDPASSWORD: ${GWSYNTH_SA_PASSWORD}
+      GWSYNTH_READ_PASSWORD: ${GWSYNTH_READ_PASSWORD:?run test-sql/up.sh}
+      GWSYNTH_WRITE_PASSWORD: ${GWSYNTH_WRITE_PASSWORD:?run test-sql/up.sh}
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 10s
+    networks: [db]
+    restart: "no"
+
+  dab-read:
+    <<: *dab
+    environment:
+      HOME: /tmp
+      DOTNET_CLI_HOME: /tmp
+      ASPNETCORE_HTTP_PORTS: 5000
+      DAB_TELEMETRY_OPT_OUT: "true"
+      GWSYNTH_DAB_CONNECTION: Server=sql,1433;Database=${GWSYNTH_DATABASE:-GwSynthMfg};User Id=gwsynth_read;Password=${GWSYNTH_READ_PASSWORD};TrustServerCertificate=True
+    volumes:
+      - ./.run/dab/read:/etc/dab:ro
+
+  dab-write:
+    <<: *dab
+    environment:
+      HOME: /tmp
+      DOTNET_CLI_HOME: /tmp
+      ASPNETCORE_HTTP_PORTS: 5000
+      DAB_TELEMETRY_OPT_OUT: "true"
+      GWSYNTH_DAB_CONNECTION: Server=sql,1433;Database=${GWSYNTH_DATABASE:-GwSynthMfg};User Id=gwsynth_write;Password=${GWSYNTH_WRITE_PASSWORD};TrustServerCertificate=True
+    volumes:
+      - ./.run/dab/write:/etc/dab:ro
+
+networks:
+  db:
+    internal: true
+  api:
+    internal: true

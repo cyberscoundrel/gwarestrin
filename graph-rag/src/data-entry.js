@@ -1,35 +1,47 @@
 /**
- * Data entry: a worker's write to a source system, through a write-capable DAB instance. The class map
- * chooses Filed or Proposed (R6; model/class-map.js filedOrProposed): the authority that counts is the
- * recorder's, never the agent's; a class missing from the map, or a source that isn't writable, means
- * Proposed (R2, R11). There are no audit nodes (R9): the caller writes the outcome to the filing log
- * (model/filing.js), which the filing stream builds. The sources stream owns this module.
+ * Reading from and committing to source systems: the read adapter (names resolved against the source, rows read
+ * by key; R3), the write adapter (create and update through the write-capable instance, never delete; R2), the
+ * guard that runs before every write, and data entry, where the class map chooses Filed or Proposed (R6;
+ * model/class-map.js filedOrProposed). The authority that counts is the recorder's, never the agent's; a class
+ * missing from the map, or a source that isn't writable, means Proposed (R2, R11). There are no audit nodes
+ * (R9): every write is begun in, and settled in, the filing log through a journal the caller gives (the filing
+ * stream's filing.js `sourceJournal` by default); with none, nothing is written. The sources stream owns this
+ * module.
  *
- * Sources. Rows are read and written through DAB's MCP endpoint (Data API
- * builder's SQL MCP Server), never copied into the graph. Two instances per
- * system (docs/DATA-SCOPING.md): the read-only one agents already reach, and
- * a write-capable one with its own SQL login that only graph-rag reaches
- * (docker-compose.yml `dab-write`). Where they are comes from the environment
- * (DAB_READ_URL, DAB_WRITE_URL, DAB_SYSTEM) or, per system, from the
- * organization's stored `sources` (an OrgPolicy row, scope "sources":
- * { "<system>": { "read": url, "write": url } }), which an admin route or the
- * replay harness sets; the stored one wins.
+ * Every adapter call answers with a `status`, never a bare throw for something the source did:
+ *   found | ambiguous | none            a read: one row, several, or none
+ *   written | already                   a write landed, or the row already held it
+ *   not_writable                        the declaration takes no such write: the piece is Proposed (R2)
+ *   unreachable                         the source couldn't be reached: the piece is Held (R3)
+ *   moved                               the row no longer holds what the worker read: Held, never overwritten (R2)
+ *   not_found | refused | unknown       no such row; the source or the guard said no; a write whose end can't be told
+ * and `filing`, the outcome it points to (filed, proposed, held). The worker's filing decides; this only says
+ * what the source did.
+ * NEEDS A RULING (read reachable, write not): smallest choice, Held, like any unreachable source (R3), not
+ * Proposed: a person approving it could not apply it either. A source declared with no write side is Proposed.
+ * NEEDS A RULING (a write whose end can't be told): the transport broke and the row can't be read back. None of
+ * the four outcomes fits; smallest choice, Held, with the log entry left "unknown" for the next attempt to settle.
  *
- * DAB's tools are as DAB 2.0.12 (the version dab/Dockerfile pins) serves them,
- * read off a running instance's tools/list and exercised against it:
- * read_records { entity, filter, first }, update_record { entity, keys, fields },
- * create_record { entity, data }. A filter's literal is typed by the column
- * (a number bare, text quoted: DAB refuses the other). describe_entities names
- * no primary key (its fields are empty under autoentities), so the key comes
- * from the first-page cursor (DAB pages by primary key): primaryKeyFrom.
+ * Sources are declared (sources.js, model/sources.js) and reached through DAB's MCP endpoint (Data API builder's
+ * SQL MCP Server), never copied into the graph. DAB's tools are as DAB 2.0.12 (the version dab/Dockerfile pins)
+ * serves them, read off running instances, last the synthetic test SQL Server's (test-sql/):
+ * read_records { entity, filter, select, orderby, first }, update_record { entity, keys, fields },
+ * create_record { entity, data }. A filter is `col op literal` joined by and / or, op one of eq ne gt ge lt le;
+ * there is no contains or startswith, so a prefix is found as a range. Text compares case-insensitively (the
+ * server's collation). A literal is typed by the column (a number bare, text quoted: DAB refuses the other).
+ * describe_entities names no fields, so the key comes from the first page's cursor (DAB pages by primary key):
+ * primaryKeyFrom.
  */
 import { log } from "./context.js";
 import { adbCommand as realCommand, adbQuery as realQuery } from "./db.js";
 import { filedOrProposed, validatePolicy } from "./model/class-map.js";
+import { classIndex } from "./model/classes.js";
 import { isoDate, snakeCase } from "./model/text.js";
 import { parseKey, parseTable } from "./model/schema.js";
-import { commonAncestor, defaultHome, EVERYONE, heldPositions } from "./positions.js";
+import { GUARD_ENTITY, writable as declaredWritable } from "./model/sources.js";
+import { canSee, commonAncestor, defaultHome, EVERYONE, heldPositions } from "./positions.js";
 import { authorityMap } from "./policy.js";
+import { forgetSources, loadSources } from "./sources.js";
 
 const realDb = { adbCommand: realCommand, adbQuery: realQuery };
 // the live position map, token map and pending-write queue, reached when used (not at load: a test imports this module alone)
@@ -40,39 +52,36 @@ const livePeople = async () => {
   const scope = await import("./scope.js");
   return (name) => scope.entriesByUser.get(name);
 };
-
-/** ---- where the source systems are ---- */
-
-const ENV = () => ({
-  system: process.env.DAB_SYSTEM || "mssql",
-  read: process.env.DAB_READ_URL ?? "http://dab:5000/mcp",
-  write: process.env.DAB_WRITE_URL || null,
-});
-
-const sourcesCache = { at: 0, value: null };
-
-/** the systems and their read and write endpoints: the stored ones over the environment's */
-export async function sourcesConfig(db = realDb, { ttlMs = 60_000, now = Date.now() } = {}) {
-  if (sourcesCache.value && now - sourcesCache.at < ttlMs) return sourcesCache.value;
-  const env = ENV();
-  const out = { [env.system]: { read: env.read || null, write: env.write } };
+/**
+ * The class tree as stored now (the classes stream's classes.js allClasses), as model/classes.js classIndex, so a
+ * subclass takes its parents' map entries (R9). Null when it can't be read: then only a class's own entry counts,
+ * which fails safe (a class with no entry is Proposed).
+ */
+async function liveIndex() {
   try {
-    const row = (await db.adbQuery("SELECT json FROM OrgPolicy WHERE scope = 'sources' LIMIT 1"))[0];
-    if (row?.json) {
-      for (const [system, v] of Object.entries(JSON.parse(row.json) ?? {})) {
-        if (!v || typeof v !== "object") continue;
-        out[system] = { read: typeof v.read === "string" && v.read ? v.read : (out[system]?.read ?? null), write: typeof v.write === "string" && v.write ? v.write : (out[system]?.write ?? null) };
-      }
-    }
+    const m = await import("./classes.js");
+    return typeof m.allClasses === "function" ? classIndex(await m.allClasses()) : null;
   } catch (e) {
-    log.warn(`sources not read (keeping the environment's): ${String(e).slice(0, 120)}`);
+    log.warn(`the class tree couldn't be read, so only a class's own map entry counts: ${String(e?.message ?? e).slice(0, 160)}`);
+    return null;
   }
-  Object.assign(sourcesCache, { at: now, value: out });
-  return out;
 }
+/** the index a decision runs over: the one given (null for none), else the live tree */
+const indexFor = async (index) => (index === undefined ? liveIndex() : index);
+/** the filing log's journal for source writes, when the filing stream's filing.js exports one */
+const liveJournal = async () => (await import("./filing.js").catch(() => null))?.sourceJournal ?? null;
 
-/** forget the cached sources (a test, or a settings change) */
-export const forgetSources = () => Object.assign(sourcesCache, { at: 0, value: null });
+export { forgetSources };
+
+/**
+ * Where each declared source is read and written, in the older shape { [system]: { read, write } } (write null when
+ * the declaration takes no writes). Filing's source lookups and briefs read this; the declarations themselves are
+ * sources.js loadSources.
+ */
+export async function sourcesConfig(db = realDb, opts = {}) {
+  const decls = await loadSources(db, opts);
+  return Object.fromEntries(Object.entries(decls).map(([system, d]) => [system, { read: d.read.url, write: d.commit.via === "none" ? null : d.commit.url }]));
+}
 
 /** ---- DAB over MCP (streamable HTTP) ---- */
 
@@ -95,39 +104,82 @@ export function odata(v, type) {
 }
 
 const sessions = new Map(); // url -> mcp-session-id
+/** the tools that change a source: never sent twice, whatever the answer (a lost answer is settled by reading back) */
+const WRITE_TOOLS = new Set(["create_record", "update_record", "delete_record", "execute_entity"]);
 
-/** one MCP tool call; the result's text content parsed as JSON when it is some */
+/** the source couldn't be reached (a network error, a timeout, a server error): nothing it says is known */
+const unreachableError = (message, extra = {}) => Object.assign(new Error(message), { transport: true, ...extra });
+
+/**
+ * One MCP tool call; the result's text content parsed as JSON when it is some. Throws with `transport: true`
+ * when the source couldn't be reached or failed as a server (5xx, a timeout, a wrong address), and with
+ * `toolError: true` (and `errorType`, DAB's) when the tool answered no: nothing was done.
+ */
 export async function mcpToolCall(url, name, args, { fetch: f = globalThis.fetch, timeoutMs = 15_000 } = {}) {
   const rpc = async (method, params, id) => {
     const session = sessions.get(url) ?? null;
-    const res = await f(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(session ? { "mcp-session-id": session } : {}) },
-      body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    let res;
+    try {
+      res = await f(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(session ? { "mcp-session-id": session } : {}) },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (e) {
+      throw unreachableError(`${name}: ${String(e?.message ?? e).slice(0, 200)}`);
+    }
     const sid = res.headers?.get?.("mcp-session-id");
     if (sid) sessions.set(url, sid);
     const text = await res.text();
-    if (!res.ok) throw Object.assign(new Error(`${name}: ${res.status} ${text.slice(0, 200)}`), { status: res.status });
+    if (!res.ok) {
+      // only an answer that says the session is gone is a lost session: a 5xx may come after the source acted
+      const lost = Boolean(session) && (res.status === 404 || (res.status === 400 && /session/i.test(text)));
+      const e = Object.assign(new Error(`${name}: ${res.status} ${text.slice(0, 200)}`), { status: res.status, staleSession: lost });
+      if (res.status >= 500 || res.status === 404) e.transport = true;
+      throw e;
+    }
     const line = text.split("\n").find((l) => l.startsWith("data:"));
-    return JSON.parse(line ? line.slice(5) : text || "{}");
+    try {
+      return JSON.parse(line ? line.slice(5) : text || "{}");
+    } catch {
+      throw unreachableError(`${name}: the source answered with something that isn't JSON-RPC`);
+    }
   };
-  if (!sessions.has(url)) {
-    // a streamable-HTTP server wants a handshake first; one that doesn't answers the call anyway
-    await rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "graph-rag", version: "0.3.0" } }, 1).catch(() => {});
+  const handshake = () => rpc("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "graph-rag", version: "0.3.0" } }, 1).catch(() => {});
+  // a streamable-HTTP server wants a handshake first; one that doesn't answers the call anyway
+  if (!sessions.has(url)) await handshake();
+  let msg;
+  try {
+    msg = await rpc("tools/call", { name, arguments: args }, 2);
+  } catch (e) {
+    // a restarted server forgets its sessions: one fresh handshake, then the call once more; never a write, which
+    // is reported unreachable and settled by its caller reading the row back
+    if (!e.staleSession) throw e;
+    sessions.delete(url);
+    if (WRITE_TOOLS.has(name)) throw Object.assign(e, { transport: true });
+    await handshake();
+    msg = await rpc("tools/call", { name, arguments: args }, 2);
   }
-  const msg = await rpc("tools/call", { name, arguments: args }, 2);
   if (msg.error) throw new Error(`${name}: ${msg.error.message ?? JSON.stringify(msg.error)}`);
   const content = msg.result?.content?.find((c) => c.type === "text")?.text ?? "";
   // the tool answered and said no: nothing was done (a transport error says nothing about that)
-  if (msg.result?.isError) throw Object.assign(new Error(`${name}: ${content.slice(0, 300)}`), { toolError: true });
+  if (msg.result?.isError) {
+    let error = null;
+    try {
+      error = JSON.parse(content)?.error ?? null;
+    } catch {}
+    throw Object.assign(new Error(`${name}: ${error?.message ?? content.slice(0, 300)}`), { toolError: true, errorType: error?.type ?? null, errorMessage: error?.message ?? null });
+  }
   try {
     return JSON.parse(content);
   } catch {
     return content;
   }
 }
+
+/** an error as an adapter status: the source couldn't be reached, or it (or a check here) said no */
+export const statusOf = (e) => (e?.transport ? "unreachable" : "refused");
 
 /** the rows in a read_records answer: DAB 2.0.12's { entity, result: { value: [...] } }, or a bare array or { value } */
 export function rowsOf(result) {
@@ -160,27 +212,36 @@ export function primaryKeyFrom(page, entity) {
   return cols.map((c) => ({ name: c.FieldName, type: typeof c.FieldValue === "number" ? "number" : "string" }));
 }
 
-const primaryKeys = new Map(); // read url + table -> [{ name, type }]
+const firstPages = new Map(); // url + table -> { pk: [{ name, type }] | null, sample: row | null }
 
-/** forget the learned primary keys (a test, or a source whose schema changed) */
-export const forgetPrimaryKeys = () => primaryKeys.clear();
+/** forget the learned primary keys and columns (a test, or a source whose schema changed) */
+export const forgetPrimaryKeys = () => firstPages.clear();
+
+/** a table's first page, once per endpoint: its key (from the cursor) and a row showing its columns and their types */
+async function firstPageOf(url, table, call) {
+  const k = `${url} ${table}`;
+  if (!firstPages.has(k)) {
+    const page = await call(url, DAB_CALLS.firstPage(table));
+    firstPages.set(k, { pk: primaryKeyFrom(page, table), sample: rowsOf(page)[0] ?? null });
+  }
+  return firstPages.get(k);
+}
 
 /**
- * A client for one system: read a row by its verified primary key, write fields to it. `urls` from
- * sourcesConfig; `fetch` injectable. The key column is the table's primary key, learned from the source;
+ * A client for one system: read a row by its verified primary key, write fields to it, create one. `urls`
+ * { read, write }; `fetch` injectable. The key column is the table's primary key, learned from the source;
  * a `key_column` a worker gives must be that column, or the call is refused, and a key that can't be
  * learned, or that spans several columns where a record key names one, refuses the call too.
+ * NEEDS A RULING (composite keys): a record key (system:table:row) names one column; a table keyed by several
+ * is refused until the contract states a form for them.
  */
 export function sourceClient(system, urls, opts = {}) {
   const call = (url, c) => mcpToolCall(url, c.name, c.args, opts);
-  const primaryKey = async (table, keyColumn) => {
-    const k = `${urls.read} ${table}`;
-    if (!primaryKeys.has(k)) {
-      const found = primaryKeyFrom(await call(urls.read, DAB_CALLS.firstPage(table)), table);
-      if (!found) throw new Error(`the primary key of ${system}:${table} can't be learned from the source (it pages by key, and this table has no second row to page to): refused rather than guessed`);
-      primaryKeys.set(k, found);
-    }
-    const pk = primaryKeys.get(k);
+  const primaryKey = async (table, keyColumn, url = urls.read) => {
+    const { pk } = await firstPageOf(url, table, call);
+    // NEEDS A RULING (tables of fewer than two rows): DAB 2.0.12 names a table's key only in the next-page cursor,
+    // and describe_entities names no fields, so such a table can be neither read by key nor written: refused
+    if (!pk) throw new Error(`the primary key of ${system}:${table} can't be learned from the source (it pages by key, and this table has no second row to page to): refused rather than guessed`);
     if (pk.length !== 1) throw new Error(`${system}:${table} has a composite primary key (${pk.map((c) => c.name).join(", ")}): a record key names one column, so the row can't be determined`);
     if (keyColumn && keyColumn !== pk[0].name) throw new Error(`${keyColumn} is not the primary key of ${system}:${table}; the row is keyed by ${pk[0].name}`);
     return pk[0];
@@ -189,6 +250,21 @@ export function sourceClient(system, urls, opts = {}) {
     system,
     canRead: Boolean(urls?.read),
     canWrite: Boolean(urls?.write),
+    primaryKey,
+    /** the columns a table shows and their types ("number", "string", or "unknown" for an empty value), from its first row */
+    async columns(table) {
+      const { sample } = await firstPageOf(urls.read, table, call);
+      return sample ? Object.fromEntries(Object.entries(sample).map(([c, v]) => [c, typeof v === "number" ? "number" : v === null ? "unknown" : "string"])) : null;
+    },
+    /** rows by a filter DAB takes, as read_records answers them */
+    async readWhere(table, args) {
+      return rowsOf(await call(urls.read, { name: "read_records", args: { entity: table, ...args } }));
+    },
+    /** the entities the read endpoint exposes */
+    async entities() {
+      const r = await call(urls.read, { name: "describe_entities", args: { nameOnly: true } });
+      return (r?.entities ?? []).map((e) => e.name).filter(Boolean);
+    },
     /** the row by its primary key, or null when there is none; `key_value` is the key as the row holds it */
     async readRow(table, rowKey, { key_column } = {}) {
       if (!urls?.read) throw new Error(`no read endpoint for ${system}`);
@@ -206,6 +282,11 @@ export function sourceClient(system, urls, opts = {}) {
       assertWritable(fields, hit);
       return call(urls.write, DAB_CALLS.update(table, { [hit.key_column]: hit.key_value }, fields));
     },
+    /** create a row; the row the source made (its key included) */
+    async createRow(table, data) {
+      if (!urls?.write) throw new Error(`no write-capable endpoint for ${system}: data entry can only be proposed`);
+      return rowsOf(await call(urls.write, DAB_CALLS.create(table, data)))[0] ?? null;
+    },
   };
 }
 
@@ -218,14 +299,283 @@ export function assertWritable(fields, hit) {
   if (typeof hit.key_value === "number" && !Number.isSafeInteger(Math.trunc(hit.key_value))) throw new Error(`${hit.key_column} ${hit.key_value} is too large to name one row exactly: nothing is written`);
 }
 
-/** a client for the system a key names (`mssql:dbo_Job:4471` -> mssql) */
-export async function clientFor(key, { db = realDb, fetch: f } = {}) {
+/** ---- the read adapter (R3: workers resolve names against the source with read tools) ---- */
+
+/** the filing outcome a status points to */
+const FILING = { written: "filed", already: "filed", not_writable: "proposed" };
+const answer = (status, rest = {}) => ({ status, filing: FILING[status] ?? (["found", "ambiguous", "none"].includes(status) ? null : "held"), ...rest });
+const failed = (e, rest = {}) => answer(statusOf(e), { why: String(e?.message ?? e).slice(0, 300), ...rest });
+
+/** the declaration for a system, and a refusal when there is none or the table isn't one the caller allows */
+/**
+ * The declaration for a system, and a refusal when there is none, when the connection's home is above the
+ * `audience` read for (R11.6: a worker sees only its audience; R11.9: a table's data takes the home of the
+ * connection that reads it), or when the table isn't one the caller allows. `audience` is a position, or
+ * everyone; `positions` the position map (the live one when not given). Nothing is read from a source above it.
+ * NEEDS A RULING (narrowing tables within one connection): a caller may pass `tables`; no rule here says which
+ * tables of a connection an audience may read beyond the connection's own home.
+ */
+async function declared(system, table, { db = realDb, sources, tables, audience, positions } = {}) {
+  const decl = (sources ?? (await loadSources(db, { ttlMs: 0 })))[system] ?? null;
+  if (!decl) return { refusal: answer("refused", { why: `no connected source called ${system}` }) };
+  if (audience !== undefined) {
+    positions ??= await livePositions();
+    if (!positions) return { refusal: answer("refused", { why: "no position map is loaded, so no audience can be told what it sees" }) };
+    const known = audience === EVERYONE || Boolean(positions.positions?.[audience]);
+    const home = decl.read.home ?? positions.root;
+    if (!known || !canSee(positions, [audience], home)) return { refusal: answer("refused", { why: `${system} is read at ${home}, which is above this audience (${audience ?? "none"}): nothing is read` }) };
+  }
+  if (table && tables && !tables.includes(table)) return { refusal: answer("refused", { why: `${system}:${table} is not among the tables this read may see` }) };
+  return { decl };
+}
+
+const readClient = (decl, f) => sourceClient(decl.system, { read: decl.read.url, write: null }, f ? { fetch: f } : {});
+const keyOf = (system, table, pk, row) => (pk?.length === 1 && row?.[pk[0].name] !== undefined && row[pk[0].name] !== null ? `${system}:${table}:${row[pk[0].name]}` : null);
+
+/** the tables a source's read side exposes (within `tables` when the caller narrows them) */
+export async function describeSource(system, opts = {}) {
+  const { decl, refusal } = await declared(system, null, opts);
+  if (refusal) return refusal;
+  try {
+    const names = await readClient(decl, opts.fetch).entities();
+    return answer("found", { system, tables: opts.tables ? names.filter((n) => opts.tables.includes(n)) : names });
+  } catch (e) {
+    return failed(e);
+  }
+}
+
+/** one row by its record key (system:table:row): found, none, or why not */
+export async function getRow(key, opts = {}) {
+  const k = parseKey(key);
+  if (!k) return answer("refused", { why: `not a record key (system:table:row): ${key}` });
+  const { decl, refusal } = await declared(k.system, k.table, opts);
+  if (refusal) return refusal;
+  try {
+    const hit = await readClient(decl, opts.fetch).readRow(k.table, k.row_key);
+    return hit ? answer("found", { key: `${k.system}:${k.table}:${hit.key_value}`, row: hit.row }) : answer("none", { key: k.key });
+  } catch (e) {
+    return failed(e, { key: k.key });
+  }
+}
+
+/**
+ * Rows whose `column` matches `value`: `mode` "eq" (the whole value, case-insensitively, as the source compares)
+ * or "prefix" (text starting with it), and `also` ({ column: value }) each equal too, to narrow by another column
+ * (an active employee called Diep). At most `first` rows come back, with `more` when there are others; one
+ * row is found, several ambiguous, none none. Which column to search is the caller's, from the table's columns:
+ * there are no word lists here (R3). DAB has no contains, so a prefix is read as a range (`ge`, in the column's
+ * order) and checked here.
+ */
+export async function findRows({ system, table, column, value, mode = "eq", first = 5, also = null }, opts = {}) {
+  const { decl, refusal } = await declared(system, table, opts);
+  if (refusal) return refusal;
+  if (!["eq", "prefix"].includes(mode)) return answer("refused", { why: `mode must be eq or prefix, not ${mode}` });
+  if (value === undefined || value === null || String(value).trim() === "") return answer("refused", { why: "a value to find is needed" });
+  const cap = Math.max(1, Math.min(Number(first) || 5, 20));
+  const c = readClient(decl, opts.fetch);
+  try {
+    const cols = await c.columns(table);
+    if (cols && !(column in cols)) return answer("refused", { why: `${system}:${table} has no column ${column}: it has ${Object.keys(cols).join(", ")}` });
+    const unknown = Object.keys(also ?? {}).filter((c) => cols && !(c in cols));
+    if (unknown.length) return answer("refused", { why: `${system}:${table} has no column ${unknown.join(", ")}: it has ${Object.keys(cols).join(", ")}` });
+    const extra = [];
+    for (const [c, v] of Object.entries(also ?? {})) {
+      const l = odata(v, cols?.[c] === "number" ? "number" : "string");
+      if (l === null) return answer("none", { rows: [], more: false });
+      extra.push(`${c} eq ${l}`);
+    }
+    const and = extra.map((x) => ` and ${x}`).join("");
+    const type = cols?.[column] === "number" ? "number" : "string";
+    if (mode === "prefix" && type === "number") return answer("refused", { why: `${column} is a number column: find it by eq` });
+    const literal = odata(String(value).trim(), type);
+    if (literal === null) return answer("none", { rows: [], more: false });
+    const { pk } = await firstPageOf(decl.read.url, table, (url, call) => mcpToolCall(url, call.name, call.args, opts.fetch ? { fetch: opts.fetch } : {}));
+    let rows;
+    if (mode === "eq") rows = await c.readWhere(table, { filter: `${column} eq ${literal}${and}`, first: cap + 1 });
+    else {
+      const page = 4 * cap;
+      const prefix = String(value).trim().toLowerCase();
+      const read = await c.readWhere(table, { filter: `${column} ge ${literal}${and}`, orderby: [`${column} asc`], first: page });
+      rows = read.filter((r) => String(r[column] ?? "").toLowerCase().startsWith(prefix));
+      // a full page all matching may have more past it
+      if (read.length === page && rows.length === page) rows.push(null);
+    }
+    const more = rows.length > cap;
+    const out = rows.filter(Boolean).slice(0, cap).map((row) => ({ key: keyOf(system, table, pk, row), row }));
+    return answer(out.length === 0 ? "none" : out.length === 1 && !more ? "found" : "ambiguous", { rows: out, more });
+  } catch (e) {
+    return failed(e);
+  }
+}
+
+/** ---- the guard ---- */
+
+const sameName = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();
+
+/**
+ * Before any write: ask the write connection which server and database it holds, and refuse unless they are the
+ * declared names (`commit.guard`). It reads the identity view through the write endpoint, which computes them on
+ * that connection (test-sql/seed.mjs), so the answer is where the write would land. No guard declared, no view,
+ * or any other answer: refused. A restored copy changes only the declared names.
+ */
+export async function checkGuard(decl, { fetch: f } = {}) {
+  if (!decl || decl.commit?.via === "none") return answer("not_writable", { ok: false, why: `${decl?.system ?? "this source"} takes no writes` });
+  const g = decl.commit.guard;
+  if (!g) return answer("refused", { ok: false, why: `no guard is declared for ${decl.system}'s write connection, so nothing is written through it` });
+  if (g.entity !== GUARD_ENTITY) return answer("refused", { ok: false, why: `the guard must be read through ${GUARD_ENTITY}, the view that computes the connection's names, not ${g.entity}` });
+  let rows;
+  try {
+    rows = rowsOf(await mcpToolCall(decl.commit.url, "read_records", { entity: g.entity, first: 2 }, f ? { fetch: f } : {}));
+  } catch (e) {
+    return failed(e, { ok: false, why: `the guard couldn't read ${g.entity} through the write connection: ${String(e?.message ?? e).slice(0, 200)}` });
+  }
+  if (rows.length !== 1) return answer("refused", { ok: false, why: `the write connection's ${g.entity} answered ${rows.length} rows, not one` });
+  const { server_name: server, database_name: database, login_name: login } = rows[0];
+  if (!sameName(server, g.server) || !sameName(database, g.database)) {
+    return answer("refused", { ok: false, server, database, why: `the write connection holds ${server ?? "?"}/${database ?? "?"}, not the declared ${g.server}/${g.database}: nothing is written` });
+  }
+  if (g.login && !sameName(login, g.login)) return answer("refused", { ok: false, server, database, why: `the write connection is logged in as ${login ?? "?"}, not the declared ${g.login}: nothing is written` });
+  return { status: "ok", ok: true, server, database, login: login ?? null };
+}
+
+/** ---- the write adapter ---- */
+
+const holds = (row, fields) => Boolean(row) && Object.entries(fields).every(([c, v]) => c in row && (sameValue(row[c], v) || ((row[c] ?? null) === null && (v ?? null) === null)));
+const pick = (row, cols) => Object.fromEntries(cols.filter((c) => c in row).map((c) => [c, row[c]]));
+
+/** settle a journal entry; a failure to settle is said, never thrown over a write that landed */
+async function settle(journal, id, status, detail) {
+  try {
+    await journal.settle(id, status, detail);
+    return true;
+  } catch (e) {
+    log.warn(`filing log entry ${id} not settled as ${status}: ${String(e?.message ?? e).slice(0, 160)}`);
+    return false;
+  }
+}
+
+/** what every write needs before it starts: a write the declaration takes, a journal, and the guard passed */
+async function writeGate(system, table, action, opts) {
+  const { decl, refusal } = await declared(system, table, opts);
+  if (refusal) return { refusal };
+  if (!declaredWritable(decl, table, action)) return { refusal: answer("not_writable", { why: `${system} takes no ${action} on ${table}` }) };
+  if (!decl.commit.tables) return { refusal: answer("refused", { why: `${system}'s write side names no tables, so it may not write any: declare the tables it writes` }) };
+  const journal = opts.journal === undefined ? await liveJournal() : opts.journal;
+  if (!journal || typeof journal.begin !== "function" || typeof journal.settle !== "function") return { refusal: answer("refused", { why: "there is no filing log to record the write in, so nothing is written" }) };
+  const guard = await checkGuard(decl, opts);
+  if (!guard.ok) return { refusal: guard };
+  return { decl, journal, guard };
+}
+
+/**
+ * Update one row (`key`, system:table:row) with `fields`. `before` is what the worker read in those columns: if
+ * the row no longer holds it, nothing is written (`moved`, R2: never overwrite). The steps: the declaration
+ * takes the write, the guard passes, the row is read through the write connection, the attempt is begun in the
+ * filing log, the write, then the entry settled; a transport error reads the row back before calling it.
+ * `piece` is passed to the journal as the caller's (the filing entry it belongs to).
+ */
+export async function commitRow({ key, fields, before = null, piece = null }, opts = {}) {
+  const k = parseKey(key);
+  if (!k) return answer("refused", { why: `not a record key (system:table:row): ${key}` });
+  if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).length) return answer("refused", { why: "fields: the columns to write, with their values" });
+  const { decl, journal, refusal } = await writeGate(k.system, k.table, "update", opts);
+  if (refusal) return { ...refusal, key: k.key };
+  const client = sourceClient(k.system, { read: decl.commit.url, write: decl.commit.url }, opts.fetch ? { fetch: opts.fetch } : {});
+  let hit;
+  try {
+    hit = await client.readRow(k.table, k.row_key);
+    if (!hit) return answer("not_found", { key: k.key, why: `no row ${k.row_key} in ${k.table}` });
+    assertWritable(fields, hit);
+  } catch (e) {
+    return failed(e, { key: k.key });
+  }
+  const now = pick(hit.row, Object.keys(fields));
+  if (!before || typeof before !== "object") return answer("refused", { key: k.key, why: "before: what was read in the columns written is needed, so a row that moved is never written over" });
+  {
+    const missing = Object.keys(fields).filter((c) => !(c in before));
+    if (missing.length) return answer("refused", { key: k.key, why: `before must say what was read in every column written; it doesn't name ${missing.join(", ")}` });
+    if (!holds(hit.row, before)) return answer("moved", { key: k.key, row: hit.row, why: "the row no longer holds what was read: nothing is written over it" });
+  }
+  let id;
+  try {
+    id = await journal.begin({ system: k.system, table: k.table, key: k.key, action: "update", fields, before: now, piece });
+  } catch (e) {
+    return answer("refused", { key: k.key, why: `the filing log couldn't record the attempt, so nothing is written: ${String(e?.message ?? e).slice(0, 200)}` });
+  }
+  // the row already holds it: nothing is sent, and the log still says so, so the piece gets its Filed entry
+  if (holds(hit.row, fields)) {
+    const settled = await settle(journal, id, "written", { after: fields, note: "the row already held it: nothing was sent" });
+    return answer("already", { key: k.key, before: now, after: fields, log_id: id, ...(settled ? {} : { log_unsettled: true }) });
+  }
+  try {
+    const result = await client.writeRow(k.table, hit, fields);
+    const settled = await settle(journal, id, "written", { after: fields });
+    return answer("written", { key: k.key, before: now, after: fields, log_id: id, result, ...(settled ? {} : { log_unsettled: true }) });
+  } catch (e) {
+    const error = String(e?.message ?? e).slice(0, 300);
+    if (!e?.transport) {
+      await settle(journal, id, "refused", { error });
+      return answer("refused", { key: k.key, log_id: id, why: error });
+    }
+    let row;
+    try {
+      row = (await client.readRow(k.table, k.row_key))?.row ?? null;
+    } catch {
+      await settle(journal, id, "unknown", { error });
+      return answer("unknown", { key: k.key, log_id: id, why: `${error}; the row couldn't be read back, so whether it changed is not known` });
+    }
+    if (holds(row, fields)) {
+      await settle(journal, id, "written", { after: fields, note: `the source answered with an error (${error}) but the row holds the new values` });
+      return answer("written", { key: k.key, before: now, after: fields, log_id: id, note: "the row holds the new values despite the transport error" });
+    }
+    await settle(journal, id, "unreachable", { error });
+    return answer("unreachable", { key: k.key, log_id: id, why: error });
+  }
+}
+
+/**
+ * Create one row in `table` (DAB's entity name) of `system`. The key the source makes comes back as `key`; a
+ * table whose key can't be learned is refused first, since a Filed piece names the row it wrote. A transport
+ * error can't be read back (there is no key yet): `unknown`.
+ */
+export async function createRow({ system, table, data, piece = null }, opts = {}) {
+  if (!data || typeof data !== "object" || Array.isArray(data) || !Object.keys(data).length) return answer("refused", { why: "data: the new row's columns, with their values" });
+  const { decl, journal, refusal } = await writeGate(system, table, "create", opts);
+  if (refusal) return refusal;
+  const client = sourceClient(system, { read: decl.commit.url, write: decl.commit.url }, opts.fetch ? { fetch: opts.fetch } : {});
+  let pk;
+  try {
+    pk = await client.primaryKey(table);
+  } catch (e) {
+    return failed(e);
+  }
+  let id;
+  try {
+    id = await journal.begin({ system, table, key: null, action: "create", fields: data, before: null, piece });
+  } catch (e) {
+    return answer("refused", { why: `the filing log couldn't record the attempt, so nothing is written: ${String(e?.message ?? e).slice(0, 200)}` });
+  }
+  try {
+    const row = await client.createRow(table, data);
+    const key = keyOf(system, table, [pk], row);
+    const settled = await settle(journal, id, "written", { key, after: row });
+    return answer("written", { key, row, log_id: id, ...(settled ? {} : { log_unsettled: true }) });
+  } catch (e) {
+    const error = String(e?.message ?? e).slice(0, 300);
+    const status = e?.transport ? "unknown" : "refused";
+    await settle(journal, id, status, { error });
+    return answer(status, { log_id: id, why: error });
+  }
+}
+
+/** a client for the system a key names (`mssql:dbo_Job:4471` -> mssql), read side only */
+export async function clientFor(key, { db = realDb, fetch: f, sources } = {}) {
   const k = parseKey(key);
   if (!k) throw new Error(`not a record key (system:table:row): ${key}`);
-  const sources = await sourcesConfig(db, { ttlMs: 0 }); // a row check reads the sources as they stand now
-  const urls = sources[k.system];
-  if (!urls) throw new Error(`no connected source called ${k.system}`);
-  return { client: sourceClient(k.system, urls, f ? { fetch: f } : {}), key: k };
+  const decl = (sources ?? (await loadSources(db, { ttlMs: 0 })))[k.system];
+  if (!decl) throw new Error(`no connected source called ${k.system}`);
+  // read only: every write goes through commitRow or createRow (the declaration, the journal, the guard)
+  return { client: sourceClient(k.system, { read: decl.read.url, write: null }, f ? { fetch: f } : {}), key: k, declaration: decl };
 }
 
 /** ---- columns and values (pure) ---- */
@@ -330,15 +680,17 @@ export const approvingPerson = (user) => String(user ?? "").split(/[/ ]/)[0];
  * by the agent `by`, into `key` (system:table:row) with `fields`, bearing on class `cls`. Filed or Proposed by
  * the class map over the recorder as they stand now (standingOf; R11: the recorder's authority, never the
  * agent's). `held` ({ home, why }) is the agent's own limit: what it read reaches fewer people than the
- * section's do, so its write is proposed whoever it acts for. Returns
- *   { outcome: "filed", result }                 written through the write-capable instance
- *   { outcome: "proposed", pendingId, reason }   a PendingWrite (kind data_entry) for a person with authority
- *   { outcome: "failed", error }                 the source refused it, or the row didn't hold
- *   { outcome: "refused", reason }               nobody stands behind it (the recorder left or moved)
+ * section's do, so its write is proposed whoever it acts for. `before` is what the worker read in the columns it
+ * writes (commitRow: a row that has moved since is never written over). Returns
+ *   { outcome: "filed", status, key, before, after }   written through the write-capable instance (commitRow)
+ *   { outcome: "proposed", pendingId, reason }         a PendingWrite (kind data_entry) for a person with authority
+ *   { outcome: "held", status, why }                   the write didn't land: the source unreachable, the row moved
+ *                                                      or missing, the source or the guard said no (commitRow)
+ *   { outcome: "refused", reason }                     nobody stands behind it (the recorder left or moved)
  * NEEDS A RULING (recorder gone or moved): which filing outcome such a piece gets; smallest choice, the adapter
  * says "refused" and the filing stream records it as Held, asking whoever put it on record.
  */
-export async function enterData({ actsFor, by, key, fields, cls, reason, identity, held = null }, { db = realDb, fetch: f, positions, policy, queue, proposal, people } = {}) {
+export async function enterData({ actsFor, by, key, fields, before = null, cls, reason, identity, held = null, piece = null }, { db = realDb, fetch: f, positions, policy, queue, proposal, people, journal, sources, index } = {}) {
   const k = parseKey(key);
   if (!k) throw new Error(`not a record key (system:table:row): ${key}`);
   if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).length) throw new Error("fields: the columns to write, with their values");
@@ -347,13 +699,15 @@ export async function enterData({ actsFor, by, key, fields, cls, reason, identit
   const lookup = people ?? (await livePeople());
   const standing = standingOf(actsFor, await lookup(String(actsFor.person).split("/agent:")[0]), positions);
   if (!standing.ok) return { outcome: "refused", reason: `Not written: ${standing.why}.` };
-  const writable = Boolean((await sourcesConfig(db, { ttlMs: 0 }))[k.system]?.write);
+  const decl = (sources ?? (await loadSources(db, { ttlMs: 0 })))[k.system] ?? null;
+  if (!decl) return { outcome: "held", status: "refused", why: `no connected source called ${k.system}` };
+  const writable = declaredWritable(decl, k.table, "update");
   let map = null;
   let decision;
   try {
     map = await authorityMapFor({ policy, positions, db });
     decision = positions
-      ? filedOrProposed({ recorder: standing.identity, cls, columns: Object.keys(fields), map, positions, writable })
+      ? filedOrProposed({ recorder: standing.identity, cls, columns: Object.keys(fields), map, positions, writable, index: await indexFor(index) })
       : { outcome: "proposed", authority: null, reason: "no position map is loaded" };
   } catch (e) {
     log.warn(`class map unreadable, so the entry on ${k.key} is proposed: ${String(e?.message ?? e).slice(0, 160)}`);
@@ -362,53 +716,23 @@ export async function enterData({ actsFor, by, key, fields, cls, reason, identit
   if (decision.outcome === "filed" && standing.identity.caps.write === "queued") decision = { ...decision, outcome: "proposed", reason: "this person's writes are queued for approval" };
   if (decision.outcome === "filed" && held) decision = { ...decision, outcome: "proposed", reason: held.why };
   if (decision.outcome === "proposed") {
-    const payload = { kind: "data_entry", key: k.key, fields, class: cls ?? null, acts_for: { person: standing.person, position: standing.position }, by, reason: String(reason ?? "").slice(0, 600) || null };
+    const payload = { kind: "data_entry", key: k.key, fields, ...(before ? { before } : {}), class: cls ?? null, acts_for: { person: standing.person, position: standing.position }, by, reason: String(reason ?? "").slice(0, 600) || null };
     // where it waits: where the map's position (else the root) and anything the agent's limit holds it at are seen
     const home = positions ? commonAncestor(positions, [standing.position ?? positions.root, decision.authority ?? positions.root, ...(held ? [held.home] : [])]) : undefined;
     const w = queue && proposal ? null : await liveQueue();
     const queued = await (queue ?? w.queueWrite)({ kind: "data_entry", payload: JSON.stringify(payload), user: by, home, ...(proposal ?? w.proposalFields)(identity ?? { role: null }, reason) });
     return { outcome: "proposed", pendingId: queued.pendingId, reason: decision.reason };
   }
-  return applyEntry({ fields, key: k.key, table: k.table, rowKey: k.row_key }, { db, fetch: f });
+  return asEntry(await commitRow({ key: k.key, fields, before, piece }, { db, fetch: f, journal, sources: sources ?? { [k.system]: decl } }));
 }
 
-const holds = (row, fields) => Boolean(row) && Object.entries(fields).every(([c, v]) => c in row && (sameValue(row[c], v) || ((row[c] ?? null) === null && (v ?? null) === null)));
-
-/**
- * The write itself: the row read by its key, the columns checked writable, the write, and on a transport error
- * the row read back before calling it failed (a broken connection says nothing about whether the row changed).
- */
-async function applyEntry({ key, fields, table, rowKey }, { db, fetch: f }) {
-  let client;
-  let hit;
-  try {
-    ({ client } = await clientFor(key, { db, fetch: f }));
-    hit = await client.readRow(table, rowKey);
-    if (!hit) throw new Error(`no row ${rowKey} in ${table}: the record key doesn't hold`);
-    assertWritable(fields, hit);
-  } catch (e) {
-    return { outcome: "failed", error: String(e?.message ?? e).slice(0, 300) };
-  }
-  const before = Object.fromEntries(Object.keys(fields).filter((c) => c in hit.row).map((c) => [c, hit.row[c]]));
-  try {
-    const result = await client.writeRow(table, hit, fields);
-    return { outcome: "filed", key, before, after: fields, result };
-  } catch (e) {
-    const error = String(e?.message ?? e).slice(0, 300);
-    if (e?.toolError) return { outcome: "failed", key, error };
-    let row;
-    try {
-      row = (await client.readRow(table, rowKey))?.row ?? null;
-    } catch {
-      return { outcome: "failed", key, error, unverified: true, note: "The source couldn't be reached to tell whether the row changed." };
-    }
-    return holds(row, fields) ? { outcome: "filed", key, before, after: fields, note: `the source answered with an error (${error}) but the row holds the new values` } : { outcome: "failed", key, error };
-  }
-}
+/** a write adapter's answer as data entry's outcome: filed when it landed, held otherwise */
+const asEntry = (r) => (r.filing === "filed" ? { outcome: "filed", ...r } : { outcome: r.filing === "proposed" ? "proposed" : "held", ...r });
 
 /** an approver must hold the authority the map names for the class, as they stand now; a map that can't be read leaves it to the root */
-async function assertApproverHolds(p, person, entry, { positions, db }) {
-  if (!positions) return;
+async function assertApproverHolds(p, person, entry, { positions, db, index }) {
+  // R11.7: a person with authority for the class approves, and without a map nobody can be shown to hold it
+  if (!positions) throw new Error("not applied: no position map is loaded, so nobody can be shown to hold the authority");
   const standing = standingOf({ person, position: null }, entry, positions);
   if (!standing.ok) throw new Error(`not applied: ${standing.why}`);
   const map = await authorityMapFor({ positions, db }).catch(() => null);
@@ -416,27 +740,30 @@ async function assertApproverHolds(p, person, entry, { positions, db }) {
     if (standing.identity.positions.includes(positions.root)) return;
     throw new Error("not applied: the class map can't be read, so only someone at the top of the organization can approve this");
   }
-  const d = filedOrProposed({ recorder: standing.identity, cls: p.class ?? null, columns: Object.keys(p.fields ?? {}), map, positions });
+  const d = filedOrProposed({ recorder: standing.identity, cls: p.class ?? null, columns: Object.keys(p.fields ?? {}), map, positions, index: await indexFor(index) });
   // a class missing from the map: a person at the root approves (R11: a person with authority for that class approves; the orchestrator never does)
   if (d.outcome !== "filed" && !(d.authority === null && standing.identity.positions.includes(positions.root))) throw new Error(`not applied: ${person} doesn't hold the authority the map names for ${p.class ?? "this class"}, so can't approve this entry`);
 }
 
 /**
  * An approved data_entry proposal: the write runs now, authorized by the person who approved it (who must hold
- * the authority), acted by the agent that proposed it.
+ * the authority), acted by the agent that proposed it. The write is begun and settled in the filing log like any
+ * other (commitRow), its `piece` naming the proposal and who approved it, so the filing stream writes the Filed
+ * entry from it; with no journal, nothing is written.
  * NEEDS A RULING (approving a class missing from the map): smallest choice, a person at the root approves it.
  */
-export async function applyProposedEntry(payload, pendingId, approver, { db = realDb, fetch: f, people, positions } = {}) {
+export async function applyProposedEntry(payload, pendingId, approver, { db = realDb, fetch: f, people, positions, journal, sources, index } = {}) {
   const p = typeof payload === "string" ? JSON.parse(payload) : payload;
   const k = parseKey(p.key);
   if (!k) throw new Error(`not a record key: ${p.key}`);
   positions ??= await livePositions();
+  if (/\/agent:/.test(String(approver ?? ""))) throw new Error("not applied: an agent can't approve a data entry; a person with authority for the class does (R11.7)");
   const authorized_by = approvingPerson(approver);
   if (!authorized_by) throw new Error("not applied: an approved entry needs the person who approved it");
   const entry = await (people ?? (await livePeople()))(authorized_by);
-  await assertApproverHolds(p, authorized_by, entry, { positions, db });
-  const r = await applyEntry({ key: k.key, fields: p.fields, table: k.table, rowKey: k.row_key }, { db, fetch: f });
-  if (r.outcome === "failed") throw new Error(r.error);
+  await assertApproverHolds(p, authorized_by, entry, { positions, db, index });
+  const r = asEntry(await commitRow({ key: k.key, fields: p.fields, before: p.before ?? null, piece: { ...(p.piece ?? {}), pending_id: pendingId ?? null, approved_by: authorized_by } }, { db, fetch: f, journal, sources }));
+  if (r.outcome !== "filed") throw new Error(`not applied (${r.status}): ${r.why ?? "the write didn't land"}`);
   return { ...r, authorized_by, pending_id: pendingId ?? null };
 }
 
