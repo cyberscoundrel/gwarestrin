@@ -2,7 +2,6 @@
   import { onMount, type Snippet } from "svelte";
   import { History, ShieldCheck, TriangleAlert } from "lucide";
   import { api, type AuthorityMap, type OrgPolicy, type PolicyView, type PositionsView, type PrunedEntry } from "../lib/api.js";
-  import ClassConfirmPanel from "./ClassConfirmPanel.svelte";
   import Dialog from "./Dialog.svelte";
   import Icon from "./Icon.svelte";
   import PanelHeader from "./PanelHeader.svelte";
@@ -347,17 +346,10 @@
         <button type="button" class="btn btn-ghost btn-sm" disabled={!tree?.scoped} onclick={addRule}>Add rule</button>
       </div>
       <span class="field-hint">
-        A rule names the position that may commit the organization to a class of commitment (orders, hires, maintenance), or to one attribute of it (price, pay, dismissal); an attribute rule with no class applies to that attribute in every class.
-        The position named and those above it see such claims and enter them directly; people below it propose, and what they write of it is filed where the authority sees it.
-        Attribute names are saved the way claims spell them ("Pay Rate" becomes pay_rate).
-        A section goes to the grader, with the restricted topics above, unless every claim in it has a rule and every sentence of it states one of them; the rule's position still holds under the grader's verdict.
+        A rule names the position whose people may have a worker file what they put on record into the source systems, for a class (orders, hires, maintenance) or one of its columns (price, pay). A piece is filed when the person who put it on record holds that position or one above it; otherwise, or when no rule names its class, it is proposed for a person with that authority. The map decides nothing about who sees what.
       </span>
     </div>
   {/if}
-{/snippet}
-
-{#snippet classesBody()}
-  <ClassConfirmPanel />
 {/snippet}
 
 {#snippet derivedBody()}
@@ -484,8 +476,7 @@
     {:else}
       {@render section("Sharing", "How long shares last and who makes them.", sharingBody)}
       {@render section("Grading", "Filing new entries where they belong.", gradingBody)}
-      {@render section("Commitment classes", "What the organization commits to (orders, jobs, hires), discovered from the connected systems. Nothing maps onto a class until you confirm it; a wrong name here misleads every later mapping.", classesBody)}
-      {@render section("Authority", "Who may commit the organization to what: the hierarchy read the other way.", authorityBody)}
+      {@render section("Class map", "Which position may file into the sources what bears on a class: within it, a worker files; otherwise it proposes.", authorityBody)}
       {@render section("Derived data", "Summaries and notes built from what an agent read.", derivedBody)}
       {@render section("Expired entries", "Entries that end (a visit, this week's schedule) leave searches on their date, and the graph later.", pruningBody)}
       {@render section("Deployment", "For reference; changed at deploy, not here.", deployBody)}

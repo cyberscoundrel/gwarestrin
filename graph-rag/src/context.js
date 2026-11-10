@@ -31,7 +31,7 @@ export const {
   // the graph worker (finds the things statements are about); its model and instructions
   // normally come from the admin's Graph worker profile; these are fallbacks and limits
   WORKER_MODEL = "",
-  // a Jev-style decision model for triage (TypeSafe's Jev through OpenRouter, or a compatible one); no key = no triage
+  // a Jev-style decision model (TypeSafe's Jev through OpenRouter, or a compatible one) for the typed check per section (R4)
   DECISION_URL = "https://openrouter.ai/api/alpha/decisions",
   DECISION_API_KEY = "",
   DECISION_MODEL = "~typesafe/jev-latest",

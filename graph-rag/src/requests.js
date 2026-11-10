@@ -6,15 +6,14 @@ import { randomUUID } from "node:crypto";
 import { ancestors, effectiveHome, heldPositions } from "./positions.js";
 import { isExpired, liveClause } from "./extent.js";
 import { grantShows, isActive } from "./grants.js";
-import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, namesOnly, needAsCommitment, needName, openUntil, ownersFor, ownerView, parseStateQuestion, pickPositions } from "./needs.js";
+import { askerView, groupLinked, groupView, JOIN_MIN, LINK_MIN, MATCH_MAX, MATCH_MIN, needName, openUntil, ownersFor, ownerView, pickPositions } from "./needs.js";
 import { GRADER_MODEL, log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, FACETS, knownIndexes, PENDING_ID_RE, RID_RE } from "./db.js";
 import { embedBatch } from "./models.js";
-import { entriesByUser, homeFilter, ownsHome, personOf, personScope, positionMap, positionName, SCOPED } from "./scope.js";
+import { entriesByUser, ownsHome, personOf, personScope, positionMap, positionName, SCOPED } from "./scope.js";
 import { gradeBatch } from "./floor.js";
 import { grantAccess, grantCache, refreshGrants, storeGrant } from "./sharing.js";
 import { policy } from "./org-policy.js";
-import { claimView, conflictsOf, seesSectionClaim, stateOfAttribute, subjectRef } from "./state.js";
 
 /** ---- needs: questions as entries (see needs.js) ---- */
 
@@ -154,18 +153,6 @@ async function matchHidden(vec, askerScope) {
     .slice(0, MATCH_MAX);
 }
 
-/**
- * Can the asker see this claim: its section by the need's rule (personSees) and the claim by the
- * per-claim rule. `claim` is the worker's shape (class, attribute, home, section = the section's rid).
- * A need can't be closed for someone by a claim this says they can't see.
- */
-export async function askerSeesClaim(asker, claim) {
-  const scope = personScope(asker);
-  if (!scope || !RID_RE.test(String(claim.section ?? ""))) return false;
-  const section = (await adbQuery(`SELECT @rid AS rid, name, _home, _origin, _written_by FROM ${claim.section}`).catch(() => []))[0];
-  return Boolean(section) && personSees(asker, section) && seesSectionClaim(scope, claim, section);
-}
-
 /** positions' description vectors (for posting unmatched needs); refreshed with the map */
 let positionVecs = { map: null, list: [] };
 async function describedPositions() {
@@ -179,67 +166,6 @@ async function describedPositions() {
 async function needVec(rid) {
   const row = (await adbQuery(`SELECT embed_identity FROM ${rid}`))[0];
   return Array.isArray(row?.embed_identity) ? row.embed_identity : null;
-}
-
-/** ---- a question on an attribute is a state query when the state exists ---- */
-
-let claimVocabulary = { at: 0, attributes: [], classes: [] };
-/** the attributes the graph's claims use and the confirmed classes' record tables (briefly cached; empty until the first claim lands) */
-async function claimWords() {
-  if (Date.now() - claimVocabulary.at < 5_000) return claimVocabulary;
-  const [attrs, classes] = await Promise.all([
-    adbQuery("SELECT attribute, count(*) AS n FROM CLAIMS GROUP BY attribute LIMIT 500").catch(() => []),
-    adbQuery("SELECT name, record_table FROM CommitmentClass WHERE status = 'confirmed' LIMIT 200").catch(() => []),
-  ]);
-  claimVocabulary = {
-    at: Date.now(),
-    attributes: attrs.map((r) => r.attribute).filter((a) => typeof a === "string" && a),
-    classes: classes.filter((c) => typeof c.record_table === "string" && c.record_table),
-  };
-  return claimVocabulary;
-}
-
-/**
- * Answer a need from state (needs.js, "commitments with the sign flipped"): when the question asks
- * for an attribute's current value (parseStateQuestion's shapes, namesOnly: an attribute word in a
- * question about something else is not that), exactly one thing the asker sees holds a claim on it
- * now, and that value isn't contradicted, that claim answers it. The need is marked met by the claim's section (a NEAR meeting the asker sees),
- * nobody is asked, no model is called. Null when it isn't such a question or no state exists: then
- * the embedding path runs as before and the need reaches an owner.
- */
-async function answerFromState(need, scope, identity) {
-  const { attributes, classes } = await claimWords();
-  if (!attributes.length) return null;
-  const parsed = parseStateQuestion(need.question, { attributes, classes });
-  if (!parsed) return null;
-  const hits = await stateOfAttribute(parsed.subjects.map((s) => subjectRef(s)), parsed.attribute, { scope, identity });
-  // none, or several things with that state: not for a query to decide
-  if (hits.length !== 1) return null;
-  const { thing, claim, claims } = hits[0];
-  if (!namesOnly(parsed.about, thing)) return null;
-  // two claims in force disagree: which is true is a person's to say
-  if (conflictsOf(claims).some((c) => c.attribute === claim.attribute)) return null;
-  const until = openUntil(Date.now(), policy.requestDays, null);
-  await meet(need, claim.section.rid, 1, "visible");
-  // (parameter names that aren't SQL words: ArcadeDB's parser reads `:by` as the keyword BY)
-  await adbCommand(`UPDATE ${need.rid} SET _status = 'met', _open_until = :until, _valid_until = :until, _valid_by = 'question', _met_by = :claim`, "sql", { until, claim: claim.id });
-  log.info(`question ${need.qid} by ${need.asker}: answered from state (${thing.name}: ${parsed.attribute} = ${claim.value.slice(0, 60)}), no model call`);
-  return { subject: { name: thing.name, ...(thing.keys.length ? { keys: thing.keys } : {}) }, ...claimView(claim) };
-}
-
-export const ANSWERED_NOTE = "Answered from the knowledge graph's current state (the claim and its section are in answer): nothing was sent to anyone.";
-
-/**
- * Open needs in the caller's view as commitments with the sign flipped (needs.js needAsCommitment):
- * the same shape as an open commitment claim, so the two list together. A need is visible like any
- * entry: at the asker's position, or shown to the caller through a share of the question.
- */
-export async function openNeeds(scope, { now = Date.now() } = {}) {
-  const rows = await adbQuery(
-    `SELECT @rid AS rid, _qid, name, text_identity, _asker, _asked_by, _status, _home, _origin, _open_until, _valid_until, _joined_into, _asked, _questions, _dismissed, _met_by FROM ${ENTITY_LABEL} WHERE _kind = 'need' AND _status = 'open' AND _open_until > :now${homeFilter(scope)} ORDER BY _open_until LIMIT 200`,
-    { now: new Date(now).toISOString() },
-  );
-  return rows.map((r) => needAsCommitment(needOf(r)));
 }
 
 /**
@@ -368,11 +294,6 @@ export async function requestAccess({ question }, identity, scope) {
     { name, qid, asker: personOf(identity.user), asked_by: identity.user, home, questions: JSON.stringify([{ text, at: now }]), text, now },
   );
   const need = await loadNeed(qid);
-  // a question on an attribute of a thing the asker sees is a state query when the state exists:
-  // answered at once from the claims, before any model is called, for an agent's ask too (the
-  // asker already sees the claim, so nothing leaks and nothing needs confirming)
-  const answer = await answerFromState(need, scope, identity);
-  if (answer) return { ...(await askerRequest(qid, identity)), answer, note: ANSWERED_NOTE };
   try {
     const [vec] = await embedBatch([text]);
     await adbCommand(`UPDATE ${need.rid} SET embed_identity = [${vec.join(",")}]`);
@@ -418,9 +339,6 @@ export async function confirmRequest(qid, identity, scope) {
   // claim it: a second confirm finds nothing to do
   const claimed = await adbCommand(`UPDATE ${ENTITY_LABEL} SET _status = 'opening' WHERE _kind = 'need' AND _qid = :qid AND _status = 'proposed'`, "sql", { qid });
   if (Number(claimed?.[0]?.count ?? 0) !== 1) throw new Error("this request was already handled");
-  // state may answer it now (a claim landed since the draft): then nobody is asked
-  const answer = await answerFromState(need, scope, identity);
-  if (answer) return { ...(await askerRequest(qid, identity)), answer, note: ANSWERED_NOTE };
   await openNeed(need, scope);
   return askerRequest(qid, identity);
 }

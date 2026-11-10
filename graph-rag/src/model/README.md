@@ -1,139 +1,81 @@
-# The data contract
+# The contract
 
-The shapes every stream of the organization model codes against
-([docs/ORGANIZATION-MODEL.md](../../../docs/ORGANIZATION-MODEL.md)). Three
-modules, pure functions over plain objects, no database, no model calls, no
-dependency beyond Node and `positions.js`. Tests in `test/model-*.test.js`;
-fixtures every stream shares in `test/fixtures/` (`classes.json`,
-`policy.json`, `positions.json`, and the sixty-note oracle
-`oracle-sixty.json`, whose 95 claims all validate: `test/oracle.test.js`).
+The shapes every stream shares, from the user's rulings R1 to R11 (`~/reviews/design-rulings.md`) and the
+design ([docs/ORGANIZATION-MODEL.md](../../../docs/ORGANIZATION-MODEL.md)). Pure functions over plain objects:
+no database, no model calls. Tests in `test/model-*.test.js`. Which stream owns which file is
+[docs/BUILD.md](../../../docs/BUILD.md).
+
+A choice no ruling makes is marked in the code with **NEEDS A RULING**, takes the smallest reversible option,
+and is listed in BUILD.md.
+
+## Modules
+
+| Module | What it holds |
+|---|---|
+| `schema.js` | Record keys (`system:table:row`), the types as data, and the idempotent DDL `server.js` runs at every start |
+| `classes.js` | Classes, the class graph (several parents), the instance edge, the dependency edge |
+| `class-map.js` | The map from classes to positions, used only to choose Filed or Proposed (R6) |
+| `record.js` | The record: a condensed document and its text sections (R2) |
+| `filing.js` | The filing log's entries, worker accounts, the orchestrator's verdicts, requests (R2, R9, R10, R11) |
+| `sources.js` | A source declaration: how each source is read and committed to (R2) |
+| `brief.js` | A worker's brief, scoped to an audience (R7, R11) |
+| `text.js` | Name and date helpers, and `ShapeError`, which names the field it is about |
 
 ## Shapes
 
-**Class** (`CommitmentClass` vertex; fixture `classes.json`): a confirmed
-commitment pattern. `name` (unique; what claims and policy use), `stages`
-(in order), `record_table` (`system:table`, e.g. `mssql:dbo_Order`, or null
-when no source system records it), `status` (proposed | confirmed |
-retired), `confirmed_by`, `confirmed_at`. Nothing maps onto a class until a
-person confirms it.
+**Class** (an `Entity` with `_kind: 'class'`; `classes.js normalizeClass`): `{ name, key, parents, home,
+description, evidence, rows_are_nodes, record_table, stages, status }`, which is what R11 says a class holds.
+The four primitives (agent, commitment, event, resource) are the only roots (R1). Every other class has at least one
+parent and may have several (R9). `assertParents` refuses a cycle, a missing or retired parent, and a class that
+reaches no primitive. A class is scoped by home like any node. `rows_are_nodes` is the per-class setting for whether
+a table's rows become instance nodes (R3). Stages are for commitment classes only.
 
-**Instance**: an `Entity` with `_kind: 'thing'`, `_class` naming its class,
-and its record key in `_keys` (`system:table:row`, `mssql:dbo_Job:4471`,
-the convention `things.js` already resolves by; `schema.recordKey(cls, row)`
-builds one). An instance with no record table is keyed by name and origin
-like any thing. Nothing else about the instance lives in the graph.
+**Instance**: any `Entity` with an `INSTANCE_OF` edge to a class, one edge per class
+(`normalizeInstanceEdge`). It is visible wherever a section about it is (R11): its `_homes` grow with the
+sections related to it by `ABOUT`.
 
-**Claim** (`CLAIMS` edge, out = the section or entry it was extracted from,
-in = the subject thing): one primitive bound to a subject with an interval.
+**Dependency** (`DEPENDS_ON`, `normalizeDependency`): from the instance that depends to the one it depends on,
+stated by a person, a record or an agent (R1). It carries when it was stated and optionally from and until when.
+It is visible only to someone who sees both ends (R11, `dependencyVisible`).
 
-```
-{ kind: commitment | event | state | observation,
-  subject: { key | null, name | null, class | null, actor | null },
-  class, attribute, value, value_num,
-  valid_from, valid_until | null, recorded_at, recorded_by, section }
-```
+**Record** (`record.js normalizeDocument`): `{ title, description, recorded_by, position, reason, recorded_at,
+sections: [{ heading, text }] }`. A section is text: a section carrying `claims` is refused (R2). `position` is where
+the sections start; the check can only raise them (R11).
 
-A subject is an instance (`class`, defaulting to the claim's, with a `key`
-or a `name`), an actor (`actor`: person | position | customer | supplier |
-agent, with a name or key), or the class itself (`scope: "class"`, an
-optional qualifying `name`: an aggregate observation or a need on a
-process, which is what the oracle's residue needed). The condenser may give
-a subject as a string: a key when it parses as one, else a name. A claim
-about an actor still names the class it bears on (a pay claim about Tomas
-is `hires` / `pay`). `attribute` is snake_case; `stage` is the attribute
-every class has and its value must be one of the class's stages. `value` is
-stored as a string (numbers and booleans JSON-encoded), with `value_num`
-when it is a number. Dates are ISO, or relative to the recording
-(`recorded_at`, `recorded_at+14d`; d, w, m, y); a date without a zone is
-UTC; a date alone is its start.
+**Filing entry** (`filing.js normalizeEntry`): one piece of a record. A piece is whatever one entry covers, and the
+worker decides the split (R11). Its outcome is one of Filed, Proposed, Held or Kept (R2): Filed names the row it
+wrote, Proposed says why, Held carries the question to the recorder, and Kept has no target, because the document is
+the source. An entry carries its section's home, the worker's account of what it did, and the orchestrator's verdict
+on that account (`matches`, `differs` or `unverifiable`, checked against the source, R10 and R11). A Kept piece that
+is re-filed later points back with `refiled_from` (R11).
 
-**Document** (what the condenser emits; `claims.normalizeDocument`):
+**Request** (`filing.js normalizeRequest`): a worker asking the orchestrator instead of resolving (R10). Its kind
+is `class`, `conflict` or `other`.
 
-```
-{ title, description?, recorded_by, position, reason, recorded_at?,
-  sections: [{ heading?, text, claims: [claim] }] }
-```
+**Source declaration** (`sources.js normalizeSource`): `{ system, read: { via, url }, commit: { via, url, tables,
+actions } | { via: "none" } }`. A source with no commit is not writable, so a clear piece is Proposed (R2).
+`briefSource` is what a brief may say about a source: how it is committed to, never its URLs.
 
-Stored as `documents.js` stores a manual: a document entry with the
-on-record marker (`_on_record`, `_recorded_by`, `_recorded_at`,
-`_record_position`, `_record_reason`), section entries `PART_OF` it, and
-each claim a `CLAIMS` edge from its section. A section with no claims is
-still stored and searchable; the grader runs on it (decision 2).
+**Brief** (`brief.js scopeBrief`, `assertBrief`): `{ audience, record, sections, classes, instances, sources }`.
+The audience is the home of the sections the brief is for. `splitByHome` gives one brief, and one worker, per home
+(R11). `scopeBrief` drops what the audience can't see and counts what it dropped without naming it, and
+`assertBrief` refuses a brief that still holds anything above the audience.
 
-**Source reference** (`SourceRef` vertex, `REFERS_TO` from the instance):
-one row of a source system by `key`, with `system`, `table`, `row_key`,
-`last_seen`, `seen_by`. Never a copy of the row.
-
-**Audit event** (`AuditEvent` vertex, `WROTE` to the `SourceRef`): an
-agent's write to a source system: `key`, `authorized_by` (the person),
-`acted_by` (the agent), `position`, `at`, `change` (JSON), `outcome`
-(applied | proposed | refused | failed), `pending_id`.
-
-**Policy** (fixture `policy.json`; `authority.validatePolicy`): what an
-admin edits. `classes[name].authority`, `classes[name].attributes[attr]`,
-`attributes[attr]`, optional `default`, each a position id. This replaces
-`restrictedTopics` for everything that maps to a class.
+**Filed or Proposed** (`class-map.js filedOrProposed`): the authority that counts is the recorder's, never the
+agent's. A class missing from the map means Proposed, and so does a source that isn't writable (R2, R11). A class with
+no entry of its own takes its parents' entries, and the strictest wins where they conflict (R9, `mapPositionOf`).
 
 ## Invariants
 
-- **Reference, never copy.** The graph holds keys, claims and provenance;
-  rows stay in the source system. A claim's `value` is what was said, not a
-  cached column.
-- **Interval rule (decision 3).** No dates: `valid_from = recorded_at`, open,
-  closed by the next claim on the same attribute of the same subject at that
-  claim's `valid_from` (`claims.closeIntervals`, applied per reader at read
-  time over the claims that reader sees: a claim above someone never ends
-  what they see, and nothing stamps a close on the stored edge). Two claims starting at the
-  same instant both stay open; with different values they are a
-  contradiction (`claims.overlaps`), never a succession. An event is a point
-  (`valid_from = valid_until = at`) unless the text gives it an end (a
-  two-day closure); it neither closes nor is closed. An explicit
-  `valid_until` is kept.
-- **State is a query.** `claims.stateOf(claims, subject, asOf)` is the
-  current state; the latest `valid_from` in force wins. Contradiction is
-  two overlapping claims with different values, after closing.
-- **Authority is one rule.** `authority.decide(identity, class, attribute,
-  policy, positions)`: `direct` when the identity holds the authority
-  position or one above it; `propose` when it holds one below; `hidden` when
-  it holds none on that line. No rule for a class means the writer's own
-  position holds it. An identity with `caps.write: 'queued'` never gets
-  `direct`. An authority position the tree does not know counts as the
-  root.
-- **The three readings.** Visibility: a claim is seen when `decide` is
-  `direct` (`authority.visible`). Proposals: a write goes through when
-  `direct`, is queued when `propose`, and when `hidden` is held at the
-  common ancestor for someone with authority over both sides. Grading: a
-  claim is homed at `authority.claimHome(positions, origin, authority)`, the
-  lowest position at or above both its origin and its authority; a section
-  is homed no lower than its most restricted claim and no lower than its
-  document (decision 5), the stricter winning (`positions.commonAncestor`).
-  The grader runs on text no rule covers: a section with no claim, a claim
-  with no rule (decision 2), or any word of its text, heading or entry name
-  that isn't one of its claims' or filler; its verdict can only restrict
-  further than the claims' placement (`placement.claimsSettle`). A policy's
-  class and attribute names are normalized as a claim's attribute is. An authority
-  a policy names that the tree no longer has stays in the map and counts as
-  the root (`staleAuthorities` lists them; `policy.normalizeStored` logs them).
-- **Provenance sets the home; nothing widens it.** `claimHome` never returns
-  a position below the origin. Unknown anything fails upward. A claim's stored
-  home follows its section whenever the section moves, no lower than the
-  claim's authority (`floor.claimsFollowEntry`).
-- **Errors name the field.** `ClaimError.field` is a path
-  (`sections[1].claims[0].value`); `validateDocument` returns every claim's
-  error at once; `validatePolicy` throws with the field.
-- **Confirmed classes gate claims.** With a class set given, a claim naming
-  an unconfirmed class is an error; never mint a class from one occurrence.
-  Without one (a stream that has not loaded them), any name passes and
-  stages go unchecked.
-- **DDL is idempotent.** `schema.statements()` is safe to run at every start;
-  it extends `Entity` and declares the new types; it redeclares nothing that
-  exists. Nothing in this directory executes it.
+- **DDL is idempotent.** `schema.statements()` is safe to run at every start, and nothing in this directory runs it.
+- **Reference, never copy.** The graph holds keys and sections; rows stay in the source. A transactional row's key
+  sits in a section, with no per-row node (R3).
+- **No audit nodes.** Every filing outcome, source writes included, is a `FilingEntry` document, which no graph read
+  returns (R9).
+- **Errors name the field.** `ShapeError.field` is a path such as `sections[1].text` or `target.key`.
 
-## What the existing code gets from this
+## Removed by the rulings
 
-`things.js normalizeKey` and `schema.parseKey` agree on `system:table:row`;
-the Admission stream should import the latter. `policy.restrictedTopics`
-stays for the grader's residue; the Authority stream replaces the ~15
-`queueWrite` level tests with `decide`. `documents.js` is the storage shape
-for everything on record; its `parseExtraction` facts become claims through
-`normalizeClaim`.
+Atomic claims and every claim-based state query (R2), the linker and triage (R4), word lists and noun tables (R3),
+the person gate on classes (R5), the single authority-over-a-class rule (R6), the migration (R8), audit nodes and
+source-reference nodes (R3, R9), and one parent per class (R9).

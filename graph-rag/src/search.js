@@ -4,15 +4,13 @@
  */
 import { effectiveHome } from "./positions.js";
 import { isExpired, liveClause } from "./extent.js";
-import { normalize } from "./things.js";
+import { normalize } from "./instances.js";
 import { log } from "./context.js";
 import { adbQuery, adbQueryLang, ensureIndex, ENTITY_LABEL, esc, FACET_RE, FACETS, knownIndexes, likeTerm, PROP_RE, RID_RE } from "./db.js";
 import { embedBatch } from "./models.js";
 import { homeFilter, homeLabel, positionMap, SCOPED, viaOf } from "./scope.js";
 import { recordReads } from "./floor.js";
 import { ASSERTIONS, openNeedsClause } from "./requests.js";
-import { enqueue } from "./worker-pool.js";
-import { asOfDate, claimsOfThing, claimView, inForceAt, stateAt, stateView } from "./state.js";
 
 /** a question in results: who asked, until when; it's a request, not a fact */
 const questionOf = (row) =>
@@ -50,10 +48,8 @@ export function identityText(name, labels, props) {
 
 /** ---- tool implementations ---- */
 
-export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of, include_expired = false, assertions_only = false }, scope = { homes: null }, readHomes = [], { demand = true, ownEntry = null } = {}) {
-  console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter, ...(as_of ? { as_of } : {}) })}`);
-  // as_of: hits that bear claims are kept only while one of their claims was in force at that date
-  const asOf = as_of === undefined || as_of === null || as_of === "" ? null : asOfDate(as_of);
+export async function searchGraph({ query, facets, k = 8, temporal_filter, include_expired = false, assertions_only = false }, scope = { homes: null }, readHomes = [], { ownEntry = null } = {}) {
+  console.log(`[graph-rag] search_graph: ${JSON.stringify({ query: query.slice(0, 80), facets, temporal_filter })}`);
   const facetList = (facets?.length ? facets : Object.keys(FACETS)).map((f) => {
     if (typeof f !== "string" || !FACET_RE.test(f)) throw new Error(`invalid facet: ${f}`);
     return f.toLowerCase();
@@ -99,8 +95,8 @@ export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of
     // may see (the visibility and temporal predicates ride in the same
     // query). Earlier this fetched the first k*8 rows and ranked only those,
     // which misses the right entities once a graph outgrows a few dozen.
-    // a filter applied after ranking (temporal, as_of) needs more candidates than it will keep
-    const innerK = temporal_filter || asOf ? Math.min(k * 3, 96) : k;
+    // a filter applied after ranking (temporal) needs more candidates than it will keep
+    const innerK = temporal_filter ? Math.min(k * 3, 96) : k;
     const vec = `[${embedding.map((x) => (Number.isFinite(x) ? x : 0)).join(",")}]`;
     const best = new Map(); // rid -> { score, facets }
     for (const facet of facetList) {
@@ -125,7 +121,7 @@ export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of
         best.set(rid, b);
       }
     }
-    const top = [...best].sort((a, b) => b[1].score - a[1].score).slice(0, asOf ? innerK : k);
+    const top = [...best].sort((a, b) => b[1].score - a[1].score).slice(0, k);
     if (top.length) {
       const rows = await adbQuery(`SELECT FROM [${top.map(([rid]) => rid).join(",")}]`);
       const byId = new Map(rows.map((r) => [String(r["@rid"]), r]));
@@ -176,11 +172,6 @@ export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of
     }
   }
 
-  // as_of: a hit that bears claims says something about a date only while one of its claims was in
-  // force then (decision 3 closes an open claim at the next one on the same attribute, so the
-  // siblings on the same subjects are read too); a hit bearing none passes as it is
-  if (asOf && results.length) results = await coveringAsOf(results, asOf, scope);
-
   // 1-hop relationships for the top results: by record id, and only to
   // neighbours the caller may see (an edge must not reveal a hidden node)
   let relationships = [];
@@ -206,16 +197,6 @@ export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of
     }
   }
 
-  // what people look for gets linked first (the one-call linking only: a
-  // search never starts a thread, and a worker's own searches aren't demand,
-  // or one thread would queue threads for everything it looked at)
-  if (demand) {
-    for (const r of results.slice(0, k)) {
-      if (r.kind === "question" || !RID_RE.test(String(r.rid)) || r._mentioned) continue;
-      void enqueue("mentions", { rid: String(r.rid), no_thread: true }, { key: `mentions:${r.rid}`, priority: 5 }).catch(() => {});
-    }
-  }
-
   // what the caller has now seen (derived-data tracking; not returned). A
   // thing isn't content (it's seen wherever its statements are, though it's
   // stored at the root), and a thread's own task entry is its brief: neither
@@ -235,44 +216,6 @@ export async function searchGraph({ query, facets, k = 8, temporal_filter, as_of
     relationships,
     ...(embedFailed ? { note: "embedding backend unavailable; lexical fallback used" } : {}),
   };
-}
-
-/**
- * The results that bear claims, filtered to those with a claim in force at `asOf` (each then carries
- * `claims`: what it said that held then); results bearing no claim pass unchanged. Claims are the
- * ones the caller sees (claimsOfThing, the per-claim rule): a claim it can't see neither shows here
- * nor ends a claim it can, and a hit whose claims it can't see at all passes as one bearing none.
- */
-async function coveringAsOf(results, asOf, scope) {
-  const rids = results.map((r) => String(r.rid)).filter((x) => RID_RE.test(x));
-  if (!rids.length) return results;
-  const edges = await adbQuery(`SELECT @rid AS rid, @out AS src, @in AS dst FROM (SELECT expand(outE('CLAIMS')) FROM [${rids.join(",")}]) LIMIT 500`).catch(() => []);
-  if (!edges.length) return results;
-  // every claim on the subjects these hits bear on, so a later claim elsewhere closes an open one here
-  const subjects = [...new Set(edges.map((e) => String(e.dst)).filter((x) => RID_RE.test(x)))].slice(0, 24);
-  const labels = new Map((await adbQuery(`SELECT @rid AS rid, label, _keys FROM [${subjects.join(",")}] WHERE _kind = 'thing'${homeFilter(scope)}`).catch(() => [])).map((t) => [String(t.rid), t]));
-  const claims = [];
-  for (const s of subjects) {
-    const t = labels.get(s);
-    const thing = { rid: s, name: t?.label ?? s, keys: Array.isArray(t?._keys) ? t._keys : [], class: null };
-    claims.push(...(await claimsOfThing(thing, { scope })).claims);
-  }
-  // closed over the caller's claims of the subject, then what held at the date, by the hit it came from
-  const bearing = new Set(claims.map((c) => c.source));
-  const held = Map.groupBy(inForceAt(claims, asOf), (c) => c.source);
-  const out = [];
-  for (const r of results) {
-    const rid = String(r.rid);
-    if (!bearing.has(rid)) {
-      out.push(r);
-      continue;
-    }
-    const mine = held.get(rid);
-    if (!mine) continue;
-    // (the hit is the section: no need to name it again on each claim)
-    out.push({ ...r, claims: mine.map(({ section: _section, ...c }) => ({ subject: c.subject.name, ...claimView(c) })) });
-  }
-  return out;
 }
 
 /** ---- pass-through: raw graph access for agents (credentials stay here) ---- */
@@ -295,25 +238,21 @@ export async function schemaGraph() {
   return { types: [], indexes };
 }
 
-/** the names a thing holds for restricted readers (linker.js, "home<TAB>value") this caller may see */
+/** the names an instance holds for restricted readers ("home<TAB>value") this caller may see */
 const heldSeenBy = (list, scope) => (list ?? []).filter((e) => !scope?.homes || scope.homes.has(String(e).split("\t")[0])).map((e) => String(e).split("\t").slice(1).join("\t"));
 
-/** what we know about a thing: the statements about it the caller can see, and its current state (the latest claim per attribute) */
+/** what we know about an instance: the sections about it the caller can see */
 export async function aboutThing({ name }, identity, scope) {
   const n = normalize(name);
   const visible = homeFilter(scope);
   const things = await adbQuery(
-    `SELECT @rid AS rid, label, _thing_type, _alias_norms, _keys, _class, _held_aliases, _held_keys FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n OR _keys CONTAINS :raw)${visible} LIMIT 5`,
+    `SELECT @rid AS rid, label, _alias_norms, _keys, _held_aliases, _held_keys FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n OR _keys CONTAINS :raw)${visible} LIMIT 5`,
     { n, raw: String(name).trim() },
   );
   if (things.length === 0) return { things: [], note: `nothing called "${name}" that you can see is known yet` };
   const out = [];
   const read = [];
-  const now = new Date().toISOString();
   for (const t of things) {
-    // the claims about it the caller sees (state.js): the sections they rest on count as read too
-    const { claims, read: claimRead } = await claimsOfThing({ rid: String(t.rid), name: t.label, type: t._thing_type, keys: t._keys ?? [], class: t._class ?? null }, { scope });
-    read.push(...claimRead);
     const rows = await adbQuery(
       `SELECT name, _home, _kind, _doc_title, _doc_id, _section, text_identity, _valid_until FROM (SELECT expand(in('ABOUT')) FROM ${String(t.rid)}) WHERE name IS NOT NULL${visible}${liveClause()} LIMIT 40`,
     ).catch(() => []);
@@ -323,22 +262,17 @@ export async function aboutThing({ name }, identity, scope) {
       ...(await adbQuery(`SELECT @in AS other, rel FROM (SELECT expand(outE('RELATES')) FROM ${String(t.rid)}) LIMIT 60`).catch(() => [])).map((e) => ({ ...e, dir: "out" })),
       ...(await adbQuery(`SELECT @out AS other, rel FROM (SELECT expand(inE('RELATES')) FROM ${String(t.rid)}) LIMIT 60`).catch(() => [])).map((e) => ({ ...e, dir: "in" })),
     ].filter((e) => RID_RE.test(String(e.other)));
-    const others = edges.length ? await adbQuery(`SELECT @rid AS rid, label, _thing_type FROM [${[...new Set(edges.map((e) => String(e.other)))].join(",")}] WHERE _kind = 'thing'${visible}`).catch(() => []) : [];
+    const others = edges.length ? await adbQuery(`SELECT @rid AS rid, label FROM [${[...new Set(edges.map((e) => String(e.other)))].join(",")}] WHERE _kind = 'thing'${visible}`).catch(() => []) : [];
     const byRid = new Map(others.map((o) => [String(o.rid), o]));
     out.push({
       name: t.label,
-      type: t._thing_type,
       also_called: [...(t._alias_norms ?? []), ...heldSeenBy(t._held_aliases, scope)],
       ...(t._keys?.length || heldSeenBy(t._held_keys, scope).length ? { keys: [...(t._keys ?? []), ...heldSeenBy(t._held_keys, scope)] } : {}),
-      ...(t._class ? { class: t._class } : {}),
-      // what holds now, from the claims the caller sees; stateAsOf (tools-queries.js) gives another date
-      state: stateView(stateAt(claims, now)),
-      claims: claims.length,
       related: edges
         .filter((e) => byRid.has(String(e.other)))
         .map((e) => {
           const o = byRid.get(String(e.other));
-          return e.dir === "out" ? { [e.rel]: `${o.label} (${o._thing_type})` } : { [`${e.rel} (from)`]: `${o.label} (${o._thing_type})` };
+          return e.dir === "out" ? { [e.rel]: o.label } : { [`${e.rel} (from)`]: o.label };
         }),
       statements: rows.map((r) => ({ name: r.name, ...questionOf(r), ...validityOf(r), text: String(r.text_identity ?? "").slice(0, 300) })),
     });
