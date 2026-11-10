@@ -28,7 +28,8 @@ import { canSee, EVERYONE } from "./positions.js";
 import { classKey } from "./model/classes.js";
 import { parseKey } from "./model/schema.js";
 import { disagreeingColumns, FILED, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, onDisagreement, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
-import { clientFor, DAB_CALLS, enterData, mcpToolCall, rowsOf, sameValue, sourcesConfig } from "./data-entry.js";
+import { enterData, findRows, getRow, sameValue } from "./data-entry.js";
+import { sourceFor } from "./sources.js";
 
 const realDb = { adbCommand: realCommand, adbQuery: realQuery };
 const json = (v) => (v === null || v === undefined ? null : JSON.stringify(v));
@@ -51,8 +52,8 @@ const normName = (s) =>
 const ENTRY_FIELDS = ["id", "outcome", "record", "section", "home", "piece", "class", "instances", "target", "recorder", "worker", "reason", "pending_id", "question", "request", "account", "verdict", "refiled_from", "at"];
 const fromEntryRow = (r) => ({ ...Object.fromEntries(ENTRY_FIELDS.map((k) => [k, r[k] ?? null])), instances: Array.isArray(r.instances) ? r.instances : [], target: parse(r.target), account: parse(r.account), verdict: parse(r.verdict) });
 const ATTEMPT_FIELDS = ["id", "system", "table", "key", "action", "fields", "before", "piece", "status", "detail", "at", "settled_at"];
-// stored under names that are no SQL keyword: table -> source_table, key -> row_key
-const ATTEMPT_COLUMN = (k) => (k === "table" ? "source_table" : k === "key" ? "row_key" : k);
+// stored under names that are no SQL keyword in ArcadeDB: table -> source_table, key -> row_key, before -> row_before
+const ATTEMPT_COLUMN = (k) => (k === "table" ? "source_table" : k === "key" ? "row_key" : k === "before" ? "row_before" : k);
 const REQUEST_FIELDS = ["id", "kind", "record", "section", "home", "worker", "question", "suggestion", "status", "answer", "answered_by", "at"];
 
 /**
@@ -90,7 +91,7 @@ export function arcadeStore(db = realDb) {
     },
     /** a source write's attempt (the sources stream's journal: begun before the write, settled after) */
     async insertAttempt(a) {
-      await db.adbCommand(`INSERT INTO FilingAttempt SET ${ATTEMPT_FIELDS.map((k) => `${ATTEMPT_COLUMN(k)} = :${ATTEMPT_COLUMN(k)}`).join(", ")}`, "sql", { ...Object.fromEntries(ATTEMPT_FIELDS.map((k) => [ATTEMPT_COLUMN(k), a[k] ?? null])), fields: json(a.fields), before: json(a.before), piece: json(a.piece), detail: json(a.detail) });
+      await db.adbCommand(`INSERT INTO FilingAttempt SET ${ATTEMPT_FIELDS.map((k) => `${ATTEMPT_COLUMN(k)} = :${ATTEMPT_COLUMN(k)}`).join(", ")}`, "sql", { ...Object.fromEntries(ATTEMPT_FIELDS.map((k) => [ATTEMPT_COLUMN(k), a[k] ?? null])), fields: json(a.fields), row_before: json(a.before), piece: json(a.piece), detail: json(a.detail) });
       return a;
     },
     async updateAttempt(id, { status, detail }) {
@@ -98,7 +99,7 @@ export function arcadeStore(db = realDb) {
     },
     async attempt(id) {
       const r = (await db.adbQuery("SELECT FROM FilingAttempt WHERE id = :id LIMIT 1", { id }))[0];
-      return r ? { ...Object.fromEntries(ATTEMPT_FIELDS.map((k) => [k, r[ATTEMPT_COLUMN(k)] ?? null])), fields: parse(r.fields), before: parse(r.before), piece: parse(r.piece), detail: parse(r.detail) } : null;
+      return r ? { ...Object.fromEntries(ATTEMPT_FIELDS.map((k) => [k, r[ATTEMPT_COLUMN(k)] ?? null])), fields: parse(r.fields), before: parse(r.row_before), piece: parse(r.piece), detail: parse(r.detail) } : null;
     },
     async requests({ id, worker, status } = {}) {
       const where = [];
@@ -124,58 +125,56 @@ export async function classByKey(key, db = realDb) {
   return { rid: String(row.rid), key: row._class_key, name: row._class_name ?? row._class_key, home: row._home ?? null, rows_are_nodes: row._rows_are_nodes === true, record_table: row._record_table ?? null, status: row._status ?? "active", parents: parents.map((p) => p.key).filter(Boolean) };
 }
 
-/** a row by its key, as a fact: { status: ok, row } | { status: not_found } | { status: unreachable, error } */
-export async function readSourceRow(key, { db = realDb, fetch } = {}) {
-  const k = parseKey(key);
-  if (!k) return { status: "not_found", error: `not a record key: ${key}` };
-  try {
-    const { client } = await clientFor(k.key, { db, fetch });
-    const hit = await client.readRow(k.table, k.row_key);
-    return hit ? { status: "ok", row: hit.row } : { status: "not_found" };
-  } catch (e) {
-    // the source said no (a wrong table, a wrong key type): the key is what's unclear. Anything else: it couldn't be reached (R3)
-    if (e?.toolError) return { status: "not_found", error: String(e.message).slice(0, 300) };
-    return { status: "unreachable", error: String(e?.message ?? e).slice(0, 300) };
-  }
+/**
+ * A row by its key, as a fact, read through the sources stream's read adapter (data-entry.js getRow):
+ * { status: ok, row } | { status: not_found } | { status: unreachable, error } | { status: refused, error }.
+ * `audience` (a worker's home) makes the adapter refuse a connection whose home the audience can't see (R11.6,
+ * R11.9); the orchestrator reads with none.
+ */
+export async function readSourceRow(key, { db = realDb, fetch, audience, positions } = {}) {
+  if (!parseKey(key)) return { status: "not_found", error: `not a record key: ${key}` };
+  const r = await getRow(key, { db, fetch, ...(audience !== undefined ? { audience, positions } : {}) });
+  if (r.status === "found") return { status: "ok", row: r.row };
+  if (r.status === "none") return { status: "not_found" };
+  if (r.status === "refused") return { status: "refused", error: r.why ?? "the source refused the read" };
+  return { status: "unreachable", error: r.why ?? r.status };
 }
 
-/**
- * Rows whose column equals a name, read through the source's read endpoint (at most five). Until the sources
- * stream's read adapter lands (its `find`), this reads with DAB's own filter, text equality only.
- */
-export async function findSourceRows(system, table, column, value, { db = realDb, fetch } = {}) {
-  const urls = (await sourcesConfig(db, { ttlMs: 0 }))[system];
-  if (!urls?.read) return { status: "unreachable", error: `no connected source called ${system}` };
-  try {
-    const literal = `'${String(value).replace(/'/g, "''")}'`;
-    const rows = rowsOf(await mcpToolCall(urls.read, DAB_CALLS.read(table, column, literal).name, { ...DAB_CALLS.read(table, column, literal).args, first: 5 }, fetch ? { fetch } : {}));
-    return { status: "ok", rows: rows.slice(0, 5) };
-  } catch (e) {
-    return e?.toolError ? { status: "not_found", error: String(e.message).slice(0, 300) } : { status: "unreachable", error: String(e?.message ?? e).slice(0, 300) };
-  }
+/** rows whose column equals a name (at most five), through the read adapter's findRows, as the audience may see them */
+export async function findSourceRows(system, table, column, value, { db = realDb, fetch, audience, positions } = {}) {
+  const r = await findRows({ system, table, column, value, mode: "eq", first: 5 }, { db, fetch, ...(audience !== undefined ? { audience, positions } : {}) });
+  if (["found", "ambiguous", "none"].includes(r.status)) return { status: "ok", rows: (r.rows ?? []).map((x) => x.row), more: Boolean(r.more) };
+  if (r.status === "refused") return { status: "refused", error: r.why ?? "the source refused the read" };
+  return { status: "unreachable", error: r.why ?? r.status };
 }
 
 /** the environment a handler runs in: the live one, with anything a caller passes over it */
 export async function liveEnv(over = {}) {
   const scope = await liveScope();
   const db = over.db ?? realDb;
-  return {
+  const positions = over.positions ?? scope.positionMap;
+  const env = {
     db,
     store: over.store ?? arcadeStore(db),
-    positions: over.positions ?? scope.positionMap,
+    positions,
     people: over.people ?? ((name) => scope.entriesByUser.get(name)),
     classes: over.classes ?? { get: (key) => classByKey(key, db) },
-    readRow: over.readRow ?? ((key) => readSourceRow(key, { db, fetch: over.fetch })),
-    findRows: over.findRows ?? ((...a) => findSourceRows(...a, { db, fetch: over.fetch })),
+    readRow: over.readRow ?? ((key, o = {}) => readSourceRow(key, { db, fetch: over.fetch, positions, ...o })),
+    findRows: over.findRows ?? ((system, table, column, value, o = {}) => findSourceRows(system, table, column, value, { db, fetch: over.fetch, positions, ...o })),
     classesForTable: over.classesForTable ?? (async (table) => (await db.adbQuery(`SELECT _class_key AS key, _home AS home FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _record_table = :t AND (_status IS NULL OR _status <> 'retired')`, { t: table }).catch(() => [])).map((r) => ({ key: r.key, home: r.home ?? null }))),
-    // the home of the connection that reads a system; undefined until the sources stream's declarations give it (F-B1)
-    connectionHome: over.connectionHome ?? (() => undefined),
-    enter: over.enter ?? ((args, opts = {}) => enterData(args, { db, fetch: over.fetch, positions: over.positions ?? scope.positionMap, people: over.people, policy: over.policy, ...opts })),
+    // the home of the connection that reads a system (its declaration's read.home; none, or no such system: the root)
+    connectionHome: over.connectionHome ?? (async (system) => {
+      const d = await sourceFor(system, db).catch(() => null);
+      return d?.read?.home ?? positions?.root ?? null;
+    }),
+    // the write is begun and settled in this env's own log (its store), not the live one; the class index decides inheritance
+    enter: over.enter ?? ((args, opts = {}) => enterData(args, { db, fetch: over.fetch, positions, people: over.people, policy: over.policy, journal: makeJournal(env), index: over.index, ...opts })),
     signal: over.signal ?? (async (kind, payload) => (await import("./master-tools.js")).emitSignal(kind, payload)),
     resume: over.resume ?? (async (job, message) => (await import("./worker-pool.js")).resumeThread(job, message)),
     now: over.now ?? (() => new Date().toISOString()),
     rule: over.rule,
   };
+  return env;
 }
 
 /** ---- a worker's job, as its tools see it ---- */
@@ -210,9 +209,11 @@ const audienceSees = (env, ctx, home) => !env.positions || canSee(env.positions,
 /**
  * May this worker read a table of a source (R7, R11.6, R11.9)? Its audience must see the home of the connection
  * that reads it, and the home of every class whose table it is (a class from a table gets the connection's home,
- * so a class above the audience marks the table as above it). A table no class points at, with no connection home
- * to go by, counts as the root's. Refused before anything is read, so no row and no value reaches the worker.
- * NEEDS A RULING (F22): a table some class points at but no visible one, or one with no class at all, is refused.
+ * so a class above the audience marks the table as above it). The connection's home is its declaration's read.home
+ * (none, or no such system: the root); the read adapter checks it again on every read (data-entry.js getRow and
+ * findRows, given the audience). Refused before anything is read, so no row and no value reaches the worker.
+ * NEEDS A RULING (F22): a class above the audience pointing at a table refuses it, even when the connection's own
+ * home is visible: the strictest wins.
  */
 async function assertTableReadable(env, ctx, table) {
   const t = String(table ?? "").trim();
@@ -227,7 +228,9 @@ async function assertTableReadable(env, ctx, table) {
 /** a worker's read of a row: only from a table its audience may read */
 async function workerRead(env, ctx, key) {
   await assertTableReadable(env, ctx, tableOf(key));
-  return env.readRow(key);
+  const read = await env.readRow(key, { audience: ctx.home });
+  if (read.status === "refused") throw refuse(`${key}: ${read.error}`);
+  return read;
 }
 
 /** a class this worker may file under: it exists, is in use, and its audience can see it. No worker makes or changes a class (R5, R7) */
@@ -594,7 +597,8 @@ export async function resolveName(args, identity, env) {
     const t = String(args.table).split(":");
     if (t.length !== 2) throw refuse("table: system:table");
     await assertTableReadable(env, ctx, String(args.table).trim());
-    source = await env.findRows(t[0], t[1], String(args.column), String(args.name));
+    source = await env.findRows(t[0], t[1], String(args.column), String(args.name), { audience: ctx.home });
+    if (source.status === "refused") throw refuse(`${args.table}: ${source.error}`);
   }
   return { instances, ...(source ? { source } : {}), note: source?.status === "unreachable" ? "The source can't be reached: a piece that needs it is Held." : undefined };
 }

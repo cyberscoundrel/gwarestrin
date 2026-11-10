@@ -333,7 +333,9 @@ F1 to F17 stand as phase 0 set them, except where noted. Each is marked `NEEDS A
 ### More requests to the integrator
 
 6. `model/schema.js`: a `FilingAttempt` TYPES entry (`id`, `system`, `source_table`, `row_key`, `action`,
-   `fields`, `before`, `piece`, `status`, `detail`, `at`, `settled_at`, all STRING; unique index on `id`).
+   `fields`, `row_before`, `piece`, `status`, `detail`, `at`, `settled_at`, all STRING; unique index on `id`).
+   `table`, `key` and `before` are ArcadeDB SQL keywords (`before` checked against a running instance), so they
+   are stored renamed.
    `filing.js ensureFilingSchema` declares it until then. R9.
 7. Nothing for the sources branch: its `enterData` (c1eaf39) still decides Filed or Proposed, now with the class
    index and the declaration's `writable`, takes `before` and `piece`, and writes through `sourceJournal`. Its new
@@ -380,4 +382,20 @@ F1 to F17 stand as phase 0 set them, except where noted. Each is marked `NEEDS A
 |---|---|---|
 | F20 (new) | At most three open requests per worker | `filing.js requestOrchestrator` |
 | F21 (new) | An empty source column taking a value is no disagreement, so it is filled | `model/filing.js disagreeingColumns` |
-| F22 (new) | A table no class points at, with no connection home yet, is refused to workers | `filing.js assertTableReadable` |
+| F22 (new) | A class above the audience pointing at a table refuses it to the worker, even when the connection's own home is visible (the strictest wins); a table no class points at goes by the connection's home | `filing.js assertTableReadable` |
+
+## The sources branch merged (15ce278)
+
+- **F-B1, finished.** A worker's every source read now goes through the sources stream's read adapter with the
+  worker's audience (`getRow`, `findRows` given `{ audience, positions }`), which refuses a connection whose home
+  the audience can't see. `assertTableReadable` also checks that home up front, from the declaration's
+  `read.home` (none, or an unknown system: the root), along with the classes pointing at the table. The
+  orchestrator reads with no audience. Tests: the reviewer's probe, and a connection above the audience refusing
+  a table a floor class vouches for, before anything is read.
+- **The seam with sources, as the sources stream proposed:** `liveEnv` builds the env and hands `enterData` its
+  own journal (`makeJournal(env)`) and the class index; the test fakes store a declaration list with the guard and
+  serve the guard's identity view. Filing's own DAB reads (`clientFor`, `mcpToolCall`) are gone.
+- **Found by the e2e run, not the unit fakes:** `before` is an ArcadeDB SQL keyword, so every journal `begin`
+  failed and every write was Held. The column is `row_before` now, and a unit test checks the stored names.
+- **Still waiting:** the classes branch, for `create_instance` and `state_dependency` to call its `relateInstance`
+  and `addDependency`.

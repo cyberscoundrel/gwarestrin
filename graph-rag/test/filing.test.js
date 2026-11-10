@@ -47,7 +47,9 @@ function fakeDab(rows, { down = false } = {}) {
     if (body.method === "initialize") return reply({ protocolVersion: "2025-03-26" });
     const { name, arguments: args } = body.params;
     calls.push({ url, name, args });
-    return reply(dabTool(tables, name, args, { write: String(url).includes("write") }));
+    const write = String(url).includes("write");
+    // the write side's identity view: the guard asks it which server and database the write connection holds
+    return reply(dabTool(write ? { ...tables, dbo_GwConnectionIdentity: { primaryKey: ["id"], rows: [{ id: 1, server_name: "gwsynth-sql", database_name: "GwSynthMfg", login_name: "gwsynth_write" }] } } : tables, name, args, { write }));
   };
   return { fetch, calls, rows };
 }
@@ -66,7 +68,8 @@ function fakeDb({ writable = true, payload } = {}) {
       return [{ count: 1 }];
     },
     async adbQuery(sql, params = {}) {
-      if (sql.includes("FROM OrgPolicy")) return sql.includes("'sources'") ? [{ json: JSON.stringify({ mssql: { read: "http://fake/read", write: writable ? "http://fake/write" : null } }) }] : [];
+      // the declaration (model/sources.js): read at the floor's home, written to dbo_Job behind the guard
+      if (sql.includes("FROM OrgPolicy")) return sql.includes("'sources'") ? [{ json: JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: "http://fake/read", home: db.readHome ?? "floor" }, commit: writable ? { via: "dab-mcp", url: "http://fake/write", tables: ["dbo_Job"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } : { via: "none" } }]) }] : [];
       if (sql.includes("FROM Job WHERE id")) return [{ payload: JSON.stringify(db.payload) }];
       if (sql.includes("_kind = 'document'")) return [{ rid: "#70:1", _recorded_by: db.recorder ?? "bob", _record_position: db.position ?? "floor" }];
       if (sql.includes("FROM PendingWrite")) return db.pending.has(params.id) ? [db.pending.get(params.id)] : [];
@@ -141,13 +144,13 @@ function setup({ rows = [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472
     store,
     positions: map,
     classes: { get: async (k) => classes.get(String(k).toLowerCase()) ?? null },
-    readRow: (key) => readSourceRow(key, { db, fetch: dab.fetch }),
+    readRow: (key, o = {}) => readSourceRow(key, { db, fetch: dab.fetch, positions: map, ...o }),
     findRows: async (...a) => (h.found.push(a), { status: "ok", rows: [{ Name: "Bob", Pay: 41 }] }),
     classesForTable: async (table) => [...classes.values()].filter((c) => c.record_table === table).map((c) => ({ key: c.key, home: c.home })),
     connectionHome: () => undefined,
     // the real decision: data-entry.js over the class map, the recorder as the token map holds them, and the fake DAB
     entered: [],
-    enter: (args, opts = {}) => (env.entered.push(args), enterData(args, { ...opts, db, fetch: dab.fetch, positions: map, policy, people: (name) => people[name], queue: async (e) => (queued.push(e), { queued: true, pendingId: `pend-${queued.length}` }) })),
+    enter: (args, opts = {}) => (env.entered.push(args), enterData(args, { journal: makeJournal(env), index: null, ...opts, db, fetch: dab.fetch, positions: map, policy, people: (name) => people[name], queue: async (e) => (queued.push(e), { queued: true, pendingId: `pend-${queued.length}` }) })),
     signal: async (kind, payload) => signals.push({ kind, ...payload }),
     resume: async (job, message) => resumed.push({ job, message }),
     now: () => `2026-11-10T00:00:${String(n++).padStart(2, "0")}.000Z`,
@@ -533,4 +536,27 @@ test("every brief is logged as sent (BriefLog, for the leak gate), and one that 
   assert.doesNotMatch(row.brief, /ZEBRA/, "the log holds what the worker got, nothing above it");
   assert.deepEqual(JSON.parse(row.dropped), composed.dropped);
   await assert.rejects(logBrief({ record: "doc-1", worker: "job-1", composed }, { adbCommand: async () => { throw new Error("no such type BriefLog"); } }), /couldn't be logged, so it isn't sent/);
+});
+
+test("F-B1, the connection's home: a worker's reads go through the read adapter with its audience, and a connection above it refuses them (R11.6, R11.9)", async () => {
+  const h = setup();
+  h.db.readHome = "ops";
+  await assert.rejects(fileToSource(piece(), identity, h.env), /above this audience/);
+  assert.equal(h.dab.calls.filter((c) => c.name === "read_records" && c.args?.entity === "dbo_Job").length, 0, "nothing was read");
+  assert.equal(h.store.entries_.length, 0);
+  // the orchestrator, the most privileged agent, reads with no audience: the same row is there for its check
+  const { readSourceRow: read } = await import("../src/filing.js");
+  assert.equal((await read("mssql:dbo_Job:4471", { db: h.db, fetch: h.dab.fetch, positions: map })).status, "ok");
+});
+
+test("the journal's store names no column ArcadeDB reads as a keyword (before, table and key are stored renamed)", async () => {
+  const { arcadeStore } = await import("../src/filing.js");
+  const seen = [];
+  const store = arcadeStore({ adbCommand: async (sql, _l, params) => (seen.push([sql, params]), [{ count: 1 }]), adbQuery: async () => [{ id: "a1", source_table: "dbo_Job", row_key: "mssql:dbo_Job:1", row_before: '{"Status":null}', fields: "{}", piece: "{}" }] });
+  await store.insertAttempt({ id: "a1", system: "mssql", table: "dbo_Job", key: "mssql:dbo_Job:1", action: "update", fields: { Status: "x" }, before: { Status: null }, piece: null, status: "begun", detail: null, at: "t", settled_at: null });
+  const [sql, params] = seen[0];
+  const columns = sql.replace(/^INSERT INTO FilingAttempt SET /, "").split(", ").map((x) => x.split(" = ")[0]);
+  for (const kw of ["before", "table", "key"]) assert.ok(!columns.includes(kw), `${kw} is not a column`);
+  assert.equal(params.row_before, '{"Status":null}');
+  assert.deepEqual((await store.attempt("a1")).before, { Status: null });
 });

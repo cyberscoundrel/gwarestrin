@@ -33,7 +33,9 @@ async function startFakeDab() {
     if (body.method !== "tools/call") return reply({});
     const { name, arguments: args } = body.params ?? {};
     fake.calls.push({ url: req.url, name, args });
-    reply(dabTool(fake.tables, name, args, { write: req.url.includes("/write") }));
+    const write = req.url.includes("/write");
+    // the write side's identity view: the guard asks it which server and database the write connection holds
+    reply(dabTool(write ? { ...fake.tables, dbo_GwConnectionIdentity: { primaryKey: ["id"], rows: [{ id: 1, server_name: "gwsynth-sql", database_name: "GwSynthMfg", login_name: "gwsynth_write" }] } } : fake.tables, name, args, { write }));
   });
   await new Promise((r) => fake.server.listen(4291, "0.0.0.0", r));
   fake.server.unref();
@@ -62,7 +64,8 @@ async function setup(ctx) {
   // a table's cursor needs a second row: DAB pages by primary key, and this is how the key is learned
   fake.tables = { dbo_FJob: { primaryKey: ["Job"], rows: [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472, Status: "open", Quantity: 20 }] } };
   fake.calls = [];
-  await upsertPolicyRow(ctx, "sources", JSON.stringify({ mssql: { read: `${url}/read/mcp`, write: `${url}/write/mcp` } }));
+  // the declaration (model/sources.js): read at the floor's home, written to dbo_FJob behind the guard
+  await upsertPolicyRow(ctx, "sources", JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: `${url}/read/mcp`, home: "floor" }, commit: { via: "dab-mcp", url: `${url}/write/mcp`, tables: ["dbo_FJob"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } }]));
   for (const c of CLASSES) {
     const have = await ctx.sql(`SELECT @rid AS rid FROM Entity WHERE _kind = 'class' AND _class_key = '${c.key}'`);
     if (have.length) continue;
