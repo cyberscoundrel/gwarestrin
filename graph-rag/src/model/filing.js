@@ -97,6 +97,12 @@ export function normalizeEntry(raw) {
   if (!Array.isArray(instances) || instances.some((r) => !nonEmpty(r))) throw new ShapeError("instances", "must be a list of record ids");
   if (raw.outcome === HELD && !nonEmpty(raw.question)) throw new ShapeError("question", "a Held piece asks whoever put it on record");
   if (raw.outcome === PROPOSED && !nonEmpty(raw.reason)) throw new ShapeError("reason", "a Proposed piece says why it isn't Filed");
+  // R11: a class missing from the map means Proposed, so a Filed piece passed the map under a class
+  if (raw.outcome === FILED && !nonEmpty(raw.class)) throw new ShapeError("class", "a Filed piece names the class the map passed it under");
+  // R10: a worker that resolves a piece to storage reports what it did
+  if (raw.outcome === FILED && (raw.account === undefined || raw.account === null)) throw new ShapeError("account", "a Filed piece carries the account of what was written");
+  // R2: Kept is "linked to instances"
+  if (raw.outcome === KEPT && !instances.length) throw new ShapeError("instances", "a Kept piece is linked to the instances it is about");
   return {
     id: String(raw.id).trim(),
     outcome: raw.outcome,
@@ -155,16 +161,15 @@ export function normalizeRequest(raw) {
  * What happens when the row already holds a different, non-empty value in a column the piece would write: a
  * disagreement with the source. R2 has "the source disagrees" Held, the worker asking whoever put it on record
  * and never overwriting; R11 calls a conflict with a source high stakes, a request to the orchestrator.
- * NEEDS A RULING (F4: an update or a disagreement). The decision lives here alone, and a ruling either way is
- * the one line below:
- *   hold_and_request     (the default, the conservative reading): nothing is written; the piece is Held with a
- *                        question to the recorder, and the worker also raises a "conflict" request
- *   update_when_changed  (proposed to the user): a record that says something changed is an update, filed given
- *                        authority and checked by the orchestrator afterwards; one that describes the current
- *                        state and disagrees without saying anything changed is Held, asking the recorder
+ * Ruled (R12, the user: "Yes, write changes", 2026-11-10; filing choice F4). The decision lives here alone:
+ *   update_when_changed  (R12, in force): a record that says something changed is an update, filed given the
+ *                        recorder's authority and checked by the orchestrator afterwards; one that describes the
+ *                        current state and disagrees without saying anything changed is Held, asking the recorder
+ *   hold_and_request     (the conservative reading the build started from, kept and tested): nothing is written;
+ *                        the piece is Held with a question to the recorder and a "conflict" request
  */
 export const DISAGREEMENT_RULES = ["hold_and_request", "update_when_changed"];
-export const DISAGREEMENT_RULE = "hold_and_request";
+export const DISAGREEMENT_RULE = "update_when_changed";
 
 /**
  * The one decision for a disagreement with the source. `says_change`: the worker's reading that the record

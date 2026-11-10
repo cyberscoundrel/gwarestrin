@@ -50,6 +50,9 @@ const normName = (s) =>
 
 const ENTRY_FIELDS = ["id", "outcome", "record", "section", "home", "piece", "class", "instances", "target", "recorder", "worker", "reason", "pending_id", "question", "request", "account", "verdict", "refiled_from", "at"];
 const fromEntryRow = (r) => ({ ...Object.fromEntries(ENTRY_FIELDS.map((k) => [k, r[k] ?? null])), instances: Array.isArray(r.instances) ? r.instances : [], target: parse(r.target), account: parse(r.account), verdict: parse(r.verdict) });
+const ATTEMPT_FIELDS = ["id", "system", "table", "key", "action", "fields", "before", "piece", "status", "detail", "at", "settled_at"];
+// stored under names that are no SQL keyword: table -> source_table, key -> row_key
+const ATTEMPT_COLUMN = (k) => (k === "table" ? "source_table" : k === "key" ? "row_key" : k);
 const REQUEST_FIELDS = ["id", "kind", "record", "section", "home", "worker", "question", "suggestion", "status", "answer", "answered_by", "at"];
 
 /**
@@ -84,6 +87,18 @@ export function arcadeStore(db = realDb) {
     async updateRequest(id, fields) {
       const keys = Object.keys(fields).filter((k) => REQUEST_FIELDS.includes(k) && k !== "id");
       if (keys.length) await db.adbCommand(`UPDATE WorkerRequest SET ${keys.map((k) => `${k} = :${k}`).join(", ")} WHERE id = :id`, "sql", { ...fields, id });
+    },
+    /** a source write's attempt (the sources stream's journal: begun before the write, settled after) */
+    async insertAttempt(a) {
+      await db.adbCommand(`INSERT INTO FilingAttempt SET ${ATTEMPT_FIELDS.map((k) => `${ATTEMPT_COLUMN(k)} = :${ATTEMPT_COLUMN(k)}`).join(", ")}`, "sql", { ...Object.fromEntries(ATTEMPT_FIELDS.map((k) => [ATTEMPT_COLUMN(k), a[k] ?? null])), fields: json(a.fields), before: json(a.before), piece: json(a.piece), detail: json(a.detail) });
+      return a;
+    },
+    async updateAttempt(id, { status, detail }) {
+      await db.adbCommand("UPDATE FilingAttempt SET status = :status, detail = :detail, settled_at = :at WHERE id = :id", "sql", { id, status, detail: json(detail), at: new Date().toISOString() });
+    },
+    async attempt(id) {
+      const r = (await db.adbQuery("SELECT FROM FilingAttempt WHERE id = :id LIMIT 1", { id }))[0];
+      return r ? { ...Object.fromEntries(ATTEMPT_FIELDS.map((k) => [k, r[ATTEMPT_COLUMN(k)] ?? null])), fields: parse(r.fields), before: parse(r.before), piece: parse(r.piece), detail: parse(r.detail) } : null;
     },
     async requests({ id, worker, status } = {}) {
       const where = [];
@@ -232,8 +247,8 @@ async function askRecorder(env, ctx, entry) {
   return id;
 }
 
-async function holdEntry(env, ctx, { section, piece, cls, target, question, request = null, reason = null, refiled = null, instances = [] }) {
-  const entry = await appendEntry(env, { outcome: HELD, record: ctx.record, section, home: ctx.home, piece, class: cls ?? null, instances, target, recorder: ctx.recorder?.person ?? "unknown", worker: ctx.job, question, request, reason, refiled_from: refiled });
+async function holdEntry(env, ctx, { section, piece, cls, target, question, request = null, reason = null, refiled = null, instances = [], account = null }) {
+  const entry = await appendEntry(env, { outcome: HELD, record: ctx.record, section, home: ctx.home, piece, class: cls ?? null, instances, target, recorder: ctx.recorder?.person ?? "unknown", worker: ctx.job, question, request, reason, refiled_from: refiled, account });
   await askRecorder(env, ctx, entry);
   return entry;
 }
@@ -255,6 +270,10 @@ export async function fileToSource(args, identity, env) {
   const section = ownSection(ctx, args.section);
   const piece = String(args.piece ?? "").trim();
   if (!piece) throw refuse("piece: say what this piece of the record is, in a sentence");
+  // R10: a worker resolving a piece to storage reports what it did; the account comes with the write it asks for
+  const said = String(args.said ?? "").trim();
+  if (!said) throw refuse("said: your account of what this piece writes, in a sentence (the orchestrator checks it against the source)");
+  const account = { said, at: env.now() };
   const cls = await visibleClass(env, ctx, args.class);
   const key = parseKey(args.key);
   if (!key) throw refuse(`key: not system:table:row: ${args.key ?? "(none)"}`);
@@ -262,7 +281,7 @@ export async function fileToSource(args, identity, env) {
   if (!fields || !Object.keys(fields).length) throw refuse("fields: the columns to write, with their values");
   const refiled = await refiledFrom(env, ctx, args.refiles);
   const target = { table: tableOf(key.key), key: key.key, fields };
-  const base = { section, piece, cls: cls.key, target, refiled };
+  const base = { section, piece, cls: cls.key, target, refiled, account };
   const read = await env.readRow(key.key);
   if (read.status === "unreachable") {
     return { outcome: HELD, entry: (await holdEntry(env, ctx, { ...base, question: args.question || `${key.system} couldn't be reached to file this: "${piece}". It waits for you to confirm it once the source is back.`, reason: read.error })).id };
@@ -283,23 +302,29 @@ export async function fileToSource(args, identity, env) {
     }
   }
   const r = await env.enter(
-    { actsFor: ctx.recorder, by: identity.user, key: key.key, fields, cls: cls.key, reason: piece, identity },
+    { actsFor: ctx.recorder, by: identity.user, key: key.key, fields, cls: cls.key, reason: piece, identity, before: Object.fromEntries(Object.keys(fields).map((c) => [c, read.row[c] ?? null])), piece: { record: ctx.record, section, job: ctx.job, piece } },
     // a Proposed piece is an outcome, not a wait: the proposal names no thread (the person approves it as themselves)
     { proposal: (_identity, reason) => ({ note: String(reason ?? "").slice(0, 600) || "(no reason given)" }) },
   );
   if (r.outcome === "filed") {
-    const before = r.before && Object.keys(r.before).length ? `before: ${JSON.stringify(r.before)}` : null;
-    const entry = await appendEntry(env, { outcome: FILED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target, recorder: ctx.recorder.person, worker: ctx.job, reason: before, refiled_from: refiled });
+    const before = r.status === "already" ? "the row already held it: nothing was written" : r.before && Object.keys(r.before).length ? `before: ${JSON.stringify(r.before)}` : null;
+    const entry = await appendEntry(env, { outcome: FILED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target, recorder: ctx.recorder.person, worker: ctx.job, reason: before, refiled_from: refiled, account });
     return { outcome: FILED, entry: entry.id, note: "Filed: written to the source." };
   }
   if (r.outcome === "proposed") {
-    const entry = await appendEntry(env, { outcome: PROPOSED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target, recorder: ctx.recorder.person, worker: ctx.job, reason: r.reason || "the recorder doesn't hold the authority", pending_id: r.pendingId ?? null, refiled_from: refiled });
+    const entry = await appendEntry(env, { outcome: PROPOSED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target, recorder: ctx.recorder.person, worker: ctx.job, reason: r.reason || "the recorder doesn't hold the authority", pending_id: r.pendingId ?? null, refiled_from: refiled, account });
     return { outcome: PROPOSED, entry: entry.id, note: `Proposed: ${entry.reason}. A person with authority approves it; carry on.` };
   }
   if (r.outcome === "refused") {
     // NEEDS A RULING (BUILD.md 12): the recorder has left or moved, so nothing stands behind the write: Held, asking them
     const entry = await holdEntry(env, ctx, { ...base, question: args.question || `"${piece}" couldn't be filed for you: ${r.reason}`, reason: r.reason });
     return { outcome: HELD, entry: entry.id };
+  }
+  if (r.outcome === "held") {
+    // the sources stream's adapter: a write that didn't land (unreachable, moved, not_found, refused, unknown) is Held, asking the recorder
+    const why = r.why ?? r.reason ?? r.status ?? "the write didn't land";
+    const entry = await holdEntry(env, ctx, { ...base, question: args.question || `"${piece}" wasn't written (${why}). Can you confirm it?`, reason: `${r.status ?? "held"}: ${why}`.slice(0, 600) });
+    return { outcome: HELD, entry: entry.id, note: "Held: nothing was written, and whoever put it on record is asked." };
   }
   if (r.unverified) {
     // NEEDS A RULING (F18): the connection broke mid-write and the row couldn't be read back. Held, so the orchestrator's check reads the row
@@ -335,6 +360,7 @@ export async function keepPiece(args, identity, env) {
   if (!piece) throw refuse("piece: say what this piece of the record is");
   const instances = [];
   for (const rid of args.instances ?? []) instances.push((await visibleInstance(env, ctx, rid)).rid);
+  if (!instances.length) throw refuse("instances: a Kept piece is linked to the instances it is about (R2): relate it to one you see, or make the lasting individual first (graph-rag_create_instance)");
   for (const rid of instances) await relate(env, ctx, section, rid);
   const entry = await appendEntry(env, { outcome: KEPT, record: ctx.record, section, home: ctx.home, piece, class: null, instances, target: null, recorder: ctx.recorder?.person ?? "unknown", worker: ctx.job, refiled_from: await refiledFrom(env, ctx, args.refiles) });
   return { outcome: KEPT, entry: entry.id, note: "Kept: the document is the source. Nothing Kept is deleted; the orchestrator re-files it when a fitting class or source appears." };
@@ -595,9 +621,51 @@ export async function recordVerdict(entryId, { result, note }, by, env) {
 
 /** ---- after the fact: approvals, Held answers ---- */
 
+/** the Filed entry an approval appends, pointing back at the Proposed one (NEEDS A RULING F6); once only */
+async function fileApproved(e, approver, env) {
+  if ((await env.store.entries({ refiled_from: e.id })).length) return false;
+  // the account is the worker's for the write it proposed; the approval is the reason (the worker didn't write it)
+  const account = e.account ?? { said: `proposed: ${e.piece}`, at: env.now() };
+  await appendEntry(env, { outcome: FILED, record: e.record, section: e.section, home: e.home, piece: e.piece, class: e.class, instances: e.instances, target: e.target, recorder: e.recorder, worker: e.worker, reason: `approved by ${approver ?? "a person"}`, refiled_from: e.id, account });
+  return true;
+}
+
+/**
+ * The journal the sources stream's write adapter writes through (data-entry.js loads `sourceJournal`): every source
+ * write is begun here before it happens and settled after, so no row changes without the filing log knowing (R9).
+ * `attempt`: { system, table, key, action, fields, before, piece }; settle's status: written, refused, unreachable,
+ * unknown. A write an approval made (piece.pending_id) that settles written appends the Filed entry superseding the
+ * Proposed one: the seam the review named (BUILD.md: filing writes the Filed entry on approval).
+ */
+export function makeJournal(envOrPromise) {
+  const envOf = async () => (typeof envOrPromise === "function" ? envOrPromise() : envOrPromise);
+  return {
+    async begin(attempt) {
+      const env = await envOf();
+      const a = { id: randomUUID(), system: attempt?.system ?? null, table: attempt?.table ?? null, key: attempt?.key ?? null, action: attempt?.action ?? null, fields: attempt?.fields ?? null, before: attempt?.before ?? null, piece: attempt?.piece ?? null, status: "begun", detail: null, at: env.now(), settled_at: null };
+      if (!a.system || !a.table || !["update", "create"].includes(a.action)) throw new Error("a write's attempt names its system, table and action");
+      await env.store.insertAttempt(a);
+      return a.id;
+    },
+    async settle(id, status, detail = null) {
+      const env = await envOf();
+      if (!["written", "refused", "unreachable", "unknown"].includes(status)) throw new Error(`not a write's status: ${status}`);
+      await env.store.updateAttempt(String(id), { status, detail });
+      const a = await env.store.attempt(String(id));
+      const pending = a?.piece?.pending_id;
+      if (status !== "written" || !pending) return;
+      const proposed = (await env.store.entries({ pending_id: String(pending) })).find((e) => e.outcome === PROPOSED);
+      if (proposed) await fileApproved(proposed, a.piece.approved_by, env);
+    },
+  };
+}
+
+/** the live journal (data-entry.js reads this export) */
+export const sourceJournal = makeJournal(() => liveEnv());
+
 /**
  * A Proposed piece a person approved becomes Filed: a new entry pointing back at it (NEEDS A RULING F6). Rejected
- * ones stay Proposed. Idempotent: runs on the worker loop.
+ * ones stay Proposed. Idempotent: runs on the worker loop, for an approval that wrote without the journal.
  */
 export async function settleProposals(env) {
   const proposed = await env.store.entries({ outcome: PROPOSED });
@@ -606,9 +674,7 @@ export async function settleProposals(env) {
     if (!e.pending_id) continue;
     const pw = (await env.db.adbQuery("SELECT status, approved_by FROM PendingWrite WHERE id = :id", { id: e.pending_id }).catch(() => []))[0];
     if (pw?.status !== "approved") continue;
-    if ((await env.store.entries({ refiled_from: e.id })).length) continue;
-    await appendEntry(env, { outcome: FILED, record: e.record, section: e.section, home: e.home, piece: e.piece, class: e.class, instances: e.instances, target: e.target, recorder: e.recorder, worker: e.worker, reason: `approved by ${pw.approved_by ?? "a person"}`, refiled_from: e.id });
-    filed++;
+    if (await fileApproved(e, pw.approved_by, env)) filed++;
   }
   return { filed };
 }
@@ -677,4 +743,8 @@ export async function ensureFilingSchema(db = realDb) {
   for (const prop of ["asked_of", "filing_entry"]) await db.adbCommand(`CREATE PROPERTY WorkerQuestion.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await db.adbCommand("CREATE INDEX IF NOT EXISTS ON WorkerQuestion (asked_of) NOTUNIQUE").catch(() => {});
   await db.adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._keys IF NOT EXISTS LIST`).catch(() => {});
+  // a source write's attempt (makeJournal): a document, never a vertex or an edge (R9). Requested of the integrator as a TYPES entry
+  await db.adbCommand("CREATE DOCUMENT TYPE FilingAttempt IF NOT EXISTS").catch(() => {});
+  for (const prop of ATTEMPT_FIELDS.map(ATTEMPT_COLUMN)) await db.adbCommand(`CREATE PROPERTY FilingAttempt.${prop} IF NOT EXISTS STRING`).catch(() => {});
+  await db.adbCommand("CREATE INDEX IF NOT EXISTS ON FilingAttempt (id) UNIQUE").catch(() => {});
 }

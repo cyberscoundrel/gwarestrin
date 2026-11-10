@@ -15,7 +15,7 @@ import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.
 import { chat } from "./models.js";
 import { recordReads } from "./floor.js";
 import { assertBrief, scopeBrief } from "./model/brief.js";
-import { accountGiven, liveEnv, settleProposals } from "./filing.js";
+import { accountGiven, ensureFilingSchema, liveEnv, settleProposals } from "./filing.js";
 import { entriesByUser, positionMap, SCOPED } from "./scope.js";
 import { emitSignal, MASTER, masterStatus, openItems } from "./master-tools.js";
 import { describeEntry } from "./data-entry.js";
@@ -55,6 +55,8 @@ export async function ensureWorkerSchema() {
   await adbCommand("CREATE EDGE TYPE RELATES IF NOT EXISTS").catch(() => {});
   for (const prop of ["rel", "evidence", "job", "at"]) await adbCommand(`CREATE PROPERTY RELATES.${prop} IF NOT EXISTS STRING`).catch(() => {});
   await adbCommand(`CREATE PROPERTY ${ENTITY_LABEL}._task_by IF NOT EXISTS STRING`).catch(() => {});
+  // a Held piece's question names whoever put the record on record, and its entry (filing.js)
+  await ensureFilingSchema();
   // a crash mid-job leaves it running: it runs again (threads keep their lease: their workspace may still run them)
   await adbCommand("UPDATE Job SET status = 'pending' WHERE status = 'running' AND kind <> 'review'").catch(() => {});
   try {
@@ -264,9 +266,9 @@ export async function composeFilingBrief(payload, { db = { adbQuery }, positions
   const rows = await db.adbQuery(`SELECT @rid AS rid, name, heading, text_identity, _home, _doc_id FROM [${rids.join(",")}] WHERE _kind = 'section'`);
   const sections = rows.filter((r) => r._doc_id === payload.record).map((r) => ({ rid: String(r.rid), heading: r.heading ?? null, text: String(r.text_identity ?? "").slice(0, 4000), home: effectiveHome(positions, r._home) }));
   if (!sections.length) throw new Error("the record's sections are gone");
-  const doc = (await db.adbQuery(`SELECT name, _home, _recorded_by, _record_position, _record_reason, _recorded_at FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: payload.record }))[0];
+  const doc = (await db.adbQuery(`SELECT name, _home, description FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: payload.record }))[0];
   // the title takes the strictest home among the sections (R11): the document's own home
-  const record = doc ? { id: payload.record, title: doc.name ?? null, home: effectiveHome(positions, doc._home), recorded_by: doc._recorded_by ?? null, position: doc._record_position ?? null, reason: doc._record_reason ?? null, recorded_at: doc._recorded_at ?? null } : null;
+  const record = doc ? { id: payload.record, title: doc.name ?? null, description: doc.description ?? null, home: effectiveHome(positions, doc._home) } : null;
   const classRows = await db.adbQuery(`SELECT @rid AS rid, _class_key, _class_name, _home, _rows_are_nodes, _record_table, _status, _description FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND (_status IS NULL OR _status <> 'retired') LIMIT 1000`).catch(() => []);
   const keyOf = new Map(classRows.map((c) => [String(c.rid), c._class_key]));
   const sub = classRows.length ? await db.adbQuery("SELECT @out AS o, @in AS i FROM SUBCLASS_OF").catch(() => []) : [];

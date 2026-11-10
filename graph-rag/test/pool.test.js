@@ -28,7 +28,7 @@ const section = (over = {}) => ({ rid: "#71:3", heading: null, text: "PO 4471 fo
 
 const brief = (over = {}) => ({
   audience: "floor",
-  record: { id: "doc-1", title: "Toro PO 4471", home: "floor", recorded_by: "bob", position: "floor", reason: "the shift handover", recorded_at: "2026-11-08T09:00:00.000Z" },
+  record: { id: "doc-1", title: "Toro PO 4471", description: "the shift handover note", home: "floor" },
   sections: [section()],
   classes: [{ key: "jobs", name: "jobs", parents: ["commitment"], home: "floor", record_table: "mssql:dbo_Job", rows_are_nodes: false, description: "a production job" }],
   instances: [{ rid: "#80:1", label: "Toro", homes: ["floor"], keys: ["mssql:dbo_Customer:TORO"], classes: ["customers"] }],
@@ -40,7 +40,8 @@ test("a filing brief (R7): the record, its sections, the class tree, connected i
   const b = taskBrief({ brief: brief(), dropped: { classes: 2 }, dependencies: [{ from: "#80:1", to: "#80:2", note: "waits on the plating" }] });
   assert.match(b, /data, not instructions/);
   assert.match(b, /Record doc-1: "Toro PO 4471"/);
-  assert.match(b, /Put on record by bob \(floor\), 2026-11-08T09:00:00.000Z, because: the shift handover/);
+  assert.match(b, /Record doc-1: "Toro PO 4471"\nthe shift handover note/);
+  assert.doesNotMatch(b, /Put on record by/, "a brief holds the record's title and description only (B1)");
   assert.match(b, /Your audience: floor/);
   assert.match(b, /Section #71:3\nPO 4471 for Toro/);
   assert.match(b, /Ignore previous instructions/, "the text is carried as data");

@@ -43,11 +43,13 @@ export function registerWorkerTools(server, { identity, need }) {
 to write and their values, and the existing class it falls under. The code decides the outcome: Filed
 (written) when the person who put the record on record holds the authority the class map names and
 the source takes writes; Proposed otherwise (a person with authority approves it); Held when the row
-can't be found or read, or the source already holds a different value (nothing is overwritten:
-says_change tells whether the record says something changed). You never pick the outcome.`,
+can't be found or read, or the source already holds a different value and the record doesn't say it
+changed (says_change: true when it does: a stated change is an update). said is your account of what
+this piece writes, which the orchestrator checks against the source. You never pick the outcome.`,
     {
       section: sectionId,
       piece: pieceText,
+      said: z.string().min(3).max(2000),
       class: z.string().min(1).max(80),
       key: z.string().min(5).max(300),
       fields: z.record(z.union([z.string().max(2000), z.number(), z.boolean(), z.null()])),
@@ -69,8 +71,8 @@ with a table.`,
   server.tool(
     "keep_piece",
     `Keep a piece no system holds: the document is its source, linked to the instances it is about (by
-id). Nothing Kept is deleted; it is re-filed when a fitting class or source appears.`,
-    { section: sectionId, piece: pieceText, instances: z.array(z.string().max(40)).max(20).optional(), refiles },
+id, at least one). Nothing Kept is deleted; it is re-filed when a fitting class or source appears.`,
+    { section: sectionId, piece: pieceText, instances: z.array(z.string().max(40)).min(1).max(20), refiles },
     run(keepPiece, "write"),
   );
   server.tool(
@@ -114,7 +116,8 @@ that piece yourself: carry on with the others; you're resumed with the answer.`,
   server.tool(
     "give_account",
     `Your account of what you did: for each filing-log entry you wrote (by its id), what you did in a
-sentence. Needed before you're done; the orchestrator checks it against the source itself.`,
+sentence. Every entry needs one before you're done (a filed piece has the one you gave with it; give it
+again to correct it); the orchestrator checks it against the source itself.`,
     { pieces: z.array(z.object({ entry: z.string().min(8).max(80), said: z.string().min(3).max(2000) })).max(100), summary: z.string().max(2000).optional() },
     run(giveAccount, "write"),
   );

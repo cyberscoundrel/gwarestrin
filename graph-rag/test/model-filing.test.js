@@ -10,8 +10,8 @@ test("four outcomes (R2)", () => {
 });
 
 test("a Filed piece names the row it wrote", () => {
-  assert.throws(() => normalizeEntry({ ...base, outcome: "filed", target: { table: "mssql:dbo_Job" } }), /names the row it wrote/);
-  const e = normalizeEntry({ ...base, outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471", fields: { Work_Center: "CNC5" } } });
+  assert.throws(() => normalizeEntry({ ...base, outcome: "filed", class: "jobs", account: "wrote it", target: { table: "mssql:dbo_Job" } }), /names the row it wrote/);
+  const e = normalizeEntry({ ...base, outcome: "filed", class: "jobs", account: "moved it to CNC5", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471", fields: { Work_Center: "CNC5" } } });
   assert.equal(e.target.key, "mssql:dbo_Job:4471");
 });
 
@@ -31,7 +31,7 @@ test("one entry is one piece; the entry carries its section's home", () => {
 });
 
 test("a worker's account and the orchestrator's verdict (R10)", () => {
-  const e = normalizeEntry({ ...base, outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471" }, account: "updated Work_Center to CNC5" });
+  const e = normalizeEntry({ ...base, outcome: "filed", class: "jobs", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471" }, account: "updated Work_Center to CNC5" });
   assert.equal(e.account.said, "updated Work_Center to CNC5");
   assert.equal(awaitingVerdict(e), true);
   const checked = normalizeEntry({ ...e, verdict: { result: "differs", checked: "mssql:dbo_Job:4471", by: "orchestrator", note: "Work_Center is CNC2" } });
@@ -41,7 +41,7 @@ test("a worker's account and the orchestrator's verdict (R10)", () => {
 });
 
 test("a Kept piece re-filed later points back to the first entry (R11)", () => {
-  const again = normalizeEntry({ ...base, id: "f2", outcome: "filed", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471" }, refiled_from: "f1" });
+  const again = normalizeEntry({ ...base, id: "f2", outcome: "filed", class: "jobs", account: "re-filed it", target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471" }, refiled_from: "f1" });
   assert.equal(again.refiled_from, "f1");
 });
 
@@ -53,10 +53,12 @@ test("requests: a class request, answered by the orchestrator", () => {
   assert.equal(normalizeRequest({ ...r, status: "answered", answer: "made forklift", answered_by: "orchestrator" }).answered_by, "orchestrator");
 });
 
-test("F4 lives in one function: the conservative default holds and requests, the proposed rule files a stated change", () => {
-  assert.equal(DISAGREEMENT_RULE, "hold_and_request", "the default until a ruling");
-  assert.deepEqual(onDisagreement({ says_change: true }), { file: false, outcome: "held", request: "conflict" });
-  assert.deepEqual(onDisagreement({ says_change: false }), { file: false, outcome: "held", request: "conflict" });
+test("R12 (F4) lives in one function: a stated change is filed, a disagreeing state is Held; the conservative rule is kept", () => {
+  assert.equal(DISAGREEMENT_RULE, "update_when_changed", "R12: stated changes are written");
+  assert.deepEqual(onDisagreement({ says_change: true }), { file: true, outcome: null, request: null });
+  assert.deepEqual(onDisagreement({ says_change: false }), { file: false, outcome: "held", request: null });
+  assert.deepEqual(onDisagreement({ says_change: true }, "hold_and_request"), { file: false, outcome: "held", request: "conflict" });
+  assert.deepEqual(onDisagreement({ says_change: false }, "hold_and_request"), { file: false, outcome: "held", request: "conflict" });
   assert.deepEqual(onDisagreement({ says_change: true }, "update_when_changed"), { file: true, outcome: null, request: null });
   assert.deepEqual(onDisagreement({ says_change: false }, "update_when_changed"), { file: false, outcome: "held", request: null });
   assert.deepEqual(onDisagreement({ says_change: "yes" }, "update_when_changed").file, false, "only a stated true counts");
@@ -88,4 +90,14 @@ test("the suggested verdict reads the source: Filed must be in the row, Proposed
   assert.equal(suggestVerdict(held, { status: "ok", row: { Status: "open" } }).result, "matches");
   assert.equal(suggestVerdict(held, { status: "ok", row: { Status: "done" } }).result, "differs", "a Held piece's values in the row: something wrote it");
   assert.equal(suggestVerdict({ outcome: "kept", target: null }, null).result, "unverifiable");
+});
+
+// the reviewer's probe3 on ba583bc (non-blocking 4): shapes the rulings rule out
+test("a Filed piece names its class and carries its account; a Kept piece is linked to instances (R2, R10, R11)", () => {
+  const filed = { ...base, outcome: "filed", class: "jobs", account: { said: "wrote Status complete" }, target: { table: "mssql:dbo_Job", key: "mssql:dbo_Job:4471", fields: { Status: "complete" } } };
+  assert.equal(normalizeEntry(filed).class, "jobs");
+  assert.throws(() => normalizeEntry({ ...filed, class: null }), /class: a Filed piece names the class/);
+  assert.throws(() => normalizeEntry({ ...filed, account: null }), /account: a Filed piece carries the account/);
+  assert.throws(() => normalizeEntry({ ...base, outcome: "kept" }), /instances: a Kept piece is linked to the instances/);
+  assert.deepEqual(normalizeEntry({ ...base, outcome: "kept", instances: ["#80:1"] }).instances, ["#80:1"]);
 });

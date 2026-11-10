@@ -213,3 +213,132 @@ Each of these is the smallest reversible option I will build. Each is marked
 - The survey brief and discovery runs, apart from what the orchestrator's tools share.
 - The web interface.
 - Which database and models the first real run uses (R11.15, open).
+
+---
+
+# Phase 1: what was built
+
+Built on the contract at `build-base` ba583bc, against `docs/BUILD.md`'s file map. Every behaviour below has a
+test that fails without it; the fakes hand the code facts (a DAB row, a class row, a person's standing), never
+an outcome.
+
+| What | Where | Rulings | Tests |
+|---|---|---|---|
+| The filing log, append-only: a later outcome is a new entry pointing back (`refiled_from`) | `src/filing.js` (`arcadeStore`, `FilingEntry`, `WorkerRequest`) | R2, R9, R11.1, R11.4 | `test/filing.test.js` |
+| Filed or Proposed decided in code: the row as read, the class map, the recorder as they stand now (through `data-entry.js enterData`) | `filing.js fileToSource` | R2, R6, R11.7 | Filed, Proposed (no authority, class missing from the map, read-only source) |
+| Held: unreachable source (R3), no such row, the recorder gone; the question goes to whoever put it on record, nothing is overwritten | `filing.js holdEntry`, `askRecorder` | R2, R3 | Held cases; e2e |
+| A disagreement with the source decided in one function, R12 in force: `model/filing.js onDisagreement`, `DISAGREEMENT_RULE` | `model/filing.js`, `filing.js` | R2, R12 | both rules, unit and in `fileToSource`; e2e (R12) |
+| Kept, and re-filing Kept pieces in a later batch; nothing Kept is deleted | `filing.js keepPiece`, `keptPieces`; `orchestrator.js refileKept` | R2, R11.4 | Kept, re-filing |
+| Requests of the orchestrator (class, conflict, other), at most three open; structured answers only, a named class visible to the worker's audience | `filing.js requestOrchestrator`, `answerRequest`; `model/filing.js normalizeAnswer` | R10, R11.2, R11.6 | requests |
+| The account: every entry needs one; a thread ending without it is asked once, then fails | `filing.js giveAccount`, `accountGiven`; `worker-pool.js finishThread` | R10 | account |
+| The orchestrator's check against the source itself, and its verdict (changes no outcome) | `filing.js accountEvidence`, `recordVerdict`; `model/filing.js suggestVerdict` | R10, R11.2 | check; e2e |
+| Approval: a Proposed piece names no thread; an approval appends a Filed entry; no agent approves or rejects one on anyone's word | `filing.js settleProposals`; `master-tools.js assertNotFilingProposal`; `decide_proposal` and `answer_worker` gone | R11.7 | approvals; e2e |
+| Instances under existing visible classes; a class whose rows stay in the source refuses; a row earns a node only through a dependency; keys on sections | `filing.js createInstance`, `relateSection`, `sectionKey`, `stateDependency` | R3, R7 | instance |
+| The worker's tools | `src/worker-tools.js` | R7, R10 | `test/pool.test.js`, server `graph-worker-tools.test.ts` |
+| One job per record and home; off-record and unchecked sections never reach a worker | `worker-pool.js filingJob`, `claimThreads` | R4, R11.6, R11.11, R11.12 | gates |
+| The brief: record, sections, class tree, connected instances, dependencies seen at both ends, how each source is committed to; scoped and checked by the contract's `scopeBrief` and `assertBrief` | `worker-pool.js composeFilingBrief`, `pool.js taskBrief` | R7, R11.6, R11.8, R11.13 | marker leak test |
+| The orchestrator: batches by record in full, a worker per record and home, every record gets one, its filing tools | `src/orchestrator.js`, `master-tools.js batchTick`, `pool.js signalsMessage` | R4, R7, R11.6 | orchestrator tests, inbox test |
+| Instructions: worker, orchestrator, handler, liaison | `packages/server/src/agents/instructions/*.ts` | R2, R5, R10, R11 | server tests |
+| The orchestrator's name where people see it; the filing counts in the worker panel | `graph-pool.ts`, `GraphWorkerPanel.svelte` | R7 | `graph-pool.test.ts` |
+
+## Requests to the integrator (shared files)
+
+1. `server.js`: drop `beyond` for the worker role on `search_graph`, `about_thing` and `read_document` (and the
+   `readScope` branch that honours it). A worker sees only its audience (R11.6). Test: a worker token's
+   `tools/list` schema for `search_graph` has no `beyond`.
+2. `routes.js`: `registerFilingRoutes(app, { resolveIdentity, personOf, isRoot })` from `filing.js`, for
+   `GET /api/filing/held` (a person's own Held questions), `POST /api/filing/held/:id/answer`, and
+   `GET /api/filing/log` (root only). Test: an answer by someone other than the recorder is refused.
+3. Contract, `model/filing.js` and `model/schema.js` `FilingEntry`: a `before` on `target` (the row's values a
+   Filed write replaced; today it rides in `reason`), and a ruling or a field on whether `refiled_from` is the
+   one back-pointer for every later outcome (re-filed Kept, approved Proposed, answered Held). R9, R11.4.
+4. `scaffold.ts` or `manager.ts`: a worker's direct read-only connection tools, dropped from its MCP config, so
+   source reads go only through graph-rag's tools (F14). Until then a worker can still read a connection whose
+   home is above its audience.
+5. `packages/web/src/lib/api.ts`: `filing`, `open_requests` and `open_held_questions` on `GraphWorkerView`
+   (the panel reads them as an extension today), and `triage` removed.
+
+## For other streams
+
+- **Sources:** `enterData` decides with `filedOrProposed` but without the class index, so a class with no map
+  entry of its own doesn't take its parents' entries (R9, BUILD.md 6). Passing `index` fixes it. The filing
+  stream's `findSourceRows` stands in for the read adapter's `find` and should be replaced by it. Filing only
+  updates rows: a piece that needs a new row has no tool yet.
+- **Classes:** the orchestrator's class tools (create a class, add a parent) are expected from the classes
+  stream and registered for the `master` role; `answer_request` names their keys. Filing reads classes as
+  contract rows (`_kind = 'class'`, `SUBCLASS_OF`) and instances as `_kind = 'thing'` with `INSTANCE_OF`.
+- **Record:** a section is held back from filing while `_ungraded` is set (the grader's mark). When the typed
+  check replaces the grader, `worker-pool.js filingJob` should read its mark instead.
+
+## Choices that need a ruling
+
+F1 to F17 stand as phase 0 set them, except where noted. Each is marked `NEEDS A RULING` in the code.
+
+| Id | The choice built | Where |
+|---|---|---|
+| F1 | The log is the contract's `FilingEntry` document (BUILD.md 8) | `model/filing.js`, `filing.js` |
+| F2 | Append-only; a later outcome points back with `refiled_from` | `filing.js` |
+| F3 | A Held question is a `WorkerQuestion` with `asked_of` the recorder; the admin's lists leave it out | `filing.js askRecorder`, `worker-pool.js` |
+| F4 | Ruled: R12. `update_when_changed` is in force; `hold_and_request` stays as the other value, tested | `model/filing.js onDisagreement` |
+| F5 | Workers create instances directly under existing classes | `filing.js createInstance` |
+| F6 | An approval appends a Filed entry; a rejection leaves Proposed | `filing.js settleProposals` |
+| F7 | Answers to workers are structured; the orchestrator's free-text `answer_worker` is gone | `model/filing.js normalizeAnswer`, `master-tools.js` |
+| F8 | A `differs` verdict flags the entry; nothing is undone | `filing.js recordVerdict` |
+| F9 | A batch's record with no worker gets one once the batch has waited `batchMinutes` | `orchestrator.js startUnstarted` |
+| F10 | The recorder's Held questions: graph-rag functions and routes only, no web or chat yet | `filing.js` |
+| F11 | A section with `_ungraded` set waits | `worker-pool.js filingJob` |
+| F12 | Not needed in this build: no path other than the filing tools mints an instance | |
+| F13 | The role kind stays `master`; people and models see "orchestrator" | `orchestrator.js`, `graph-pool.ts` |
+| F14 | Every connected source is listed in a brief (no source declares a home yet); see request 4 | `worker-pool.js composeFilingBrief` |
+| F15 | The handler and the liaison stay, and can't apply or reject a Proposed piece | `master-tools.js` |
+| F16 | The log is for the admin and the orchestrator; a recorder sees their own Held questions | `filing.js` |
+| F17 | No worker closes a need | |
+| F18 (new) | A write whose connection broke and whose row couldn't be read back is Held, for the orchestrator's check | `filing.js fileToSource` |
+| F19 (new) | A worker's request to the orchestrator doesn't stop its other pieces; the thread waits only while a request is open at the end | `filing.js`, `worker-pool.js finishThread` |
+| BUILD.md 9 | Verdicts are `matches`, `differs`, `unverifiable` | contract |
+| BUILD.md 10 | Superseded by R12: a disagreeing state is Held with no request; a stated change is filed | contract |
+| BUILD.md 12 | A recorder who left or moved: Held, asking them | `filing.js fileToSource` |
+
+## Follow-up: ruling 12 and the review of ba583bc
+
+- **R12 (was F4).** `model/filing.js DISAGREEMENT_RULE` is `update_when_changed`: a record that says something
+  changed is filed given the recorder's authority (Proposed without it) and checked by the orchestrator after; a
+  record describing the state that disagrees with the source is Held, asking the recorder, with no request. The
+  conservative `hold_and_request` stays as the other value of the same function, and both are tested (unit, and
+  the orchestrator's `update` answer under it). The e2e scenario runs R12.
+- **B1 (blocking), `model/brief.js`.** A record with no home counts as the root. A brief's record is its id,
+  title, description and the title's home only (`RECORD_FIELDS`); `assertBrief` refuses a record carrying
+  sections or anything else. The reviewer's probe is `test/model-brief.test.js` (both B1 tests fail on the old
+  logic). The brief text no longer names who put the record on record, its reason or its position.
+- **Non-blocking 4, `normalizeEntry`.** A Filed entry names its class and carries its account; a Kept entry is
+  linked to at least one instance. So `file_to_source` takes the worker's account with the piece (`said`), and
+  `keep_piece` needs an instance.
+- **Non-blocking 1, the approval seam.** `filing.js` exports `sourceJournal` (and `makeJournal(env)`), the
+  journal the sources stream's write adapter writes through (`claude/build-sources-000b53` 50d0eff: `begin`
+  before a write, `settle` after). An attempt is a `FilingAttempt` document. A write settled `written` whose
+  `piece` carries `pending_id` (what `applyProposedEntry` passes on approval) appends the Filed entry superseding
+  the Proposed one, once. Until that adapter is merged, approvals write through today's `applyProposedEntry`, and
+  the worker loop's `settleProposals` files them; both paths are idempotent with each other. **The seam:** filing
+  owns the Filed entry on approval, written from `sourceJournal.settle`; sources owns calling it; the integrator's
+  `write.js` only routes the approval. `fileToSource` now passes `before` (what the worker read) and `piece` to
+  `enterData`, as the adapter asks.
+- **Non-blocking 10, agents relaying approvals: needs a ruling.** F15, which stood as the default, already
+  refuses a Proposed piece (a `data_entry` proposal) approved or rejected by the handler or the liaison on a
+  person's word (`master-tools.js assertNotFilingProposal`), so today only a person approving as themselves, in
+  Approvals, writes one. Whether an agent may relay a person's approval is still the user's to rule. Removing the
+  two calls to `assertNotFilingProposal` undoes it.
+
+### More requests to the integrator
+
+6. `model/schema.js`: a `FilingAttempt` TYPES entry (`id`, `system`, `source_table`, `row_key`, `action`,
+   `fields`, `before`, `piece`, `status`, `detail`, `at`, `settled_at`, all STRING; unique index on `id`).
+   `filing.js ensureFilingSchema` declares it until then. R9.
+7. Nothing for the sources branch: its `enterData` (c1eaf39) still decides Filed or Proposed, now with the class
+   index and the declaration's `writable`, takes `before` and `piece`, and writes through `sourceJournal`. Its new
+   `held` answer (a write that didn't land: unreachable, moved, not_found, refused, unknown) is filed as Held, asking
+   the recorder; `status: "already"` is Filed with nothing written.
+8. `e2e/run.mjs`, the built-in scenario "a model with a limit gets no more threads than it serves": its four
+   review jobs point at a plain note that belongs to no record, and a filing worker now gets only a record on
+   record (`worker-pool.js filingJob`: R4, R11.12), so the claim returns none and the scenario fails. The fix is
+   in the scenario, not the gate: make its jobs' `rid` a section of a document with `_on_record = true` (as
+   `scenarios-filing.mjs record()` does). This is the one red check on this branch.
