@@ -138,13 +138,35 @@ It lands on `build-base` with the first stream merge.
   carrying the section's text and the worker's last reply (`filing.js kickBack`). The orchestrator settles it
   by starting one fresh worker for just that section (`start_worker` with `section`, once every job that
   had it has ended; one per kick-back), by answering keep (Kept now), or by answering hold (a question to the
-  recorder). A kick-back still open when the orchestrator acks the signal that carried it, which ends its
-  turn, is filed by graph-rag as one Kept piece (`floorUnsettled`): the whole section, at its home, with the
-  instances related to it, reason "worker ended without filing", and no source written. It is re-fileable under
-  R14. Such a Kept piece may have no instances (`model/filing.js`). The run kept as `runs/A-1-prefallback`
+  recorder). A kick-back still open when its turn has ended is filed by graph-rag as one Kept piece
+  (`floorUnsettled`): the whole section, at its home, with the instances related to it, reason "worker ended
+  without filing", and no source written. It is re-fileable under R14. The turn's end is when the master next
+  asks for signals: graph-pool.ts acks a signal as the prompt goes in, so the ack is the turn's start, and it asks
+  again only once the turn has settled. The first build floored at the ack, so a kick-back could be Kept before
+  the orchestrator acted on it; run A-1-flash-r15 ran with that build, and it is fixed since. Such a Kept piece may have no instances (`model/filing.js`). The run kept as `runs/A-1-prefallback`
   is the one stopped for this.
   `start_handler` refused the orchestrator in A-1-stall because the worker wasn't "waiting" (it had failed,
   then been closed). It hands only a waiting worker to the operator, so the refusal is by design, not a bug.
+- **After run A-1-flash-r15** (DeepSeek V4 Flash, stopped at 53 of 68 records; the user: "sure and address the
+  issues discussed earlier"). 588 of 2,561 calls errored. Fixed:
+  - **Section ids.** The brief names each section `s1`, `s2` … with its record id beside it. Every worker tool
+    resolves `section` before anything else (`model/brief.js resolveSectionRef`): the short id, the record id, a
+    number or § number, with or without "Section "; with one section in the brief, any value. Otherwise it refuses,
+    listing the ids and headings. The field takes any string, so text in it no longer fails on length.
+  - **`record_table`** as a bare table name is the one declared source that has that table
+    (`classes.js qualifyTable`); otherwise it is refused with the form.
+  - **DSML.** DeepSeek's tool markup inside argument values (142 calls from 4 worker conversations) is cut at the
+    first marker by the driver, logged as a `dsml` event with the provider and the raw value, and counted. A probe
+    of all 13 OpenRouter providers with a short tool call found none leaking it, so no provider is pinned. Each
+    response's provider is now recorded.
+  - **The orchestrator's turns.** The driver ran each turn to its end before claiming any work, so the workers an
+    orchestrator started couldn't run while it waited, and it polled `worker_status`/`pool_status`. Its turns
+    now run beside the workers' claims, as graph-pool.ts runs the master. The signals are fetched again only once
+    the turn has ended.
+  - **Speed.** 8 workers at a time. Setups A and B run side by side, each in its own compose project
+    (`gwsynth-eval-a`, `gwsynth-eval-b`) with its own SQL copy, DABs, litellm, graph and graph-rag.
+  - **Database read errors** are left to the workers (the user: workers with proper context should find and use
+    resources themselves). They are counted in each report.
 
 ### The review of ba583bc (`~/reviews/build-build-base-ba583bc.md`): the integrator's items
 
@@ -269,6 +291,10 @@ The integrator's (labels and evaluation, [build/integrate.md](build/integrate.md
 | I-25 | R14's "a source table declared" is read as a class given its table by `update_class` (`_table_at`), or the stored source declarations (OrgPolicy `sources`) changing after the piece was Kept. A source declared only in the environment never counts as new, and classes made before `_created_at` existed count as older |
 | I-26 | R15 doesn't bound how often one section is sent back: a fresh worker that also ends without filing is sent back again, and the orchestrator may start another. Each kick-back allows one fresh worker, and the floor applies to any it leaves open |
 | I-27 | R15's "send it to a person" is read as a question to the record's recorder (`answer_request hold`), since a Held entry needs a source table that an unfiled section doesn't have; the section has no entry until they answer |
+| I-28 | Setup B is `nemotron-3.5-lightning` → `openrouter/nvidia/nemotron-3.5-lightning` (the paid endpoint, pinned by exact id like Flash). The coordinator asked for this note as I-26, which R15 had taken |
+| I-29 | The two setups' database copies keep the same synthetic names (`gwsynth-sql`, `GwSynthMfg`), so each graph-rag's guard and the seed guard check the names they always did. The copies are separated by compose project and network: neither graph-rag joins the other's networks |
+| I-30 | DSML in tool arguments is cut at the first marker and counted as the model's failure, with no provider pinned (none reproduced it in isolation); the trace records each response's provider |
+| I-31 | With one section in the brief, a missing `section` or plain text in it means that section; a value naming any other section (a record id, a short id or number past the list) is refused, so a worker still can't file another record's section |
 
 ---
 

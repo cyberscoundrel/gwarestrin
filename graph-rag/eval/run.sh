@@ -72,7 +72,11 @@ mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"
 
 NET="gr-eval-$$"
+# each setup its own compose project (its own SQL copy, DABs and litellm), so setups run side by side: A in
+# gwsynth-eval-a, B in gwsynth-eval-b; nothing joins one project's networks to the other's. The copies keep the
+# synthetic names the guard checks (gwsynth-sql, GwSynthMfg): each graph-rag's guard checks its own copy's
 SYNTH="gwsynth-eval"
+if [ "$MODELS" = "real" ]; then SYNTH="gwsynth-eval-$(echo "$SETUP" | tr '[:upper:]' '[:lower:]')"; fi
 CFG="$(mktemp -d)"
 NODE="node:22-alpine"
 ADB_IMAGE="${ADB_IMAGE:-arcadedata/arcadedb:latest}"
@@ -175,7 +179,7 @@ case "$MODELS/$VIA" in
   real/direct)  DRIVER_ENV=(--env-file "$ENV_FILE" -e EVAL_VIA=direct --dns 1.1.1.1 --dns 1.0.0.1) ;;
 esac
 echo "the run: $MODELS models via $VIA, setup $SETUP, run $RUN -> $OUT"
-docker create --name "$NET-driver" --network "$NET" -v "$REPO:/repo:ro" -v "$CFG:/cfg:ro" -v "$OUT:/out" --user "$(id -u):$(id -g)" "${DRIVER_ENV[@]}" \
+docker create --name "$NET-driver" --label "eval-setup=$SETUP" --label "eval-run=$RUN" --network "$NET" -v "$REPO:/repo:ro" -v "$CFG:/cfg:ro" -v "$OUT:/out" --user "$(id -u):$(id -g)" "${DRIVER_ENV[@]}" \
   "$NODE" node /repo/graph-rag/eval/driver/run.mjs --graph http://graph-rag:8000 --tokens /cfg/tokens.json \
   --dab-read http://dab-read:5000/mcp --dab-write http://dab-write:5000/mcp --run-dir /out \
   --models "$MODELS" ${SETUP:+--setup "$SETUP"} --run "$RUN" ${SEED:+--seed "$SEED"} >/dev/null

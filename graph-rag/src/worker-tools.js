@@ -11,8 +11,9 @@
  * The filing stream owns this module.
  */
 import { z } from "zod";
-import { createInstance, fileToSource, giveAccount, holdPiece, keepPiece, liveEnv, relateSection, requestOrchestrator, resolveName, sectionKey, stateDependency } from "./filing.js";
+import { createInstance, fileToSource, giveAccount, holdPiece, jobContext, keepPiece, liveEnv, relateSection, requestOrchestrator, resolveName, sectionKey, stateDependency } from "./filing.js";
 import { REQUEST_KINDS } from "./model/filing.js";
+import { resolveSectionRef, shortSectionId } from "./model/brief.js";
 
 /** a worker writes no entries: the record is on record as its person put it */
 export async function workerUpsert() {
@@ -20,15 +21,22 @@ export async function workerUpsert() {
 }
 
 const reply = (v) => ({ content: [{ type: "text", text: JSON.stringify(v) }] });
-const sectionId = z.string().min(3).max(40);
+// a section is named by its short id from the brief (s1, s2 ...) or its record id; models also send "1", "§1",
+// "Section #1:23" or the piece's text itself, so the field takes any string and is resolved before anything else
+// (resolveSectionRef), and only then checked as one of the worker's own sections (filing.js ownSection)
+const SECTION_HINT = "the section's id from your brief (s1, s2 …), not its text";
+const sectionId = z.string().max(5000).optional().describe(SECTION_HINT);
 const pieceText = z.string().min(3).max(1000);
 const refiles = z.string().max(80).optional();
 
 /** the tools of a worker thread, registered on the MCP server built for that identity (see createServer) */
 export function registerWorkerTools(server, { identity, need }) {
-  const run = (fn, cap) => async (args) => {
+  // section: "required" or "optional" resolves args.section to the record id the worker means, or refuses with
+  // its sections' ids and headings
+  const run = (fn, cap, section = null) => async (args) => {
     need(cap);
-    return reply(await fn(args, identity, await liveEnv()));
+    const env = await liveEnv();
+    return reply(await fn(section ? await withSection(args, identity, env, section === "optional") : args, identity, env));
   };
   server.tool(
     "resolve_name",
@@ -58,7 +66,7 @@ this piece writes, which the orchestrator checks against the source. You never p
       confirmed_update: z.string().max(80).optional(),
       refiles,
     },
-    run(fileToSource, "write"),
+    run(fileToSource, "write", "required"),
   );
   server.tool(
     "hold_piece",
@@ -66,14 +74,14 @@ this piece writes, which the orchestrator checks against the source. You never p
 your question goes to whoever put the record on record. Name the row's key, or its table, or a class
 with a table.`,
     { section: sectionId, piece: pieceText, question: z.string().min(8).max(1000), class: z.string().max(80).optional(), key: z.string().max(300).optional(), table: z.string().max(200).optional(), refiles },
-    run(holdPiece, "write"),
+    run(holdPiece, "write", "required"),
   );
   server.tool(
     "keep_piece",
     `Keep a piece no system holds: the document is its source, linked to the instances it is about (by
 id, at least one). Nothing Kept is deleted; it is re-filed when a fitting class or source appears.`,
     { section: sectionId, piece: pieceText, instances: z.array(z.string().max(40)).min(1).max(20), refiles },
-    run(keepPiece, "write"),
+    run(keepPiece, "write", "required"),
   );
   server.tool(
     "create_instance",
@@ -82,19 +90,19 @@ existing class, with its source key when a source holds it; the section then rel
 already holds the key, or has that name under that class, is reused. A class whose rows stay in the
 source refuses: store the key on the section instead.`,
     { section: sectionId, name: z.string().min(1).max(120), class: z.string().min(1).max(80), key: z.string().max(300).optional() },
-    run(createInstance, "write"),
+    run(createInstance, "write", "required"),
   );
   server.tool(
     "relate_section",
     "Relate one of your sections to an instance your audience can see (by id).",
     { section: sectionId, instance: z.string().min(3).max(40), role: z.string().max(40).optional() },
-    run(relateSection, "write"),
+    run(relateSection, "write", "required"),
   );
   server.tool(
     "section_key",
     "Store a transactional row's key on a section (an order line, an operation, a time punch): the row stays in the source, with no node.",
     { section: sectionId, key: z.string().min(5).max(300) },
-    run(sectionKey, "write"),
+    run(sectionKey, "write", "required"),
   );
   server.tool(
     "state_dependency",
@@ -102,7 +110,7 @@ source refuses: store the key on the section instead.`,
 key (a row earns its node this way). stated_as "record" when the record says so, "agent" when it's
 your reading.`,
     { section: sectionId, from: z.string().min(3).max(300), to: z.string().min(3).max(300), stated_as: z.enum(["record", "agent"]), note: z.string().max(600).optional(), valid_from: z.string().max(40).optional(), valid_until: z.string().max(40).optional() },
-    run(stateDependency, "write"),
+    run(stateDependency, "write", "required"),
   );
   server.tool(
     "request",
@@ -110,8 +118,8 @@ your reading.`,
 existing class fits a piece (say what the piece is and which parents you'd suggest), "conflict" for a
 conflict with a source, "other" for anything else you won't settle alone. Keep requests few. Don't file
 that piece yourself: carry on with the others; you're resumed with the answer.`,
-    { kind: z.enum(REQUEST_KINDS), question: z.string().min(8).max(1000), section: sectionId.optional(), suggestion: z.string().max(600).optional() },
-    run(requestOrchestrator, "write"),
+    { kind: z.enum(REQUEST_KINDS), question: z.string().min(8).max(1000), section: sectionId, suggestion: z.string().max(600).optional() },
+    run(requestOrchestrator, "write", "optional"),
   );
   server.tool(
     "give_account",
@@ -147,3 +155,24 @@ export const REMOVED_WORKER_TOOLS = [
   "rename_thing",
   "update_entry",
 ];
+
+/**
+ * The section a worker meant, as its record id, before the tool runs: its short id, record id, number or a value
+ * with "Section " or "§" in front; with one section in the brief, a missing or unmatched value is that one. A
+ * section that matches none is refused with the worker's own sections, each by id and heading.
+ */
+async function withSection(args, identity, env, optional) {
+  const given = args.section;
+  if (optional && (given === undefined || given === null || String(given).trim() === "")) {
+    const { section: _, ...rest } = args;
+    return rest;
+  }
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) return args; // not a filing thread: the tool's own refusal says so
+  const rid = resolveSectionRef(given, ctx.sections);
+  if (rid) return { ...args, section: rid };
+  const rows = await env.db.adbQuery(`SELECT @rid AS rid, heading, text_identity FROM [${ctx.sections.join(",")}]`).catch(() => []);
+  const label = new Map(rows.map((r) => [String(r.rid), r.heading || String(r.text_identity ?? "").slice(0, 60)]));
+  const ids = ctx.sections.map((r, i) => `${shortSectionId(i)} (${r})${label.get(r) ? `: ${label.get(r)}` : ""}`).join("; ");
+  throw Object.assign(new Error(`section "${String(given ?? "").slice(0, 60)}" isn't one of yours. section is ${SECTION_HINT}. Yours: ${ids}`), { refused: true });
+}

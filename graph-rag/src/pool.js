@@ -80,7 +80,8 @@ export function taskBrief({ brief, dropped = {}, dependencies = [], refile = [],
     ...(r ? [`Record ${r.id}${r.title ? `: "${r.title}"` : ""}`, ...(r.description ? [String(r.description).slice(0, 600)] : [])] : ["Record: its title is above your audience"]),
     `Your audience: ${brief.audience}. You see what people there see, and nothing above it.`,
   ];
-  for (const s of brief.sections) lines.push("----------", `Section ${s.rid}${s.heading ? `: ${s.heading}` : ""}`, String(s.text ?? "").slice(0, 4000));
+  // each section by its short id (what the tools take as section), the record id beside it
+  for (const s of brief.sections) lines.push("----------", `section ${s.section ?? s.rid}${s.section ? ` (${s.rid})` : ""}${s.heading ? `: ${s.heading}` : ""}`, String(s.text ?? "").slice(0, 4000));
   lines.push("----------", `Classes (${brief.classes.length}${dropped.classes ? `; ${dropped.classes} more above your audience` : ""}): key, parents, its table, whether its rows become nodes`);
   for (const c of brief.classes) lines.push(`- ${c.key}${c.parents?.length ? ` < ${c.parents.join(", ")}` : ""}${c.record_table ? `, table ${c.record_table}${c.rows_are_nodes ? ", rows are nodes" : ", rows stay in the source"}` : ""}${c.description ? `: ${String(c.description).slice(0, 200)}` : ""}`);
   if (!brief.classes.length) lines.push("- none yet beyond the four roots (agent, commitment, event, resource): request one when a piece needs it");
@@ -98,7 +99,8 @@ export function taskBrief({ brief, dropped = {}, dependencies = [], refile = [],
   lines.push(
     "----------",
     ...(why ? [`Why it's here: ${why}`] : []),
-    "File the record piece by piece: one filing-log entry per piece, the split is yours. Resolve names against the source (graph-rag_resolve_name). For each piece: graph-rag_file_to_source with your account of it (the code decides Filed or Proposed, or Held when the row is unclear or the source disagrees with a record that states no change), graph-rag_hold_piece when it's unclear which record, or graph-rag_keep_piece when no system holds it. Relate sections to the lasting individuals they are about (graph-rag_create_instance, graph-rag_relate_section), keep a transactional row's key on the section (graph-rag_section_key), and state dependencies the record gives (graph-rag_state_dependency).",
+    `File the record piece by piece: one filing-log entry per piece, the split is yours. Name a section by its id above (${brief.sections.map((s) => s.section ?? s.rid).join(", ")}), never by its text.`,
+    "Resolve names against the source (graph-rag_resolve_name). For each piece: graph-rag_file_to_source with your account of it (the code decides Filed or Proposed, or Held when the row is unclear or the source disagrees with a record that states no change), graph-rag_hold_piece when it's unclear which record, or graph-rag_keep_piece when no system holds it. Relate sections to the lasting individuals they are about (graph-rag_create_instance, graph-rag_relate_section), keep a transactional row's key on the section (graph-rag_section_key), and state dependencies the record gives (graph-rag_state_dependency).",
     "Decide low-stakes matters yourself. When no class fits a piece, or the source conflicts with the record, request it of the orchestrator (graph-rag_request) and don't file that piece. Keep requests few.",
     "Finish with your account (graph-rag_give_account): each entry you wrote and what you did. Then a short report.",
   );

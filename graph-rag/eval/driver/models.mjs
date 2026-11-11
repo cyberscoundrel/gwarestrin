@@ -9,6 +9,28 @@
 // Messages, inside the driver: { role: "user", content } | { role: "assistant", content, toolCalls: [{ id, name, args }] }
 // | { role: "tool", toolCallId, name, content }.
 
+/**
+ * DeepSeek's own tool-call markup (DSML: "<｜DSML｜parameter name=...>") sometimes comes back inside an argument's
+ * value, the provider's parser having missed it. Each string value is cut at the first marker; what was cut is
+ * returned so the driver logs it and the report counts it as the model's failure (harness handling, not a fix).
+ */
+export const DSML_RE = /<\/?｜DSML｜|｜DSML｜/;
+export function cutDsml(args) {
+  const cut = [];
+  const walk = (v, path) => {
+    if (typeof v === "string") {
+      const m = DSML_RE.exec(v);
+      if (!m) return v;
+      cut.push({ path, raw: v.slice(0, 2000) });
+      return v.slice(0, m.index).trimEnd();
+    }
+    if (Array.isArray(v)) return v.map((x, i) => walk(x, `${path}[${i}]`));
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, path ? `${path}.${k}` : k)]));
+    return v;
+  };
+  return { args: walk(args, ""), cut };
+}
+
 /** an OpenAI-compatible client; `apiKey` is read once and kept in this closure only */
 export function openaiClient({ baseUrl, apiKey, model, maxTokens = 4096, temperature = null, fetch: f = globalThis.fetch, timeoutMs = 300_000, headers = {} }) {
   if (!baseUrl || !model) throw new Error("a model client needs a base URL and a model");
@@ -54,9 +76,11 @@ export function openaiClient({ baseUrl, apiKey, model, maxTokens = 4096, tempera
         } catch {
           args = { _unparsed: String(t.function?.arguments ?? "").slice(0, 500) };
         }
-        return { id: t.id, name: t.function?.name, args };
+        const { args: clean, cut } = cutDsml(args);
+        return { id: t.id, name: t.function?.name, args: clean, ...(cut.length ? { dsml: cut } : {}) };
       });
-      return { text: msg.content ?? "", toolCalls, usage: { input: j.usage?.prompt_tokens ?? 0, output: j.usage?.completion_tokens ?? 0 } };
+      // which upstream served it (OpenRouter names its provider; litellm passes it through)
+      return { text: msg.content ?? "", toolCalls, provider: j.provider ?? null, dsmlInText: DSML_RE.test(String(msg.content ?? "")), usage: { input: j.usage?.prompt_tokens ?? 0, output: j.usage?.completion_tokens ?? 0 } };
     },
   };
 }
@@ -122,8 +146,9 @@ export function briefSections(brief) {
   const out = [];
   const parts = String(brief).split(/\n----------\n/);
   for (const p of parts) {
-    const m = /^Section (#\d+:\d+)(?::[^\n]*)?\n([\s\S]*)$/.exec(p.trim());
-    if (m) out.push({ rid: m[1], text: m[2].trim() });
+    // "section s1 (#1:23): heading" (the short id a tool takes), or the older "Section #1:23: heading"
+    const m = /^section (s\d+) \((#\d+:\d+)\)(?::[^\n]*)?\n([\s\S]*)$/i.exec(p.trim()) ?? /^Section (#\d+:\d+)(?::[^\n]*)?\n([\s\S]*)$/.exec(p.trim());
+    if (m) out.push(m.length === 4 ? { rid: m[1], text: m[3].trim() } : { rid: m[1], text: m[2].trim() });
   }
   return out;
 }

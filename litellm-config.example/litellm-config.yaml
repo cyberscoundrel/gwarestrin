@@ -41,6 +41,12 @@ model_list:
     litellm_params:
       model: openrouter/deepseek/deepseek-v4-flash
       api_key: os.environ/OPENROUTER_API_KEY
+  # Nemotron 3.5 Lightning, the paid endpoint (not :free), by its exact OpenRouter id (listed 2026-11-11, four
+  # providers). Setup B of the evaluation.
+  - model_name: nemotron-3.5-lightning
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3.5-lightning
+      api_key: os.environ/OPENROUTER_API_KEY
 
 litellm_settings:
   drop_params: true   # tolerate client params a backend doesn't support

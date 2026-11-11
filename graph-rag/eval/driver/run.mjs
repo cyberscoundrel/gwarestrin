@@ -40,7 +40,7 @@ const DAB_WRITE = need("dab-write");
 const MODE = need("models");
 const SETUP = MODE === "real" ? need("setup") : "fake";
 const RUN = Number(args.run ?? 1);
-const CONCURRENCY = Number(args.concurrency ?? 4);
+const CONCURRENCY = Number(args.concurrency ?? 8);
 const DEADLINE = Date.now() + Number(args["timeout-min"] ?? 240) * 60_000;
 const CONNECTION = "mssql";
 mkdirSync(RUN_DIR, { recursive: true });
@@ -94,13 +94,17 @@ const conversations = new Map();
 
 const usage = {};
 const addUsage = (role, u) => {
-  const x = (usage[role] ??= { input: 0, output: 0, calls: 0, agents: 0, sentChars: 0, outChars: 0 });
+  const x = (usage[role] ??= { input: 0, output: 0, calls: 0, agents: 0, sentChars: 0, outChars: 0, dsml: 0, providers: {} });
   x.input += u.input;
   x.output += u.output;
   x.calls += u.calls;
   x.sentChars += u.sentChars ?? 0;
   x.outChars += u.outChars ?? 0;
+  x.dsml += u.dsml ?? 0;
+  for (const [k, n] of Object.entries(u.providers ?? {})) x.providers[k] = (x.providers[k] ?? 0) + n;
   x.agents++;
+  // as it stands, for the runaway guard watching each setup's spend while the run goes
+  writeFileSync(`${RUN_DIR}/usage-live.json`, JSON.stringify({ setup: SETUP, run: RUN, at: new Date().toISOString(), usage }));
 };
 
 // ---- the instruction texts, as the workspace builds them (packages/server graph-roles.ts) ----
@@ -243,14 +247,23 @@ async function idle() {
 async function poolLoop({ stopWhen, quietPolls }) {
   const running = new Set();
   let quiet = 0;
+  // the orchestrator's turn runs beside the workers, as the workspace's master does (graph-pool.ts masterTurn): its
+  // workers are claimed and run while it works, and it is asked for signals again only once its turn has ended
+  let orchestrating = null;
   while (Date.now() < DEADLINE) {
-    // the orchestrator: woken by its signals
-    const sig = await api("/api/worker/signals");
-    const signals = sig.body?.signals ?? [];
-    if (signals.length) {
-      quiet = 0;
-      await api("/api/worker/signals/ack", { method: "POST", body: { ids: signals.map((s) => s.id) } });
-      await agent("orchestrator", sign({ r: "master" }), sig.body.message, { job: `signals:${signals.length}` });
+    let signals = [];
+    if (!orchestrating) {
+      const sig = await api("/api/worker/signals");
+      signals = sig.body?.signals ?? [];
+      if (sig.body?.kept_by_graph_rag?.length) log({ r15_floor: sig.body.kept_by_graph_rag });
+      if (signals.length) {
+        quiet = 0;
+        // acked as the turn starts, as the workspace acks once the prompt is in
+        await api("/api/worker/signals/ack", { method: "POST", body: { ids: signals.map((s) => s.id) } });
+        orchestrating = agent("orchestrator", sign({ r: "master" }), sig.body.message, { job: `signals:${signals.length}` })
+          .catch((e) => log({ orchestrator: "failed", error: String(e?.message ?? e).slice(0, 300) }))
+          .finally(() => (orchestrating = null));
+      }
     }
     // workers: as many threads as there is room for
     const room = CONCURRENCY - running.size;
@@ -270,11 +283,11 @@ async function poolLoop({ stopWhen, quietPolls }) {
         p.finally(() => running.delete(p));
       }
     }
-    if (!signals.length && !running.size && (await stopWhen())) {
+    if (!orchestrating && !signals.length && !running.size && (await stopWhen())) {
       if (++quiet >= quietPolls) break;
     }
     await new Promise((r) => setTimeout(r, running.size ? 2000 : 5000));
   }
-  await Promise.allSettled([...running]);
+  await Promise.allSettled([...running, ...(orchestrating ? [orchestrating] : [])]);
   if (Date.now() >= DEADLINE) say("the run's deadline passed: what was filed by then is reported");
 }

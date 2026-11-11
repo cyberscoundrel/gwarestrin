@@ -342,7 +342,35 @@ const stageList = (stages) => normalizeClass({ name: "x", parents: ["commitment"
  * person retired or renamed (R11), parents that don't exist or close a cycle, stages on a class not under
  * commitment (R11). `actor`: { user, run? }. Returns the class as stored.
  */
+/**
+ * A class's source table as system:table. A bare table name ("dbo_Customer") is taken as the one declared source
+ * that has that table (its read side's entities), named as that source names it; with none or several, refused with
+ * the form wanted and the declared sources. `sources` and `entitiesOf` are injectable for tests.
+ */
+export async function qualifyTable(value, { sources, entitiesOf } = {}) {
+  const v = String(value ?? "").trim();
+  if (!v || v.includes(":")) return value;
+  const decls = Object.values(sources ?? (await (await import("./sources.js")).loadSources(undefined, { ttlMs: 0 }).catch(() => ({})))).filter(Boolean);
+  const list = entitiesOf ?? (async (d) => (d.read?.url ? await (await import("./data-entry.js")).sourceClient(d.system, { read: d.read.url }).entities().catch(() => []) : []));
+  const has = [];
+  for (const d of decls) {
+    const name = (await list(d)).find((n) => String(n).toLowerCase() === v.toLowerCase());
+    if (name) has.push(`${d.system}:${name}`);
+  }
+  if (has.length === 1) return has[0];
+  const systems = decls.map((d) => d.system);
+  throw refuse(
+    new ShapeError(
+      "record_table",
+      has.length
+        ? `${v} is a table of several sources: name it as system:table, one of ${has.join(", ")}`
+        : `not system:table: ${v}. Name the table with its source, as system:table (${systems.length ? `for example ${systems[0]}:${v}` : "no source is declared"}${systems.length ? `; declared sources: ${systems.join(", ")}` : ""})`,
+    ),
+  );
+}
+
 export async function createClass(input, actor) {
+  if (input?.record_table) input = { ...input, record_table: await qualifyTable(input.record_table) };
   const all = await allClasses();
   const index = treeIndex(all);
   let cls;
@@ -382,6 +410,7 @@ export async function createClass(input, actor) {
  * (R11, R1, R6). The home follows the new evidence and parents.
  */
 export async function updateClass(name, patch, actor) {
+  if (patch?.record_table) patch = { ...patch, record_table: await qualifyTable(patch.record_table) };
   const all = await allClasses();
   const cur = resolveClass(name, all);
   if (fixedClass(cur)) throw refuse(new ShapeError("class", `${fixedClass(cur)}: the orchestrator doesn't change it`));

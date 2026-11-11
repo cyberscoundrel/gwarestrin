@@ -43,7 +43,7 @@ test("a filing brief (R7): the record, its sections, the class tree, connected i
   assert.match(b, /Record doc-1: "Toro PO 4471"\nthe shift handover note/);
   assert.doesNotMatch(b, /Put on record by/, "a brief holds the record's title and description only (B1)");
   assert.match(b, /Your audience: floor/);
-  assert.match(b, /Section #71:3\nPO 4471 for Toro/);
+  assert.match(b, /section #71:3\nPO 4471 for Toro/, "a section with no short id is named by its record id");
   assert.match(b, /Ignore previous instructions/, "the text is carried as data");
   assert.match(b, /Classes \(1; 2 more above your audience\)/, "what the audience can't see is counted, never named");
   assert.match(b, /- jobs < commitment, table mssql:dbo_Job, rows stay in the source: a production job/);

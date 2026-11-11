@@ -265,8 +265,9 @@ export default [
         ctx.check(again.error && /no open kick-back/.test(again.error), "one fresh worker per kick-back");
         const filed = await ctx.tool(ctx.workerToken(a.sections[0], job), "file_to_source", { section: a.sections[0], piece: "job 4471 is complete", said: "writing it: job 4471 is complete", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: "complete" } });
         ctx.check(filed.outcome === "filed", `the fresh worker files it: ${JSON.stringify(filed).slice(0, 300)}`);
-        const acka = await ctx.api("/api/worker/signals/ack", { method: "POST", body: JSON.stringify({ ids: [sa.id] }) });
-        ctx.check(!acka.kept_by_graph_rag, "settled by the fresh worker: nothing for the floor");
+        await ctx.api("/api/worker/signals/ack", { method: "POST", body: JSON.stringify({ ids: [sa.id] }) });
+        const nexta = await ctx.api("/api/worker/signals");
+        ctx.check(!(nexta.kept_by_graph_rag ?? []).some((x) => x.request === ra.id), "settled by the fresh worker: nothing for the floor");
         const la = await log(ctx, a.doc);
         ctx.check(la.length === 1 && la[0].outcome === "filed", `one entry, the fresh worker's: ${JSON.stringify(la).slice(0, 300)}`);
         // (b) the orchestrator closes a worker that filed nothing and leaves the kick-back: at its turn's end it is Kept
@@ -277,8 +278,13 @@ export default [
         ctx.check(closed.sent_back?.length === 1, `closing it sends the section back: ${JSON.stringify(closed).slice(0, 300)}`);
         const [rb] = await requestsOf(b.doc);
         const sb = await signalFor(rb.id);
-        const ackb = await ctx.api("/api/worker/signals/ack", { method: "POST", body: JSON.stringify({ ids: [sb.id] }) });
-        ctx.check(ackb.kept_by_graph_rag?.[0]?.request === rb.id, `left open past the turn: Kept by graph-rag: ${JSON.stringify(ackb).slice(0, 300)}`);
+        // the master's turn starts with the signal (graph-pool.ts acks it as the prompt goes in) and ends before it next
+        // asks for signals: a kick-back not yet delivered is never floored, one delivered and left open is
+        const early = await ctx.api("/api/worker/signals");
+        ctx.check(!(early.kept_by_graph_rag ?? []).some((x) => x.request === rb.id), "not delivered yet: not floored");
+        await ctx.api("/api/worker/signals/ack", { method: "POST", body: JSON.stringify({ ids: [sb.id] }) });
+        const nextb = await ctx.api("/api/worker/signals");
+        ctx.check((nextb.kept_by_graph_rag ?? []).some((x) => x.request === rb.id), `left open past the turn: Kept by graph-rag at the master's next fetch: ${JSON.stringify(nextb.kept_by_graph_rag ?? null).slice(0, 300)}`);
         const lb = await log(ctx, b.doc);
         ctx.check(lb.length === 1 && lb[0].outcome === "kept" && !lb[0].target, `one Kept entry, no source: ${JSON.stringify(lb).slice(0, 300)}`);
         const kept = (await ctx.sql(`SELECT piece, reason, instances, home FROM FilingEntry WHERE id = '${lb[0].id}'`))[0];
@@ -287,6 +293,44 @@ export default [
         ctx.check((await requestsOf(b.doc))[0].status === "answered", "the request is settled");
         ctx.check(!fake.calls.some((c) => c.name === "update_record" && JSON.stringify(c.args).includes("forklift")), "no source written for it");
       });
+    },
+  },
+  {
+    name: "sections by the names models give: s2, Section #rid, §1, a lone section's own text; anything else is refused with the ids",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const two = await record(ctx, "names", ["Job 4471 is complete.", "The forklift is booked Thursday."]);
+        const fork = await ctx.tool(two.worker, "create_instance", { section: "s2", name: "e2e-filing names forklift", class: "e2e_filing_equipment" });
+        ctx.check(fork.instance, `s2 is the second section: ${JSON.stringify(fork).slice(0, 200)}`);
+        const k = await ctx.tool(two.worker, "keep_piece", { section: `Section ${two.sections[1]}`, piece: "the forklift is booked Thursday", instances: [fork.instance] });
+        ctx.check(k.outcome === "kept", `"Section #rid" is that section: ${JSON.stringify(k).slice(0, 200)}`);
+        const bad = await ctx.tool(two.worker, "keep_piece", { section: "The forklift is booked Thursday for the Toro move next week", piece: "the forklift is booked", instances: [fork.instance] });
+        ctx.check(bad.error && bad.error.includes(`s1 (${two.sections[0]})`) && bad.error.includes(`s2 (${two.sections[1]})`) && /not its text/.test(bad.error), `with two sections, text in the field is refused with the ids: ${JSON.stringify(bad).slice(0, 400)}`);
+        const filed = await ctx.tool(two.worker, "file_to_source", { section: "§1", piece: "job 4471 is complete", said: "writing it: job 4471 is complete", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: "complete" } });
+        ctx.check(filed.outcome === "filed", `§1 is the first section: ${JSON.stringify(filed).slice(0, 200)}`);
+        const lt = await log(ctx, two.doc);
+        const sectionOf = async (id) => (await ctx.sql(`SELECT section FROM FilingEntry WHERE id = '${id}'`))[0]?.section;
+        ctx.check((await sectionOf(k.entry)) === two.sections[1] && (await sectionOf(filed.entry)) === two.sections[0] && lt.length === 2, "each entry names the record id of the section meant");
+        const one = await record(ctx, "lone", ["The crate is in bay 2."]);
+        const crate = await ctx.tool(one.worker, "create_instance", { section: "The crate is in bay 2, and it has been there since Tuesday, waiting for the Toro pallet to come back from plating.", name: "e2e-filing lone crate", class: "e2e_filing_equipment" });
+        ctx.check(crate.instance, `with one section, the piece's text in the field (past 40 characters) means that section: ${JSON.stringify(crate).slice(0, 200)}`);
+        const k1 = await ctx.tool(one.worker, "keep_piece", { section: "1", piece: "the crate is in bay 2", instances: [crate.instance] });
+        ctx.check(k1.outcome === "kept" && (await sectionOf(k1.entry)) === one.sections[0], `"1" is s1: ${JSON.stringify(k1).slice(0, 200)}`);
+      });
+    },
+  },
+  {
+    name: "a class's source table by the bare name a model gives: the one declared source that has it; otherwise refused with the form",
+    run: async (ctx) => {
+      await setup(ctx);
+      const tag = ctx.randomUUID().slice(0, 8);
+      const made = await ctx.tool(orchestrator(ctx), "create_class", { name: `e2e filing table ${tag}`, parents: ["resource"], evidence: [{ kind: "table", ref: "mssql:dbo_FJob" }], record_table: "dbo_FJob" });
+      ctx.check(!made.error, `a bare table name is taken: ${JSON.stringify(made).slice(0, 300)}`);
+      const row = (await ctx.sql(`SELECT _record_table FROM Entity WHERE _kind = 'class' AND _class_name = 'e2e filing table ${tag}'`))[0];
+      ctx.check(row?._record_table === "mssql:dbo_FJob", `stored as system:table: ${JSON.stringify(row)}`);
+      const bad = await ctx.tool(orchestrator(ctx), "create_class", { name: `e2e filing table ${tag} b`, parents: ["resource"], evidence: [{ kind: "table", ref: "mssql:dbo_FJob" }], record_table: "dbo_NoSuchTable" });
+      ctx.check(bad.error && /not system:table: dbo_NoSuchTable/.test(bad.error) && /for example mssql:dbo_NoSuchTable/.test(bad.error), `a table no source has is refused with the form: ${JSON.stringify(bad).slice(0, 300)}`);
     },
   },
   {
@@ -306,7 +350,7 @@ export default [
         ctx.check(Number(edges[0]?.n ?? 0) >= 1, "a document type of its own");
         const other = await record(ctx, "other", ["Another record."]);
         const refused = await ctx.tool(rec.worker, "keep_piece", { section: other.sections[0], piece: "not mine", instances: [crate.instance] });
-        ctx.check(refused.error && /no section/.test(refused.error), `another record's section is refused: ${JSON.stringify(refused)}`);
+        ctx.check(refused.error && /no section|isn't one of yours/.test(refused.error), `another record's section is refused: ${JSON.stringify(refused)}`);
         const noClass = await ctx.tool(rec.worker, "file_to_source", { section: rec.sections[0], piece: "a pallet", said: "writing it: " + "a pallet", class: "e2e_filing_no_such_class", key: "mssql:dbo_FJob:4471", fields: { Status: "x" } });
         ctx.check(noClass.error && /request one/.test(noClass.error), `no class: request one, never make one (R5): ${JSON.stringify(noClass)}`);
       });

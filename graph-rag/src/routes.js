@@ -220,30 +220,37 @@ app.post("/api/worker/threads/:id/finish", (req, res) => {
   if (!rootOnly(req, res)) return;
   void finishThread(req.params.id, req.body ?? {}).then((r) => res.json(r), (e) => httpError(res, e));
 });
+/** R15's floor: every open kick-back whose signal the master was given (delivered) is Kept as it stands */
+async function floorDeliveredKickbacks() {
+  const { floorUnsettled, liveEnv } = await import("./filing.js");
+  const env = await liveEnv();
+  const open = await env.store.requests({ status: "open", raised_by: "graph-rag" }).catch(() => []);
+  const seen = [];
+  for (const r of open) {
+    const sig = (await adbQuery("SELECT status FROM Signal WHERE kind = 'request' AND data LIKE :d LIMIT 1", { d: `%${r.id}%` }).catch(() => []))[0];
+    if (sig?.status === "delivered") seen.push(r.id);
+  }
+  return seen.length ? floorUnsettled(seen, env) : [];
+}
 /** the master's inbox: new signals (the workspace delivers them to the master thread) */
 app.get("/api/worker/signals", (req, res) => {
   if (!rootOnly(req, res)) return;
   void (async () => {
+    // R15: the master asks for signals only once its last turn has ended (graph-pool.ts masterTurn; the eval driver
+    // likewise), so a kick-back whose signal was delivered and is still open was left open by that turn: Kept now
+    const floored = await floorDeliveredKickbacks();
     const rows = await adbQuery("SELECT id, kind, job_id, batch_id, data, created_at FROM Signal WHERE status = 'new' ORDER BY created_at ASC LIMIT 50");
     const signals = rows.map((r) => ({ ...r, data: JSON.parse(r.data || "{}") }));
     const status = await masterStatus();
-    return { signals, status, message: signals.length ? signalsMessage(signals, status) : "" };
+    return { signals, status, message: signals.length ? signalsMessage(signals, status) : "", ...(floored.length ? { kept_by_graph_rag: floored } : {}) };
   })().then((r) => res.json(r), (e) => httpError(res, e));
 });
 app.post("/api/worker/signals/ack", (req, res) => {
   if (!rootOnly(req, res)) return;
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).filter((i) => JOB_ID_RE.test(String(i))).slice(0, 100);
   void (async () => {
-    // R15: the orchestrator's turn that saw these signals is over: a request graph-rag raised that it left open is Kept
-    const kickbacks = [];
-    for (const id of ids) {
-      const row = (await adbQuery("SELECT kind, data FROM Signal WHERE id = :id AND status = 'new'", { id }).catch(() => []))[0];
-      const data = row?.kind === "request" ? JSON.parse(row.data || "{}") : null;
-      if (data?.raised_by === "graph-rag" && data.request) kickbacks.push(data.request);
-    }
     for (const id of ids) await adbCommand("UPDATE Signal SET status = 'delivered' WHERE id = :id", "sql", { id });
-    const floored = kickbacks.length ? await (await import("./filing.js")).floorUnsettled(kickbacks, await (await import("./filing.js")).liveEnv()) : [];
-    return { acked: ids.length, ...(floored.length ? { kept_by_graph_rag: floored } : {}) };
+    return { acked: ids.length };
   })().then((r) => res.json(r), (e) => httpError(res, e));
 });
 /** handlers to start (not limited by the pool: they wait on the operator) */

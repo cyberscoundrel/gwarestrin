@@ -77,3 +77,31 @@ export function assertBrief(brief, positions) {
   }
   return brief;
 }
+
+/**
+ * A worker names a section by a short id, s1, s2 ..., its place in the job's own list of sections (the payload's
+ * order, which the brief follows); the record id (#1:23) is shown beside it and also accepted.
+ */
+export const shortSectionId = (i) => `s${i + 1}`;
+
+/**
+ * What a model sent as `section`, as the record id it means, or null: the record id itself, the short id ("s2"),
+ * a bare or § number ("2", "§2"), any of those after "Section ". With one section in the brief, a missing value or
+ * plain text means that one (a model writing the piece's text into the field, say); a value that names some other
+ * section (a record id, or a short id or number past the list) never does: a worker can't file another record's
+ * section (R7, R9).
+ */
+export function resolveSectionRef(value, sections) {
+  const list = (sections ?? []).map(String);
+  const raw = String(value ?? "").trim();
+  const v = raw.replace(/^section\s+/i, "").replace(/^§\s*/, "").trim();
+  if (list.includes(v)) return v;
+  const n = /^s?(\d{1,3})$/i.exec(v);
+  if (n && Number(n[1]) >= 1 && Number(n[1]) <= list.length) return list[Number(n[1]) - 1];
+  const rid = /^(#\d+:\d+)/.exec(v);
+  if (rid && list.includes(rid[1])) return rid[1];
+  // names a section, just not one of these: refused, whatever the list
+  if (rid || n) return null;
+  if (list.length === 1) return list[0];
+  return null;
+}

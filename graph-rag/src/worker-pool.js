@@ -14,7 +14,7 @@ import { EMBED_MODEL, health, log, loops, WORKER_DAILY_CALLS, WORKER_MODEL, WORK
 import { adbCommand, adbQuery, ENTITY_LABEL, PENDING_ID_RE, RID_RE } from "./db.js";
 import { chat } from "./models.js";
 import { recordReads } from "./floor.js";
-import { assertBrief, scopeBrief } from "./model/brief.js";
+import { assertBrief, scopeBrief, shortSectionId } from "./model/brief.js";
 import { briefSource } from "./model/sources.js";
 import { accountGiven, ensureFilingSchema, kickBack, liveEnv, settleProposals } from "./filing.js";
 import { entriesByUser, positionMap, SCOPED } from "./scope.js";
@@ -268,7 +268,12 @@ export async function composeFilingBrief(payload, { db = { adbQuery }, positions
   const home = payload.home;
   const rids = payload.sections;
   const rows = await db.adbQuery(`SELECT @rid AS rid, name, heading, text_identity, _home, _doc_id FROM [${rids.join(",")}] WHERE _kind = 'section'`);
-  const sections = rows.filter((r) => r._doc_id === payload.record).map((r) => ({ rid: String(r.rid), heading: r.heading ?? null, text: String(r.text_identity ?? "").slice(0, 4000), home: effectiveHome(positions, r._home) }));
+  // in the job's own order, each with the short id a worker names it by (s1, s2 ...), the record id beside it
+  const order = (rid) => rids.map(String).indexOf(String(rid));
+  const sections = rows
+    .filter((r) => r._doc_id === payload.record)
+    .sort((a, b) => order(a.rid) - order(b.rid))
+    .map((r) => ({ section: shortSectionId(order(r.rid)), rid: String(r.rid), heading: r.heading ?? null, text: String(r.text_identity ?? "").slice(0, 4000), home: effectiveHome(positions, r._home) }));
   if (!sections.length) throw new Error("the record's sections are gone");
   const doc = (await db.adbQuery(`SELECT name, _home, description FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: payload.record }))[0];
   // the title takes the strictest home among the sections (R11): the document's own home
@@ -308,7 +313,7 @@ export async function composeFilingBrief(payload, { db = { adbQuery }, positions
   // the Kept or Held pieces it re-files (R11): only this record's, at this home
   const byId = entries ?? (async (id) => (await import("./filing.js")).arcadeStore().entries({ id }));
   const toRefile = [];
-  for (const id of Array.isArray(payload.refile) ? payload.refile : []) for (const e of await byId(id)) if (e.record === payload.record && e.home === home) toRefile.push({ entry: e.id, outcome: e.outcome, piece: e.piece, section: e.section });
+  for (const id of Array.isArray(payload.refile) ? payload.refile : []) for (const e of await byId(id)) if (e.record === payload.record && e.home === home) toRefile.push({ entry: e.id, outcome: e.outcome, piece: e.piece, section: order(e.section) >= 0 ? shortSectionId(order(e.section)) : e.section });
   return { brief, dropped, dependencies, refile: toRefile };
 }
 
