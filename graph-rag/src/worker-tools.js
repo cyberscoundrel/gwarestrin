@@ -11,7 +11,7 @@
  * The filing stream owns this module.
  */
 import { z } from "zod";
-import { createInstance, fileToSource, giveAccount, holdPiece, jobContext, keepPiece, liveEnv, relateSection, requestOrchestrator, resolveName, sectionKey, stateDependency } from "./filing.js";
+import { createInstance, fileToSource, findText, giveAccount, holdPiece, jobContext, keepPiece, liveEnv, relateSection, requestOrchestrator, resolveName, sectionKey, stateDependency } from "./filing.js";
 import { REQUEST_KINDS } from "./model/filing.js";
 import { resolveEntryRef, resolveSectionRef, shortSectionId } from "./model/brief.js";
 
@@ -27,10 +27,29 @@ const reply = (v) => ({ content: [{ type: "text", text: JSON.stringify(v) }] });
 const SECTION_HINT = "the section's id from your brief (s1, s2 …), not its text";
 const sectionId = z.string().max(5000).optional().describe(SECTION_HINT);
 const pieceText = z.string().min(3).max(1000);
-const refiles = z.string().max(80).optional();
+// re-filing (I-41): offered only to a worker with something to re-file (identity.refiling, set per request from
+// filing.js refileOffered); a first-time filing has no such argument, and one sent anyway is dropped by the schema
+const REFILES = z.string().max(80).optional().describe("only when you re-file: the entry id your brief or the answer named");
+const refileArg = (identity) => (identity?.refiling ? { refiles: REFILES } : {});
+
+/** find_rows (I-40): the worker's and the orchestrator's search of a source table, graph-rag doing the text match */
+export const FIND_ROWS_HELP = `Find rows of a source table, read-only: text is words that must all appear in a row (any case; in
+columns, or in every column when none are named); where narrows by equal values ({ "Status": "Active",
+"Job": 3260356 }). Use this, not a filter with contains or startswith, which the source doesn't take.
+An unknown table or column is refused with the real ones. More rows: call again with offset: next_offset.`;
+export const FIND_ROWS_ARGS = {
+  table: z.string().min(1).max(200).describe('"system:table", like mssql:dbo_Customer'),
+  text: z.string().max(200).optional(),
+  columns: z.array(z.string().max(80)).max(30).optional(),
+  where: z.record(z.union([z.string().max(300), z.number(), z.boolean()])).optional(),
+  select: z.array(z.string().max(80)).max(30).optional(),
+  first: z.number().int().min(1).max(50).optional(),
+  offset: z.number().int().min(0).max(5000).optional(),
+};
 
 /** the tools of a worker thread, registered on the MCP server built for that identity (see createServer) */
 export function registerWorkerTools(server, { identity, need }) {
+  const refiles = refileArg(identity);
   // section: "required" or "optional" resolves args.section to the record id the worker means, or refuses with
   // its sections' ids and headings
   // tables: bare table names in table/key resolved to system:table (withTables); every result naming an entry carries
@@ -49,6 +68,7 @@ export function registerWorkerTools(server, { identity, need }) {
     { name: z.string().min(1).max(200), table: z.string().max(200).optional(), column: z.string().max(80).optional() },
     run(resolveName, "read", null, { tables: true }),
   );
+  server.tool("find_rows", FIND_ROWS_HELP, FIND_ROWS_ARGS, run(findText, "read", null, { tables: true }));
   server.tool(
     "file_to_source",
     `File one piece of the record into its source row: the row's key ("mssql:dbo_Job:4471"), the columns
@@ -68,7 +88,7 @@ this piece writes, which the orchestrator checks against the source. You never p
       says_change: z.boolean().optional(),
       question: z.string().max(1000).optional(),
       confirmed_update: z.string().max(80).optional(),
-      refiles,
+      ...refiles,
     },
     run(fileToSource, "write", "required", { tables: true }),
   );
@@ -77,14 +97,14 @@ this piece writes, which the orchestrator checks against the source. You never p
     `Hold a piece a source should hold when it's unclear which record it means: nothing is written, and
 your question goes to whoever put the record on record. Name the row's key, or its table, or a class
 with a table.`,
-    { section: sectionId, piece: pieceText, question: z.string().min(8).max(1000), class: z.string().max(80).optional(), key: z.string().max(300).optional(), table: z.string().max(200).optional(), refiles },
+    { section: sectionId, piece: pieceText, question: z.string().min(8).max(1000), class: z.string().max(80).optional(), key: z.string().max(300).optional(), table: z.string().max(200).optional(), ...refiles },
     run(holdPiece, "write", "required", { tables: true }),
   );
   server.tool(
     "keep_piece",
     `Keep a piece no system holds: the document is its source, linked to the instances it is about (by
 id, at least one). Nothing Kept is deleted; it is re-filed when a fitting class or source appears.`,
-    { section: sectionId, piece: pieceText, instances: z.array(z.string().max(40)).min(1).max(20), refiles },
+    { section: sectionId, piece: pieceText, instances: z.array(z.string().max(200)).min(1).max(20), ...refiles },
     run(keepPiece, "write", "required"),
   );
   server.tool(
@@ -99,7 +119,7 @@ source refuses: store the key on the section instead.`,
   server.tool(
     "relate_section",
     "Relate one of your sections to an instance your audience can see (by id).",
-    { section: sectionId, instance: z.string().min(3).max(40), role: z.string().max(40).optional() },
+    { section: sectionId, instance: z.string().min(2).max(200).describe("the instance's id (#12:3); a name is taken when exactly one instance you see has it"), role: z.string().max(40).optional() },
     run(relateSection, "write", "required"),
   );
   server.tool(
@@ -140,7 +160,7 @@ again to correct it); the orchestrator checks it against the source itself.`,
 }
 
 /** for tests and the integrator: the tools a worker has now, and the ones earlier designs had */
-export const WORKER_TOOLS = ["resolve_name", "file_to_source", "hold_piece", "keep_piece", "create_instance", "relate_section", "section_key", "state_dependency", "request", "give_account"];
+export const WORKER_TOOLS = ["resolve_name", "find_rows", "file_to_source", "hold_piece", "keep_piece", "create_instance", "relate_section", "section_key", "state_dependency", "request", "give_account"];
 export const REMOVED_WORKER_TOOLS = [
   // asking the admin: Held pieces ask the recorder, and requests go to the orchestrator (R2, R10)
   "raise_question",
@@ -224,7 +244,7 @@ async function withEntries(args, identity, env) {
  * A bare table name where system:table is wanted: in `table`, and as the table of a `key` with no system
  * ("dbo_Job:4471"). The one declared source that has the table (classes.js qualifyTable), or refused with the form.
  */
-async function withTables(args) {
+export async function withTables(args) {
   const { qualifyTable } = await import("./classes.js");
   const out = { ...args };
   try {

@@ -56,6 +56,11 @@ app.post("/mcp", async (req, res) => {
   res.on("close", () => transport.close());
   try {
     await withDiscoveryRole(identity); // a discovery part's worker is held to its run's tools (classes.js)
+    // a filing worker is offered refiles only when it has something to re-file (filing.js refileOffered, I-41)
+    if (identity.role?.kind === "worker" && !identity.role.discovery) {
+      const { liveEnv, refileOffered } = await import("./filing.js");
+      identity.refiling = await refileOffered(identity, await liveEnv()).catch(() => false);
+    }
     await createServer(identity).connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {

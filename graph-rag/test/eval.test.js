@@ -448,3 +448,50 @@ test("driver: a blank reply that says it stopped is asked once more, counted; a 
   await runAgent({ client: c4, system: "s", prompt: "p", tools: [] });
   assert.equal(c4.asked, 1, "a reply with text is never retried");
 });
+
+test("I-43: tool errors split three ways: malformed calls, source rejections, graph-rag refusals", async () => {
+  const { errorKind, parseLog, toolCallCounts } = await import("../eval/toolcalls.mjs");
+  const log = [
+    { agent: "worker", tool: "graph-rag_keep_piece", error: false },
+    { agent: "worker", tool: "graph-rag_keep_piece", error: true, errorText: "MCP error -32602: Input validation error: Invalid arguments for tool keep_piece" },
+    { agent: "worker", tool: "graph-pool_status", error: true, errorText: "error: no tool graph-pool_status" },
+    { agent: "worker", tool: "mssql_read_records", error: true, errorText: '{ "toolName": "read_records", "status": "error", "error": { "message": "$filter query parameter is not well formed." } }' },
+    { agent: "orchestrator", tool: "graph-rag_record_verdict", error: true, errorText: "entry x isn't one of yours" },
+    { agent: "discovery", tool: "mssql_describe_entities", error: true, errorText: "No entities found" },
+    { agent: "worker", turn: 1, reply: "" },
+  ];
+  assert.equal(errorKind(log[1]), "malformed");
+  assert.equal(errorKind(log[2]), "malformed", "a tool that doesn't exist");
+  assert.equal(errorKind(log[3]), "source");
+  assert.equal(errorKind(log[4]), "graph_rag");
+  const c = toolCallCounts(log);
+  assert.deepEqual(c.all, { calls: 6, errors: 5, malformed: 2, source: 2, graph_rag: 1 });
+  assert.deepEqual(c.filing, { calls: 5, errors: 4, malformed: 2, source: 1, graph_rag: 1 }, "discovery left out");
+  assert.deepEqual(c.byRole.orchestrator, { calls: 1, errors: 1, malformed: 0, source: 0, graph_rag: 1 });
+  assert.equal(parseLog(`${JSON.stringify(log[0])}\nnot json\n`).length, 1);
+});
+
+test("report: a run on a subset (meta.only) scores only those notes, and the tool calls show their errors split three ways", () => {
+  const notes = NOTES.slice(0, 3);
+  const { entries, noteOf } = perfectLog(notes);
+  const before = dataset();
+  const snap = {
+    meta: { setup: "C", run: 1, seed: 1, noteOf, markers: [], only: [notes[0].id, notes[2].id] },
+    positions: POSITIONS,
+    before,
+    after: clone(before),
+    entries: entries.filter((e) => e.outcome !== "filed"),
+    requests: [],
+    briefs: [{ id: "b1", audience: "floor", text: "a brief" }],
+    classes: roots,
+    instances: [],
+    sections: [],
+    about: {},
+    toolCalls: { all: { calls: 10, errors: 4, malformed: 1, source: 2, graph_rag: 1 }, filing: { calls: 8, errors: 3, malformed: 1, source: 1, graph_rag: 1 }, byRole: { worker: { calls: 8, errors: 3, malformed: 1, source: 1, graph_rag: 1 } } },
+  };
+  const r = buildReport(snap);
+  assert.deepEqual(r.outcomes.notes.map((n) => n.note), [notes[0].id, notes[2].id]);
+  assert.match(r.markdown, /## Tool calls/);
+  assert.match(r.markdown, /\| all \| 10 \| 4 \(40%\) \| 1 \| 2 \| 1 \|/);
+  assert.equal(buildReport({ ...snap, meta: { ...snap.meta, only: undefined } }).outcomes.notes.length, NOTES.length, "no subset: every note");
+});

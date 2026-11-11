@@ -16,7 +16,8 @@ import { log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { effectiveHome, homeName } from "./positions.js";
 import { positionMap } from "./scope.js";
-import { accountEvidence, answerRequest, filingLog, keptPieces, liveEnv, openRequestLines, recordVerdict, refileRefusal, REFILE_LIMIT, requestHandle, requestList, resolveRequestRef } from "./filing.js";
+import { FIND_ROWS_ARGS, FIND_ROWS_HELP, withTables } from "./worker-tools.js";
+import { accountEvidence, answerRequest, filingLog, findText, keptPieces, liveEnv, openRequestLines, recordVerdict, refileRefusal, REFILE_LIMIT, requestHandle, requestList, resolveRequestRef } from "./filing.js";
 import { ANSWERS, GRAPH_RAG, VERDICTS } from "./model/filing.js";
 import { splitByHome } from "./model/brief.js";
 
@@ -273,8 +274,10 @@ nothing is undone.`,
     { entry: z.string().min(8).max(80), result: z.enum(VERDICTS), note: z.string().max(1000).optional() },
     async (args) => reply(await recordVerdict(args.entry, { result: args.result, note: args.note }, identity.user, await liveEnv())),
   );
+  // the same search of a source table a worker has (I-40), read with no audience: the orchestrator sees every home
+  server.tool("find_rows", FIND_ROWS_HELP, FIND_ROWS_ARGS, async (args) => reply(await findText(await withTables(args), identity, await liveEnv(), { orchestrator: true })));
 }
 
 /** for tests: the orchestrator's filing tools, and the master tools that went (R11: it never approves) */
-export const ORCHESTRATOR_TOOLS = ["start_worker", "answer_request", "open_requests", "filing_log", "kept_pieces", "refile", "check_account", "record_verdict"];
+export const ORCHESTRATOR_TOOLS = ["start_worker", "answer_request", "open_requests", "filing_log", "kept_pieces", "refile", "check_account", "record_verdict", "find_rows"];
 export const REMOVED_ORCHESTRATOR_TOOLS = ["decide_proposal", "answer_worker"];

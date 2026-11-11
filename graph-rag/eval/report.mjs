@@ -10,6 +10,7 @@
 //                                        // [{ rid, record, home, text }]; { recordId: [instance rid] }
 //   titles,                              // [{ rid, record, home, title }]: documents' titles
 //   checks?: { a: [answer], b: [answer], aName, bName },
+//   toolCalls?: { all, byRole, filing } // from the run's driver.log (toolcalls.mjs): errors split three ways
 //   connectionHome?                      // who reads the test source (the test configuration: everyone)
 // }
 import { NOTES } from "./labels.mjs";
@@ -63,7 +64,7 @@ export function buildReport(snap, { notes = snap.meta?.only ? NOTES.filter((n) =
   const checks = snap.checks?.a?.length && snap.checks?.b?.length ? compareChecks(snap.checks.a, snap.checks.b) : null;
   const tree = renderTree(snap.classes, counts, { title: `Class tree: ${snap.meta.setup ?? "setup"}, run ${snap.meta.run ?? 1}` });
   const gates = { rows: rows.ok, leaks: leaks.ok, ok: rows.ok && leaks.ok };
-  const report = { meta: snap.meta, gates, changes, rows, leaks: { ...leaks, markers: homes }, outcomes, links, accounts, placements, duplicates, checks, tree };
+  const report = { meta: snap.meta, gates, changes, rows, leaks: { ...leaks, markers: homes }, outcomes, links, accounts, placements, duplicates, checks, tree, ...(snap.toolCalls ? { toolCalls: snap.toolCalls } : {}) };
   report.markdown = markdown(report, snap);
   return report;
 }
@@ -110,6 +111,14 @@ function markdown(r, snap) {
     L.push(`${snap.checks.aName ?? "A"} against ${snap.checks.bName ?? "B"} on ${c.compared} sections: agreement ${pct(c.agreement)}, kappa ${c.kappa === null ? "n/a" : c.kappa.toFixed(2)}.`);
     L.push(`- ${snap.checks.aName ?? "A"}: unsure ${pct(c.a.unsureRate)}, stable ${pct(c.a.stability)}, unanswered ${c.a.unanswered}`);
     L.push(`- ${snap.checks.bName ?? "B"}: unsure ${pct(c.b.unsureRate)}, stable ${pct(c.b.stability)}, unanswered ${c.b.unanswered}`);
+  }
+  if (r.toolCalls) {
+    // I-43: a tool error is one of three things, and only the first is a model failing to call a tool
+    const line = (name, x) => `| ${name} | ${x.calls} | ${x.errors} (${x.calls ? Math.round((100 * x.errors) / x.calls) : 0}%) | ${x.malformed} | ${x.source} | ${x.graph_rag} |`;
+    L.push("", "## Tool calls", "", "Errors split three ways: malformed (the call didn't fit the tool's schema, or named no tool), source rejections (a connection's own tool refused a well-formed call) and graph-rag refusals (a graph-rag tool refused a well-formed call).", "");
+    L.push("| | calls | errors | malformed | source rejections | graph-rag refusals |", "|---|--:|--:|--:|--:|--:|");
+    L.push(line("all", r.toolCalls.all), line("filing (no discovery)", r.toolCalls.filing));
+    for (const [role, x] of Object.entries(r.toolCalls.byRole)) L.push(line(role, x));
   }
   L.push("", "## Source changes", "");
   if (!r.changes.length) L.push("No row changed.");

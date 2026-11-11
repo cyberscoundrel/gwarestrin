@@ -678,3 +678,42 @@ test("review: approving needs a position map, and a person, never an agent", asy
   assert.match((await run("admin/agent:orchestrator")).threw, /an agent can't approve/);
   assert.equal((await run("bob")).r.outcome, "filed");
 });
+
+test("I-40: searchRows matches words in any column (DAB has no contains), pages by primary key with no cursor, and says when it stopped short", async () => {
+  const { searchRows, SEARCH_PAGE } = await import("../src/data-entry.js");
+  forgetPrimaryKeys();
+  const many = Array.from({ length: 2 * SEARCH_PAGE + 50 }, (_, i) => ({ Part: 1000 + i, Description: i % 100 === 7 ? `floater bar ${i}` : `blank ${i}`, Status: i % 2 ? "Open" : "Closed" }));
+  const dab = shop({ tables: { dbo_Part: { primaryKey: ["Part"], rows: many }, dbo_Employee: { primaryKey: ["Employee"], rows: people2.map((r) => ({ ...r })) } } });
+  const all = await searchRows({ system: "mssql", table: "dbo_Part", text: "FLOATER" }, on(dab));
+  assert.deepEqual([all.status, all.matched, all.complete], ["ambiguous", 5, true], "found on every page, not just the first");
+  assert.deepEqual(all.rows.map((r) => r.key), [1007, 1107, 1207, 1307, 1407].map((p) => `mssql:dbo_Part:${p}`));
+  const reads = dab.calls.filter((c) => c.name === "read_records" && c.args.entity === "dbo_Part" && c.args.first !== 1);
+  assert.ok(reads.length >= 3, "several pages");
+  assert.ok(reads.every((c) => c.args.after === undefined), "never a cursor");
+  assert.ok(reads.slice(1).every((c) => /^Part gt \d+$/.test(c.args.filter)), "the next page by key");
+  // words must all appear; where narrows at the source; offset pages through the matches
+  const two = await searchRows({ system: "mssql", table: "dbo_Part", text: "floater 107", where: { Status: "open" } }, on(dab));
+  assert.deepEqual(two.rows.map((r) => r.key), ["mssql:dbo_Part:1107"]);
+  const p1 = await searchRows({ system: "mssql", table: "dbo_Part", text: "floater", first: 2 }, on(dab));
+  assert.deepEqual([p1.rows.length, p1.next_offset, p1.more], [2, 2, true]);
+  const p3 = await searchRows({ system: "mssql", table: "dbo_Part", text: "floater", first: 2, offset: 4 }, on(dab));
+  assert.deepEqual([p3.rows.map((r) => r.key), p3.next_offset, p3.more], [["mssql:dbo_Part:1407"], undefined, false]);
+  // select narrows the row shown, the key stays
+  const sel = await searchRows({ system: "mssql", table: "dbo_Employee", text: "diep", where: { Status: "Active" }, select: ["Last_Name"] }, on(dab));
+  assert.deepEqual([sel.status, sel.rows[0].row], ["found", { Employee: "NGUD", Last_Name: "Nguyen" }]);
+  // a scan stopped short says so
+  const short = await searchRows({ system: "mssql", table: "dbo_Part", text: "floater" }, on(dab, { scanLimit: SEARCH_PAGE }));
+  assert.deepEqual([short.complete, short.matched, short.more], [false, 2, true]);
+  assert.match(short.note, /searched the first 200 rows/);
+  // refusals name what is there
+  assert.match((await searchRows({ system: "mssql", table: "dbo_Nope", text: "x" }, on(dab))).why, /mssql has no table dbo_Nope: it has dbo_Job, dbo_Part, dbo_Employee/);
+  assert.match((await searchRows({ system: "mssql", table: "dbo_Part", where: { Part: "abc" } }, on(dab))).why, /Part is a number column/);
+  assert.match((await searchRows({ system: "mssql", table: "dbo_Part" }, on(dab))).why, /give text to find, or where/);
+  const coerced = await searchRows({ system: "mssql", table: "dbo_Part", where: { Part: "1107" } }, on(dab));
+  assert.deepEqual([coerced.status, coerced.rows[0].key], ["found", "mssql:dbo_Part:1107"]);
+  // the audience: a connection read above it reads nothing
+  const before = dab.calls.length;
+  const opsHomed = { fetch: dab.fetch, sources: declared({ read: { via: "dab-mcp", url: "http://fake/read", home: "ops" } }), positions: map, audience: "floor" };
+  assert.equal((await searchRows({ system: "mssql", table: "dbo_Part", text: "floater" }, opsHomed)).status, "refused");
+  assert.equal(dab.calls.length, before);
+});

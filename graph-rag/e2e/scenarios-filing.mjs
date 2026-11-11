@@ -111,6 +111,18 @@ const log = (ctx, doc) => ctx.sql(`SELECT id, outcome, target, pending_id, quest
 const writes = () => fake.calls.filter((c) => c.name === "update_record");
 const orchestrator = (ctx) => ctx.delegated({ r: "master" });
 
+/** tools/list for a token: each tool's input schema by name */
+async function toolSchemas(ctx, token) {
+  const r = await fetch(`${ctx.GRAPH}/mcp`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+  });
+  const t = await r.text();
+  const line = t.split("\n").find((l) => l.startsWith("data:"));
+  return new Map((JSON.parse(line ? line.slice(5) : t).result?.tools ?? []).map((x) => [x.name, x.inputSchema ?? {}]));
+}
+
 export default [
   {
     name: "a worker files a piece its recorder has authority for: the source row is written and the log names it, Filed",
@@ -204,7 +216,8 @@ export default [
       await withMap(ctx, async () => {
         const rec = await record(ctx, "r14", ["The forklift is booked Thursday."]);
         const fork = await ctx.tool(rec.worker, "create_instance", { section: rec.sections[0], name: "e2e-filing r14 forklift", class: "e2e_filing_equipment" });
-        const keep = async (refiles) => (await ctx.tool(rec.worker, "keep_piece", { section: rec.sections[0], piece: "the forklift is booked Thursday", instances: [fork.instance], ...(refiles ? { refiles } : {}) })).entry;
+        // a re-filing is done by the refile job's own worker (I-41: only it is offered refiles)
+        const keep = async (refiles, worker = rec.worker) => (await ctx.tool(worker, "keep_piece", { section: rec.sections[0], piece: "the forklift is booked Thursday", instances: [fork.instance], ...(refiles ? { refiles } : {}) })).entry;
         const offered = async () => (await ctx.tool(orchestrator(ctx), "kept_pieces", {})).kept?.map((p) => p.entry) ?? [];
         const refile = (entry) => ctx.tool(orchestrator(ctx), "refile", { entries: [entry] });
         const tag = ctx.randomUUID().slice(0, 8);
@@ -222,7 +235,7 @@ export default [
           ctx.check((await offered()).includes(prev), `a class made since: offered (re-filing ${i})`);
           const r = await refile(prev);
           ctx.check(!r.error && !r.refused, `re-filing ${i} goes ahead: ${JSON.stringify(r).slice(0, 300)}`);
-          const next = await keep(prev);
+          const next = await keep(prev, ctx.workerToken(rec.sections[0], r.started?.[0]?.job));
           ctx.check(Boolean(next) && next !== prev, `the re-filing's worker Keeps it again (${i})`);
           const now = await offered();
           ctx.check(!now.includes(prev) && !now.includes(next), `re-filed with no class since: neither the old entry nor the new one is offered (${i})`);
@@ -345,8 +358,8 @@ export default [
       await withMap(ctx, async () => {
         const rec = await record(ctx, "handles", ["Job 4471 is complete. The forklift is booked Thursday."]);
         const fork = await ctx.tool(rec.worker, "create_instance", { section: "s1", name: "e2e-filing handles forklift", class: "e2e_filing_equipment" });
-        const byName = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the forklift is booked Thursday", instances: ["alice"] });
-        ctx.check(byName.error && /graph-rag_resolve_name or graph-rag_create_instance/.test(byName.error), `an instance by name is refused, pointing to where ids come from: ${JSON.stringify(byName).slice(0, 300)}`);
+        const byName = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the forklift is booked Thursday", instances: ["e2e-filing nobody by this name"] });
+        ctx.check(byName.error && /graph-rag_resolve_name or graph-rag_create_instance/.test(byName.error), `a name no instance the worker sees has is refused, pointing to where ids come from (I-42 takes a name only with one candidate): ${JSON.stringify(byName).slice(0, 300)}`);
         const k = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the forklift is booked Thursday", instances: [fork.instance] });
         ctx.check(k.handle === "e1" && k.entry, `the first entry's handle is e1: ${JSON.stringify(k).slice(0, 200)}`);
         const f = await ctx.tool(rec.worker, "file_to_source", { section: "s1", piece: "job 4471 is complete", said: "writing it: job 4471 is complete", class: "e2e_filing_jobs", key: "dbo_FJob:4471", fields: { Status: "complete" } });
@@ -414,6 +427,107 @@ export default [
         ctx.check(refused.error && /no section|isn't one of yours/.test(refused.error), `another record's section is refused: ${JSON.stringify(refused)}`);
         const noClass = await ctx.tool(rec.worker, "file_to_source", { section: rec.sections[0], piece: "a pallet", said: "writing it: " + "a pallet", class: "e2e_filing_no_such_class", key: "mssql:dbo_FJob:4471", fields: { Status: "x" } });
         ctx.check(noClass.error && /request one/.test(noClass.error), `no class: request one, never make one (R5): ${JSON.stringify(noClass)}`);
+      });
+    },
+  },
+  {
+    name: "I-40: find_rows finds rows by words the source's filter can't take, pages by key, and refuses an unknown table or column with the real ones",
+    run: async (ctx) => {
+      await setup(ctx);
+      fake.tables.dbo_FCust = { primaryKey: ["Cust"], rows: [{ Cust: "EXA", Name: "Exatron Corp", Terms: "Net 30" }, { Cust: "TOR", Name: "Toro", Terms: "Net 45" }] };
+      await withMap(ctx, async () => {
+        const rec = await record(ctx, "findrows", ["Exatron wants the next batch earlier."]);
+        const exa = await ctx.tool(rec.worker, "find_rows", { table: "mssql:dbo_FCust", text: "exatron" });
+        ctx.check(exa.status === "found" && exa.rows?.[0]?.key === "mssql:dbo_FCust:EXA", `a word inside a name is found: ${JSON.stringify(exa).slice(0, 300)}`);
+        const bare = await ctx.tool(rec.worker, "find_rows", { table: "dbo_FCust", text: "net 45" });
+        ctx.check(bare.rows?.[0]?.key === "mssql:dbo_FCust:TOR", `a bare table name is qualified; words across columns: ${JSON.stringify(bare).slice(0, 300)}`);
+        const job = await ctx.tool(rec.worker, "find_rows", { table: "mssql:dbo_FJob", where: { Job: "4472" } });
+        ctx.check(job.status === "found" && job.rows?.[0]?.row?.Status === "open", `a number given as text is read as a number: ${JSON.stringify(job).slice(0, 300)}`);
+        const notNumber = await ctx.tool(rec.worker, "find_rows", { table: "mssql:dbo_FJob", where: { Job: "job 4472" } });
+        ctx.check(/number column/.test(notNumber.error ?? ""), `a number column compared with words is explained: ${JSON.stringify(notNumber)}`);
+        const col = await ctx.tool(rec.worker, "find_rows", { table: "mssql:dbo_FCust", text: "x", columns: ["Code"] });
+        ctx.check(/has no column Code: it has Cust, Name, Terms/.test(col.error ?? ""), `an unknown column is refused with the real ones: ${JSON.stringify(col)}`);
+        const table = await ctx.tool(rec.worker, "find_rows", { table: "mssql:dbo_FNope", text: "x" });
+        ctx.check(/has no table dbo_FNope: it has/.test(table.error ?? ""), `an unknown table is refused with the real ones: ${JSON.stringify(table)}`);
+        const filters = fake.calls.filter((c) => c.name === "read_records").map((c) => String(c.args?.filter ?? ""));
+        ctx.check(filters.every((x) => !/contains|startswith|endswith/.test(x)) && fake.calls.every((c) => c.args?.after === undefined), `no string function and no cursor reach the source: ${JSON.stringify(filters)}`);
+        // the orchestrator has it too, with no audience
+        const o = await ctx.tool(orchestrator(ctx), "find_rows", { table: "mssql:dbo_FCust", text: "toro" });
+        ctx.check(o.rows?.[0]?.key === "mssql:dbo_FCust:TOR", `the orchestrator's find_rows: ${JSON.stringify(o).slice(0, 200)}`);
+      });
+    },
+  },
+  {
+    name: "I-40: find_rows keeps the audience rules: a worker below the source's read home reads nothing",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        // the source read at Operations: a floor worker may not read it, through find_rows as through anything else
+        const url = fake.url;
+        await upsertPolicyRow(ctx, "sources", JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: `${url}/read/mcp`, home: "ops" }, commit: { via: "dab-mcp", url: `${url}/write/mcp`, tables: ["dbo_FJob"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } }]));
+        try {
+          const rec = await record(ctx, "findrows-aud", ["Job 4471."]);
+          // the sources declaration is cached for a minute; wait it out so the ops read home is what the read sees
+          let r;
+          for (let i = 0; i < 15; i++) {
+            fake.calls = [];
+            r = await ctx.tool(rec.worker, "find_rows", { table: "mssql:dbo_FJob", text: "4471" });
+            if (r.error) break;
+            await new Promise((res) => setTimeout(res, 5000));
+          }
+          ctx.check(/above your audience|above this audience/.test(r.error ?? ""), `refused: ${JSON.stringify(r).slice(0, 300)}`);
+          ctx.check(!fake.calls.some((c) => c.name === "read_records" && c.args?.entity === "dbo_FJob" && c.args?.first !== 1), "no rows were read for it");
+        } finally {
+          await upsertPolicyRow(ctx, "sources", JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: `${url}/read/mcp`, home: "floor" }, commit: { via: "dab-mcp", url: `${url}/write/mcp`, tables: ["dbo_FJob"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } }]));
+        }
+      });
+    },
+  },
+  {
+    name: "I-41: a first-time worker isn't offered refiles (a stray one is dropped); once it holds a piece, it is, and a wrong entry is refused with the ones it may",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const rec = await record(ctx, "refile-offer", ["The forklift is booked Thursday; which Toro job was it?"]);
+        const crate = await ctx.tool(rec.worker, "create_instance", { section: "s1", name: `e2e-filing forklift ${ctx.randomUUID().slice(0, 6)}`, class: "e2e_filing_equipment" });
+        let tools = await toolSchemas(ctx, rec.worker);
+        ctx.check(["file_to_source", "hold_piece", "keep_piece"].every((t) => tools.has(t) && !("refiles" in (tools.get(t).properties ?? {}))), "no refiles on a first-time filing's tools");
+        ctx.check(tools.has("find_rows"), "find_rows is offered");
+        const stray = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the forklift is booked Thursday", instances: [crate.instance], refiles: "shipment" });
+        ctx.check(stray.outcome === "kept", `a stray refiles is dropped, not refused: ${JSON.stringify(stray).slice(0, 200)}`);
+        const held = await ctx.tool(rec.worker, "hold_piece", { section: "s1", piece: "which Toro job", question: "Which Toro job did you mean?", table: "mssql:dbo_FJob" });
+        ctx.check(held.outcome === "held", `held: ${JSON.stringify(held).slice(0, 200)}`);
+        tools = await toolSchemas(ctx, rec.worker);
+        ctx.check(["file_to_source", "hold_piece", "keep_piece"].every((t) => "refiles" in (tools.get(t).properties ?? {})), "refiles is offered once it holds a piece to re-file");
+        const wrong = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the Toro job", instances: [crate.instance], refiles: "hold-1" });
+        ctx.check(wrong.error?.includes(held.entry), `a made-up entry is refused with the ones it may re-file: ${JSON.stringify(wrong).slice(0, 300)}`);
+        const ok = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the Toro job", instances: [crate.instance], refiles: held.entry });
+        const row = (await log(ctx, rec.doc)).find((e) => e.id === ok.entry);
+        ctx.check(row?.refiled_from === held.entry, `re-filed from the Held entry: ${JSON.stringify(row).slice(0, 200)}`);
+        const first = (await log(ctx, rec.doc)).find((e) => e.id === stray.entry);
+        ctx.check(first && !first.refiled_from, "the stray one re-filed nothing");
+      });
+    },
+  },
+  {
+    name: "I-42: a name where an instance id is wanted is taken when one instance the worker sees has it; two by that name are refused",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const rec = await record(ctx, "byname", ["The press is booked Thursday."]);
+        const name = `e2e-filing press ${ctx.randomUUID().slice(0, 6)}`;
+        const press = await ctx.tool(rec.worker, "create_instance", { section: "s1", name, class: "e2e_filing_equipment" });
+        const k = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the press is booked Thursday", instances: [name.toUpperCase()] });
+        const row = (await log(ctx, rec.doc)).find((e) => e.id === k.entry);
+        ctx.check(k.outcome === "kept", `kept by name: ${JSON.stringify(k).slice(0, 200)}`);
+        const linked = await ctx.sql(`SELECT instances FROM FilingEntry WHERE id = '${k.entry}'`);
+        ctx.check(JSON.stringify(linked).includes(press.instance), `linked to the one instance by that name: ${JSON.stringify(linked)} ${JSON.stringify(row).slice(0, 100)}`);
+        const rel = await ctx.tool(rec.worker, "relate_section", { section: "s1", instance: name });
+        ctx.check(!rel.error, `relate_section takes the name too: ${JSON.stringify(rel).slice(0, 200)}`);
+        // a second instance by the same name, under another class the worker sees: now two, so refused
+        await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${name}', label = '${name}', _kind = 'thing', _norm = '${name.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}', _homes = ['floor'], _home = 'floor'` });
+        const two = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the press again", instances: [name] });
+        ctx.check(/no one instance you can see is called that/.test(two.error ?? ""), `two by that name: refused: ${JSON.stringify(two)}`);
       });
     },
   },

@@ -78,6 +78,8 @@ function fakeDb({ writable = true, payload } = {}) {
       if (sql.includes("expand(outE('ABOUT'))")) return (db.about ?? {})[sql.match(/FROM (#\d+:\d+)\)/)?.[1]] ?? [];
       if (sql.includes("FROM #80:1 WHERE _kind = 'thing'")) return [{ rid: "#80:1", label: "forklift 2", _homes: ["floor"], _keys: [] }];
       if (sql.includes("FROM #80:9 WHERE _kind = 'thing'")) return [{ rid: "#80:9", label: "the payroll", _homes: ["org"], _keys: [] }];
+      // instances by name (resolve_name, and a name where an id is wanted, I-42): db.things [{ rid, norm, _homes }]
+      if (sql.includes("_norm = :n")) return (db.things ?? []).filter((t) => t.norm === params.n).map((t) => ({ rid: t.rid, label: t.norm, _homes: t._homes, _keys: [] }));
       return [];
     },
   };
@@ -850,4 +852,79 @@ test("R11.13 on source writes: a write the source's readers can't all see is Pro
     assert.equal(r3.outcome, "filed", `read at ${home}`);
     assert.equal(h3.dab.rows[0].Status, "complete");
   }
+});
+
+// ---- I-40, I-41, I-42: the two largest sources of tool errors in C-1, and names where an id is wanted ----
+
+test("I-40: find_rows finds rows by words the source's filter can't take, refuses an unknown table or column with the real ones, and reads only what the worker's audience may", async () => {
+  const { findText } = await import("../src/filing.js");
+  const { searchRows } = await import("../src/data-entry.js");
+  const h = setup();
+  h.env.searchRows = (args, o = {}) => searchRows(args, { db: h.db, fetch: h.dab.fetch, positions: map, ...o });
+  h.env.systems = async () => ["mssql"];
+  const diep = await findText({ table: "mssql:dbo_Crew", text: "diep" }, identity, h.env);
+  assert.deepEqual([diep.status, diep.rows.map((r) => r.key)], ["found", ["mssql:dbo_Crew:E1"]]);
+  assert.equal(diep.filing, undefined, "a read decides no outcome");
+  const filters = h.dab.calls.map((c) => String(c.args?.filter ?? ""));
+  assert.ok(filters.every((f) => !/contains|startswith|endswith/.test(f)), "no string function reaches the source");
+  // a number column takes a number given as text; anything else is explained
+  const job = await findText({ table: "mssql:dbo_Job", where: { Job: "4471" } }, identity, h.env);
+  assert.deepEqual([job.status, job.rows[0].key], ["found", "mssql:dbo_Job:4471"]);
+  await assert.rejects(findText({ table: "mssql:dbo_Job", where: { Job: "job 4471" } }, identity, h.env), /Job is a number column: compare it with a number/);
+  await assert.rejects(findText({ table: "mssql:dbo_Crew", text: "x", columns: ["First_Name"] }, identity, h.env), /has no column First_Name: it has Emp, Name/);
+  await assert.rejects(findText({ table: "erp:dbo_Job", text: "x" }, identity, h.env), /no connected source called erp: the sources are mssql/);
+  // the audience rules: a table above the worker's audience is refused before anything is read
+  const before = h.dab.calls.length;
+  await assert.rejects(findText({ table: "mssql:dbo_Pay", text: "Bob" }, identity, h.env), /above your audience/);
+  assert.equal(h.dab.calls.length, before, "the source was never asked");
+  // a table the source doesn't have, once the connection vouches for the system: refused with the real ones
+  h.env.connectionHome = () => "floor";
+  await assert.rejects(findText({ table: "mssql:dbo_Nope", text: "x" }, identity, h.env), /mssql has no table dbo_Nope: it has dbo_Job, dbo_Crew/);
+  h.env.connectionHome = () => "ops";
+  await assert.rejects(findText({ table: "mssql:dbo_Crew", text: "diep" }, identity, h.env), /connection above your audience/);
+});
+
+test("I-42: a name where an instance id is wanted is taken when exactly one instance the worker sees has it; otherwise refused as before", async () => {
+  const h = setup();
+  h.db.things = [{ rid: "#80:1", norm: "forklift 2", _homes: ["floor"] }];
+  const k = await keepPiece({ section: "#71:4", piece: "the forklift is booked Thursday", instances: ["Forklift 2"] }, identity, h.env);
+  assert.deepEqual([k.outcome, h.store.entries_[0].instances], ["kept", ["#80:1"]]);
+  // an id without its #
+  await keepPiece({ section: "#71:4", piece: "the forklift is booked Friday", instances: ["80:1"] }, identity, h.env);
+  assert.deepEqual(h.store.entries_[1].instances, ["#80:1"]);
+  // two by that name, or one the worker can't see: refused, nothing written
+  h.db.things = [{ rid: "#80:1", norm: "forklift 2", _homes: ["floor"] }, { rid: "#80:2", norm: "forklift 2", _homes: ["floor"] }];
+  await assert.rejects(keepPiece({ section: "#71:4", piece: "the forklift again", instances: ["Forklift 2"] }, identity, h.env), /no one instance you can see is called that/);
+  h.db.things = [{ rid: "#80:9", norm: "the payroll", _homes: ["org"] }];
+  await assert.rejects(keepPiece({ section: "#71:4", piece: "the payroll again", instances: ["the payroll"] }, identity, h.env), /no one instance you can see is called that/);
+  assert.equal(h.store.entries_.length, 2);
+});
+
+test("I-41: refiles is offered only to a worker with something to re-file, and a wrong one is refused with the ones it may", async () => {
+  const { refileOffered } = await import("../src/filing.js");
+  const h = setup();
+  assert.equal(await refileOffered(identity, h.env), false, "a first-time filing: no argument to fill");
+  assert.equal(await refileOffered({ user: "admin", role: { kind: "master" } }, h.env), false);
+  const held = await holdPiece({ section: "#71:3", piece: "the Toro job", question: "Which Toro job did you mean?", class: "jobs" }, identity, h.env);
+  assert.equal(await refileOffered(identity, h.env), true, "resumed with the recorder's answer to a Held piece");
+  await assert.rejects(keepPiece({ section: "#71:3", piece: "the Toro job", instances: ["#80:1"], refiles: "hold-1" }, identity, h.env), new RegExp(`The ones you may re-file: ${held.entry}`));
+  const k = await keepPiece({ section: "#71:3", piece: "the Toro job", instances: ["#80:1"], refiles: held.entry }, identity, h.env);
+  assert.equal(h.store.entries_.find((e) => e.id === k.entry).refiled_from, held.entry);
+  // a re-filing job is offered it from the start
+  const r = setup({ payload: { record: "doc-1", home: "floor", sections: ["#71:3"], rid: "#71:3", refile: ["kept-1"] } });
+  assert.equal(await refileOffered(identity, r.env), true);
+});
+
+test("I-41: the refiles argument is in the filing tools' schemas only when the identity is offered it", async () => {
+  const { registerWorkerTools } = await import("../src/worker-tools.js");
+  const schemas = (id) => {
+    const tools = new Map();
+    registerWorkerTools({ tool: (name, _d, schema) => tools.set(name, schema) }, { identity: id, need: () => {} });
+    return tools;
+  };
+  const first = schemas(identity);
+  for (const t of ["file_to_source", "hold_piece", "keep_piece"]) assert.ok(!("refiles" in first.get(t)), `${t}: no refiles on a first-time filing`);
+  assert.ok(first.has("find_rows"));
+  const again = schemas({ ...identity, refiling: true });
+  for (const t of ["file_to_source", "hold_piece", "keep_piece"]) assert.ok("refiles" in again.get(t), `${t}: refiles when re-filing`);
 });

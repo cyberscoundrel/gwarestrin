@@ -28,8 +28,8 @@ import { canSee, EVERYONE, visibleHomes } from "./positions.js";
 import { classKey } from "./model/classes.js";
 import { parseKey } from "./model/schema.js";
 import { disagreeingColumns, FILED, FLOOR_REASON, GRAPH_RAG, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, onDisagreement, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
-import { enterData, findRows, getRow, sameValue } from "./data-entry.js";
-import { sourceFor } from "./sources.js";
+import { enterData, findRows, getRow, sameValue, searchRows } from "./data-entry.js";
+import { loadSources, sourceFor } from "./sources.js";
 import { addDependency, relateInstance } from "./instances.js";
 
 const realDb = { adbCommand: realCommand, adbQuery: realQuery };
@@ -162,6 +162,9 @@ export async function liveEnv(over = {}) {
     classes: over.classes ?? { get: (key) => classByKey(key, db) },
     readRow: over.readRow ?? ((key, o = {}) => readSourceRow(key, { db, fetch: over.fetch, positions, ...o })),
     findRows: over.findRows ?? ((system, table, column, value, o = {}) => findSourceRows(system, table, column, value, { db, fetch: over.fetch, positions, ...o })),
+    // rows by text and column values (data-entry.js searchRows, I-40), and the declared systems' names
+    searchRows: over.searchRows ?? ((args, o = {}) => searchRows(args, { db, fetch: over.fetch, positions, ...o })),
+    systems: over.systems ?? (async () => Object.keys(await loadSources(db).catch(() => ({})))),
     laterClassOrSource: over.laterClassOrSource ?? ((at) => laterClassOrSource(at, db)),
     classesForTable: over.classesForTable ?? (async (table) => (await db.adbQuery(`SELECT _class_key AS key, _home AS home FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _record_table = :t AND (_status IS NULL OR _status <> 'retired')`, { t: table }).catch(() => [])).map((r) => ({ key: r.key, home: r.home ?? null }))),
     // the home of the connection that reads a system (its declaration's read.home; none, or no such system: the root)
@@ -257,9 +260,31 @@ async function answeredRequest(env, ctx, id, decisions) {
 /** a Kept or Held entry this worker was given to re-file: it points back at it (R11) */
 async function refiledFrom(env, ctx, id) {
   if (!id) return null;
-  const e = (await env.store.entries({ id: String(id) }))[0];
-  if (!e || e.record !== ctx.record || e.home !== ctx.home || ![KEPT, HELD, PROPOSED].includes(e.outcome)) throw refuse(`entry ${id} isn't a piece of this record at your home to re-file`);
+  const e = (await env.store.entries({ id: String(id).trim() }))[0];
+  if (!e || e.record !== ctx.record || e.home !== ctx.home || ![KEPT, HELD, PROPOSED].includes(e.outcome)) {
+    const mine = await refilable(env, ctx);
+    throw refuse(`entry ${String(id).slice(0, 60)} isn't a piece of this record at your home to re-file. ${mine.length ? `The ones you may re-file: ${mine.join(", ")}` : "You have none to re-file: leave refiles out"}`);
+  }
   return e.id;
+}
+
+/** the entries a worker may name in refiles: those its job was given to re-file, and its own Held ones (a question was answered) */
+async function refilable(env, ctx) {
+  const held = (await env.store.entries({ worker: ctx.job })).filter((e) => e.outcome === HELD).map((e) => e.id);
+  return [...new Set([...(ctx.refile ?? []).map(String), ...held])];
+}
+
+/**
+ * Is the refiles argument offered to this worker (I-41)? Only when it has something to re-file: its job was given
+ * entries to re-file (a refile job), or it holds a Held piece of its own (resumed with the recorder's answer). A
+ * first-time filing has no such argument to fill. MCP here is stateless (a server per request), so this is settled
+ * per request, before the tools are registered (routes.js).
+ */
+export async function refileOffered(identity, env) {
+  if (identity?.role?.kind !== "worker") return false;
+  const ctx = await jobContext(identity, env.db).catch(() => null);
+  if (!ctx) return false;
+  return (await refilable(env, ctx)).length > 0;
 }
 
 /**
@@ -603,9 +628,26 @@ export async function floorUnsettled(requestIds, env) {
 
 /** ---- instances, sections and dependency (R1, R3, R7) ---- */
 
+/**
+ * The instance a worker means by a name where an id is wanted (I-42): the one instance its audience sees by that name
+ * or alias, as resolve_name finds it; null when there is none or several. The one-candidate rule handles already use.
+ */
+async function instanceByName(env, ctx, name) {
+  const n = normName(name);
+  if (!n) return null;
+  const rows = await env.db.adbQuery(`SELECT @rid AS rid, _homes FROM ${ENTITY_LABEL} WHERE _kind = 'thing' AND (_norm = :n OR _alias_norms CONTAINS :n) LIMIT 10`, { n }).catch(() => []);
+  const seen = rows.filter((r) => (r._homes ?? []).some((h) => h === EVERYONE || audienceSees(env, ctx, h)));
+  return seen.length === 1 ? String(seen[0].rid) : null;
+}
+
 async function visibleInstance(env, ctx, rid) {
-  const r = String(rid ?? "").trim();
-  if (!RID_RE.test(r)) throw refuse(`"${r.slice(0, 60)}" isn't an instance id: give the id (like #12:3) that graph-rag_resolve_name or graph-rag_create_instance gave you, never a name`);
+  let r = String(rid ?? "").trim();
+  if (/^\d+:\d+$/.test(r)) r = `#${r}`; // an id without its #
+  if (!RID_RE.test(r)) {
+    const one = await instanceByName(env, ctx, r);
+    if (!one) throw refuse(`"${r.slice(0, 60)}" isn't an instance id, and no one instance you can see is called that: give the id (like #12:3) that graph-rag_resolve_name or graph-rag_create_instance gave you`);
+    r = one;
+  }
   const row = (await env.db.adbQuery(`SELECT @rid AS rid, label, _homes, _keys FROM ${r} WHERE _kind = 'thing'`).catch(() => []))[0];
   const homes = Array.isArray(row?._homes) ? row._homes : [];
   // an instance is visible wherever a section about it is (R11): one of its homes the audience sees will do
@@ -725,6 +767,32 @@ export async function resolveName(args, identity, env) {
     if (source.status === "refused") throw refuse(`${args.table}: ${source.error}`);
   }
   return { instances, ...(source ? { source } : {}), note: source?.status === "unreachable" ? "The source can't be reached: a piece that needs it is Held." : undefined };
+}
+
+/**
+ * Rows of a source table found by text and column values, read-only (I-40): the read adapter does the text match
+ * (data-entry.js searchRows), so an agent never needs a filter function the source doesn't take. A worker reads as
+ * its audience: the table must be one it may read (assertTableReadable), and the connection's home is checked again
+ * on the read. The orchestrator reads with no audience (`scope` null). A system or table that isn't there is refused
+ * with the real ones.
+ */
+export async function findText(args, identity, env, { orchestrator = false } = {}) {
+  const ctx = orchestrator ? null : await jobContext(identity, env.db);
+  if (!orchestrator && !ctx) throw refuse("this thread has no record to file");
+  const table = String(args.table ?? "").trim();
+  const [system, name, ...rest] = table.split(":");
+  const systems = await env.systems();
+  if (!name || rest.length) throw refuse(`table: system:table, like ${systems[0] ?? "mssql"}:dbo_Job`);
+  if (!systems.includes(system)) throw refuse(`no connected source called ${system}: the sources are ${systems.join(", ") || "none"}`);
+  if (ctx) await assertTableReadable(env, ctx, table);
+  const r = await env.searchRows(
+    { system, table: name, text: args.text ?? null, columns: args.columns ?? null, where: args.where ?? null, select: args.select ?? null, first: args.first ?? 10, offset: args.offset ?? 0 },
+    ctx ? { audience: ctx.home } : {},
+  );
+  if (r.status === "refused") throw refuse(`${table}: ${r.why}`);
+  if (!["found", "ambiguous", "none"].includes(r.status)) return { status: "unreachable", note: `The source can't be reached: ${String(r.why ?? "").slice(0, 200)}. A piece that needs it is Held.` };
+  const { filing: _f, ...out } = r;
+  return out;
 }
 
 /** ---- the worker's account, and the orchestrator's check (R10, R11) ---- */

@@ -246,8 +246,9 @@ await scenario("a worker cannot read above its audience by any tool it is offere
   // and writes that find nothing. A new tool fails this until it's sorted and, if it reads or finds, checked.
   const offered = await listTools(w);
   // list_classes and read_dependencies: the classes stream's (routes-classes.js), read through this audience
-  // resolve_name: the filing stream's read of instances and source rows (worker-tools.js)
-  const READS = ["search_graph", "about_thing", "read_document", "schema_graph", "list_classes", "read_dependencies", "resolve_name"];
+  // resolve_name: the filing stream's read of instances and source rows (worker-tools.js); find_rows: its search of a
+  // source table (I-40), through the same audience gate
+  const READS = ["search_graph", "about_thing", "read_document", "schema_graph", "list_classes", "read_dependencies", "resolve_name", "find_rows"];
   // writes that find what they act on by name, id or key: each must neither reveal nor touch what the audience can't see
   const FINDS = ["set_home", "file_to_source", "hold_piece", "keep_piece", "create_instance", "relate_section", "state_dependency"];
   // execute_graph: a worker's raw command is always a proposal for an admin (write.js), never run for it;
@@ -333,6 +334,17 @@ await scenario("a worker cannot read above its audience by any tool it is offere
   check(!seenOk.error, `relate_section to an instance the floor sees works: ${JSON.stringify(seenOk).slice(0, 200)}`);
   await same("relate_section", (x) => ({ section: fsec, instance: x }), String(crew.rid), NONE_RID, aboutCrew);
   await same("keep_piece", (x) => ({ section: fsec, piece: "the bench is ready", instances: [x] }), String(crew.rid), NONE_RID, noEntry);
+  // I-42: a name where an id is wanted finds only what the audience sees: one above it answers as a name nobody has
+  // (the refusal echoes the name it was given, so the check is that it answers as for a name nobody has, and touches nothing)
+  for (const [name, args, probe] of [["keep_piece", (x) => ({ section: fsec, piece: "the bench is ready", instances: [x] }), noEntry], ["relate_section", (x) => ({ section: fsec, instance: x }), aboutCrew]]) {
+    const hidden = await tool(fw, name, args("vellichor crew"));
+    const missing = await tool(fw, name, args("e2e nobody by this name"));
+    check(Boolean(hidden.error) && !leaked(hidden) && !JSON.stringify(hidden).includes(String(crew.rid)), `${name} by name: nothing above the audience is taken: ${JSON.stringify(hidden).slice(0, 300)}`);
+    check(blur(hidden, "vellichor crew") === blur(missing, "e2e nobody by this name"), `${name} by name: something above the audience answers as nothing does`);
+    check(await probe(), `${name} by name touched nothing above the audience`);
+  }
+  const fr = await tool(fw, "find_rows", { table: "mssql:dbo_Job", text: "vellichor" });
+  check(!leaked(fr) && !/vellichor crew|vellichor raise/i.test(JSON.stringify(fr)), `find_rows shows nothing of the graph above the audience: ${JSON.stringify(fr).slice(0, 300)}`);
   await same("state_dependency", (x) => ({ section: fsec, from: String(bench.rid), to: x, stated_as: "agent" }), String(crew.rid), NONE_RID, depsOfBench);
   await same("hold_piece", (x) => ({ section: fsec, piece: "which bench", question: "which bench do you mean?", class: x }), "vellichor_raise_class", "e2e_no_such_class");
   await same("file_to_source", (x) => ({ section: fsec, piece: "the bench is ready", said: "writing it", class: x, key: "mssql:dbo_Work_Center:SAW", fields: { Status: "Up" } }), "vellichor_raise_class", "e2e_no_such_class");

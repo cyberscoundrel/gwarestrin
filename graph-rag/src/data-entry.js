@@ -408,6 +408,90 @@ export async function findRows({ system, table, column, value, mode = "eq", firs
   }
 }
 
+/** the rows searchRows reads per page, and at most in all, before it says it stopped short */
+export const SEARCH_PAGE = 200;
+export const SEARCH_SCAN = 5000;
+
+/**
+ * Rows of one table found by text and by column values, for an agent (I-40). DAB 2.0.12's filter has no string
+ * functions (contains, startswith: "$filter query parameter is not well formed"), and an agent writing valid OData
+ * can't know that, so the text match is done here: `text` is words that must all appear, case-insensitively, in a
+ * row's `columns` (all of them when none are named), numbers read as text. `where` ({ column: value }) narrows by
+ * equal values, sent to the source: a number column takes a number (a numeric string is read as one; anything else
+ * is refused with why), a text column takes the value as text. A table or column that isn't there is refused with
+ * the real ones, before anything is read. Pages are read by primary key (`key gt last`), never by a cursor, up to
+ * SEARCH_SCAN rows; the caller pages through what matched by `offset`. `select` narrows the columns shown (the key
+ * stays). Returns { status: found | ambiguous | none, rows: [{ key, row }], matched, offset, more, next_offset?,
+ * complete }; complete is false when the scan stopped short (narrow it with where).
+ */
+export async function searchRows({ system, table, text = null, columns = null, where = null, select = null, first = 10, offset = 0 }, opts = {}) {
+  const { decl, refusal } = await declared(system, table, opts);
+  if (refusal) return refusal;
+  const cap = Math.max(1, Math.min(Number(first) || 10, 50));
+  const from = Math.max(0, Math.trunc(Number(offset) || 0));
+  const c = readClient(decl, opts.fetch);
+  try {
+    const names = (await c.entities()).filter((n) => !opts.tables || opts.tables.includes(n));
+    if (!names.includes(table)) return answer("refused", { why: `${system} has no table ${table}: it has ${names.join(", ")}` });
+    const cols = await c.columns(table);
+    if (!cols) return answer("none", { rows: [], matched: 0, offset: from, more: false, complete: true });
+    const named = [...(columns ?? []), ...Object.keys(where ?? {}), ...(select ?? [])];
+    const unknown = [...new Set(named.filter((x) => !(x in cols)))];
+    if (unknown.length) return answer("refused", { why: `${system}:${table} has no column ${unknown.join(", ")}: it has ${Object.keys(cols).join(", ")}` });
+    const words = String(text ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length && !Object.keys(where ?? {}).length) return answer("refused", { why: "give text to find, or where: { column: value }" });
+    // equal values: sent to the source where the column's type is known, compared here where it isn't (a null in the sample row)
+    const sent = [];
+    const here = [];
+    for (const [col, v] of Object.entries(where ?? {})) {
+      const s = String(v ?? "").trim();
+      if (v === null || v === undefined || s === "") return answer("refused", { why: `where ${col}: give a value` });
+      if (cols[col] === "number") {
+        if (!/^-?\d+(\.\d+)?$/.test(s)) return answer("refused", { why: `${col} is a number column: compare it with a number, not "${s.slice(0, 60)}"; to find words in it, use text` });
+        sent.push(`${col} eq ${s}`);
+      } else if (cols[col] === "string") sent.push(`${col} eq ${odata(s, "string")}`);
+      else here.push([col, s]);
+    }
+    const searchIn = columns?.length ? columns : Object.keys(cols);
+    const hit = (row) => here.every(([col, s]) => sameValue(row[col], s)) && words.every((w) => searchIn.some((col) => row[col] !== null && row[col] !== undefined && String(row[col]).toLowerCase().includes(w)));
+    const { pk } = await firstPageOf(decl.read.url, table, (url, call) => mcpToolCall(url, call.name, call.args, opts.fetch ? { fetch: opts.fetch } : {}));
+    const byKey = pk?.length === 1 ? pk[0] : null;
+    const limit = Math.max(SEARCH_PAGE, Number(opts.scanLimit ?? SEARCH_SCAN));
+    const matches = [];
+    let scanned = 0;
+    let last = null;
+    let complete = false;
+    while (scanned < limit) {
+      const after = byKey && last !== null ? odata(last, byKey.type) : null;
+      if (byKey && last !== null && after === null) break;
+      const filter = [...sent, ...(after !== null ? [`${byKey.name} gt ${after}`] : [])].join(" and ");
+      const size = byKey ? SEARCH_PAGE : limit;
+      const rows = await c.readWhere(table, { ...(filter ? { filter } : {}), ...(byKey ? { orderby: [`${byKey.name} asc`] } : {}), first: size });
+      scanned += rows.length;
+      for (const r of rows) if (hit(r)) matches.push(r);
+      if (rows.length < size || !byKey) {
+        complete = rows.length < size;
+        break;
+      }
+      last = rows.at(-1)[byKey.name];
+    }
+    const show = (row) => (select?.length ? Object.fromEntries(Object.entries(row).filter(([k]) => select.includes(k) || k === byKey?.name)) : row);
+    const page = matches.slice(from, from + cap).map((row) => ({ key: keyOf(system, table, pk, row), row: show(row) }));
+    const more = matches.length > from + cap || !complete;
+    return answer(page.length === 0 ? "none" : page.length === 1 && !more && from === 0 ? "found" : "ambiguous", {
+      rows: page,
+      matched: matches.length,
+      offset: from,
+      more,
+      ...(matches.length > from + cap ? { next_offset: from + cap } : {}),
+      complete,
+      ...(complete ? {} : { note: `searched the first ${scanned} rows of ${system}:${table} only: narrow it with where` }),
+    });
+  } catch (e) {
+    return failed(e);
+  }
+}
+
 /** ---- the guard ---- */
 
 const sameName = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();

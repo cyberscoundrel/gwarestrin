@@ -21,6 +21,7 @@ import { dirname } from "node:path";
 import { collectGraph } from "../graph-rag/eval/collect.mjs";
 import { buildReport, compareRuns } from "../graph-rag/eval/report.mjs";
 import { POSITIONS } from "../graph-rag/eval/s0.mjs";
+import { parseLog, toolCallCounts } from "../graph-rag/eval/toolcalls.mjs";
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -40,6 +41,8 @@ const usage = (msg) => {
   process.exit(2);
 };
 const read = (f) => JSON.parse(readFileSync(f, "utf8"));
+/** the run's tool calls with their errors split three ways (I-43), from its driver.log when there is one */
+const toolCallsOf = (dir) => (existsSync(`${dir}/driver.log`) ? { toolCalls: toolCallCounts(parseLog(readFileSync(`${dir}/driver.log`, "utf8"))) } : {});
 const args = parseArgs(process.argv.slice(2));
 
 if (args._[0] === "run") {
@@ -78,6 +81,7 @@ if (args._[0] === "run") {
     after: read(`${dir}/after.json`),
     ...graph,
     checks: typeof args.checks === "string" ? read(args.checks) : null,
+    ...toolCallsOf(dir),
   };
   const report = buildReport(snap);
   writeFileSync(`${dir}/snapshot.json`, `${JSON.stringify(snap, null, 2)}\n`);
@@ -95,7 +99,7 @@ if (args._[0] === "run") {
   // leaves the run's own files as they are
   const dir = args._[1];
   if (!dir) usage("give the run dir");
-  const snap = read(`${dir}/snapshot.json`);
+  const snap = { ...read(`${dir}/snapshot.json`), ...toolCallsOf(dir) };
   if (typeof args.only === "string") snap.meta = { ...snap.meta, only: args.only.split(",").map((s) => s.trim()).filter(Boolean) };
   const to = typeof args.out === "string" ? args.out.replace(/\/$/, "") : dir;
   if (to === dir) {
