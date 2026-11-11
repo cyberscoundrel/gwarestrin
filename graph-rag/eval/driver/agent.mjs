@@ -95,7 +95,8 @@ export async function runAgent({ client, system, prompt, tools, maxTurns = 40, l
       calls++;
       const tool = byName.get(tc.name);
       const res = tool ? await tool.call(tc.args ?? {}).catch((e) => ({ text: `error: ${String(e?.message ?? e)}`, error: true })) : { text: `error: no tool ${tc.name}`, error: true };
-      log({ tool: tc.name, args: tc.args, error: res.error });
+      // a refused call's own text, for the report's commonest errors (graph-rag's and the source's words, never a key)
+      log({ tool: tc.name, args: tc.args, error: res.error, ...(res.error ? { errorText: String(res.text).slice(0, 300) } : {}) });
       messages.push({ role: "tool", toolCallId: tc.id, name: tc.name, content: String(res.text).slice(0, 20_000) });
     }
   }

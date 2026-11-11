@@ -727,27 +727,41 @@ export async function laterClassOrSource(at, db = realDb) {
   return Boolean(src?.updated_at && String(src.updated_at) > String(at));
 }
 
-/** how many re-filings led to this entry: its refiled_from chain, followed back */
-async function refileDepth(env, e) {
-  let n = 0;
-  const seen = new Set([e.id]);
-  for (let cur = e; cur?.refiled_from && !seen.has(cur.refiled_from) && n < REFILE_LIMIT + 1; ) {
-    seen.add(cur.refiled_from);
-    n++;
-    cur = (await env.store.entries({ id: cur.refiled_from }))[0];
+/**
+ * How many times one piece was re-filed: every entry in its refile tree (from the first entry, following
+ * refiled_from back, then every entry re-filed from any entry of the tree) but that first one, so sibling re-filings
+ * of the same entry count as much as a chain of them.
+ */
+async function refileCount(env, e) {
+  let root = e;
+  const back = new Set([e.id]);
+  while (root.refiled_from && !back.has(root.refiled_from)) {
+    back.add(root.refiled_from);
+    const up = (await env.store.entries({ id: root.refiled_from }))[0];
+    if (!up) break;
+    root = up;
   }
-  return n;
+  const seen = new Set([root.id]);
+  for (let frontier = [root.id]; frontier.length; ) {
+    const next = [];
+    for (const id of frontier) for (const c of await env.store.entries({ refiled_from: id })) if (!seen.has(c.id)) (seen.add(c.id), next.push(c.id));
+    frontier = next;
+  }
+  return seen.size - 1;
 }
 
 /**
- * Why a Kept entry may not be re-filed now (R14), or null when it may: it was re-filed REFILE_LIMIT times already, or
- * no class was created and no source table declared since it was Kept. Both enforced here, not only asked of the
- * orchestrator: kept_pieces doesn't offer such a piece and refile refuses it.
+ * Why a Kept entry may not be re-filed now (R14), or null when it may: it was re-filed already (a re-filing goes from
+ * the entry it left), its piece was re-filed REFILE_LIMIT times already over the whole refile tree, or no class was
+ * created and no source table declared since it was Kept. Enforced here, not only asked of the orchestrator:
+ * kept_pieces doesn't offer such a piece and refile refuses it.
  */
 export async function refileRefusal(env, e) {
   if (!e || e.outcome !== KEPT) return "it isn't a Kept piece";
-  const depth = await refileDepth(env, e);
-  if (depth >= REFILE_LIMIT) return `this piece was re-filed ${depth} times already, the most allowed (R14)`;
+  const from = await env.store.entries({ refiled_from: e.id });
+  if (from.length) return `this entry was re-filed already (entry ${from[0].id}): re-file what that left, if anything (R14)`;
+  const n = await refileCount(env, e);
+  if (n >= REFILE_LIMIT) return `this piece was re-filed ${n} times already, the most allowed (R14)`;
   const later = env.laterClassOrSource ?? ((at) => laterClassOrSource(at, env.db));
   if (!(await later(e.at))) return "no class was created and no source table declared since this piece was Kept, so nothing new could give it a home (R14)";
   return null;
@@ -761,7 +775,6 @@ export async function keptPieces(env) {
   const kept = await env.store.entries({ outcome: KEPT });
   const out = [];
   for (const e of kept) {
-    if ((await env.store.entries({ refiled_from: e.id })).length) continue;
     if (await refileRefusal(env, e)) continue;
     out.push({ entry: e.id, record: e.record, home: e.home, piece: e.piece, instances: e.instances, at: e.at });
   }

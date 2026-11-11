@@ -124,7 +124,14 @@ It lands on `build-base` with the first stream merge.
   (`filing.js refileRefusal`, `REFILE_LIMIT`). `refile` refuses the
   others one by one, each with its reason, and starts the rest. Classes now
   carry `_created_at`, and `_table_at` when `update_class` gives one a
-  table. Run A/1's output is kept as `graph-rag/eval/runs/A-1-loop`.
+  table. Run A/1's output is kept as `graph-rag/eval/runs/A-1-loop`. Then (the coordinator, closing a
+  hole in "refile refuses it"): an entry re-filed once is never re-filed again, and the limit counts the
+  piece's whole refile tree, so sibling re-filings count too.
+- **The seeder's pacing (option (a), the coordinator, 2026-11-10).** The R14 rerun stalled: a worker filed
+  nothing and was closed, graph-rag starts no second worker for that record, and the seeder waited 30 minutes
+  before every later batch for an entry that would never come (kept as `runs/A-1-stall`). The seeder now
+  counts a record as settled when all its workers finished without an entry; the record is reported as missing,
+  which is the model's result. Restarting a worker for such a record (option (b)) is left for the user.
 
 ### The review of ba583bc (`~/reviews/build-build-base-ba583bc.md`): the integrator's items
 

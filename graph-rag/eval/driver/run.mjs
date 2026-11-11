@@ -139,7 +139,8 @@ async function agent(role, token, prompt, extra = {}) {
   log({ agent: role, id, model: client.model, tools: tools.length, toolChars: JSON.stringify(tools.map((t) => ({ n: t.name, d: t.description, s: t.schema }))).length, systemChars: system.length, promptChars: String(prompt).length });
   const r = await runAgent({ client, system, prompt, tools, history: extra.history ?? null, maxTurns: extra.maxTurns ?? 40, log: (e) => log({ agent: role, id, ...e }) });
   addUsage(role, r.usage);
-  log({ agent: role, id, ended: r.stopped ?? "answered", turns: r.turns, calls: r.calls });
+  // its last words too: why a record went unfiled is often only in what the worker answered
+  log({ agent: role, id, ended: r.stopped ?? "answered", turns: r.turns, calls: r.calls, text: String(r.text ?? "").slice(0, 600) });
   return r;
 }
 
@@ -219,7 +220,11 @@ if (seedResult.code) say(`the seeder ended with ${seedResult.code}: ${seedResult
 // 5. the source after, and the report
 const after = await node("scripts/source-dump.mjs", [...dumpArgs, "--out", `${RUN_DIR}/after.json`]);
 if (after.code) throw new Error(`the after dump refused or failed: ${after.out}`);
-writeFileSync(`${RUN_DIR}/usage.json`, `${JSON.stringify({ setup: SETUP, run: RUN, models: MODE, via: VIA, ...(VIA === "none" ? {} : { orchestrator: modelOf("orchestrator"), worker: modelOf("worker") }), usage }, null, 2)}\n`);
+// which worker filed which record: each review job's record and home (job_key file:<record>:<home>) and how it ended,
+// so a record left unfiled can be traced to its workers' last answers in driver.log
+const jobs = await sql("SELECT id, job_key, status FROM Job WHERE kind = 'review' AND job_key LIKE 'file:%'").catch(() => []);
+writeFileSync(`${RUN_DIR}/jobs.json`, `${JSON.stringify(jobs.map((j) => ({ job: j.id, record: String(j.job_key).split(":")[1], home: String(j.job_key).split(":")[2], status: j.status })), null, 2)}\n`);
+writeFileSync(`${RUN_DIR}/usage.json`,`${JSON.stringify({ setup: SETUP, run: RUN, models: MODE, via: VIA, ...(VIA === "none" ? {} : { orchestrator: modelOf("orchestrator"), worker: modelOf("worker") }), usage }, null, 2)}\n`);
 const rep = await node("scripts/filing-report.mjs", ["run", "--url", GRAPH, "--tokens", simpleTokens, "--run-dir", RUN_DIR, "--setup", SETUP, "--run", String(RUN)]);
 say(rep.out.trim());
 process.exit(rep.code ?? 1);

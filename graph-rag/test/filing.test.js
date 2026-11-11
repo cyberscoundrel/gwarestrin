@@ -631,10 +631,35 @@ test("R14: after REFILE_LIMIT re-filings a piece is never offered again and refi
   // nothing new: refused for that reason, and the others in the same call still go ahead
   const fresh = (await keepPiece({ section: "#71:3", piece: "the crate is in bay 2", instances: ["#80:1"] }, identity, h.env)).entry;
   h.env.laterClassOrSource = async (at) => at === h.store.entries_.find((e) => e.id === fresh).at;
-  const mixed = await refileKept([chain[0], fresh], "orchestrator", h.env);
-  assert.equal(mixed.started.length, 1);
-  assert.deepEqual(mixed.refused.map((x) => x.entry), [chain[0]]);
-  assert.match(mixed.refused[0].reason, /no class was created and no source table declared/);
+  const other = (await keepPiece({ section: "#71:3", piece: "the pallet is wrapped", instances: ["#80:1"] }, identity, h.env)).entry;
+  const mixed = await refileKept([chain[0], other, fresh], "orchestrator", h.env);
+  assert.equal(mixed.started.length, 1, "only the fresh one goes ahead");
+  assert.deepEqual(mixed.refused.map((x) => x.entry), [chain[0], other]);
+  assert.match(mixed.refused[0].reason, /re-filed already/, "an entry re-filed once is never re-filed again");
+  assert.match(mixed.refused[1].reason, /no class was created and no source table declared/);
+});
+
+test("R14: the limit counts the piece's whole refile tree: sibling re-filings of one entry count as much as a chain", async () => {
+  const { refileKept } = await import("../src/orchestrator.js");
+  const h = setup();
+  h.env.laterClassOrSource = async () => true;
+  h.env.startRecordWorkers = async () => [{ job: "j", home: "floor" }];
+  const keep = async (refiles) => (await keepPiece({ section: "#71:4", piece: "the forklift is booked Thursday", instances: ["#80:1"], ...(refiles ? { refiles } : {}) }, identity, h.env)).entry;
+  const k0 = await keep();
+  // two re-filings went from the same entry (as two workers may), and one more from one of them
+  const a = await keep(k0);
+  const b = await keep(k0);
+  assert.equal((await refileKept([k0], "orchestrator", h.env)).refused?.[0]?.reason.match(/re-filed already/)?.[0], "re-filed already", "the entry they went from is refused");
+  assert.deepEqual((await keptPieces(h.env)).map((p) => p.entry).sort(), [a, b].sort(), "two re-filings so far: the leaves are still offered");
+  const c = await keep(a);
+  assert.deepEqual(await keptPieces(h.env), [], "three re-filings over the tree: nothing of this piece is offered");
+  const r = await refileKept([b, c], "orchestrator", h.env);
+  assert.deepEqual(r.started, []);
+  assert.deepEqual(r.refused.map((x) => x.entry), [b, c]);
+  for (const x of r.refused) assert.match(x.reason, new RegExp(`re-filed 3 times already`));
+  // a piece of its own, from the same record, keeps its own count
+  const other = await keep();
+  assert.equal(await refileRefusal(h.env, h.store.entries_.find((e) => e.id === other)), null);
 });
 
 test("R14: what counts as new: a class created or given its table after the entry, or the stored sources changed after it", async () => {

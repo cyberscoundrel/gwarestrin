@@ -18,7 +18,8 @@
 //        posts every record, in order, as its person (tokens.json: { user: token } or graph-rag's token map).
 //        --url is required and has no default: this never finds an instance on its own, and it is never run
 //        against the development instance or the demo. Batches go one at a time: after each batch it waits
-//        until the filing log holds an entry for every record so far (--wait-ms, default 30 minutes), unless
+//        until every record so far has an entry in the filing log, or all its workers finished without one
+//        (--wait-ms, default 30 minutes), unless
 //        --no-wait. Run only against a throwaway graph and the synthetic test source.
 //        The guard, before anything is sent: the records drive filing, and filing writes to whatever source the
 //        instance declares. graph-rag's own guard (data-entry.js checkGuard) only compares the write connection
@@ -134,9 +135,21 @@ if (args._[0] === "generate") {
       process.exit(1);
     }
   }
+  // a record is settled when the filing log holds an entry for it, or when every worker it had has finished (done,
+  // failed or closed) without one: a record its workers left unfiled is the model's result (reported as missing), and
+  // the next batch doesn't wait on it (the coordinator's option (a), 2026-11-10: pacing only)
+  const FINISHED = new Set(["done", "failed", "closed"]);
   const filedRecords = async () => {
     const r = await call(adminToken, "query_graph", { query: "SELECT DISTINCT(record) AS record FROM FilingEntry", language: "sql" });
-    return new Set((r.rows ?? []).map((x) => x.record));
+    const settled = new Set((r.rows ?? []).map((x) => x.record));
+    const jobs = await call(adminToken, "query_graph", { query: "SELECT job_key, status FROM Job WHERE kind = 'review' AND job_key LIKE 'file:%'", language: "sql" });
+    const byRecord = new Map();
+    for (const j of jobs.rows ?? []) {
+      const record = String(j.job_key).split(":")[1];
+      byRecord.set(record, [...(byRecord.get(record) ?? []), j.status]);
+    }
+    for (const [record, states] of byRecord) if (states.every((x) => FINISHED.has(x))) settled.add(record);
+    return settled;
   };
   let lastBatch = null;
   let sent = 0;
