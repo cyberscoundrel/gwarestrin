@@ -767,3 +767,42 @@ test("R15: one fresh worker per kick-back, only for a section whose jobs have al
   assert.equal(JSON.parse(h.store.requests_[0].answer).decision, "fresh_worker");
   await assert.rejects(startKickbackWorker("doc-1", "#71:3", { by: "o" }, { env: h.env, db, enqueue, pool }), /no open kick-back/, "one per kick-back");
 });
+
+test("handles: a request by r1, 2 or its id; its question as the id is refused with the open ones; with one open, any value means it", async () => {
+  const { resolveRequestRef } = await import("../src/filing.js");
+  const h = setup();
+  const req = (id, at, question, status = "open") => h.store.insertRequest({ id, kind: "other", record: "doc-1", section: "#71:3", home: "floor", worker: identity.role.job, question, suggestion: null, status, answer: status === "open" ? null : "{}", answered_by: status === "open" ? null : "o", raised_by: null, at });
+  const a = "aaaaaaaa-1111-4111-8111-111111111111";
+  const b = "bbbbbbbb-2222-4222-8222-222222222222";
+  await req(b, "2026-11-10T00:00:02.000Z", "File piece under acquisition_talk or keep?");
+  await req(a, "2026-11-10T00:00:01.000Z", "Is the Toro job 4471 or 4472?");
+  assert.equal(await resolveRequestRef("r1", h.env), a, "handles follow the order requests were raised");
+  assert.equal(await resolveRequestRef("2", h.env), b);
+  assert.equal(await resolveRequestRef(b, h.env), b);
+  assert.equal(await resolveRequestRef("File piece under acquisition_talk or keep?", h.env), null, "two open: a question is no id");
+  await assert.rejects(answerRequest("File piece under acquisition_talk or keep?", { decision: "keep" }, "o", h.env), (e) => /never its question/.test(e.message) && e.message.includes("r1 (other") && e.message.includes("r2 (other"));
+  assert.equal(await resolveRequestRef("r3", h.env), null, "a handle past the list");
+  const done = await answerRequest("r1", { decision: "keep" }, "o", h.env);
+  assert.equal(done.answered, a);
+  assert.equal(await resolveRequestRef("whatever the model wrote", h.env), b, "one open: any value means it");
+  assert.equal(await resolveRequestRef("cccccccc-3333-4333-8333-333333333333", h.env), null, "an id that matches none never does");
+});
+
+test("handles: a fresh worker for a kick-back by its request handle, or with one open for the record any section value; a record id that matches none is refused", async () => {
+  const { startKickbackWorker } = await import("../src/orchestrator.js");
+  const h = setup();
+  const db = { adbQuery: async () => [] };
+  const queued = [];
+  const enqueue = async (kind, payload) => (queued.push(payload), `j-${queued.length}`);
+  const pool = { threadMinutes: 20 };
+  const one = { ...ended, rid: "#71:3", sections: ["#71:3"] };
+  const [r] = await kickBack(identity.role.job, one, "", h.env);
+  await assert.rejects(startKickbackWorker("doc-1", "#71:9", { by: "o" }, { env: h.env, db, enqueue, pool }), /no open kick-back for section #71:9[\s\S]*Open kick-backs: r1 \(other, raised by graph-rag/);
+  const s = await startKickbackWorker("doc-1", "sec", { by: "o" }, { env: h.env, db, enqueue, pool });
+  assert.equal(s[0].kickback, r.id, "one open for the record: 'sec' means it");
+  const h2 = setup();
+  const [r2] = await kickBack(identity.role.job, one, "", h2.env);
+  const s2 = await startKickbackWorker(null, undefined, { by: "o", request: "r1" }, { env: h2.env, db, enqueue, pool });
+  assert.equal(s2[0].kickback, r2.id, "by its request handle, record not needed");
+  assert.equal(queued.at(-1).sections[0], "#71:3");
+});

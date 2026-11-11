@@ -55,3 +55,36 @@ test("record_table: a bare table name is the one declared source that has it; ot
   await assert.rejects(qualifyTable("dbo_Nope", opts(["mssql"])), /not system:table: dbo_Nope\. Name the table with its source, as system:table \(for example mssql:dbo_Nope; declared sources: mssql\)/);
   await assert.rejects(qualifyTable("dbo_Job", { sources: {}, entitiesOf: async () => [] }), /no source is declared/);
 });
+
+test("handles: an entry by e1, 1 or its id among the worker's own; one entry takes any value; another's id or a handle past the list never", async () => {
+  const { resolveEntryRef } = await import("../src/model/brief.js");
+  const a = "11111111-1111-4111-8111-111111111111";
+  const b = "22222222-2222-4222-8222-222222222222";
+  const other = "33333333-3333-4333-8333-333333333333";
+  for (const [v, want] of [["e1", a], ["E2", b], ["2", b], [a, a], [b, b], ["e3", null], ["0", null], [other, null], ["section_s1", null], ["mssql:dbo_Job:4471", null], ["", null]]) assert.equal(resolveEntryRef(v, [a, b]), want, String(v));
+  for (const [v, want] of [["section_s1", a], ["the forklift entry", a], ["", a], ["e1", a], ["e2", null], [other, null]]) assert.equal(resolveEntryRef(v, [a]), want, `one entry: ${v}`);
+});
+
+test("class map: the record_table the model set; else its one table in evidence, if the source has it; never written on the class", async () => {
+  const { classMapFrom } = await import("../eval/classmap.mjs");
+  const MAP = { "mssql:dbo_Job": "floor", "mssql:dbo_Customer": "ops" };
+  const tables = new Set(["mssql:dbo_job", "mssql:dbo_customer", "mssql:dbo_vendor"]);
+  const ev = (...refs) => JSON.stringify(refs.map((ref) => ({ kind: "table", ref })));
+  const rows = [
+    { _class_key: "job", _class_name: "Job", _record_table: "mssql:dbo_Job", _evidence: ev("mssql:dbo_Job") },
+    { _class_key: "customer", _class_name: "Customer", _record_table: null, _evidence: ev("mssql:dbo_Customer") },
+    { _class_key: "deal", _class_name: "Deal", _record_table: null, _evidence: ev("mssql:dbo_Customer", "mssql:dbo_Job") },
+    { _class_key: "ghost", _class_name: "Ghost", _record_table: null, _evidence: ev("mssql:dbo_Ghost") },
+    { _class_key: "vendor", _class_name: "Vendor", _record_table: null, _evidence: ev("mssql:dbo_Vendor") },
+    { _class_key: "talk", _class_name: "Acquisition talk", _record_table: null, _evidence: JSON.stringify([{ kind: "notes", note: "the owners" }]) },
+    { _class_key: "odd", _class_name: "Odd", _record_table: "mssql:dbo_Odd", _evidence: "[]" },
+  ];
+  const m = classMapFrom(rows, tables, MAP);
+  assert.deepEqual(m.classes, { job: { authority: "floor" }, customer: { authority: "ops" } });
+  assert.deepEqual(m.by_record_table.map((x) => x.class), ["Job"]);
+  assert.deepEqual(m.by_evidence.map((x) => x.class), ["Customer"], "one table in evidence, in the source and in M0");
+  assert.deepEqual(m.unmapped_with_table.map((x) => x.class), ["Deal", "Ghost", "Vendor"], "two tables, one the source hasn't, one M0 doesn't map: unmapped");
+  assert.deepEqual(m.no_table, ["Acquisition talk"]);
+  assert.deepEqual(m.record_table_not_in_map.map((x) => x.class), ["Odd"]);
+  assert.equal(rows[1]._record_table, null, "nothing is written on the class");
+});

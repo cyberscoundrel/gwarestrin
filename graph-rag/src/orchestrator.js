@@ -16,7 +16,7 @@ import { log } from "./context.js";
 import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { effectiveHome, homeName } from "./positions.js";
 import { positionMap } from "./scope.js";
-import { accountEvidence, answerRequest, filingLog, keptPieces, liveEnv, recordVerdict, refileRefusal, REFILE_LIMIT } from "./filing.js";
+import { accountEvidence, answerRequest, filingLog, keptPieces, liveEnv, openRequestLines, recordVerdict, refileRefusal, REFILE_LIMIT, requestHandle, requestList, resolveRequestRef } from "./filing.js";
 import { ANSWERS, GRAPH_RAG, VERDICTS } from "./model/filing.js";
 import { splitByHome } from "./model/brief.js";
 
@@ -72,10 +72,26 @@ export async function startRecordWorkers(record, { by, level, minutes, refile = 
  * section has ended. It files just that section, at the kick-back's home. One per kick-back: starting it answers the
  * request, so a second call finds none open. If that worker too ends without filing, graph-rag sends it back again.
  */
-export async function startKickbackWorker(record, section, { by, level, minutes } = {}, { env, db = db0, enqueue, pool } = {}) {
+export async function startKickbackWorker(record, section, { by, level, minutes, request = null } = {}, { env, db = db0, enqueue, pool } = {}) {
   const e = env ?? (await liveEnv());
-  const req = (await e.store.requests({ section: String(section), status: "open", raised_by: GRAPH_RAG })).find((r) => r.record === record);
-  if (!req) throw new Error(`no open kick-back for section ${section} of record ${record}: a fresh worker is started only for a section graph-rag sent back because its worker ended without filing it (R15)`);
+  // the kick-back: by its request handle or id, or by its section's record id; with one kick-back open for the
+  // record, any other value means that one (a model writing "sec", say). A record id that matches none never does.
+  const open = (await e.store.requests({ status: "open", raised_by: GRAPH_RAG })).filter((r) => !record || r.record === record);
+  let req = null;
+  if (request) {
+    const rid = await resolveRequestRef(request, e);
+    req = open.find((r) => r.id === rid) ?? null;
+  }
+  const s = String(section ?? "").trim();
+  if (!req && s) req = open.find((r) => r.section === s) ?? null;
+  if (!req && s && /^r?\d{1,5}$/i.test(s)) {
+    const rid = await resolveRequestRef(s, e);
+    req = open.find((r) => r.id === rid) ?? null;
+  }
+  if (!req && !request && !/^#\d+:\d+$/.test(s) && open.length === 1) req = open[0];
+  if (!req) throw new Error(`no open kick-back for section ${s || "(none given)"} of record ${record}: a fresh worker is started only for a section graph-rag sent back because its worker ended without filing it (R15). Name it by its request handle (request: "r3") or its section's id. Open kick-backs: ${await openRequestLines(e, (r) => r.raised_by === GRAPH_RAG)}`);
+  record = req.record;
+  section = req.section;
   const jobs = await db.adbQuery("SELECT id, status, payload FROM Job WHERE kind = 'review' AND job_key LIKE :k", { k: `%:${record}:%` }).catch(() => []);
   const busy = jobs.filter((j) => ["pending", "running", "waiting"].includes(j.status)).filter((j) => {
     const p = JSON.parse(j.payload || "{}");
@@ -180,11 +196,18 @@ each seeing only what people at that home see. Every record gets a worker; a rec
 keeps its workers. With section: one fresh worker for just that section, when graph-rag sent it back because
 its worker ended without filing it (R15); one per time it is sent back. level picks the model: 1 quick, 2 the
 default, 3 a broad matter. Its brief is composed for it from the graph: you write none.`,
-    { record: z.string().min(3).max(120), section: z.string().min(3).max(40).optional(), level: z.number().int().min(1).max(3).optional(), minutes: z.number().int().min(5).max(180).optional() },
+    {
+      record: z.string().max(120).optional(),
+      section: z.string().max(2000).optional().describe("for a section graph-rag sent back: its id, as the kick-back names it"),
+      request: z.string().max(2000).optional().describe("for a section graph-rag sent back: the kick-back's request handle (r1, r2 …)"),
+      level: z.number().int().min(1).max(3).optional(),
+      minutes: z.number().int().min(5).max(180).optional(),
+    },
     async (args) =>
       reply({
-        started: args.section
-          ? await startKickbackWorker(args.record, args.section, { by: identity.user, level: args.level, minutes: args.minutes })
+        started:
+          args.section || args.request
+            ? await startKickbackWorker(args.record ?? null, args.section, { by: identity.user, level: args.level, minutes: args.minutes, request: args.request ?? null })
           : await startRecordWorkers(args.record, { by: identity.user, level: args.level, minutes: args.minutes }),
         note: "You'll get a signal when each is done or stopped.",
       }),
@@ -195,14 +218,17 @@ default, 3 a broad matter. Its brief is composed for it from the graph: you writ
 class, one the worker's audience can see; update says a conflict with the source is really a change the
 record states. No free text reaches the worker. A request graph-rag raised for a worker that ended (R15)
 takes keep (the section is Kept now) or hold (its recorder is asked); for a fresh worker use start_worker.`,
-    { request: z.string().min(8).max(80), decision: z.enum(ANSWERS), class: z.string().max(80).optional() },
+    { request: z.string().max(2000).describe("the request's handle (r1, r2 …) from your signals or open_requests, or its id; never its question"), decision: z.enum(ANSWERS), class: z.string().max(80).optional() },
     async (args) => reply(await answerRequest(args.request, { decision: args.decision, ...(args.class ? { class: args.class } : {}) }, identity.user, await liveEnv())),
   );
   server.tool(
     "open_requests",
     "Workers' requests not yet answered: kind, record, home, question.",
     {},
-    async () => reply({ requests: await (await liveEnv()).store.requests({ status: "open" }) }),
+    async () => {
+      const all = await requestList(await liveEnv());
+      return reply({ requests: all.map((r, i) => ({ handle: requestHandle(i), ...r })).filter((r) => r.status === "open") });
+    },
   );
   server.tool(
     "filing_log",

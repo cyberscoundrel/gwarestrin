@@ -80,7 +80,7 @@ export function openaiClient({ baseUrl, apiKey, model, maxTokens = 4096, tempera
         return { id: t.id, name: t.function?.name, args: clean, ...(cut.length ? { dsml: cut } : {}) };
       });
       // which upstream served it (OpenRouter names its provider; litellm passes it through)
-      return { text: msg.content ?? "", toolCalls, provider: j.provider ?? null, dsmlInText: DSML_RE.test(String(msg.content ?? "")), usage: { input: j.usage?.prompt_tokens ?? 0, output: j.usage?.completion_tokens ?? 0 } };
+      return { text: msg.content ?? "", toolCalls, finish: j.choices?.[0]?.finish_reason ?? null, provider: j.provider ?? null, dsmlInText: DSML_RE.test(String(msg.content ?? "")), usage: { input: j.usage?.prompt_tokens ?? 0, output: j.usage?.completion_tokens ?? 0 } };
     },
   };
 }

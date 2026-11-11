@@ -241,6 +241,12 @@ app.get("/api/worker/signals", (req, res) => {
     const floored = await floorDeliveredKickbacks();
     const rows = await adbQuery("SELECT id, kind, job_id, batch_id, data, created_at FROM Signal WHERE status = 'new' ORDER BY created_at ASC LIMIT 50");
     const signals = rows.map((r) => ({ ...r, data: JSON.parse(r.data || "{}") }));
+    // each request by the handle the orchestrator answers it with (r1, r2 ...: the order requests were raised)
+    if (signals.some((x) => x.kind === "request")) {
+      const { liveEnv, requestHandle, requestList } = await import("./filing.js");
+      const order = (await requestList(await liveEnv())).map((r) => r.id);
+      for (const x of signals) if (x.kind === "request" && order.includes(x.data?.request)) x.data.handle = requestHandle(order.indexOf(x.data.request));
+    }
     const status = await masterStatus();
     return { signals, status, message: signals.length ? signalsMessage(signals, status) : "", ...(floored.length ? { kept_by_graph_rag: floored } : {}) };
   })().then((r) => res.json(r), (e) => httpError(res, e));

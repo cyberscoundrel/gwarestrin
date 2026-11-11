@@ -209,11 +209,11 @@ export function signalsMessage(signals, status = {}) {
       lines.push("Decide the classes these records need, broadly (the class tools), then start a worker for each record with graph-rag_start_worker (its record id; it's split by home, one worker per home). Every record gets a worker: one you leave is started for you when the batch closes. The worker's brief is composed for it from the graph: you write none.");
     } else if (s.kind === "request" && d.raised_by === "graph-rag") {
       // R15: a worker ended without filing a section, and graph-rag (not a model) sent it back
-      lines.push("", `REQUEST ${d.request} (${d.kind}) raised by graph-rag: worker ${s.job_id} ended without filing section ${d.section} of record ${d.record} at ${d.home}. ${String(d.question ?? "").slice(0, 900)}`);
-      lines.push("  Settle it this turn: a fresh worker for just that section (graph-rag_start_worker with record and section), or graph-rag_answer_request keep or hold. Left open when this turn ends, the section is Kept as it stands.");
+      lines.push("", `REQUEST ${d.handle ?? d.request} (${d.kind}) raised by graph-rag: worker ${s.job_id} ended without filing section ${d.section} of record ${d.record} at ${d.home}. ${String(d.question ?? "").slice(0, 900)}`);
+      lines.push(`  Settle it this turn: a fresh worker for just that section (graph-rag_start_worker with request: "${d.handle ?? d.request}"), or graph-rag_answer_request ${d.handle ?? d.request} keep or hold. Left open when this turn ends, the section is Kept as it stands.`);
     } else if (s.kind === "request") {
-      lines.push("", `REQUEST ${d.request} (${d.kind}) from worker ${s.job_id}, record ${d.record} at ${d.home}: ${String(d.question ?? "").slice(0, 800)}${d.suggestion ? ` (it suggests: ${String(d.suggestion).slice(0, 300)})` : ""}`);
-      lines.push("  Answer it with graph-rag_answer_request: use_class or class_created (with the class, one its audience sees), keep, hold, or update (a conflict that is really a change).");
+      lines.push("", `REQUEST ${d.handle ?? d.request} (${d.kind}) from worker ${s.job_id}, record ${d.record} at ${d.home}: ${String(d.question ?? "").slice(0, 800)}${d.suggestion ? ` (it suggests: ${String(d.suggestion).slice(0, 300)})` : ""}`);
+      lines.push(`  Answer it with graph-rag_answer_request, request "${d.handle ?? d.request}": use_class or class_created`+" (with the class, one its audience sees), keep, hold, or update (a conflict that is really a change).");
     } else if (s.kind === "done") {
       lines.push("", `DONE worker ${s.job_id} (${d.title}): ${String(d.summary ?? "").slice(0, 1200)}`);
       if (d.outcomes) lines.push(`  outcomes: ${Object.entries(d.outcomes).map(([k, n]) => `${n} ${k}`).join(", ") || "nothing filed"}. Check its account against the source (graph-rag_check_account), and record a verdict per entry (graph-rag_record_verdict).`);

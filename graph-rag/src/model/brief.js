@@ -105,3 +105,17 @@ export function resolveSectionRef(value, sections) {
   if (list.length === 1) return list[0];
   return null;
 }
+
+/**
+ * An entry a worker names in its account, as its id, or null: its handle (e3, 3) or id among `ids` (its own, in the
+ * order it wrote them); with one entry, any other value means it. Another id, or a handle past the list, never does.
+ */
+export function resolveEntryRef(value, ids) {
+  const list = (ids ?? []).map(String);
+  const s = String(value ?? "").trim();
+  if (list.includes(s)) return s;
+  const n = /^e?(\d{1,4})$/i.exec(s);
+  if (n) return Number(n[1]) >= 1 && Number(n[1]) <= list.length ? list[Number(n[1]) - 1] : null;
+  if (/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(s)) return null;
+  return list.length === 1 ? list[0] : null;
+}

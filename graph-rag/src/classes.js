@@ -347,7 +347,7 @@ const stageList = (stages) => normalizeClass({ name: "x", parents: ["commitment"
  * that has that table (its read side's entities), named as that source names it; with none or several, refused with
  * the form wanted and the declared sources. `sources` and `entitiesOf` are injectable for tests.
  */
-export async function qualifyTable(value, { sources, entitiesOf } = {}) {
+export async function qualifyTable(value, { sources, entitiesOf, field = "record_table" } = {}) {
   const v = String(value ?? "").trim();
   if (!v || v.includes(":")) return value;
   const decls = Object.values(sources ?? (await (await import("./sources.js")).loadSources(undefined, { ttlMs: 0 }).catch(() => ({})))).filter(Boolean);
@@ -361,7 +361,7 @@ export async function qualifyTable(value, { sources, entitiesOf } = {}) {
   const systems = decls.map((d) => d.system);
   throw refuse(
     new ShapeError(
-      "record_table",
+      field,
       has.length
         ? `${v} is a table of several sources: name it as system:table, one of ${has.join(", ")}`
         : `not system:table: ${v}. Name the table with its source, as system:table (${systems.length ? `for example ${systems[0]}:${v}` : "no source is declared"}${systems.length ? `; declared sources: ${systems.join(", ")}` : ""})`,

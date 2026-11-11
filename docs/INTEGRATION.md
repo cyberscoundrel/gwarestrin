@@ -167,6 +167,24 @@ It lands on `build-base` with the first stream merge.
     (`gwsynth-eval-a`, `gwsynth-eval-b`) with its own SQL copy, DABs, litellm, graph and graph-rag.
   - **Database read errors** are left to the workers (the user: workers with proper context should find and use
     resources themselves). They are counted in each report.
+- **Before round 2** (after A-1, Flash, 58 of 75 exact; B-1 Nemotron kept partial at 20 of 68 as `runs/B-1-partial`,
+  A-2 on round-1 code as `runs/A-2-prefix`). The same failure as section ids had moved to the other ids a model
+  copies back. Now:
+  - **Requests** have handles r1, r2 …, in the order they were raised. The handles appear in the orchestrator's
+    signals and in `open_requests`. `answer_request` takes a handle or an id (`filing.js resolveRequestRef`); with
+    one request open, any value means it. A question as the id is refused, with the open ones listed.
+  - **Kick-backs.** `start_worker` names one by its request handle (`request: "r3"`) or by its section's id; with
+    one open for the record, any section value means it.
+  - **Entries.** A worker's entries have handles e1, e2 …, returned beside each entry id. `give_account` takes either
+    (`model/brief.js resolveEntryRef`); anything else is refused with the worker's entries listed.
+  - **Instance ids.** A name as an instance is still refused, and the refusal says the id comes from
+    `resolve_name` or `create_instance`.
+  - **Bare table names** are resolved as for `record_table`: in `resolve_name` and `hold_piece` tables, and as
+    the table in a `file_to_source`/`hold_piece` key with no system ("dbo_Job:4471").
+  - **The class map** (I-32): by `record_table`; else by a class's one table in evidence, when the source has it.
+    It is re-applied as classes appear during the run.
+  - **Pacing:** a worker waiting on an unanswered request counts as settled for the seeder (I-33). Each run
+    reports who was still waiting at the end, and for how long.
 
 ### The review of ba583bc (`~/reviews/build-build-base-ba583bc.md`): the integrator's items
 
@@ -295,6 +313,9 @@ The integrator's (labels and evaluation, [build/integrate.md](build/integrate.md
 | I-29 | The two setups' database copies keep the same synthetic names (`gwsynth-sql`, `GwSynthMfg`), so each graph-rag's guard and the seed guard check the names they always did. The copies are separated by compose project and network: neither graph-rag joins the other's networks |
 | I-30 | DSML in tool arguments is cut at the first marker and counted as the model's failure, with no provider pinned (none reproduced it in isolation); the trace records each response's provider |
 | I-31 | With one section in the brief, a missing `section` or plain text in it means that section; a value naming any other section (a record id, a short id or number past the list) is refused, so a worker still can't file another record's section |
+| I-32 | The eval's class map (I-2) maps a class by the `record_table` the model set, else (harness only) by the one table its evidence names when the source has that table, and is re-applied whenever classes appear during a run. Nothing is written on the class. Without it Flash's filing phase can't be measured at all: its discovery names tables only in evidence, so no class would map and no piece could be Filed. Each report gives the classes mapped each way and those unmapped |
+| I-33 | For the seeder's pacing only, a worker waiting on a request the orchestrator hasn't answered counts as settled: with no operator in a run, nothing else ends that wait |
+| I-34 | The ids a model copies back have short handles local to its job: sections s1 …, entries e1 …, requests r1 …. Each tool takes the handle or the full id, with the one-candidate exception sections have, and a refusal lists the valid handles with a line each. Free text and labels are never taken as an id |
 
 ---
 

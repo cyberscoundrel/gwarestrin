@@ -13,7 +13,7 @@
 import { z } from "zod";
 import { createInstance, fileToSource, giveAccount, holdPiece, jobContext, keepPiece, liveEnv, relateSection, requestOrchestrator, resolveName, sectionKey, stateDependency } from "./filing.js";
 import { REQUEST_KINDS } from "./model/filing.js";
-import { resolveSectionRef, shortSectionId } from "./model/brief.js";
+import { resolveEntryRef, resolveSectionRef, shortSectionId } from "./model/brief.js";
 
 /** a worker writes no entries: the record is on record as its person put it */
 export async function workerUpsert() {
@@ -33,17 +33,21 @@ const refiles = z.string().max(80).optional();
 export function registerWorkerTools(server, { identity, need }) {
   // section: "required" or "optional" resolves args.section to the record id the worker means, or refuses with
   // its sections' ids and headings
-  const run = (fn, cap, section = null) => async (args) => {
+  // tables: bare table names in table/key resolved to system:table (withTables); every result naming an entry carries
+  // its handle (e1, e2 ...) beside the id, which give_account takes back
+  const run = (fn, cap, section = null, { tables = false } = {}) => async (args) => {
     need(cap);
     const env = await liveEnv();
-    return reply(await fn(section ? await withSection(args, identity, env, section === "optional") : args, identity, env));
+    let a = section ? await withSection(args, identity, env, section === "optional") : args;
+    if (tables) a = await withTables(a);
+    return reply(await withEntryHandle(await fn(a, identity, env), identity, env));
   };
   server.tool(
     "resolve_name",
     `Look a name up, read-only: the instances your audience can see by that name, and, given a table
 ("system:table") and a column, the source rows whose column holds it (at most five).`,
     { name: z.string().min(1).max(200), table: z.string().max(200).optional(), column: z.string().max(80).optional() },
-    run(resolveName, "read"),
+    run(resolveName, "read", null, { tables: true }),
   );
   server.tool(
     "file_to_source",
@@ -66,7 +70,7 @@ this piece writes, which the orchestrator checks against the source. You never p
       confirmed_update: z.string().max(80).optional(),
       refiles,
     },
-    run(fileToSource, "write", "required"),
+    run(fileToSource, "write", "required", { tables: true }),
   );
   server.tool(
     "hold_piece",
@@ -74,7 +78,7 @@ this piece writes, which the orchestrator checks against the source. You never p
 your question goes to whoever put the record on record. Name the row's key, or its table, or a class
 with a table.`,
     { section: sectionId, piece: pieceText, question: z.string().min(8).max(1000), class: z.string().max(80).optional(), key: z.string().max(300).optional(), table: z.string().max(200).optional(), refiles },
-    run(holdPiece, "write", "required"),
+    run(holdPiece, "write", "required", { tables: true }),
   );
   server.tool(
     "keep_piece",
@@ -123,11 +127,15 @@ that piece yourself: carry on with the others; you're resumed with the answer.`,
   );
   server.tool(
     "give_account",
-    `Your account of what you did: for each filing-log entry you wrote (by its id), what you did in a
+    `Your account of what you did: for each filing-log entry you wrote (by its handle, e1, e2 …, or its id), what you did in a
 sentence. Every entry needs one before you're done (a filed piece has the one you gave with it; give it
 again to correct it); the orchestrator checks it against the source itself.`,
-    { pieces: z.array(z.object({ entry: z.string().min(8).max(80), said: z.string().min(3).max(2000) })).max(100), summary: z.string().max(2000).optional() },
-    run(giveAccount, "write"),
+    { pieces: z.array(z.object({ entry: z.string().max(2000).describe("the entry's handle (e1, e2 …) or id, as your filing tools gave it"), said: z.string().min(3).max(2000) })).max(100), summary: z.string().max(2000).optional() },
+    async (args) => {
+      need("write");
+      const env = await liveEnv();
+      return reply(await giveAccount(await withEntries(args, identity, env), identity, env));
+    },
   );
 }
 
@@ -175,4 +183,62 @@ async function withSection(args, identity, env, optional) {
   const label = new Map(rows.map((r) => [String(r.rid), r.heading || String(r.text_identity ?? "").slice(0, 60)]));
   const ids = ctx.sections.map((r, i) => `${shortSectionId(i)} (${r})${label.get(r) ? `: ${label.get(r)}` : ""}`).join("; ");
   throw Object.assign(new Error(`section "${String(given ?? "").slice(0, 60)}" isn't one of yours. section is ${SECTION_HINT}. Yours: ${ids}`), { refused: true });
+}
+
+/** a worker's own entries in the order it wrote them: its handles e1, e2 ... */
+async function ownEntries(identity, env) {
+  const ctx = await jobContext(identity, env.db);
+  if (!ctx) return [];
+  return (await env.store.entries({ worker: ctx.job })).sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
+}
+const entryHandle = (i) => `e${i + 1}`;
+
+/** a filing tool's answer naming an entry, with that entry's handle beside its id */
+async function withEntryHandle(result, identity, env) {
+  if (!result || typeof result.entry !== "string") return result;
+  const i = (await ownEntries(identity, env)).findIndex((e) => e.id === result.entry);
+  return i >= 0 ? { ...result, handle: entryHandle(i) } : result;
+}
+
+/**
+ * give_account's entries as ids: each by its handle (e3, 3) or id; with one entry, any value means it. Anything
+ * else (a key, a section, another worker's entry) is refused with the worker's own entries, each with a line.
+ */
+async function withEntries(args, identity, env) {
+  const list = await ownEntries(identity, env);
+  const ids = list.map((e) => e.id);
+  const resolve = (v) => resolveEntryRef(v, ids);
+  const pieces = [];
+  for (const p of args.pieces ?? []) {
+    const id = resolve(p.entry);
+    if (!id) {
+      const yours = list.length ? list.map((e, i) => `${entryHandle(i)} (${e.outcome}, ${String(e.piece ?? "").slice(0, 60)})`).join("; ") : "none yet";
+      throw Object.assign(new Error(`entry "${String(p.entry ?? "").slice(0, 60)}" isn't one of yours: give each entry's handle (e1, e2 …) or id, as your filing tools gave it. Yours: ${yours}`), { refused: true });
+    }
+    pieces.push({ ...p, entry: id });
+  }
+  return { ...args, pieces };
+}
+
+/**
+ * A bare table name where system:table is wanted: in `table`, and as the table of a `key` with no system
+ * ("dbo_Job:4471"). The one declared source that has the table (classes.js qualifyTable), or refused with the form.
+ */
+async function withTables(args) {
+  const { qualifyTable } = await import("./classes.js");
+  const out = { ...args };
+  try {
+    if (typeof out.table === "string" && out.table.trim() && !out.table.includes(":")) out.table = await qualifyTable(out.table, { field: "table" });
+    if (typeof out.key === "string") {
+      const parts = out.key.trim().split(":");
+      if (parts.length === 2 && parts[0] && parts[1]) {
+        const { loadSources } = await import("./sources.js");
+        const systems = Object.keys(await loadSources().catch(() => ({})));
+        if (!systems.includes(parts[0])) out.key = `${await qualifyTable(parts[0], { field: "key" })}:${parts[1]}`;
+      }
+    }
+  } catch (e) {
+    throw Object.assign(new Error(String(e?.message ?? e)), { refused: true });
+  }
+  return out;
 }

@@ -331,6 +331,46 @@ export default [
       ctx.check(row?._record_table === "mssql:dbo_FJob", `stored as system:table: ${JSON.stringify(row)}`);
       const bad = await ctx.tool(orchestrator(ctx), "create_class", { name: `e2e filing table ${tag} b`, parents: ["resource"], evidence: [{ kind: "table", ref: "mssql:dbo_FJob" }], record_table: "dbo_NoSuchTable" });
       ctx.check(bad.error && /not system:table: dbo_NoSuchTable/.test(bad.error) && /for example mssql:dbo_NoSuchTable/.test(bad.error), `a table no source has is refused with the form: ${JSON.stringify(bad).slice(0, 300)}`);
+      // its class records dbo_FJob, homed at the root (the harness sets no connection home for classes): retired, so later
+      // scenarios still file to that table (a retired class records no table: filing.js classesForTable)
+      const ret = await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Entity SET _status = 'retired' WHERE _kind = 'class' AND _class_name = 'e2e filing table ${tag}'` });
+      const left = await ctx.sql(`SELECT _status FROM Entity WHERE _kind = 'class' AND _class_name = 'e2e filing table ${tag}'`);
+      ctx.check(left[0]?._status === "retired", `its class is retired: ${JSON.stringify(ret).slice(0, 200)} ${JSON.stringify(left)}`);
+    },
+  },
+  {
+    name: "handles: entries e1.., requests r1.. and bare table names stand for their ids; names, questions and other values are refused with the list",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const rec = await record(ctx, "handles", ["Job 4471 is complete. The forklift is booked Thursday."]);
+        const fork = await ctx.tool(rec.worker, "create_instance", { section: "s1", name: "e2e-filing handles forklift", class: "e2e_filing_equipment" });
+        const byName = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the forklift is booked Thursday", instances: ["alice"] });
+        ctx.check(byName.error && /graph-rag_resolve_name or graph-rag_create_instance/.test(byName.error), `an instance by name is refused, pointing to where ids come from: ${JSON.stringify(byName).slice(0, 300)}`);
+        const k = await ctx.tool(rec.worker, "keep_piece", { section: "s1", piece: "the forklift is booked Thursday", instances: [fork.instance] });
+        ctx.check(k.handle === "e1" && k.entry, `the first entry's handle is e1: ${JSON.stringify(k).slice(0, 200)}`);
+        const f = await ctx.tool(rec.worker, "file_to_source", { section: "s1", piece: "job 4471 is complete", said: "writing it: job 4471 is complete", class: "e2e_filing_jobs", key: "dbo_FJob:4471", fields: { Status: "complete" } });
+        ctx.check(f.outcome === "filed" && f.handle === "e2", `a key with a bare table is the source's row: ${JSON.stringify(f).slice(0, 300)}`);
+        const fe = (await ctx.sql(`SELECT target FROM FilingEntry WHERE id = '${f.entry}'`))[0];
+        ctx.check(JSON.stringify(fe?.target ?? "").includes("mssql:dbo_FJob:4471"), `stored as system:table:row: ${JSON.stringify(fe).slice(0, 200)}`);
+        const rn = await ctx.tool(rec.worker, "resolve_name", { name: "4471", table: "dbo_FJob", column: "Job" });
+        ctx.check(!rn.error, `resolve_name takes a bare table name: ${JSON.stringify(rn).slice(0, 200)}`);
+        const badAcc = await ctx.tool(rec.worker, "give_account", { pieces: [{ entry: "section_s1", said: "kept the forklift booking" }] });
+        ctx.check(badAcc.error && badAcc.error.includes("e1 (kept") && badAcc.error.includes("e2 (filed"), `an account for something that isn't an entry is refused with the worker's entries: ${JSON.stringify(badAcc).slice(0, 300)}`);
+        const acc = await ctx.tool(rec.worker, "give_account", { pieces: [{ entry: "e1", said: "kept the forklift booking" }] });
+        ctx.check(acc.missing?.length === 0, `an account by handle: ${JSON.stringify(acc).slice(0, 200)}`);
+        const q1 = await ctx.tool(rec.worker, "request", { kind: "other", question: "Which forklift is meant in this note?", section: "s1" });
+        const q2 = await ctx.tool(rec.worker, "request", { kind: "class", question: "No class fits a booking: should one be made?", section: "s1" });
+        const open = (await ctx.tool(orchestrator(ctx), "open_requests", {})).requests ?? [];
+        const h1 = open.find((r) => r.id === q1.request)?.handle;
+        const h2 = open.find((r) => r.id === q2.request)?.handle;
+        ctx.check(/^r\d+$/.test(h1 ?? "") && /^r\d+$/.test(h2 ?? ""), `open requests carry handles: ${h1}, ${h2}`);
+        const bad = await ctx.tool(orchestrator(ctx), "answer_request", { request: "Which forklift is meant in this note?", decision: "keep" });
+        ctx.check(bad.error && /never its question/.test(bad.error) && bad.error.includes(`${h1} (other`) && bad.error.includes(`${h2} (class`), `a question as the id is refused with the open requests: ${JSON.stringify(bad).slice(0, 400)}`);
+        const ok = await ctx.tool(orchestrator(ctx), "answer_request", { request: h1, decision: "keep" });
+        ctx.check(ok.answered === q1.request, `answered by handle: ${JSON.stringify(ok).slice(0, 200)}`);
+        await ctx.tool(orchestrator(ctx), "answer_request", { request: h2, decision: "keep" });
+      });
     },
   },
   {

@@ -135,7 +135,12 @@ if [ "$VIA" = "litellm" ]; then
   docker image inspect --format '{{.Id}} {{json .RepoDigests}}' "$LITELLM_IMAGE" >"$OUT/litellm-image.txt" 2>/dev/null || true
 fi
 
-docker network create "$NET" >/dev/null
+# an explicit /24 of 172.31.100-249: once docker's 172.x pool is used up it hands out 192.168.0.0/20, which
+# doesn't route between containers on this host (setup B's first starts)
+for try in $(seq 1 20); do
+  if docker network create --subnet "172.31.$(( 100 + RANDOM % 150 )).0/24" "$NET" >/dev/null 2>&1; then break; fi
+  [ "$try" = 20 ] && { echo "no free subnet for $NET" >&2; exit 1; }
+done
 docker run -d --name "$NET-adb" --network "$NET" --network-alias arcadedb \
   -e ARCADEDB_OPTS_MEMORY="-Xms256m -Xmx1g" \
   -e ARCADEDB_SETTINGS="-Darcadedb.server.rootPassword=eval-throwaway -Darcadedb.server.defaultDatabases=gwarestrin[root]" \
@@ -144,7 +149,7 @@ docker run -d --name "$NET-models" --network "$NET" --network-alias models -v "$
 echo "building graph-rag from this checkout"
 docker build -q -t "$GR_IMAGE" "$GR" >/dev/null
 docker run --rm --network "$NET" "$NODE" node -e '
-  const end = Date.now() + 120000;
+  const end = Date.now() + 300000; // five minutes: two setups starting side by side load the host
   (async () => { while (Date.now() < end) { try { if ((await fetch("http://arcadedb:2480/api/v1/ready")).status < 500) process.exit(0); } catch {} await new Promise((r) => setTimeout(r, 2000)); } process.exit(1); })();'
 
 CHECK_ENV=(-e DECISION_URL=http://models:4000/decisions -e DECISION_API_KEY=fake)

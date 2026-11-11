@@ -425,9 +425,40 @@ export async function requestOrchestrator(args, identity, env) {
   return { request: r.id, note: "Sent to the orchestrator. Don't file that piece yourself: carry on with the others, and you're resumed with the answer." };
 }
 
+/** every request in the order it was raised: the orchestrator names them by handle, r1, r2 ... */
+export async function requestList(env) {
+  return (await env.store.requests({})).sort((a, b) => String(a.at).localeCompare(String(b.at)) || String(a.id).localeCompare(String(b.id)));
+}
+export const requestHandle = (i) => `r${i + 1}`;
+
+/** the open requests, one line each with its handle, for a refusal */
+export async function openRequestLines(env, filter = () => true) {
+  const all = await requestList(env);
+  const open = all.map((r, i) => ({ r, h: requestHandle(i) })).filter(({ r }) => r.status === "open" && filter(r));
+  return open.length ? open.map(({ r, h }) => `${h} (${r.kind}${r.raised_by ? `, raised by ${r.raised_by}` : ""}, record ${r.record} at ${r.home}${r.section ? `, section ${r.section}` : ""}): ${String(r.question).slice(0, 80)}`).join("; ") : "none open";
+}
+
+/**
+ * The request a model meant, as its id, or null: its handle (r3, 3) or id; with one request open, any other value
+ * means that one. A value shaped like a handle or id that matches none is never taken as another.
+ */
+export async function resolveRequestRef(value, env) {
+  const all = await requestList(env);
+  const ids = all.map((r) => r.id);
+  const s = String(value ?? "").trim();
+  if (ids.includes(s)) return s;
+  const n = /^r?(\d{1,5})$/i.exec(s);
+  if (n) return Number(n[1]) >= 1 && Number(n[1]) <= ids.length ? ids[Number(n[1]) - 1] : null;
+  if (/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(s)) return null;
+  const open = all.filter((r) => r.status === "open");
+  return open.length === 1 ? open[0].id : null;
+}
+
 /** the orchestrator answers a request, structured (model/filing.js normalizeAnswer); the worker resumes with it */
 export async function answerRequest(id, raw, by, env) {
-  const r = (await env.store.requests({ id: String(id) }))[0];
+  const rid = await resolveRequestRef(id, env);
+  if (!rid) throw refuse(`request "${String(id ?? "").slice(0, 60)}" isn't one to answer: give its handle (r1, r2 …) or id, never its question. Open: ${await openRequestLines(env)}`);
+  const r = (await env.store.requests({ id: rid }))[0];
   if (!r) throw refuse(`no request ${id}`);
   if (r.status !== "open") throw refuse(`request ${id} is ${r.status}`);
   const answer = normalizeAnswer(raw);
@@ -552,11 +583,11 @@ export async function floorUnsettled(requestIds, env) {
 
 async function visibleInstance(env, ctx, rid) {
   const r = String(rid ?? "").trim();
-  if (!RID_RE.test(r)) throw refuse(`not an instance id: ${r}`);
+  if (!RID_RE.test(r)) throw refuse(`"${r.slice(0, 60)}" isn't an instance id: give the id (like #12:3) that graph-rag_resolve_name or graph-rag_create_instance gave you, never a name`);
   const row = (await env.db.adbQuery(`SELECT @rid AS rid, label, _homes, _keys FROM ${r} WHERE _kind = 'thing'`).catch(() => []))[0];
   const homes = Array.isArray(row?._homes) ? row._homes : [];
   // an instance is visible wherever a section about it is (R11): one of its homes the audience sees will do
-  if (!row || !(homes.includes(EVERYONE) || homes.some((h) => audienceSees(env, ctx, h)))) throw refuse(`no instance ${r} you can see`);
+  if (!row || !(homes.includes(EVERYONE) || homes.some((h) => audienceSees(env, ctx, h)))) throw refuse(`no instance ${r} you can see: take its id from graph-rag_resolve_name, or make it with graph-rag_create_instance`);
   return { rid: String(row.rid), label: row.label, keys: Array.isArray(row._keys) ? row._keys : [] };
 }
 

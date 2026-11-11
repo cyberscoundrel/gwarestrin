@@ -137,8 +137,10 @@ if (args._[0] === "generate") {
   }
   // a record is settled when the filing log holds an entry for it, or when every worker it had has finished (done,
   // failed or closed) without one: a record its workers left unfiled is the model's result (reported as missing), and
-  // the next batch doesn't wait on it (the coordinator's option (a), 2026-11-10: pacing only)
-  const FINISHED = new Set(["done", "failed", "closed"]);
+  // the next batch doesn't wait on it (the coordinator's option (a), 2026-11-10: pacing only). A worker waiting on a
+  // request the orchestrator hasn't answered counts as settled too, for pacing only (the coordinator, after round 1):
+  // with no operator in a run, nothing else ends that wait; the report says who was still waiting, and how long
+  const FINISHED = new Set(["done", "failed", "closed", "waiting"]);
   const filedRecords = async () => {
     const r = await call(adminToken, "query_graph", { query: "SELECT DISTINCT(record) AS record FROM FilingEntry", language: "sql" });
     const settled = new Set((r.rows ?? []).map((x) => x.record));

@@ -19,6 +19,7 @@ import { mcpSession, runAgent, toolsFrom } from "./agent.mjs";
 import { fakeClient, openaiClient } from "./models.mjs";
 import { signAgentToken } from "../../src/delegation.js";
 import { MAP } from "../s0.mjs";
+import { classMapFrom } from "../classmap.mjs";
 
 const REPO = fileURLToPath(new URL("../../../", import.meta.url));
 const args = Object.fromEntries(
@@ -148,8 +149,36 @@ async function agent(role, token, prompt, extra = {}) {
   const r = await runAgent({ client, system, prompt, tools, history: extra.history ?? null, maxTurns: extra.maxTurns ?? 40, log: (e) => log({ agent: role, id, ...e }) });
   addUsage(role, r.usage);
   // its last words too: why a record went unfiled is often only in what the worker answered
-  log({ agent: role, id, ended: r.stopped ?? "answered", turns: r.turns, calls: r.calls, text: String(r.text ?? "").slice(0, 600) });
+  log({ agent: role, id, ended: r.stopped ?? "answered", turns: r.turns, calls: r.calls, finish: r.finish ?? null, text: String(r.text ?? "").slice(0, 600) });
   return r;
+}
+
+// ---- the class map (I-2, I-32) ----
+// M0 by each class's source table: the record_table the model set; else (harness only, the coordinator's call after
+// round 1) the one table its evidence names, when that table exists in the source. Nothing is written on the class:
+// a model leaving record_table empty stays visible, and class-map.json says which way each class was mapped.
+const SOURCE_TABLES = () => {
+  try {
+    return new Set(Object.keys(JSON.parse(readFileSync(`${RUN_DIR}/before.json`, "utf8"))).map((t) => `${CONNECTION}:${t}`.toLowerCase()));
+  } catch {
+    return new Set();
+  }
+};
+let classMapKeys = "";
+let classMapAt = 0;
+async function applyClassMap(reason) {
+  const rows = await sql("SELECT _class_key, _class_name, _record_table, _evidence FROM Entity WHERE _kind = 'class'");
+  const { classes, ...out } = classMapFrom(rows, SOURCE_TABLES(), MAP);
+  const keys = Object.keys(classes).sort().join(",");
+  if (keys !== classMapKeys) {
+    const pol = await api("/api/policy");
+    const put = await api("/api/policy", { method: "PUT", body: { authorityMap: { ...(pol.body?.policy?.authorityMap ?? {}), classes } } });
+    if (put.status !== 200) throw new Error(`the class map wasn't set: ${put.status} ${JSON.stringify(put.body).slice(0, 300)}`);
+    classMapKeys = keys;
+    log({ class_map: reason, by_record_table: out.by_record_table.length, by_evidence: out.by_evidence.length, unmapped_with_table: out.unmapped_with_table.length, record_table_not_in_map: out.record_table_not_in_map.length, no_table: out.no_table.length });
+  }
+  writeFileSync(`${RUN_DIR}/class-map.json`, `${JSON.stringify({ at: new Date().toISOString(), total: rows.length, ...out }, null, 2)}\n`);
+  return { total: rows.length, mapped: Object.keys(classes).length, by_record_table: out.by_record_table.length, by_evidence: out.by_evidence.length };
 }
 
 // ---- the steps ----
@@ -204,13 +233,10 @@ discoveryFinished = true;
 await discoveryParts;
 say(`discovery: ${d.stopped ?? "answered"} after ${d.turns} turns`);
 
-// 3. the class map: M0, from each class's source table (the test configuration; NEEDS A RULING I-2)
-const classes = await sql("SELECT _class_key, _record_table FROM Entity WHERE _kind = 'class'");
-const mapped = Object.fromEntries(classes.filter((c) => MAP[c._record_table]).map((c) => [c._class_key, { authority: MAP[c._record_table] }]));
-const pol = await api("/api/policy");
-const put = await api("/api/policy", { method: "PUT", body: { authorityMap: { ...(pol.body?.policy?.authorityMap ?? {}), classes: mapped } } });
-if (put.status !== 200) throw new Error(`the class map wasn't set: ${put.status} ${JSON.stringify(put.body).slice(0, 300)}`);
-say(`class map: ${Object.keys(mapped).length} of ${classes.length} classes mapped from their source tables`);
+// 3. the class map: M0, from each class's source table (the test configuration; NEEDS A RULING I-2), applied again
+//    whenever classes appear during the run (applyClassMap, above)
+const cm = await applyClassMap("after discovery");
+say(`class map: ${cm.mapped} of ${cm.total} classes mapped (${cm.by_record_table} by the record_table the model set, ${cm.by_evidence} by their one table in evidence)`);
 
 // 4. the orchestrator on, then the records seeded (batch by batch) while the pool files them
 const set = await api("/api/worker", { method: "PUT", body: { enabled: true, pool: { ...poolBase, master: true } } });
@@ -230,8 +256,19 @@ const after = await node("scripts/source-dump.mjs", [...dumpArgs, "--out", `${RU
 if (after.code) throw new Error(`the after dump refused or failed: ${after.out}`);
 // which worker filed which record: each review job's record and home (job_key file:<record>:<home>) and how it ended,
 // so a record left unfiled can be traced to its workers' last answers in driver.log
-const jobs = await sql("SELECT id, job_key, status FROM Job WHERE kind = 'review' AND job_key LIKE 'file:%'").catch(() => []);
-writeFileSync(`${RUN_DIR}/jobs.json`, `${JSON.stringify(jobs.map((j) => ({ job: j.id, record: String(j.job_key).split(":")[1], home: String(j.job_key).split(":")[2], status: j.status })), null, 2)}\n`);
+// (every filing job: the first per record and home, re-filings and R15's fresh workers), with when it last changed
+// and the requests it still waits on at the end
+const jobs = await sql("SELECT id, job_key, status, updated_at FROM Job WHERE kind = 'review' AND (job_key LIKE 'file:%' OR job_key LIKE 'refile:%' OR job_key LIKE 'kickback:%')").catch(() => []);
+const openReqs = await sql("SELECT worker, id, kind, at FROM WorkerRequest WHERE status = 'open'").catch(() => []);
+const endedAt = new Date().toISOString();
+writeFileSync(
+  `${RUN_DIR}/jobs.json`,
+  `${JSON.stringify(
+    jobs.map((j) => ({ job: j.id, kind: String(j.job_key).split(":")[0], record: String(j.job_key).split(":")[1], home: String(j.job_key).split(":")[2], status: j.status, updated_at: j.updated_at ?? null, open_requests: openReqs.filter((r) => r.worker === j.id).map((r) => ({ id: r.id, kind: r.kind, at: r.at })), ended_at: endedAt })),
+    null,
+    2,
+  )}\n`,
+);
 writeFileSync(`${RUN_DIR}/usage.json`,`${JSON.stringify({ setup: SETUP, run: RUN, models: MODE, via: VIA, ...(VIA === "none" ? {} : { orchestrator: modelOf("orchestrator"), worker: modelOf("worker") }), usage }, null, 2)}\n`);
 const rep = await node("scripts/filing-report.mjs", ["run", "--url", GRAPH, "--tokens", simpleTokens, "--run-dir", RUN_DIR, "--setup", SETUP, "--run", String(RUN)]);
 say(rep.out.trim());
@@ -282,6 +319,11 @@ async function poolLoop({ stopWhen, quietPolls }) {
         running.add(p);
         p.finally(() => running.delete(p));
       }
+    }
+    // classes made during the run get their authority too (the same rule, both setups)
+    if (Date.now() - classMapAt > 20_000) {
+      classMapAt = Date.now();
+      await applyClassMap("during the run").catch((e) => log({ class_map_error: String(e?.message ?? e).slice(0, 200) }));
     }
     if (!orchestrating && !signals.length && !running.size && (await stopWhen())) {
       if (++quiet >= quietPolls) break;

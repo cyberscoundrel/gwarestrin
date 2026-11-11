@@ -96,7 +96,8 @@ export async function runAgent({ client, system, prompt, tools, maxTurns = 40, l
     // the model's own words each turn (the run's trace of why it did what it did)
     if (String(r.text ?? "").trim()) log({ turn, reply: String(r.text).slice(0, 2000), provider: r.provider ?? null });
     usage.outChars += String(r.text ?? "").length + JSON.stringify(r.toolCalls ?? []).length;
-    if (!r.toolCalls?.length) return { text: r.text ?? "", turns: turn, calls, usage, messages, stopped: null };
+    // why the model's turn ended ("stop", or "length" at the output cap), for the trace
+    if (!r.toolCalls?.length) return { text: r.text ?? "", turns: turn, calls, usage, messages, stopped: null, finish: r.finish ?? null };
     for (const tc of r.toolCalls) {
       calls++;
       const tool = byName.get(tc.name);
