@@ -2,7 +2,8 @@
 // snapshot (collect.mjs reads one from an instance) and returns the measures, the two gates, and Markdown.
 //
 // snapshot: {
-//   meta: { setup, run, seed, noteOf: { recordId: noteId }, markers: [{ word, record, recordId, floor, expect? }] },
+//   meta: { setup, run, seed, noteOf: { recordId: noteId }, markers: [{ word, record, recordId, floor, expect? }],
+//           only?: [noteId] },           // a run on a subset of the notes: only those are scored
 //   positions, before, after,            // the test positions; the source dumps
 //   entries, requests, briefs,           // the filing log, workers' requests, every brief as sent
 //   classes, instances, sections, about, // the graph: classes; [{ rid, name, key, classes, homes }];
@@ -22,7 +23,7 @@ import { SYSTEM, rowKey } from "./s0.mjs";
 
 const pct = (x) => (x === null || x === undefined || Number.isNaN(x) ? "n/a" : `${Math.round(x * 100)}%`);
 
-export function buildReport(snap, { notes = NOTES } = {}) {
+export function buildReport(snap, { notes = snap.meta?.only ? NOTES.filter((n) => snap.meta.only.includes(n.id)) : NOTES } = {}) {
   const noteOf = (rid) => snap.meta.noteOf?.[rid] ?? null;
   const recordsOf = (id) => Object.entries(snap.meta.noteOf ?? {}).filter(([, n]) => n === id).map(([r]) => r);
   const info = new Map(snap.instances.map((i) => [i.rid, { key: i.key ?? null, name: i.name }]));

@@ -2,9 +2,11 @@
 // The real-model evaluation's input (docs/build/integrate.md, section 3): the 62 notes as records, plus the
 // marker records for the leak gate, and the labels' check.
 //
-//   node scripts/make-records.mjs generate --out <run-dir> [--seed N]
+//   node scripts/make-records.mjs generate --out <run-dir> [--seed N] [--only ux-m01,ux-t06]
 //        writes <run-dir>/records.json: { seed, records: [{ note, batch, person, document }], markers: [{ word, record, section }] }
-//        and prints the label counts. The seed makes the markers; keep it with the run.
+//        and prints the label counts. The seed makes the markers; keep it with the run. --only keeps just the named
+//        notes, plus every marker record (the leak gate needs them all), and records the list as only: [...], so
+//        the report scores just those notes
 //
 //   node scripts/make-records.mjs check [--data dump.json]
 //        the labels against the oracle's ids and against a dataset (default S0, graph-rag/eval/s0.mjs; or a
@@ -52,7 +54,7 @@ function parseArgs(argv) {
 }
 const usage = (msg) => {
   if (msg) console.error(msg);
-  console.error("usage: make-records.mjs generate --out dir [--seed N]\n       make-records.mjs check [--data dump.json]\n       make-records.mjs table\n       make-records.mjs seed records.json --url URL --tokens f [--tool name] [--only ids] [--dry-run] [--no-wait] [--harness]");
+  console.error("usage: make-records.mjs generate --out dir [--seed N] [--only ids]\n       make-records.mjs check [--data dump.json]\n       make-records.mjs table\n       make-records.mjs seed records.json --url URL --tokens f [--tool name] [--only ids] [--dry-run] [--no-wait] [--harness]");
   process.exit(2);
 };
 
@@ -62,11 +64,15 @@ const oracle = JSON.parse(readFileSync(ORACLE, "utf8"));
 if (args._[0] === "generate") {
   if (typeof args.out !== "string") usage("--out <run-dir> is required");
   const seed = Number(args.seed ?? Math.floor(Math.random() * 2 ** 31));
-  const notes = recordsFrom(oracle);
+  const only = typeof args.only === "string" ? args.only.split(",").map((s) => s.trim()).filter(Boolean) : null;
+  const all = recordsFrom(oracle);
+  const unknown = (only ?? []).filter((id) => !all.some((r) => r.note === id));
+  if (unknown.length) usage(`--only names notes that aren't in the set: ${unknown.join(", ")}`);
+  const notes = only ? all.filter((r) => only.includes(r.note)) : all;
   const { records: marks, markers } = markerRecords(seed, { avoid: oracle.map((n) => n.text).join(" ") });
   mkdirSync(args.out, { recursive: true });
   const file = `${args.out.replace(/\/$/, "")}/records.json`;
-  writeFileSync(file, `${JSON.stringify({ seed, records: [...marks, ...notes], markers }, null, 2)}\n`);
+  writeFileSync(file, `${JSON.stringify({ seed, ...(only ? { only } : {}), records: [...marks, ...notes], markers }, null, 2)}\n`);
   const c = labelCounts();
   console.log(`wrote ${file}: ${marks.length} marker records, then ${notes.length} notes in ${new Set(notes.map((r) => r.batch)).size} batches (seed ${seed})`);
   console.log(`labels: ${c.pieces} pieces, ${c.filed} Filed, ${c.proposed} Proposed, ${c.held} Held, ${c.kept} Kept; ${c.unheld} accept Kept or Held (item 5); stated changes and states (R12): ${STATED_NOTES.join(", ")}`);

@@ -47,6 +47,12 @@ model_list:
     litellm_params:
       model: openrouter/nvidia/nemotron-3.5-lightning
       api_key: os.environ/OPENROUTER_API_KEY
+  # GLM 5.3 Flash by its exact OpenRouter id (listed 2026-11-11; not the FlashX, FlashX Legal or :batch variants).
+  # Setup C of the evaluation.
+  - model_name: glm-5.3-flash
+    litellm_params:
+      model: openrouter/z-ai/glm-5.3-flash
+      api_key: os.environ/OPENROUTER_API_KEY
 
 litellm_settings:
   drop_params: true   # tolerate client params a backend doesn't support

@@ -7,6 +7,7 @@
 //
 //   node graph-rag/eval/driver/run.mjs --graph URL --tokens tokens.json --dab-read URL --dab-write URL --run-dir DIR
 //        --models fake | --models real --setup A   [--run 1] [--seed N] [--concurrency 4] [--timeout-min 240]
+//        [--only ux-m01,ux-t06]   a subset of the notes (every marker record too); discovery still runs in full
 //
 // --models real reads the setup's model names from the environment and reaches them through the evaluation's litellm
 // or directly (EVAL_VIA, below; eval/run.sh sets this up, and nothing here prints a key). Proposal B's plan (the assistant's, approved with the doc):
@@ -216,7 +217,7 @@ await checkLitellmModels();
 await until("graph-rag up", async () => (await api("/api/worker")).status === 200);
 
 // 1. the records, and the source before anything happens
-const gen = await node("scripts/make-records.mjs", ["generate", "--out", RUN_DIR, ...(args.seed ? ["--seed", String(args.seed)] : [])]);
+const gen = await node("scripts/make-records.mjs", ["generate", "--out", RUN_DIR, ...(args.seed ? ["--seed", String(args.seed)] : []), ...(typeof args.only === "string" ? ["--only", args.only] : [])]);
 if (gen.code) throw new Error(`records: ${gen.out}`);
 const before = await node("scripts/source-dump.mjs", [...dumpArgs, "--out", `${RUN_DIR}/before.json`]);
 if (before.code) throw new Error(`the before dump refused or failed: ${before.out}`);

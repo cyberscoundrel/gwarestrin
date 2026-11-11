@@ -6,6 +6,9 @@
 #                                                                                behind the evaluation's litellm
 #   graph-rag/eval/run.sh --models real --env-file ~/gwsynth-models.env --setup A [--run 1] [--out DIR] [--seed N]
 #                                                                [--via litellm (the default) | --via direct]
+#                                                                [--only ux-m01,ux-t06 (a subset of the notes)]
+# A setup's two model names come from the env file, or else from eval/setups.env (names only, committed); the env
+# file is only ever grepped for names.
 #
 # What it starts, all its own, all removed afterwards (KEEP=1 leaves them):
 #   - a fresh copy of the synthetic database, compose project gwsynth-eval (test-sql/up.sh): a new database each run;
@@ -30,7 +33,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 GR="$PWD"
 REPO="$(cd .. && pwd)"
-MODELS="" ENV_FILE="" SETUP="" RUN=1 OUT="" SEED="" VIA=""
+MODELS="" ENV_FILE="" SETUP="" RUN=1 OUT="" SEED="" VIA="" ONLY=""
+NAMES="$GR/eval/setups.env"
 while [ $# -gt 0 ]; do
   case "$1" in
     --models) MODELS="$2"; shift 2 ;;
@@ -40,6 +44,7 @@ while [ $# -gt 0 ]; do
     --out) OUT="$2"; shift 2 ;;
     --seed) SEED="$2"; shift 2 ;;
     --via) VIA="$2"; shift 2 ;;
+    --only) ONLY="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -59,7 +64,7 @@ case "$MODELS" in
     [ -n "$ENV_FILE" ] || { echo "--env-file is required with --models real" >&2; exit 2; }
     [ -f "$ENV_FILE" ] || refuse "no env file at $ENV_FILE (the user creates it; see graph-rag/eval/models.env.example)"
     ENV_FILE="$(cd "$(dirname "$ENV_FILE")" && pwd)/$(basename "$ENV_FILE")"
-    for name in "EVAL_SETUP_${SETUP}_ORCHESTRATOR" "EVAL_SETUP_${SETUP}_WORKER"; do sets "$name" || refuse "the env file sets no $name"; done
+    for name in "EVAL_SETUP_${SETUP}_ORCHESTRATOR" "EVAL_SETUP_${SETUP}_WORKER"; do sets "$name" || grep -q "^$name=." "$NAMES" || refuse "neither the env file nor eval/setups.env sets $name"; done
     if [ "$VIA" = "litellm" ]; then sets OPENROUTER_API_KEY || refuse "the env file sets no OPENROUTER_API_KEY (litellm's key)"
     else sets EVAL_AGENT_API_KEY || refuse "the env file sets no EVAL_AGENT_API_KEY (--via direct)"; fi
     # the typed check's decision model: its own key, or the OpenRouter key
@@ -121,7 +126,12 @@ cat >"$CFG/tokens.json" <<EOF
 EOF
 # the driver's model names through litellm: only the setup's two name lines of the env file, never a key line
 if [ "$MODELS" = "real" ] && [ "$VIA" = "litellm" ]; then
-  grep -E "^EVAL_SETUP_${SETUP}_(ORCHESTRATOR|WORKER)=" "$ENV_FILE" >"$CFG/models.env"
+  # each name from the env file when it sets it, else from eval/setups.env
+  : >"$CFG/models.env"
+  for role in ORCHESTRATOR WORKER; do
+    if sets "EVAL_SETUP_${SETUP}_$role"; then grep -E "^EVAL_SETUP_${SETUP}_$role=" "$ENV_FILE" >>"$CFG/models.env"
+    else grep -E "^EVAL_SETUP_${SETUP}_$role=" "$NAMES" >>"$CFG/models.env"; fi
+  done
 fi
 chmod -R a+rX "$CFG"
 
@@ -187,7 +197,7 @@ echo "the run: $MODELS models via $VIA, setup $SETUP, run $RUN -> $OUT"
 docker create --name "$NET-driver" --label "eval-setup=$SETUP" --label "eval-run=$RUN" --network "$NET" -v "$REPO:/repo:ro" -v "$CFG:/cfg:ro" -v "$OUT:/out" --user "$(id -u):$(id -g)" "${DRIVER_ENV[@]}" \
   "$NODE" node /repo/graph-rag/eval/driver/run.mjs --graph http://graph-rag:8000 --tokens /cfg/tokens.json \
   --dab-read http://dab-read:5000/mcp --dab-write http://dab-write:5000/mcp --run-dir /out \
-  --models "$MODELS" ${SETUP:+--setup "$SETUP"} --run "$RUN" ${SEED:+--seed "$SEED"} >/dev/null
+  --models "$MODELS" ${SETUP:+--setup "$SETUP"} --run "$RUN" ${SEED:+--seed "$SEED"} ${ONLY:+--only "$ONLY"} >/dev/null
 docker network connect "${SYNTH}_api" "$NET-driver"
 [ "$VIA" = "litellm" ] && docker network connect "${SYNTH}_models" "$NET-driver"
 status=0

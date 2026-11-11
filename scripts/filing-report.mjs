@@ -10,11 +10,13 @@
 //        pass mark. The two gates and their zero tolerance are proposal B's (the assistant's proposal, which the
 //        user read and approved with docs/ORGANIZATION-MODEL.md), not a ruling of their own.
 //
+//   node scripts/filing-report.mjs rescore <dir> [--only ids] [--out dir]   the report again from snapshot.json
+//
 //   node scripts/filing-report.mjs compare <dir> <dir> ...   writes compare.md next to the first dir's parent
 //
 // --url is required and has no default: this never finds an instance on its own. The token needs the raw
 // capability (query_graph in SQL): the admin's.
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { collectGraph } from "../graph-rag/eval/collect.mjs";
 import { buildReport, compareRuns } from "../graph-rag/eval/report.mjs";
@@ -70,7 +72,7 @@ if (args._[0] === "run") {
   const graph = await collectGraph(query, { records: run.records });
   const markers = run.markers.map((m) => ({ ...m, recordId: graph.recordIds[m.record] ?? null }));
   const snap = {
-    meta: { setup: typeof args.setup === "string" ? args.setup : "setup", run: Number(args.run ?? 1), seed: run.seed, noteOf: graph.noteOf, markers },
+    meta: { setup: typeof args.setup === "string" ? args.setup : "setup", run: Number(args.run ?? 1), seed: run.seed, ...(run.only ? { only: run.only } : {}), noteOf: graph.noteOf, markers },
     positions: POSITIONS,
     before: read(`${dir}/before.json`),
     after: read(`${dir}/after.json`),
@@ -88,16 +90,22 @@ if (args._[0] === "run") {
   console.log(`wrote ${dir}/report.md, tree.md, report.json, snapshot.json`);
   process.exit(report.gates.ok ? 0 : 1);
 } else if (args._[0] === "rescore") {
-  // a finished run's report again, from its snapshot (the graph is gone): the old report kept as report.v1.*
+  // a finished run's report again, from its snapshot (the graph is gone): the old report kept as report.v1.*.
+  // --only ids scores just those notes (a full run on a subset run's notes); --out dir writes there instead and
+  // leaves the run's own files as they are
   const dir = args._[1];
   if (!dir) usage("give the run dir");
   const snap = read(`${dir}/snapshot.json`);
-  for (const f of ["report.md", "report.json", "tree.md"]) if (existsSync(`${dir}/${f}`) && !existsSync(`${dir}/${f.replace("report", "report.v1").replace("tree", "tree.v1")}`)) copyFileSync(`${dir}/${f}`, `${dir}/${f.replace("report", "report.v1").replace("tree", "tree.v1")}`);
+  if (typeof args.only === "string") snap.meta = { ...snap.meta, only: args.only.split(",").map((s) => s.trim()).filter(Boolean) };
+  const to = typeof args.out === "string" ? args.out.replace(/\/$/, "") : dir;
+  if (to === dir) {
+    for (const f of ["report.md", "report.json", "tree.md"]) if (existsSync(`${dir}/${f}`) && !existsSync(`${dir}/${f.replace("report", "report.v1").replace("tree", "tree.v1")}`)) copyFileSync(`${dir}/${f}`, `${dir}/${f.replace("report", "report.v1").replace("tree", "tree.v1")}`);
+  } else mkdirSync(to, { recursive: true });
   const report = buildReport(snap);
-  writeFileSync(`${dir}/report.md`, report.markdown);
-  writeFileSync(`${dir}/tree.md`, report.tree);
+  writeFileSync(`${to}/report.md`, report.markdown);
+  writeFileSync(`${to}/tree.md`, report.tree);
   const { markdown: _m, tree: _t, ...rest } = report;
-  writeFileSync(`${dir}/report.json`, `${JSON.stringify(rest, null, 2)}\n`);
+  writeFileSync(`${to}/report.json`, `${JSON.stringify(rest, null, 2)}\n`);
   const t = report.outcomes.totals;
   console.log(`${dir}: ${report.gates.ok ? "GATES PASS" : "GATES FAIL"}; pieces ${t.pieces}: ${t.exact} exact, ${t.accepted} accepted, ${t.wrong} wrong, ${t.missing} missing; must-not ${report.outcomes.mustNot.length}`);
 } else if (args._[0] === "compare") {
