@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { awaitingVerdict, DISAGREEMENT_RULE, disagreeingColumns, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, onDisagreement, OUTCOMES, suggestVerdict } from "../src/model/filing.js";
+import { awaitingVerdict, disagreeingColumns, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, OUTCOMES, suggestVerdict } from "../src/model/filing.js";
 
 const base = { id: "f1", record: "#20:1", section: "#20:2", home: "floor", recorder: "bob", worker: "admin/agent:w1", piece: "Job 4471 moved to CNC 5" };
 
@@ -53,16 +53,10 @@ test("requests: a class request, answered by the orchestrator", () => {
   assert.equal(normalizeRequest({ ...r, status: "answered", answer: "made forklift", answered_by: "orchestrator" }).answered_by, "orchestrator");
 });
 
-test("R12 (F4) lives in one function: a stated change is filed, a disagreeing state is Held; the conservative rule is kept", () => {
-  assert.equal(DISAGREEMENT_RULE, "update_when_changed", "R12: stated changes are written");
-  assert.deepEqual(onDisagreement({ says_change: true }), { file: true, outcome: null, request: null });
-  assert.deepEqual(onDisagreement({ says_change: false }), { file: false, outcome: "held", request: null });
-  assert.deepEqual(onDisagreement({ says_change: true }, "hold_and_request"), { file: false, outcome: "held", request: "conflict" });
-  assert.deepEqual(onDisagreement({ says_change: false }, "hold_and_request"), { file: false, outcome: "held", request: "conflict" });
-  assert.deepEqual(onDisagreement({ says_change: true }, "update_when_changed"), { file: true, outcome: null, request: null });
-  assert.deepEqual(onDisagreement({ says_change: false }, "update_when_changed"), { file: false, outcome: "held", request: null });
-  assert.deepEqual(onDisagreement({ says_change: "yes" }, "update_when_changed").file, false, "only a stated true counts");
-  assert.throws(() => onDisagreement({}, "overwrite"), /must be one of/);
+test("R16 replaced R12's state-versus-change rule: the model no longer has a disagreement rule for a worker's reading to drive", async () => {
+  const m = await import("../src/model/filing.js");
+  assert.equal(m.onDisagreement, undefined);
+  assert.equal(m.DISAGREEMENT_RULE, undefined);
 });
 
 test("a disagreement is a different, non-empty value in a written column; an empty column taking a value is none", () => {

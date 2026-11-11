@@ -109,6 +109,34 @@ export const NOTES = [
   { id: "ux-aw10", recorder: "alice", pieces: [K("Diep may lift nothing over 20 pounds for two weeks; a doctor's note")], resolves: [KEY("Employee", "NGUD")], mustNot: [{ link: KEY("Employee", "NGDT") }] },
 ];
 
+/**
+ * The labels R16 changes (the user, 2026-11-11: code decides whether a source write lands, and R12's state-versus-change
+ * test is dropped), old and new (I-47). NOTES above stay the R12 labels, so a run is scored either way: `notesUnder`.
+ * Each change is the integrator's reading of the note under R16 and the conditions as built (model/write-conditions.js,
+ * DEFINITIONS); a treatment chosen for booleans or closed-set values would move t06 and z01 to Filed, which they accept.
+ */
+export const R16_CHANGES = [
+  { note: "ux-m01", piece: 0, from: "held", to: "filed", accept: [], dropMustNot: KEY("Work_Center", "INSPECT-2"), why: "no longer Held for describing a state: the note names INSPECT-2 and gives the values in its own words (down, until the gauge is recalibrated), and alice (Operations) holds the authority over work centers" },
+  { note: "ux-t06", piece: 0, from: "held", to: "held", accept: ["filed"], dropMustNot: KEY("Job", "3260372"), why: "no longer Held for describing a state, but Held by condition 3: Certs_Required true isn't in the note's words (\"needs certs\"); Filed once a boolean treatment counts it (I-45)" },
+  { note: "ux-z01", piece: 0, from: "filed", to: "held", accept: ["filed"], dropMustNot: null, why: "Held by condition 3: the Status \"shipped Thursday\" means is a closed-set value (Complete) not in the note's words; no treatment for closed sets is proposed (I-45)" },
+];
+
+/** the notes as labelled under "r12" (the labels as written) or "r16" (with R16_CHANGES applied) */
+export function notesUnder(labels = "r16") {
+  if (labels === "r12") return NOTES;
+  if (labels !== "r16") throw new Error(`labels: r12 or r16, not ${labels}`);
+  return NOTES.map((n) => {
+    const changes = R16_CHANGES.filter((c) => c.note === n.id);
+    if (!changes.length) return n;
+    const pieces = n.pieces.map((p, i) => {
+      const c = changes.find((x) => x.piece === i);
+      return c ? { ...p, outcome: c.to, accept: c.accept, r16: c.why } : p;
+    });
+    const drop = new Set(changes.map((c) => c.dropMustNot).filter(Boolean));
+    return { ...n, pieces, ...(n.mustNot ? { mustNot: n.mustNot.filter((m) => !drop.has(m.change)) } : {}) };
+  });
+}
+
 /** the notes with a stated change or a stated state (R12), listed apart in the report */
 export const STATED_NOTES = NOTES.filter((n) => n.pieces.some((p) => p.stated)).map((n) => n.id);
 

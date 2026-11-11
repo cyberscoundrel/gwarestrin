@@ -3,7 +3,8 @@
 //
 // snapshot: {
 //   meta: { setup, run, seed, noteOf: { recordId: noteId }, markers: [{ word, record, recordId, floor, expect? }],
-//           only?: [noteId] },           // a run on a subset of the notes: only those are scored
+//           only?: [noteId],             // a run on a subset of the notes: only those are scored
+//           labels?: "r12" | "r16" },    // the labels it is scored by (I-47): none, r12 (a run from before R16)
 //   positions, before, after,            // the test positions; the source dumps
 //   entries, requests, briefs,           // the filing log, workers' requests, every brief as sent
 //   classes, instances, sections, about, // the graph: classes; [{ rid, name, key, classes, homes }];
@@ -13,8 +14,8 @@
 //   toolCalls?: { all, byRole, filing } // from the run's driver.log (toolcalls.mjs): errors split three ways
 //   connectionHome?                      // who reads the test source (the test configuration: everyone)
 // }
-import { NOTES } from "./labels.mjs";
-import { briefItems, classItems, entryItems, instanceItems, markerHomes, requestItems, scanLeaks, sectionItems, titleItems, writeItems } from "./leaks.mjs";
+import { notesUnder } from "./labels.mjs";
+import { briefItems, classItems, entryItems, instanceItems, markerHomes, requestItems, scanLeaks, sectionItems, splitWritesByAuthority, titleItems, writeItems } from "./leaks.mjs";
 import { OUTCOME_ORDER, scoreLinks, scoreOutcomes } from "./outcomes.mjs";
 import { accountResults, diffDumps, rowGate } from "./source.mjs";
 import { duplicateCandidates, placementSample, renderTree, stability } from "./tree.mjs";
@@ -24,7 +25,10 @@ import { SYSTEM, rowKey } from "./s0.mjs";
 
 const pct = (x) => (x === null || x === undefined || Number.isNaN(x) ? "n/a" : `${Math.round(x * 100)}%`);
 
-export function buildReport(snap, { notes = snap.meta?.only ? NOTES.filter((n) => snap.meta.only.includes(n.id)) : NOTES } = {}) {
+/** the labels a snapshot is scored by: meta.labels ("r12" or "r16", I-47; a run from before R16 has none, so r12) */
+export const labelsOf = (snap) => snap.meta?.labels ?? "r12";
+
+export function buildReport(snap, { notes = notesUnder(labelsOf(snap)).filter((n) => !snap.meta?.only || snap.meta.only.includes(n.id)) } = {}) {
   const noteOf = (rid) => snap.meta.noteOf?.[rid] ?? null;
   const recordsOf = (id) => Object.entries(snap.meta.noteOf ?? {}).filter(([, n]) => n === id).map(([r]) => r);
   const info = new Map(snap.instances.map((i) => [i.rid, { key: i.key ?? null, name: i.name }]));
@@ -44,7 +48,8 @@ export function buildReport(snap, { notes = snap.meta?.only ? NOTES.filter((n) =
     ...classItems(snap.classes),
     ...writeItems(changes, snap.connectionHome ?? EVERYONE),
   ];
-  const leaks = scanLeaks(items, homes, snap.positions, { briefs: (snap.briefs ?? []).length });
+  // R17: a marker written to a wider table by its recorder's authority, from a note at their own level, is listed apart
+  const leaks = splitWritesByAuthority(scanLeaks(items, homes, snap.positions, { briefs: (snap.briefs ?? []).length }), { entries: snap.entries, sections: snap.sections, documents: snap.documents ?? [], positions: snap.positions });
   const about = new Map(Object.entries(snap.about ?? {}));
   const outcomes = scoreOutcomes(notes, snap.entries, { noteOf, info, changes, instances: snap.instances, about });
   const links = scoreLinks(notes, { recordsOf, about, info });
@@ -79,7 +84,11 @@ function markdown(r, snap) {
   for (const m of r.leaks.misplaced) L.push(`- misplaced: "${m.word}" (${m.record}) stored at ${m.stored}, below its recorder's position ${m.floor}`);
   if (r.leaks.untested.length) L.push(`- markers never stored, so untested: ${r.leaks.untested.join(", ")}`);
   for (const b of r.leaks.belowExpect) L.push(`- (reported, not gating) "${b.word}" ended at ${b.home}; the integrator's label reads the check as owing ${b.expect}`);
-  L.push("", "## Filing outcomes against the labels", "");
+  if (r.leaks.byAuthority?.length) {
+    L.push("", "### Note wording that reached a wider table by authority (R17)", "", "Not counted as leaks: each was written by its recorder's authority from a note at their own level. Listed so every case is seen.", "");
+    for (const b of r.leaks.byAuthority) L.push(`- "${b.word}" (home ${b.home}) in ${b.row} (${b.columns.join(", ")}), seen by ${b.seen_by}: from ${b.notes.join(", ")}`);
+  }
+  L.push("", "## Filing outcomes against the labels", "", `Labels: ${labelsOf(snap) === "r16" ? "under R16 (R16_CHANGES applied: m01, t06, z01)" : "as written, under R12 (before R16)"}.`, "");
   L.push(`${o.totals.pieces} labelled pieces: ${o.totals.exact} exact, ${o.totals.accepted} accepted, ${o.totals.wrong} wrong (${o.totals.wrongTarget} wrong target, ${o.totals.wrongRule} wrong outcome on the right target), ${o.totals.missing} missing. ${o.totals.extra} extra entries, ${o.totals.extraWrites} of them writes.`, "");
   L.push(`| label \\ logged | ${[...OUTCOME_ORDER, "missing"].join(" | ")} |`, `|---|${[...OUTCOME_ORDER, "missing"].map(() => "--:").join("|")}|`);
   for (const lab of OUTCOME_ORDER) L.push(`| ${lab} | ${[...OUTCOME_ORDER, "missing"].map((x) => o.confusion[lab][x]).join(" | ")} |`);

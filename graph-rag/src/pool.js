@@ -118,7 +118,7 @@ export function resumeBrief({ question, answer, answered_by, proposal, decision,
       class_created: `the orchestrator made the class ${cls}: file the piece under it`,
       keep: "no class fits: keep the piece (graph-rag_keep_piece)",
       hold: "leave the piece Held; whoever put it on record is asked",
-      update: `the record states a change: file it as an update, with confirmed_update: "${request}"`,
+      update: "file the piece to its row; graph-rag decides whether it lands (the record must name the row and give every value)",
     }[decision];
     return [`The orchestrator answered your request ${request}: ${what ?? decision}.`, "Carry on with that piece, then give your account (graph-rag_give_account) and a short report."].join("\n");
   }

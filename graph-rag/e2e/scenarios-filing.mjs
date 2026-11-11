@@ -163,22 +163,34 @@ export default [
     },
   },
   {
-    name: "R12: a record describing a state the source disagrees with is Held, asking the recorder, never overwritten; a stated change is written",
+    name: "R16: a write lands when the record names the row and gives the value, whatever the row held; a value not in the record is Held, asking the recorder, nothing overwritten; it can be undone",
     run: async (ctx) => {
       await setup(ctx);
       await withMap(ctx, async () => {
-        const rec = await record(ctx, "held", ["Job 4472 is complete."]);
+        // the row holds "open": no state-versus-change test, and the worker has nothing to assert about it
+        const rec = await record(ctx, "r16", ["Job 4472 is complete."]);
         const r = await ctx.tool(rec.worker, "file_to_source", { section: rec.sections[0], piece: "job 4472 is complete", said: "writing Status complete to job 4472", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4472", fields: { Status: "complete" } });
-        ctx.check(r.outcome === "held" && !r.request, `Held, no request: ${JSON.stringify(r).slice(0, 300)}`);
-        ctx.check(fake.tables.dbo_FJob.rows[1].Status === "open" && writes().length === 0, "never overwritten");
-        const q1 = (await ctx.sql(`SELECT asked_of, status FROM WorkerQuestion WHERE job_id = '${rec.job}'`))[0];
-        ctx.check(q1?.asked_of === "bob" && q1.status === "open", `asked of whoever put it on record: ${JSON.stringify(q1)}`);
-        // the record says it changed: an update, written given the recorder's authority (R12)
-        const changed = await ctx.tool(rec.worker, "file_to_source", { section: rec.sections[0], piece: "job 4472 was finished today", said: "updated job 4472 from open to complete", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4472", fields: { Status: "complete" }, says_change: true });
-        ctx.check(changed.outcome === "filed" && fake.tables.dbo_FJob.rows[1].Status === "complete", `a stated change is written: ${JSON.stringify(changed).slice(0, 300)}`);
-        // the admin's question list doesn't carry it: it's the recorder's (R2)
+        ctx.check(r.outcome === "filed" && fake.tables.dbo_FJob.rows[1].Status === "complete", `named row, value in the record: Filed: ${JSON.stringify(r).slice(0, 300)}`);
+        const entry = (await ctx.sql(`SELECT reason FROM FilingEntry WHERE id = '${r.entry}'`))[0];
+        ctx.check(entry?.reason === 'before: {"Status":"open"}', `logged with the value it replaced: ${JSON.stringify(entry?.reason)}`);
+        // a value the record doesn't give: Held, the recorder asked which condition failed, nothing overwritten
+        const other = await record(ctx, "r16-held", ["Job 4471 is finished."]);
+        const h = await ctx.tool(other.worker, "file_to_source", { section: other.sections[0], piece: "job 4471 is finished", said: "writing Status complete to job 4471", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: "complete" } });
+        ctx.check(h.outcome === "held" && /R16 condition 3/.test(h.note ?? ""), `Held by condition 3: ${JSON.stringify(h).slice(0, 300)}`);
+        ctx.check(fake.tables.dbo_FJob.rows[0].Status === null && writes().length === 1, "nothing written for it");
+        const q1 = (await ctx.sql(`SELECT asked_of, status, question FROM WorkerQuestion WHERE job_id = '${other.job}'`))[0];
+        ctx.check(q1?.asked_of === "bob" && /Not every value is in your words/.test(q1.question ?? ""), `asked of whoever put it on record, saying which condition: ${JSON.stringify(q1)}`);
         const listed = await ctx.api("/api/worker/questions");
-        ctx.check(!JSON.stringify(listed).includes(rec.job), "not among the admin's questions");
+        ctx.check(!JSON.stringify(listed).includes(other.job), "not among the admin's questions: no operator is involved");
+        // the Filed write undone by a person with authority: the old value back, the entry marked
+        const agent = await fetch(`${ctx.GRAPH}/api/filing/entries/${r.entry}/undo`, { method: "POST", headers: { authorization: `Bearer ${rec.worker}` } });
+        ctx.check(agent.status === 403, `an agent can't undo: ${agent.status}`);
+        const u = await ctx.api(`/api/filing/entries/${r.entry}/undo`, { method: "POST" });
+        ctx.check(u.restored?.Status === "open" && fake.tables.dbo_FJob.rows[1].Status === "open", `undone, the old value back: ${JSON.stringify(u).slice(0, 300)}`);
+        const marked = (await ctx.sql(`SELECT outcome, undone FROM FilingEntry WHERE id = '${r.entry}'`))[0];
+        ctx.check(marked?.outcome === "filed" && /"by"/.test(String(marked?.undone ?? "")), `the entry stays, marked undone: ${JSON.stringify(marked)}`);
+        const again = await ctx.api(`/api/filing/entries/${r.entry}/undo`, { method: "POST" });
+        ctx.check(/undone already/.test(again.error ?? ""), `not twice: ${JSON.stringify(again).slice(0, 200)}`);
       });
     },
   },
@@ -387,23 +399,24 @@ export default [
     },
   },
   {
-    name: "R11.13 on source writes (the A-4 leak): a section stricter than the source's read home is Proposed, nothing lands, no marker reaches the source; one at that home files as before",
+    name: "R17 narrows I-39: a section at its recorder's own level updates a table read lower, by authority; one the check raised above its recorder is Proposed, nothing lands",
     run: async (ctx) => {
       await setup(ctx);
       await withMap(ctx, async () => {
-        const marker = `zebra-r1113-${ctx.randomUUID().slice(0, 6)}`;
-        // alice's Operations note, as in A-4; the source (dbo_FJob) is read at the floor, whose readers can't see ops
-        const ops = await record(ctx, "r1113-ops", [`Job 4471 is complete; ${marker} covers setups until the new hire is trained.`], { home: "ops", by: "alice" });
-        const f = await ctx.tool(ops.worker, "file_to_source", { section: "s1", piece: `Job 4471 is complete; ${marker} covers setups`, said: "writing Status to job 4471", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: `complete; ${marker} covers setups` }, says_change: true });
-        ctx.check(f.outcome === "proposed" && /R11\.13/.test(f.note ?? ""), `Proposed, saying why: ${JSON.stringify(f).slice(0, 300)}`);
-        ctx.check(!JSON.stringify(fake.tables).includes(marker), "nothing lands in the source: no row holds the marker");
-        ctx.check(!fake.calls.some((c) => c.name === "update_record" && JSON.stringify(c.args).includes(marker)), "no write carrying it was sent");
-        const pend = (await ctx.sql(`SELECT home FROM PendingWrite WHERE payload LIKE '%${marker}%'`))[0];
+        const marker = `zebra-r17-${ctx.randomUUID().slice(0, 6)}`;
+        // alice's Operations note, as in A-4, into a source read at the floor: her authority over jobs decides (R17), and
+        // its words are hers (R16), so it lands; the leak gate lists such a write apart (eval/leaks.mjs)
+        const ops = await record(ctx, "r17-own", [`Job 4471 is complete; ${marker} covers setups until the new hire is trained.`], { home: "ops", by: "alice" });
+        const f = await ctx.tool(ops.worker, "file_to_source", { section: "s1", piece: `Job 4471 is complete; ${marker} covers setups`, said: "writing Status to job 4471", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: `complete; ${marker} covers setups` } });
+        ctx.check(f.outcome === "filed" && fake.tables.dbo_FJob.rows[0].Status === `complete; ${marker} covers setups`, `at her own level, by her authority: Filed: ${JSON.stringify(f).slice(0, 300)}`);
+        // bob's note the check raised to Operations, above his own position: an agent doesn't write it to the floor's table
+        const raised = await record(ctx, "r17-raised", [`Job 4472 is complete; ${marker}-b covers setups.`], { home: "ops", by: "bob" });
+        await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Entity SET _record_position = 'floor' WHERE _kind = 'document' AND _doc_id = '${raised.doc}'` });
+        const g = await ctx.tool(raised.worker, "file_to_source", { section: "s1", piece: `Job 4472 is complete; ${marker}-b covers setups`, said: "writing Status to job 4472", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4472", fields: { Status: `complete; ${marker}-b covers setups` } });
+        ctx.check(g.outcome === "proposed" && /R17, I-39 as narrowed/.test(g.note ?? ""), `raised above its recorder: Proposed, saying why: ${JSON.stringify(g).slice(0, 300)}`);
+        ctx.check(!JSON.stringify(fake.tables).includes(`${marker}-b`), "nothing of it lands in the source");
+        const pend = (await ctx.sql(`SELECT home FROM PendingWrite WHERE payload LIKE '%${marker}-b%'`))[0];
         ctx.check(pend?.home === "ops", `the pending write waits where the section is seen: ${JSON.stringify(pend)}`);
-        // a section at the source's read home (the floor) files as before
-        const floor = await record(ctx, "r1113-floor", ["Job 4472 is complete."]);
-        const g = await ctx.tool(floor.worker, "file_to_source", { section: "s1", piece: "Job 4472 is complete", said: "writing Status to job 4472", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4472", fields: { Status: "complete" }, says_change: true });
-        ctx.check(g.outcome === "filed" && fake.tables.dbo_FJob.rows.find((r) => r.Job === 4472)?.Status === "complete", `a floor section into a source read at the floor is Filed: ${JSON.stringify(g).slice(0, 200)}`);
       });
     },
   },

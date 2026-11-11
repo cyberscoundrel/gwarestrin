@@ -495,3 +495,32 @@ test("report: a run on a subset (meta.only) scores only those notes, and the too
   assert.match(r.markdown, /\| all \| 10 \| 4 \(40%\) \| 1 \| 2 \| 1 \|/);
   assert.equal(buildReport({ ...snap, meta: { ...snap.meta, only: undefined } }).outcomes.notes.length, NOTES.length, "no subset: every note");
 });
+
+test("R17: a marker written to a wider table from a note at its recorder's own level is listed apart, not a leak; from a raised note it stays one", async () => {
+  const { splitWritesByAuthority } = await import("../eval/leaks.mjs");
+  const leak = { where: "write:mssql:dbo_Work_Center:CNC 3", audience: "everyone", word: "Grazzalt", home: "ops" };
+  const base = { ok: false, leaks: [leak], misplaced: [], untested: [], briefs: 3, reasons: ["1 leak(s)"], scanned: 9, belowExpect: [] };
+  const entries = [{ id: "e1", outcome: "filed", record: "doc-4", section: "#3:1", home: "ops", target: { key: "mssql:dbo_Work_Center:CNC 3", fields: { Status_Note: "Grazzalt covers setups until the new hire is trained." } } }];
+  const own = splitWritesByAuthority(base, { entries, sections: [{ rid: "#3:1", home: "ops" }], documents: [{ _doc_id: "doc-4", name: "Staffing for second shift", _record_position: "ops" }], positions: POSITIONS });
+  assert.deepEqual([own.ok, own.leaks.length, own.reasons], [true, 0, []]);
+  assert.deepEqual(own.byAuthority[0], { word: "Grazzalt", home: "ops", row: "mssql:dbo_Work_Center:CNC 3", seen_by: "everyone", notes: ["Staffing for second shift"], columns: ["Status_Note"], entries: ["e1"] });
+  // the check raised the section to the top: still a leak
+  const raised = splitWritesByAuthority(base, { entries, sections: [{ rid: "#3:1", home: "org" }], documents: [{ _doc_id: "doc-4", _record_position: "ops" }], positions: POSITIONS });
+  assert.deepEqual([raised.ok, raised.leaks.length, raised.byAuthority.length], [false, 1, 0]);
+  // no Filed entry behind the write: still a leak
+  const none = splitWritesByAuthority(base, { entries: [], sections: [], documents: [], positions: POSITIONS });
+  assert.equal(none.leaks.length, 1);
+});
+
+test("I-47: the labels R16 changes, applied only when a run is scored under R16; the R12 labels stay as written", async () => {
+  const { notesUnder, R16_CHANGES } = await import("../eval/labels.mjs");
+  assert.deepEqual(R16_CHANGES.map((c) => [c.note, c.from, c.to]), [["ux-m01", "held", "filed"], ["ux-t06", "held", "held"], ["ux-z01", "filed", "held"]]);
+  const r12 = notesUnder("r12");
+  const r16 = notesUnder("r16");
+  assert.equal(r12, NOTES);
+  assert.equal(r16.find((n) => n.id === "ux-m01").pieces[0].outcome, "filed");
+  assert.equal(NOTES.find((n) => n.id === "ux-m01").pieces[0].outcome, "held", "the R12 label unchanged");
+  assert.ok(!r16.find((n) => n.id === "ux-m01").mustNot.some((m) => m.change), "changing INSPECT-2 is what m01 says, under R16");
+  assert.deepEqual(r16.find((n) => n.id === "ux-t06").pieces[0].accept, ["filed"]);
+  assert.throws(() => notesUnder("r99"), /r12 or r16/);
+});

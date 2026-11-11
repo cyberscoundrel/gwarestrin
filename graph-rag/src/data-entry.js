@@ -454,27 +454,7 @@ export async function searchRows({ system, table, text = null, columns = null, w
     }
     const searchIn = columns?.length ? columns : Object.keys(cols);
     const hit = (row) => here.every(([col, s]) => sameValue(row[col], s)) && words.every((w) => searchIn.some((col) => row[col] !== null && row[col] !== undefined && String(row[col]).toLowerCase().includes(w)));
-    const { pk } = await firstPageOf(decl.read.url, table, (url, call) => mcpToolCall(url, call.name, call.args, opts.fetch ? { fetch: opts.fetch } : {}));
-    const byKey = pk?.length === 1 ? pk[0] : null;
-    const limit = Math.max(SEARCH_PAGE, Number(opts.scanLimit ?? SEARCH_SCAN));
-    const matches = [];
-    let scanned = 0;
-    let last = null;
-    let complete = false;
-    while (scanned < limit) {
-      const after = byKey && last !== null ? odata(last, byKey.type) : null;
-      if (byKey && last !== null && after === null) break;
-      const filter = [...sent, ...(after !== null ? [`${byKey.name} gt ${after}`] : [])].join(" and ");
-      const size = byKey ? SEARCH_PAGE : limit;
-      const rows = await c.readWhere(table, { ...(filter ? { filter } : {}), ...(byKey ? { orderby: [`${byKey.name} asc`] } : {}), first: size });
-      scanned += rows.length;
-      for (const r of rows) if (hit(r)) matches.push(r);
-      if (rows.length < size || !byKey) {
-        complete = rows.length < size;
-        break;
-      }
-      last = rows.at(-1)[byKey.name];
-    }
+    const { pk, byKey, scanned, complete, matches } = await scanRows(decl, table, { sent, keep: hit, ...opts });
     const show = (row) => (select?.length ? Object.fromEntries(Object.entries(row).filter(([k]) => select.includes(k) || k === byKey?.name)) : row);
     const page = matches.slice(from, from + cap).map((row) => ({ key: keyOf(system, table, pk, row), row: show(row) }));
     const more = matches.length > from + cap || !complete;
@@ -489,6 +469,53 @@ export async function searchRows({ system, table, text = null, columns = null, w
     });
   } catch (e) {
     return failed(e);
+  }
+}
+
+/**
+ * A table's rows read page by page by primary key (`key gt last`, never a cursor), up to SEARCH_SCAN rows (opts.scanLimit),
+ * `sent` an OData filter's conditions the source applies and `keep` a test applied here. Returns { pk, byKey, scanned,
+ * complete, matches }.
+ */
+async function scanRows(decl, table, { sent = [], keep = () => true, scanLimit, fetch: f } = {}) {
+  const c = readClient(decl, f);
+  const { pk } = await firstPageOf(decl.read.url, table, (url, call) => mcpToolCall(url, call.name, call.args, f ? { fetch: f } : {}));
+  const byKey = pk?.length === 1 ? pk[0] : null;
+  const limit = Math.max(SEARCH_PAGE, Number(scanLimit ?? SEARCH_SCAN));
+  const matches = [];
+  let scanned = 0;
+  let last = null;
+  let complete = false;
+  while (scanned < limit) {
+    const after = byKey && last !== null ? odata(last, byKey.type) : null;
+    if (byKey && last !== null && after === null) break;
+    const filter = [...sent, ...(after !== null ? [`${byKey.name} gt ${after}`] : [])].join(" and ");
+    const size = byKey ? SEARCH_PAGE : limit;
+    const rows = await c.readWhere(table, { ...(filter ? { filter } : {}), ...(byKey ? { orderby: [`${byKey.name} asc`] } : {}), first: size });
+    scanned += rows.length;
+    for (const r of rows) if (keep(r)) matches.push(r);
+    if (rows.length < size || !byKey) {
+      complete = rows.length < size;
+      break;
+    }
+    last = rows.at(-1)[byKey.name];
+  }
+  return { pk, byKey, scanned, complete, matches };
+}
+
+/**
+ * A table's rows, for R16's condition 2 (which row the record names): { status: "ok", rows, primaryKey, complete } as
+ * the audience may read them (the connection's home checked, as every read), or { status, why } when it can't be read.
+ */
+export async function tableRows({ system, table }, opts = {}) {
+  const { decl, refusal } = await declared(system, table, opts);
+  if (refusal) return { status: refusal.status, why: refusal.why };
+  try {
+    const r = await scanRows(decl, table, opts);
+    return { status: "ok", rows: r.matches, primaryKey: r.byKey?.name ?? null, complete: r.complete };
+  } catch (e) {
+    const x = failed(e);
+    return { status: x.status, why: x.why };
   }
 }
 
@@ -774,7 +801,7 @@ export const approvingPerson = (user) => String(user ?? "").split(/[/ ]/)[0];
  * NEEDS A RULING (recorder gone or moved): which filing outcome such a piece gets; smallest choice, the adapter
  * says "refused" and the filing stream records it as Held, asking whoever put it on record.
  */
-export async function enterData({ actsFor, by, key, fields, before = null, cls, reason, identity, held = null, piece = null }, { db = realDb, fetch: f, positions, policy, queue, proposal, people, journal, sources, index } = {}) {
+export async function enterData({ actsFor, by, key, fields, before = null, cls, reason, identity, held = null, conditions = null, piece = null }, { db = realDb, fetch: f, positions, policy, queue, proposal, people, journal, sources, index } = {}) {
   const k = parseKey(key);
   if (!k) throw new Error(`not a record key (system:table:row): ${key}`);
   if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).length) throw new Error("fields: the columns to write, with their values");
@@ -799,6 +826,10 @@ export async function enterData({ actsFor, by, key, fields, before = null, cls, 
   }
   if (decision.outcome === "filed" && standing.identity.caps.write === "queued") decision = { ...decision, outcome: "proposed", reason: "this person's writes are queued for approval" };
   if (decision.outcome === "filed" && held) decision = { ...decision, outcome: "proposed", reason: held.why };
+  // R16: with the authority held (condition 1), the record must name the row and give every value (2 and 3), checked by
+  // the caller in code (model/write-conditions.js); one failing holds the piece, and nothing is written or queued.
+  // Condition 4, the row unchanged since it was read, is commitRow's.
+  if (decision.outcome === "filed" && conditions && !conditions.ok) return { outcome: "held", status: "conditions", condition: conditions.failed, why: conditions.why };
   if (decision.outcome === "proposed") {
     const payload = { kind: "data_entry", key: k.key, fields, ...(before ? { before } : {}), class: cls ?? null, acts_for: { person: standing.person, position: standing.position }, by, reason: String(reason ?? "").slice(0, 600) || null };
     // where it waits: where the map's position (else the root) and anything the agent's limit holds it at are seen
@@ -814,7 +845,7 @@ export async function enterData({ actsFor, by, key, fields, before = null, cls, 
 const asEntry = (r) => (r.filing === "filed" ? { outcome: "filed", ...r } : { outcome: r.filing === "proposed" ? "proposed" : "held", ...r });
 
 /** an approver must hold the authority the map names for the class, as they stand now; a map that can't be read leaves it to the root */
-async function assertApproverHolds(p, person, entry, { positions, db, index }) {
+export async function assertApproverHolds(p, person, entry, { positions, db, index }) {
   // R11.7: a person with authority for the class approves, and without a map nobody can be shown to hold it
   if (!positions) throw new Error("not applied: no position map is loaded, so nobody can be shown to hold the authority");
   const standing = standingOf({ person, position: null }, entry, positions);

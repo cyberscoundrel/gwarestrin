@@ -98,3 +98,43 @@ export const requestItems = (requests) => requests.map((r) => ({ where: `request
 
 /** source writes: a row is seen by whoever reads the source; the test connection's home is everyone */
 export const writeItems = (changes, home = EVERYONE) => changes.filter((c) => c.after).map((c) => ({ where: `write:${c.key}`, audience: home, text: JSON.stringify(c.after) }));
+
+/**
+ * R17 (the user: "Yes, by authority", 2026-11-11): a record at its recorder's own level may update a table lower
+ * positions read, by the recorder's authority. A marker word written to a wider table from such a note is permitted,
+ * so it isn't counted as a leak; it is listed apart ("note wording that reached a wider table by authority") with the
+ * note, the row and the column, so the user sees every case (I-46). It is permitted only when every Filed entry that
+ * wrote the word came from a section at or below its recorder's own position; one written from a section the check
+ * raised above its recorder, or with no Filed entry behind it, stays a leak.
+ */
+export function splitWritesByAuthority(result, { entries = [], sections = [], documents = [], positions }) {
+  const sectionHome = new Map(sections.map((s) => [s.rid, s.home]));
+  const recorderAt = new Map(documents.map((d) => [d._doc_id, d._record_position ?? null]));
+  const title = new Map(documents.map((d) => [d._doc_id, d.name ?? d._doc_title ?? d._doc_id]));
+  const byAuthority = [];
+  const leaks = [];
+  for (const l of result.leaks) {
+    const row = String(l.where).startsWith("write:") ? String(l.where).slice(6) : null;
+    const word = String(l.word).toLowerCase();
+    const from = row ? entries.filter((e) => e.outcome === "filed" && String(e.target?.key ?? "").toLowerCase() === row.toLowerCase() && JSON.stringify(e.target?.fields ?? {}).toLowerCase().includes(word)) : [];
+    const atOwnLevel = (e) => {
+      const home = sectionHome.get(e.section) ?? e.home;
+      const at = recorderAt.get(e.record);
+      return Boolean(at && home) && (home === at || sees(positions, at, home));
+    };
+    if (from.length && from.every(atOwnLevel)) {
+      byAuthority.push({
+        word: l.word,
+        home: l.home,
+        row,
+        seen_by: l.audience,
+        notes: [...new Set(from.map((e) => title.get(e.record) ?? e.record))],
+        columns: [...new Set(from.flatMap((e) => Object.entries(e.target.fields).filter(([, v]) => String(v ?? "").toLowerCase().includes(word)).map(([c]) => c)))],
+        entries: from.map((e) => e.id),
+      });
+    } else leaks.push(l);
+  }
+  const reasons = result.reasons.filter((r) => !/ leak\(s\)$/.test(r));
+  if (leaks.length) reasons.unshift(`${leaks.length} leak(s)`);
+  return { ...result, ok: reasons.length === 0, leaks, byAuthority, reasons };
+}

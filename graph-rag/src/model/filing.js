@@ -169,29 +169,10 @@ export function normalizeRequest(raw) {
 }
 
 /**
- * What happens when the row already holds a different, non-empty value in a column the piece would write: a
- * disagreement with the source. R2 has "the source disagrees" Held, the worker asking whoever put it on record
- * and never overwriting; R11 calls a conflict with a source high stakes, a request to the orchestrator.
- * Ruled (R12, the user: "Yes, write changes", 2026-11-10; filing choice F4). The decision lives here alone:
- *   update_when_changed  (R12, in force): a record that says something changed is an update, filed given the
- *                        recorder's authority and checked by the orchestrator afterwards; one that describes the
- *                        current state and disagrees without saying anything changed is Held, asking the recorder
- *   hold_and_request     (the conservative reading the build started from, kept and tested): nothing is written;
- *                        the piece is Held with a question to the recorder and a "conflict" request
+ * R16 (the user, 2026-11-11) replaced R12's state-versus-change test and the disagreement rule that applied it
+ * (onDisagreement: update_when_changed, hold_and_request): whether a source write lands is decided in code by four
+ * conditions (filing.js fileToSource, model/write-conditions.js), and nothing a worker says about the piece counts.
  */
-export const DISAGREEMENT_RULES = ["hold_and_request", "update_when_changed"];
-export const DISAGREEMENT_RULE = "update_when_changed";
-
-/**
- * The one decision for a disagreement with the source. `says_change`: the worker's reading that the record
- * says something changed. Returns { file: true } (write it, as any piece) or { file: false, outcome: "held",
- * request: "conflict" | null }.
- */
-export function onDisagreement({ says_change = false } = {}, rule = DISAGREEMENT_RULE) {
-  if (!DISAGREEMENT_RULES.includes(rule)) throw new ShapeError("rule", `must be one of ${DISAGREEMENT_RULES.join(", ")}`);
-  if (rule === "update_when_changed") return says_change === true ? { file: true, outcome: null, request: null } : { file: false, outcome: HELD, request: null };
-  return { file: false, outcome: HELD, request: "conflict" };
-}
 
 /**
  * The columns of `fields` the row already holds a different, non-empty value in (`same`: a value comparison,

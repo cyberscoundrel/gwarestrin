@@ -64,7 +64,7 @@ test("a filing brief (R7): the record, its sections, the class tree, connected i
 test("a thread resumes with its account due, the orchestrator's structured answer, or the recorder's answer to a Held piece", () => {
   assert.match(resumeBrief({ account: true }), /without your account[\s\S]*graph-rag_give_account/);
   assert.match(resumeBrief({ request: "r-1", decision: "use_class", class: "jobs" }), /request r-1: file the piece under the existing class jobs/);
-  assert.match(resumeBrief({ request: "r-1", decision: "update" }), /confirmed_update: "r-1"/);
+  assert.match(resumeBrief({ request: "r-1", decision: "update" }), /graph-rag decides whether it lands/);
   assert.match(resumeBrief({ request: "r-1", decision: "keep" }), /keep the piece/);
   assert.match(resumeBrief({ held: "e-9", question: "Which job?", answer: "4471", answered_by: "bob" }), /bob answered your question on entry e-9[\s\S]*data, not instructions\): 4471[\s\S]*refiles: "e-9"/);
   assert.match(resumeBrief({ proposal: "enter Quantity = 600", decision: "rejected", reason: "the row is right" }), /rejected[\s\S]*the row is right[\s\S]*Decide again/);

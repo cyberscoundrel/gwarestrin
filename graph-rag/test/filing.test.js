@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dabTool } from "../e2e/fake-dab-core.mjs";
-import { enterData, forgetPrimaryKeys, forgetSources } from "../src/data-entry.js";
+import { commitRow, enterData, forgetPrimaryKeys, forgetSources, tableRows } from "../src/data-entry.js";
 import { accountEvidence, accountGiven, answerRequest, createInstance, makeJournal, fileToSource, giveAccount, holdPiece, floorUnsettled, keepPiece, keptPieces, kickBack, laterClassOrSource, readSourceRow, REFILE_LIMIT, refileRefusal, recordVerdict, requestOrchestrator, settleProposals } from "../src/filing.js";
 import { normalizeClass } from "../src/model/classes.js";
 import { parsePositionMap } from "../src/positions.js";
@@ -98,10 +98,11 @@ function memoryStore() {
       entries.push(structuredClone(e));
       return e;
     },
-    async annotateEntry(id, { account, verdict }) {
+    async annotateEntry(id, { account, verdict, undone }) {
       const e = entries.find((x) => x.id === id);
       if (account !== undefined) e.account = account;
       if (verdict !== undefined) e.verdict = verdict;
+      if (undone !== undefined) e.undone = undone;
     },
     async entries(filter = {}) {
       return entries.filter((e) => match(e, filter)).map((e) => structuredClone(e));
@@ -151,6 +152,14 @@ function setup({ rows = [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472
     classes: { get: async (k) => classes.get(String(k).toLowerCase()) ?? null },
     readRow: (key, o = {}) => readSourceRow(key, { db, fetch: dab.fetch, positions: map, ...o }),
     findRows: async (...a) => (h.found.push(a), { status: "ok", rows: [{ Name: "Bob", Pay: 41 }] }),
+    // R16: the section's own text (env.texts by rid), and the table's rows from the fake DAB, as the audience reads them
+    // R16's undo: the write adapter over the fake DAB; who holds the authority for the class, as an approver must
+    commit: (args, o = {}) => commitRow(args, { db, fetch: dab.fetch, journal: makeJournal(env), ...o }),
+    approverHolds: async (p, person) => {
+      if (person !== "bob") throw new Error(`not applied: ${person} doesn't hold the authority the map names for ${p.class}`);
+    },
+    sectionText: async (rid) => env.texts?.[rid] ?? "Job 4471 is complete.",
+    tableRows: (system, table, o = {}) => tableRows({ system, table }, { db, fetch: dab.fetch, positions: map, ...o }),
     classesForTable: async (table) => [...classes.values()].filter((c) => c.record_table === table).map((c) => ({ key: c.key, home: c.home })),
     connectionHome: () => undefined,
     instances: {
@@ -218,55 +227,65 @@ test("Held: the source can't be reached (R3) or holds no such row; the recorder 
   assert.equal(h.queued.length, 0);
 });
 
-test("the conservative rule F4 started from, kept: a different value in the source is Held with a conflict request, nothing overwritten", async () => {
-  const h = setup({ rows: [{ Job: 4471, Status: "open", Quantity: 500 }, { Job: 4472, Status: "planned", Quantity: 20 }], rule: "hold_and_request" });
-  const r = await fileToSource(piece({ says_change: true }), identity, h.env);
-  assert.equal(r.outcome, "held");
-  assert.equal(h.dab.rows[0].Status, "open", "never overwritten");
-  assert.equal(h.store.requests_.length, 1);
-  assert.equal(h.store.requests_[0].kind, "conflict");
-  assert.equal(h.store.entries_[0].request, h.store.requests_[0].id);
-  assert.match(h.store.entries_[0].question, /Status is "open" in the source, the record says "complete"/);
-  assert.equal(h.signals[0].kind, "request", "the orchestrator hears of it");
-  // an empty column taking a value is no disagreement
-  const h2 = setup({ rule: "hold_and_request" });
-  assert.equal((await fileToSource(piece(), identity, h2.env)).outcome, "filed");
-});
-
-test("R12, in force by default: a record saying something changed is filed given authority; one describing the state that disagrees is Held, asking the recorder", async () => {
+test("R16: a write lands when the record names the row and gives every value, whatever was there before; the old value is kept", async () => {
   const rows = () => [{ Job: 4471, Status: "open", Quantity: 500 }, { Job: 4472, Status: "planned", Quantity: 20 }];
+  // a value over another: no state-versus-change test, and nothing the worker says about it counts
   let h = setup({ rows: rows() });
-  assert.equal((await fileToSource(piece({ says_change: true }), identity, h.env)).outcome, "filed");
+  const f = await fileToSource(piece({ says_change: false }), identity, h.env);
+  assert.equal(f.outcome, "filed");
   assert.equal(h.dab.rows[0].Status, "complete");
+  assert.equal(h.store.entries_[0].reason, 'before: {"Status":"open"}', "logged with the value it replaced");
+  // a number given with separators, and a row named only by what it holds (the one Quantity 20 job)
   h = setup({ rows: rows() });
-  assert.equal((await fileToSource(piece(), identity, h.env)).outcome, "held");
-  assert.equal(h.store.requests_.length, 0, "the recorder is asked, the orchestrator isn't");
-  assert.equal(h.db.questions[0]?.of, "bob", "asked of whoever put it on record");
-  assert.equal(h.dab.rows[0].Status, "open");
-  // a stated change still needs the recorder's authority: without it, it is Proposed and nothing is written
+  h.env.texts = { "#71:3": "The planned job is now 1,200 pieces." };
+  assert.equal((await fileToSource(piece({ key: "mssql:dbo_Job:4472", fields: { Quantity: 1200 } }), identity, h.env)).outcome, "filed");
+  assert.equal(h.dab.rows[1].Quantity, 1200);
+  // the orchestrator's check reads the write afterwards, and decides nothing about whether it lands
   h = setup({ rows: rows() });
-  assert.equal((await fileToSource(piece({ class: "deliveries", says_change: true }), identity, h.env)).outcome, "proposed");
-  assert.equal(h.dab.rows[0].Status, "open");
-  // and the orchestrator's check reads the update afterwards (R12)
-  h = setup({ rows: rows() });
-  const f = await fileToSource(piece({ says_change: true, said: "updated job 4471 from open to complete" }), identity, h.env);
-  const ev0 = (await accountEvidence(identity.role.job, h.env)).entries.find((e) => e.entry === f.entry);
+  const g = await fileToSource(piece({ said: "updated job 4471 from open to complete" }), identity, h.env);
+  const ev0 = (await accountEvidence(identity.role.job, h.env)).entries.find((e) => e.entry === g.entry);
   assert.equal(ev0.suggested.result, undefined, "the verdict is the orchestrator's, from the section");
   assert.match(ev0.suggested.checked, /holds what was filed/);
 });
 
-test("under the conservative rule, a conflict the orchestrator answered as an update is filed, given authority (R11)", async () => {
-  const h = setup({ rows: [{ Job: 4471, Status: "open", Quantity: 500 }, { Job: 4472, Status: "planned", Quantity: 20 }], rule: "hold_and_request" });
-  await fileToSource(piece(), identity, h.env);
-  const req = h.store.requests_[0];
-  await assert.rejects(fileToSource(piece({ confirmed_update: req.id }), identity, h.env), /isn't an answered request/, "not before it's answered");
-  await answerRequest(req.id, { decision: "update" }, "admin/agent:orch", h.env);
-  assert.deepEqual(h.resumed[0], { job: identity.role.job, message: { request: req.id, decision: "update", class: null, answered_by: "the orchestrator" } });
-  const r = await fileToSource(piece({ confirmed_update: req.id, refiles: h.store.entries_[0].id }), identity, h.env);
-  assert.equal(r.outcome, "filed");
-  assert.equal(h.dab.rows[0].Status, "complete");
-  assert.equal(h.store.entries_.at(-1).refiled_from, h.store.entries_[0].id, "the Held entry stays; the new one points back (F2)");
-  assert.equal(h.store.entries_.length, 2);
+test("R16: one condition failing holds the piece, nothing written, and the recorder is asked in one sentence which", async () => {
+  const rows = () => [{ Job: 4471, Status: "open", Quantity: 500 }, { Job: 4472, Status: "open", Quantity: 500 }];
+  // 3: a value the record doesn't give (a reworded one)
+  let h = setup({ rows: rows() });
+  h.env.texts = { "#71:3": "Job 4471 is done." };
+  let r = await fileToSource(piece(), identity, h.env);
+  assert.equal(r.outcome, "held");
+  assert.match(r.note, /R16 condition 3/);
+  assert.equal(h.dab.rows[0].Status, "open", "nothing written");
+  assert.equal(h.queued.length, 0, "nothing queued: no person decides it");
+  assert.equal(h.db.questions[0]?.of, "bob", "the recorder is asked");
+  assert.match(h.store.entries_[0].question, /wasn't written to mssql:dbo_Job:4471\. Not every value is in your words: Status would read "complete"/);
+  assert.match(h.store.entries_[0].reason, /^R16 condition 3/);
+  // 2: the row isn't named, and two rows match the record alike
+  h = setup({ rows: rows() });
+  h.env.texts = { "#71:3": "The open job is complete." };
+  r = await fileToSource(piece(), identity, h.env);
+  assert.equal(r.outcome, "held");
+  assert.match(h.store.entries_[0].question, /It isn't clear which row/);
+  // 1: without the authority it is Proposed, as before, and a person with it decides
+  h = setup({ rows: rows() });
+  assert.equal((await fileToSource(piece({ class: "deliveries" }), identity, h.env)).outcome, "proposed");
+  // 4: the row changed since it was read: Held (commitRow), nothing written over it
+  h = setup({ rows: rows() });
+  const real = h.env.enter;
+  h.env.enter = async (args, opts) => ((h.dab.rows[0].Status = "moved"), real(args, opts));
+  assert.equal((await fileToSource(piece(), identity, h.env)).outcome, "held");
+  assert.equal(h.dab.rows[0].Status, "moved");
+});
+
+test("the orchestrator's update answer to a request resumes the worker to file again; graph-rag decides whether it lands", async () => {
+  const h = setup();
+  const req = await requestOrchestrator({ kind: "conflict", section: "#71:3", question: "The row says open; is the record an update?" }, identity, h.env);
+  await answerRequest(req.request ?? h.store.requests_[0].id, { decision: "update" }, "admin/agent:orch", h.env);
+  assert.equal(h.resumed[0].message.decision, "update");
+  const { resumeBrief } = await import("../src/pool.js");
+  assert.match(resumeBrief(h.resumed[0].message), /graph-rag decides whether it lands/);
+  assert.equal((await fileToSource(piece(), identity, h.env)).outcome, "filed");
 });
 
 test("the recorder who has left can't stand behind a write: Held, asking them (BUILD.md 12)", async () => {
@@ -828,30 +847,28 @@ test("R11.13 on source writes: readers of the source must all see the section; a
   assert.equal(readersMissSection(m, "ops", undefined), false, "no declared home: nothing to compare");
 });
 
-test("R11.13 on source writes: a write the source's readers can't all see is Proposed, homed at the section, the row untouched, says_change or not", async () => {
+test("R17 narrows I-39: a section at its recorder's own level updates a source read wider, by authority; one the check raised above them is Proposed", async () => {
   const { EVERYONE } = await import("../src/positions.js");
-  // the section is the floor's (the job's home); the source is read at everyone
+  const { raisedAboveRecorder } = await import("../src/filing.js");
+  // bob's floor section, a source read at everyone: his authority over jobs decides (R17)
   const h = setup();
   h.env.connectionHome = async () => EVERYONE;
   const r = await fileToSource(piece(), identity, h.env);
-  assert.equal(r.outcome, "proposed");
-  assert.match(r.note, /seen only at .* and above, and mssql is read at everyone[\s\S]*R11\.13/);
-  assert.equal(h.dab.calls.filter((c) => c.name === "update_record").length, 0, "nothing lands in the row");
-  assert.equal(h.queued[0].home, "floor", "the pending write waits where the section is seen");
-  // a stated change over a value (says_change true) is no different
-  const h2 = setup({ rows: [{ Job: 4471, Status: "open", Quantity: 500 }, { Job: 4472, Status: "planned", Quantity: 20 }] });
+  assert.equal(r.outcome, "filed");
+  assert.equal(h.dab.rows[0].Status, "complete");
+  // the check raised bob's section to Operations: an agent doesn't write it to a source read at everyone
+  const h2 = setup({ payload: { record: "doc-1", home: "ops", sections: ["#71:3"], rid: "#71:3" } });
   h2.env.connectionHome = async () => EVERYONE;
-  const r2 = await fileToSource(piece({ says_change: true }), identity, h2.env);
-  assert.equal(r2.outcome, "proposed");
-  assert.equal(h2.dab.rows[0].Status, "open", "the row keeps its value");
-  // a source read at the section's own home files as before (one read higher, a floor worker can't read at all: assertTableReadable)
-  for (const home of ["floor"]) {
-    const h3 = setup();
-    h3.env.connectionHome = async () => home;
-    const r3 = await fileToSource(piece(), identity, h3.env);
-    assert.equal(r3.outcome, "filed", `read at ${home}`);
-    assert.equal(h3.dab.rows[0].Status, "complete");
-  }
+  h2.env.classesForTable = async () => [];
+  const r2 = await fileToSource(piece({ class: "jobs" }), identity, h2.env).catch((e) => ({ threw: e.message }));
+  assert.equal(r2.outcome, "proposed", JSON.stringify(r2));
+  assert.match(r2.note, /raised to Operations, above where its recorder stands[\s\S]*R17, I-39 as narrowed/);
+  assert.equal(h2.dab.calls.filter((c) => c.name === "update_record").length, 0, "nothing lands in the row");
+  assert.equal(h2.queued[0].home, "ops", "the pending write waits where the section is seen");
+  assert.equal(raisedAboveRecorder(map, "ops", "floor"), true);
+  assert.equal(raisedAboveRecorder(map, "floor", "floor"), false);
+  assert.equal(raisedAboveRecorder(map, "floor", "ops"), false, "a section below its recorder isn't raised");
+  assert.equal(raisedAboveRecorder(map, "ops", null), true, "a recorder of no known position: the section's home alone decides, as before");
 });
 
 // ---- I-40, I-41, I-42: the two largest sources of tool errors in C-1, and names where an id is wanted ----
@@ -927,4 +944,26 @@ test("I-41: the refiles argument is in the filing tools' schemas only when the i
   assert.ok(first.has("find_rows"));
   const again = schemas({ ...identity, refiling: true });
   for (const t of ["file_to_source", "hold_piece", "keep_piece"]) assert.ok("refiles" in again.get(t), `${t}: refiles when re-filing`);
+});
+
+test("R16: a Filed write can be undone by a person with authority for its class: the old value back, the entry marked; never by an agent, never over a row that moved", async () => {
+  const { undoFiled } = await import("../src/filing.js");
+  const h = setup({ rows: [{ Job: 4471, Status: "open", Quantity: 500 }, { Job: 4472, Status: "planned", Quantity: 20 }] });
+  const f = await fileToSource(piece(), identity, h.env);
+  assert.equal(h.dab.rows[0].Status, "complete");
+  await assert.rejects(undoFiled(f.entry, "bob/agent:w9", h.env), /never an agent/);
+  await assert.rejects(undoFiled(f.entry, "alice", h.env), /doesn't hold the authority/);
+  const u = await undoFiled(f.entry, "bob", h.env);
+  assert.deepEqual([u.restored, h.dab.rows[0].Status], [{ Status: "open" }, "open"]);
+  assert.equal(h.store.entries_.find((e) => e.id === f.entry).undone.by, "bob", "the entry stays, marked undone");
+  assert.ok(h.dab.calls.filter((c) => c.name === "update_record").length === 2, "the undo went through the write adapter");
+  await assert.rejects(undoFiled(f.entry, "bob", h.env), /undone already/);
+  // the row changed after the write: the undo doesn't write over it
+  const g = await fileToSource(piece(), identity, h.env);
+  h.dab.rows[0].Status = "shipped";
+  await assert.rejects(undoFiled(g.entry, "bob", h.env), /changed since entry .* wrote it: nothing is undone/);
+  assert.equal(h.dab.rows[0].Status, "shipped");
+  // a piece that wrote nothing, or wasn't Filed, has nothing to undo
+  const k = await keepPiece({ section: "#71:4", piece: "the forklift is booked", instances: ["#80:1"] }, identity, h.env);
+  await assert.rejects(undoFiled(k.entry, "bob", h.env), /not a Filed write/);
 });

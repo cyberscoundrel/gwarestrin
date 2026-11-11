@@ -27,8 +27,9 @@ import { adbCommand as realCommand, adbQuery as realQuery, ENTITY_LABEL, RID_RE 
 import { canSee, EVERYONE, visibleHomes } from "./positions.js";
 import { classKey } from "./model/classes.js";
 import { parseKey } from "./model/schema.js";
-import { disagreeingColumns, FILED, FLOOR_REASON, GRAPH_RAG, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, onDisagreement, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
-import { enterData, findRows, getRow, sameValue, searchRows } from "./data-entry.js";
+import { FILED, FLOOR_REASON, GRAPH_RAG, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
+import { assertApproverHolds, commitRow, enterData, findRows, getRow, sameValue, searchRows, tableRows } from "./data-entry.js";
+import { writeConditions } from "./model/write-conditions.js";
 import { loadSources, sourceFor } from "./sources.js";
 import { addDependency, relateInstance } from "./instances.js";
 
@@ -51,7 +52,7 @@ const normName = (s) =>
 /** ---- the log's store ---- */
 
 const ENTRY_FIELDS = ["id", "outcome", "record", "section", "home", "piece", "class", "instances", "target", "recorder", "worker", "reason", "pending_id", "question", "request", "account", "verdict", "refiled_from", "at"];
-const fromEntryRow = (r) => ({ ...Object.fromEntries(ENTRY_FIELDS.map((k) => [k, r[k] ?? null])), instances: Array.isArray(r.instances) ? r.instances : [], target: parse(r.target), account: parse(r.account), verdict: parse(r.verdict) });
+const fromEntryRow = (r) => ({ ...Object.fromEntries(ENTRY_FIELDS.map((k) => [k, r[k] ?? null])), instances: Array.isArray(r.instances) ? r.instances : [], target: parse(r.target), account: parse(r.account), verdict: parse(r.verdict), undone: parse(r.undone) });
 const ATTEMPT_FIELDS = ["id", "system", "table", "key", "action", "fields", "before", "piece", "status", "detail", "at", "settled_at"];
 // stored under names that are no SQL keyword in ArcadeDB: table -> source_table, key -> row_key, before -> row_before
 const ATTEMPT_COLUMN = (k) => (k === "table" ? "source_table" : k === "key" ? "row_key" : k === "before" ? "row_before" : k);
@@ -67,10 +68,11 @@ export function arcadeStore(db = realDb) {
       await db.adbCommand(`INSERT INTO FilingEntry SET ${ENTRY_FIELDS.map((k) => `${k} = :${k}`).join(", ")}`, "sql", { ...e, target: json(e.target), account: json(e.account), verdict: json(e.verdict) });
       return e;
     },
-    /** an entry gains its account or verdict; nothing else about it changes */
-    async annotateEntry(id, { account, verdict }) {
+    /** an entry gains its account or verdict, or is marked undone; nothing else about it changes */
+    async annotateEntry(id, { account, verdict, undone }) {
       const sets = [];
       const params = { id };
+      if (undone !== undefined) (sets.push("undone = :undone"), (params.undone = json(undone)));
       if (account !== undefined) (sets.push("account = :account"), (params.account = json(account)));
       if (verdict !== undefined) (sets.push("verdict = :verdict"), (params.verdict = json(verdict)));
       if (sets.length) await db.adbCommand(`UPDATE FilingEntry SET ${sets.join(", ")} WHERE id = :id`, "sql", params);
@@ -164,6 +166,11 @@ export async function liveEnv(over = {}) {
     findRows: over.findRows ?? ((system, table, column, value, o = {}) => findSourceRows(system, table, column, value, { db, fetch: over.fetch, positions, ...o })),
     // rows by text and column values (data-entry.js searchRows, I-40), and the declared systems' names
     searchRows: over.searchRows ?? ((args, o = {}) => searchRows(args, { db, fetch: over.fetch, positions, ...o })),
+    // R16's undo: a write back through the write adapter, begun and settled in this env's log
+    commit: over.commit ?? ((args, o = {}) => commitRow(args, { db, fetch: over.fetch, journal: makeJournal(env), ...o })),
+    approverHolds: over.approverHolds ?? ((p, person, entry) => assertApproverHolds(p, person, entry, { positions, db })),
+    // R16 condition 2: the table's rows, as the audience may read them
+    tableRows: over.tableRows ?? ((system, table, o = {}) => tableRows({ system, table }, { db, fetch: over.fetch, positions, ...o })),
     systems: over.systems ?? (async () => Object.keys(await loadSources(db).catch(() => ({})))),
     laterClassOrSource: over.laterClassOrSource ?? ((at) => laterClassOrSource(at, db)),
     classesForTable: over.classesForTable ?? (async (table) => (await db.adbQuery(`SELECT _class_key AS key, _home AS home FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _record_table = :t AND (_status IS NULL OR _status <> 'retired')`, { t: table }).catch(() => [])).map((r) => ({ key: r.key, home: r.home ?? null }))),
@@ -248,14 +255,6 @@ async function visibleClass(env, ctx, name) {
   return cls;
 }
 
-/** the request a piece may rely on: this worker's own, answered, with that decision */
-async function answeredRequest(env, ctx, id, decisions) {
-  if (!id) return null;
-  const r = (await env.store.requests({ id: String(id) }))[0];
-  const ans = parse(r?.answer);
-  if (!r || r.worker !== ctx.job || r.status !== "answered" || !decisions.includes(ans?.decision)) throw refuse(`request ${id} isn't an answered request of yours saying ${decisions.join(" or ")}`);
-  return { ...r, answer: ans };
-}
 
 /** a Kept or Held entry this worker was given to re-file: it points back at it (R11) */
 async function refiledFrom(env, ctx, id) {
@@ -292,18 +291,41 @@ export async function refileOffered(identity, env) {
  * connection's home, so a write lands there for everyone who reads it. When the section's home is stricter, so that
  * someone who reads the source couldn't see the section, the write must not land: it goes as Proposed to a person with
  * authority, the pending write homed no lower than the section (enterData's `held`). Whether or not the column held a
- * value, whatever says_change is. Returns that `held` ({ home, why }), or null when the source's readers all see the
+ * value. Returns that `held` ({ home, why }), or null when the source's readers all see the
  * section. NEEDS A RULING (I-39): the coordinator's reading, for the user's review; Proposed rather than refused or Held.
  */
 export function readersMissSection(positions, sectionHome, readHome) {
   if (!positions || readHome === undefined || readHome === null || !sectionHome) return false;
   return !canSee(positions, [readHome], sectionHome);
 }
-async function sourceWriteFloor(env, sectionHome, system) {
+/**
+ * R17 narrows it (the user: "Yes, by authority", 2026-11-11): a record at its recorder's own level may update a table
+ * lower positions read, by the recorder's authority. What stays (I-39 as narrowed, the coordinator's proposal under R17):
+ * a section the check raised above its recorder's own position (R11.5, R11.11). The recorder's own position doesn't see
+ * the section's home, or isn't known (then, as before R17, the section's home alone decides).
+ */
+export function raisedAboveRecorder(positions, sectionHome, recorderPosition) {
+  if (!positions || !sectionHome) return false;
+  if (!recorderPosition) return true;
+  return sectionHome !== recorderPosition && !canSee(positions, [recorderPosition], sectionHome);
+}
+async function sourceWriteFloor(env, ctx, system) {
+  const sectionHome = ctx.home;
   const readHome = env.connectionHome ? await env.connectionHome(system) : undefined;
   if (!readersMissSection(env.positions, sectionHome, readHome)) return null;
+  if (!raisedAboveRecorder(env.positions, sectionHome, ctx.recorder?.position ?? null)) return null;
   const name = (h) => (h === EVERYONE ? "everyone" : (env.positions?.positions?.[h]?.name ?? h));
-  return { home: sectionHome, why: `the section is seen only at ${name(sectionHome)} and above, and ${system} is read at ${name(readHome)}, so writing it would show it to people who can't see the record (R11.13): a person with authority decides` };
+  return { home: sectionHome, why: `the section was raised to ${name(sectionHome)}, above where its recorder stands, and ${system} is read at ${name(readHome)}, so an agent doesn't write it there (R17, I-39 as narrowed): a person with authority decides` };
+}
+
+/**
+ * R16 conditions 2 and 3 for one write, from the section's own text and the table's rows (model/write-conditions.js);
+ * rows the audience can't read, or a table that can't be read, leave condition 2 to the row's key alone.
+ */
+async function recordConditions(env, ctx, section, key, fields, current) {
+  const text = env.sectionText ? await env.sectionText(section) : String((await env.db.adbQuery(`SELECT text_identity FROM ${section} WHERE _kind = 'section'`).catch(() => []))[0]?.text_identity ?? "");
+  const t = env.tableRows ? await env.tableRows(key.system, key.table, { audience: ctx.home }).catch(() => null) : null;
+  return writeConditions({ text, key: key.key, fields, rows: t?.status === "ok" ? t.rows : [], primaryKey: t?.status === "ok" ? t.primaryKey : null, current });
 }
 
 /** write one entry (normalized, append-only) */
@@ -368,25 +390,15 @@ export async function fileToSource(args, identity, env) {
   if (read.status === "not_found") {
     return { outcome: HELD, entry: (await holdEntry(env, ctx, { ...base, question: args.question || `No row ${key.key} was found for "${piece}". Which record did you mean?`, reason: read.error ?? null })).id };
   }
-  const differing = disagreeingColumns(read.row, fields, sameValue);
-  if (differing.length) {
-    // the orchestrator's "update" answer to a conflict request: reachable only under the conservative rule, which raises
-    // conflict requests; under R12 (in force) a disagreeing state is Held and asks the recorder, and no request is raised
-    const confirmed = await answeredRequest(env, ctx, args.confirmed_update, ["update"]);
-    const d = confirmed ? { file: true } : onDisagreement({ says_change: args.says_change === true }, env.rule);
-    if (!d.file) {
-      const says = differing.map((x) => `${x.column} is ${JSON.stringify(x.source)} in the source, the record says ${JSON.stringify(x.record)}`).join("; ");
-      let request = null;
-      if (d.request) request = (await openRequest(env, ctx, { kind: d.request, section, question: `${key.key}: ${says}. Is the record an update, or does it disagree with the source?` })).id;
-      const entry = await holdEntry(env, ctx, { ...base, question: args.question || `For "${piece}": ${says}. Which is right?`, request, reason: "the source disagrees: nothing was overwritten" });
-      return { outcome: HELD, entry: entry.id, ...(request ? { request } : {}), note: request ? "Held, and a conflict request went to the orchestrator: nothing was written. Carry on with the other pieces." : "Held: nothing was written, and the recorder is asked." };
-    }
-  }
-  // R11.13 on source writes (the coordinator's reading, I-39): a write the source's readers couldn't all see the section
-  // of doesn't land; it is Proposed to a person with authority, waiting where the section is seen (data-entry.js held)
-  const held = await sourceWriteFloor(env, ctx.home, key.system);
+  // R17, I-39 as narrowed: a section the check raised above its recorder's own position isn't written by an agent to a
+  // source its readers couldn't all see; it is Proposed to a person with authority, waiting where the section is seen
+  const held = await sourceWriteFloor(env, ctx, key.system);
+  // R16: whether a write lands is decided here, in code: (1) the recorder's authority (enterData), (2) the record names
+  // the row, (3) every value written is in the record (model/write-conditions.js), (4) the row unchanged since it was read
+  // (commitRow). Nothing the worker says about the piece being a change counts (R12's state-versus-change test is gone).
+  const conditions = await recordConditions(env, ctx, section, key, fields, read.row);
   const r = await env.enter(
-    { actsFor: ctx.recorder, by: identity.user, key: key.key, fields, cls: cls.key, reason: piece, identity, held, before: Object.fromEntries(Object.keys(fields).map((c) => [c, read.row[c] ?? null])), piece: { record: ctx.record, section, job: ctx.job, piece } },
+    { actsFor: ctx.recorder, by: identity.user, key: key.key, fields, cls: cls.key, reason: piece, identity, held, conditions, before: Object.fromEntries(Object.keys(fields).map((c) => [c, read.row[c] ?? null])), piece: { record: ctx.record, section, job: ctx.job, piece } },
     // a Proposed piece is an outcome, not a wait: the proposal names no thread (the person approves it as themselves)
     { proposal: (_identity, reason) => ({ note: String(reason ?? "").slice(0, 600) || "(no reason given)" }) },
   );
@@ -403,6 +415,11 @@ export async function fileToSource(args, identity, env) {
     // NEEDS A RULING (BUILD.md 12): the recorder has left or moved, so nothing stands behind the write: Held, asking them
     const entry = await holdEntry(env, ctx, { ...base, question: args.question || `"${piece}" couldn't be filed for you: ${r.reason}`, reason: r.reason });
     return { outcome: HELD, entry: entry.id };
+  }
+  if (r.outcome === "held" && r.status === "conditions") {
+    // R16: a condition failed: nothing is written, and only the recorder knows what they meant, so they are asked
+    const entry = await holdEntry(env, ctx, { ...base, question: `"${piece}" wasn't written to ${key.key}. ${r.why}`, reason: `R16 condition ${r.condition}: ${r.why}`.slice(0, 600) });
+    return { outcome: HELD, entry: entry.id, note: `Held (R16 condition ${r.condition}): ${r.why} Nothing was written, and whoever put it on record is asked.` };
   }
   if (r.outcome === "held") {
     // the sources stream's adapter: a write that didn't land (unreachable, moved, not_found, refused, unknown) is Held, asking the recorder
@@ -793,6 +810,31 @@ export async function findText(args, identity, env, { orchestrator = false } = {
   if (!["found", "ambiguous", "none"].includes(r.status)) return { status: "unreachable", note: `The source can't be reached: ${String(r.why ?? "").slice(0, 200)}. A piece that needs it is Held.` };
   const { filing: _f, ...out } = r;
   return out;
+}
+
+/**
+ * Undo a Filed write (R16: "when all four hold the write lands, is logged with the value it replaced, and can be
+ * undone"). A person, never an agent, who holds the authority for the entry's class (as an approver must, R11.7)
+ * writes back the value the entry logged it replaced. The row must still hold what was written: a row that changed
+ * since is never written over (commitRow's `before`), and is refused. The entry stays, marked undone (I-48).
+ */
+export async function undoFiled(entryId, person, env) {
+  if (!person || /\/agent:/.test(String(person))) throw refuse("a person with authority for the class undoes a write, never an agent");
+  const e = (await env.store.entries({ id: String(entryId) }))[0];
+  if (!e) throw refuse(`no filing-log entry ${entryId}`);
+  if (e.outcome !== FILED || !e.target?.key || !e.target.fields) throw refuse(`entry ${e.id} is ${e.outcome}, not a Filed write: nothing to undo`);
+  if (e.undone) throw refuse(`entry ${e.id} was undone already, by ${e.undone.by}`);
+  const m = /^before: (\{.*\})$/s.exec(String(e.reason ?? ""));
+  if (!m) throw refuse(`entry ${e.id} logged no value it replaced (${e.reason ?? "none"}): nothing was written, so nothing is undone`);
+  const before = JSON.parse(m[1]);
+  const fields = Object.fromEntries(Object.keys(e.target.fields).map((c) => [c, before[c] ?? null]));
+  await env.approverHolds({ class: e.class, fields }, person, env.people ? await env.people(person) : null);
+  const r = await env.commit({ key: e.target.key, fields, before: e.target.fields, piece: { undo_of: e.id, by: person, record: e.record, section: e.section } });
+  if (r.status === "moved") throw refuse(`${e.target.key} changed since entry ${e.id} wrote it: nothing is undone, and nothing written over`);
+  if (r.filing !== "filed") throw refuse(`the undo didn't land (${r.status}): ${r.why ?? "the source refused it"}`);
+  const undone = { by: person, at: env.now(), log_id: r.log_id ?? null };
+  await env.store.annotateEntry(e.id, { undone });
+  return { entry: e.id, key: e.target.key, restored: fields, undone };
 }
 
 /** ---- the worker's account, and the orchestrator's check (R10, R11) ---- */

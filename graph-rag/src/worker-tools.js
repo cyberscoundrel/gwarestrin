@@ -72,12 +72,12 @@ export function registerWorkerTools(server, { identity, need }) {
   server.tool(
     "file_to_source",
     `File one piece of the record into its source row: the row's key ("mssql:dbo_Job:4471"), the columns
-to write and their values, and the existing class it falls under. The code decides the outcome: Filed
-(written) when the person who put the record on record holds the authority the class map names and
-the source takes writes; Proposed otherwise (a person with authority approves it); Held when the row
-can't be found or read, or the source already holds a different value and the record doesn't say it
-changed (says_change: true when it does: a stated change is an update). said is your account of what
-this piece writes, which the orchestrator checks against the source. You never pick the outcome.`,
+to write and their values in the record's own words, and the existing class it falls under. graph-rag
+decides the outcome (R16): Filed (written, the old value kept so it can be undone) when the person who
+put the record on record holds the authority the class map names, the record names the row (or only
+that row matches it), every value written is in the record, and the row hasn't changed since it was
+read; Proposed when they lack the authority or the source takes no writes; Held, asking them, when any
+other condition fails. said is your account of what this piece writes. You never pick the outcome.`,
     {
       section: sectionId,
       piece: pieceText,
@@ -85,9 +85,7 @@ this piece writes, which the orchestrator checks against the source. You never p
       class: z.string().min(1).max(80),
       key: z.string().min(5).max(300),
       fields: z.record(z.union([z.string().max(2000), z.number(), z.boolean(), z.null()])),
-      says_change: z.boolean().optional(),
       question: z.string().max(1000).optional(),
-      confirmed_update: z.string().max(80).optional(),
       ...refiles,
     },
     run(fileToSource, "write", "required", { tables: true }),

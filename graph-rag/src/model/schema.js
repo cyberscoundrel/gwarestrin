@@ -132,6 +132,7 @@ export const TYPES = {
       request: "STRING",
       account: "STRING", // JSON
       verdict: "STRING", // JSON
+      undone: "STRING", // JSON { by, at, log_id }: a Filed write a person undid (R16)
       refiled_from: "STRING",
       at: "STRING",
     },

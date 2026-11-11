@@ -361,6 +361,17 @@ app.post("/api/worker/proposals/:id", (req, res) => {
   void decideProposal(req.params.id, req.body?.approve === true, typeof req.body?.reason === "string" ? req.body.reason.slice(0, 1000) : "", identity).then((r) => res.json(r), (e) => httpError(res, e));
 });
 
+/** R16: a person with authority for the class undoes a Filed write (filing.js undoFiled); never an agent */
+app.post("/api/filing/entries/:id/undo", (req, res) => {
+  const identity = resolveIdentity(req.headers.authorization);
+  if (!identity) return res.status(401).json({ error: "unauthenticated" });
+  if (identity.role || identity.agent || /\/agent:/.test(String(identity.user))) return res.status(403).json({ error: "a person with authority for the class undoes a write, never an agent" });
+  void (async () => {
+    const { liveEnv, undoFiled } = await import("./filing.js");
+    return undoFiled(req.params.id, identity.user, await liveEnv());
+  })().then((r) => res.json(r), (e) => (e?.refused ? res.status(409).json({ error: String(e.message) }) : httpError(res, e)));
+});
+
 /** queue the entries saved before the worker existed (newest first; demand still goes first) */
 app.post("/api/worker/backfill", (req, res) => {
   const identity = resolveIdentity(req.headers.authorization);
