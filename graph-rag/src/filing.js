@@ -751,7 +751,11 @@ export async function accountEvidence(job, env) {
     const later = (await env.store.entries({ refiled_from: e.id })).length > 0;
     const read = e.target?.key && !later ? await env.readRow(e.target.key) : null;
     const suggested = later ? { result: "unverifiable", checked: "a later entry supersedes this one" } : suggestVerdict(e, read, sameValue);
-    out.push({ entry: e.id, outcome: e.outcome, piece: e.piece, class: e.class, target: e.target, account: e.account?.said ?? null, source_now: read?.status === "ok" && e.target?.fields ? Object.fromEntries(Object.keys(e.target.fields).map((c) => [c, read.row[c] ?? null])) : (read?.status ?? null), suggested, verdict: e.verdict });
+    // the record itself (R12: the orchestrator checks the entry afterwards): the section's text, which the orchestrator
+    // sees whatever its home; and the row before the write, where the entry recorded it
+    const sec = RID_RE.test(String(e.section ?? "")) ? (await env.db.adbQuery(`SELECT text_identity FROM ${e.section} WHERE _kind = 'section'`).catch(() => []))[0] : null;
+    const before = /^before: /.test(String(e.reason ?? "")) ? (() => { try { return JSON.parse(String(e.reason).slice(8)); } catch { return null; } })() : /already held it/.test(String(e.reason ?? "")) ? e.target?.fields ?? null : null;
+    out.push({ entry: e.id, outcome: e.outcome, section_text: sec?.text_identity ?? null, piece: e.piece, class: e.class, target: e.target, account: e.account?.said ?? null, row_before: before, source_now: read?.status === "ok" && e.target?.fields ? Object.fromEntries(Object.keys(e.target.fields).map((c) => [c, read.row[c] ?? null])) : (read?.status ?? null), suggested, verdict: e.verdict });
   }
   return { job: String(job), entries: out };
 }

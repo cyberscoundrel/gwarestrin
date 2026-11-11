@@ -248,7 +248,9 @@ test("R12, in force by default: a record saying something changed is filed given
   // and the orchestrator's check reads the update afterwards (R12)
   h = setup({ rows: rows() });
   const f = await fileToSource(piece({ says_change: true, said: "updated job 4471 from open to complete" }), identity, h.env);
-  assert.equal((await accountEvidence(identity.role.job, h.env)).entries.find((e) => e.entry === f.entry).suggested.result, "matches");
+  const ev0 = (await accountEvidence(identity.role.job, h.env)).entries.find((e) => e.entry === f.entry);
+  assert.equal(ev0.suggested.result, undefined, "the verdict is the orchestrator's, from the section");
+  assert.match(ev0.suggested.checked, /holds what was filed/);
 });
 
 test("under the conservative rule, a conflict the orchestrator answered as an update is filed, given authority (R11)", async () => {
@@ -340,7 +342,9 @@ test("the orchestrator checks an account against the source itself (R10, R11): a
   const f = await fileToSource(piece(), identity, h.env);
   await giveAccount({ pieces: [{ entry: f.entry, said: "I wrote Status complete to job 4471" }] }, identity, h.env);
   let ev = await accountEvidence(identity.role.job, h.env);
-  assert.deepEqual([ev.entries[0].suggested.result, ev.entries[0].source_now], ["matches", { Status: "complete" }]);
+  assert.deepEqual([ev.entries[0].suggested.result, ev.entries[0].source_now], [undefined, { Status: "complete" }]);
+  assert.equal(ev.entries[0].section_text, "the text of #71:3", "the section's own text, to judge the entry by");
+  assert.deepEqual(ev.entries[0].row_before, { Status: null }, "the row before the write, as the entry recorded it");
   // someone changes the row after: the account no longer matches the source
   h.dab.rows[0].Status = "open";
   ev = await accountEvidence(identity.role.job, h.env);

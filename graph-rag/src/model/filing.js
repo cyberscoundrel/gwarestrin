@@ -233,9 +233,13 @@ export function suggestVerdict(entry, read, same = (a, b) => a === b) {
   const fields = entry.target?.fields ?? null;
   if (!entry.target?.key || !fields) return { result: "unverifiable", checked: "the entry names no row and fields" };
   if (!read || read.status === "unreachable") return { result: "unverifiable", checked: "the source couldn't be read" };
-  if (read.status === "not_found") return entry.outcome === FILED ? { result: "differs", checked: `no row ${entry.target.key}` } : { result: "matches", checked: `no row ${entry.target.key}: nothing was written` };
+  // R12 "the orchestrator checks it afterwards": whether an entry says what its section says is the orchestrator's
+  // judgement, from the section's text (accountEvidence gives it). This hands over a verdict only where there is
+  // nothing to judge (a Kept piece, a source that can't be read, a Filed write that isn't in the row); otherwise only
+  // the facts about the row, as `checked`, and no result
+  if (read.status === "not_found") return entry.outcome === FILED ? { result: "differs", checked: `no row ${entry.target.key}: the write is not in the source` } : { checked: `no row ${entry.target.key}: nothing was written` };
   const holds = Object.entries(fields).every(([c, v]) => c in read.row && same(read.row[c], v));
-  if (entry.outcome === FILED) return holds ? { result: "matches", checked: `${entry.target.key} holds what was filed` } : { result: "differs", checked: `${entry.target.key} doesn't hold what was filed` };
+  if (entry.outcome === FILED) return holds ? { checked: `the row holds what was filed` } : { result: "differs", checked: `${entry.target.key} doesn't hold what was filed: the write didn't land, or was changed since` };
   // Proposed and Held write nothing: a row holding the piece's values is either an approval since, or a write that shouldn't have happened
-  return holds ? { result: "differs", checked: `${entry.target.key} holds the piece's values though it was ${entry.outcome}` } : { result: "matches", checked: `${entry.target.key} is unchanged by this piece` };
+  return holds ? { checked: `the row holds the piece's values though it was ${entry.outcome}: an approval since, or a write that shouldn't have happened` } : { checked: `the row is unchanged by this piece` };
 }

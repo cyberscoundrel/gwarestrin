@@ -254,14 +254,22 @@ reason, for a piece with nothing new since it was Kept or re-filed ${REFILE_LIMI
   );
   server.tool(
     "check_account",
-    "A worker's account against the source itself: each entry it wrote, what it said it did, the row as the source holds it now, and a suggested verdict.",
+    `A worker's entries for you to judge against the record: for each, the section's text it came from, the
+worker's piece and its account, the row it targets (before the write, where recorded, and now), and the facts
+about the row (checked). The verdict is yours, from the section's text: does the entry say what the section says?
+The right row, the right values, a change the section actually states (not a state, a wish or a question), and
+nothing the section doesn't say. matches when it does; differs when it doesn't; unverifiable when the section
+can't settle it. A suggested result is given only where there is nothing to judge (a Kept piece, a source that
+can't be read, a Filed write that isn't in the row).`,
     { job: z.string().min(8).max(80) },
     async (args) => reply(await accountEvidence(args.job, await liveEnv())),
   );
   server.tool(
     "record_verdict",
-    `Your verdict on one entry's account, after checking it against the source: ${VERDICTS.join(", ")}. A
-"differs" flags the entry for a person; nothing is undone.`,
+    `Your verdict on one entry, after checking it against its section's text and the source (graph-rag_check_account):
+${VERDICTS.join(", ")}. matches: the entry says what the section says (right row, right values, a change the section
+states); differs: it doesn't; unverifiable: the section can't settle it. A "differs" flags the entry for a person;
+nothing is undone.`,
     { entry: z.string().min(8).max(80), result: z.enum(VERDICTS), note: z.string().max(1000).optional() },
     async (args) => reply(await recordVerdict(args.entry, { result: args.result, note: args.note }, identity.user, await liveEnv())),
   );

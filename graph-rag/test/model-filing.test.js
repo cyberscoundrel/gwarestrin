@@ -82,13 +82,15 @@ test("an answer to a request is structured: a decision, and a class only where i
 
 test("the suggested verdict reads the source: Filed must be in the row, Proposed and Held must not have changed it", () => {
   const filed = { outcome: "filed", target: { key: "mssql:dbo_Job:4471", fields: { Status: "done" } } };
-  assert.equal(suggestVerdict(filed, { status: "ok", row: { Status: "done" } }).result, "matches");
+  assert.equal(suggestVerdict(filed, { status: "ok", row: { Status: "done" } }).result, undefined, "a write that landed: the facts only, the orchestrator judges it from the section");
+  assert.match(suggestVerdict(filed, { status: "ok", row: { Status: "done" } }).checked, /holds what was filed/);
   assert.equal(suggestVerdict(filed, { status: "ok", row: { Status: "open" } }).result, "differs");
   assert.equal(suggestVerdict(filed, { status: "not_found" }).result, "differs");
   assert.equal(suggestVerdict(filed, { status: "unreachable" }).result, "unverifiable");
   const held = { ...filed, outcome: "held" };
-  assert.equal(suggestVerdict(held, { status: "ok", row: { Status: "open" } }).result, "matches");
-  assert.equal(suggestVerdict(held, { status: "ok", row: { Status: "done" } }).result, "differs", "a Held piece's values in the row: something wrote it");
+  assert.equal(suggestVerdict(held, { status: "ok", row: { Status: "open" } }).result, undefined);
+  assert.match(suggestVerdict(held, { status: "ok", row: { Status: "open" } }).checked, /unchanged/);
+  assert.match(suggestVerdict(held, { status: "ok", row: { Status: "done" } }).checked, /though it was held/, "a Held piece's values in the row: the fact, for the orchestrator to judge");
   assert.equal(suggestVerdict({ outcome: "kept", target: null }, null).result, "unverifiable");
 });
 

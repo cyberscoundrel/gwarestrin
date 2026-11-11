@@ -134,7 +134,8 @@ function orchestratorPolicy({ messages }) {
   if (n === 1) {
     const calls = [];
     for (const r of toolResults(messages, "graph-rag_check_account").map(parse).filter(Boolean)) {
-      for (const e of r.entries ?? []) if (!e.verdict && e.suggested?.result) calls.push(call("graph-rag_record_verdict", { entry: e.entry, result: e.suggested.result, note: "fake: the suggested verdict" }));
+      // naive: the suggested result where there is one, else "matches" (it reads no section and no label)
+      for (const e of r.entries ?? []) if (!e.verdict) calls.push(call("graph-rag_record_verdict", { entry: e.entry, result: e.suggested?.result ?? "matches", note: "fake: the suggested verdict" }));
     }
     if (calls.length) return { toolCalls: calls };
   }
