@@ -810,3 +810,44 @@ test("handles: a fresh worker for a kick-back by its request handle, or with one
   assert.equal(s2[0].kickback, r2.id, "by its request handle, record not needed");
   assert.equal(queued.at(-1).sections[0], "#71:3");
 });
+
+/** ---- R11.13 on source writes (I-39) ---- */
+
+test("R11.13 on source writes: readers of the source must all see the section; a source read wider than the section misses it", async () => {
+  const { readersMissSection } = await import("../src/filing.js");
+  const { EVERYONE } = await import("../src/positions.js");
+  const m = parsePositionMap({ root: "org", positions: { org: { name: "Top" }, ops: { name: "Operations", parent: "org" }, floor: { name: "Floor", parent: "ops" } } });
+  assert.equal(readersMissSection(m, "ops", EVERYONE), true, "A-4: an ops section into a table everyone reads");
+  assert.equal(readersMissSection(m, "ops", "floor"), true, "floor readers can't see ops");
+  assert.equal(readersMissSection(m, "floor", "floor"), false);
+  assert.equal(readersMissSection(m, "floor", "ops"), false, "ops readers see the floor");
+  assert.equal(readersMissSection(m, "ops", "org"), false);
+  assert.equal(readersMissSection(m, EVERYONE, EVERYONE), false);
+  assert.equal(readersMissSection(m, "ops", undefined), false, "no declared home: nothing to compare");
+});
+
+test("R11.13 on source writes: a write the source's readers can't all see is Proposed, homed at the section, the row untouched, says_change or not", async () => {
+  const { EVERYONE } = await import("../src/positions.js");
+  // the section is the floor's (the job's home); the source is read at everyone
+  const h = setup();
+  h.env.connectionHome = async () => EVERYONE;
+  const r = await fileToSource(piece(), identity, h.env);
+  assert.equal(r.outcome, "proposed");
+  assert.match(r.note, /seen only at .* and above, and mssql is read at everyone[\s\S]*R11\.13/);
+  assert.equal(h.dab.calls.filter((c) => c.name === "update_record").length, 0, "nothing lands in the row");
+  assert.equal(h.queued[0].home, "floor", "the pending write waits where the section is seen");
+  // a stated change over a value (says_change true) is no different
+  const h2 = setup({ rows: [{ Job: 4471, Status: "open", Quantity: 500 }, { Job: 4472, Status: "planned", Quantity: 20 }] });
+  h2.env.connectionHome = async () => EVERYONE;
+  const r2 = await fileToSource(piece({ says_change: true }), identity, h2.env);
+  assert.equal(r2.outcome, "proposed");
+  assert.equal(h2.dab.rows[0].Status, "open", "the row keeps its value");
+  // a source read at the section's own home files as before (one read higher, a floor worker can't read at all: assertTableReadable)
+  for (const home of ["floor"]) {
+    const h3 = setup();
+    h3.env.connectionHome = async () => home;
+    const r3 = await fileToSource(piece(), identity, h3.env);
+    assert.equal(r3.outcome, "filed", `read at ${home}`);
+    assert.equal(h3.dab.rows[0].Status, "complete");
+  }
+});

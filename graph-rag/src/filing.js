@@ -262,6 +262,25 @@ async function refiledFrom(env, ctx, id) {
   return e.id;
 }
 
+/**
+ * R11.13 (an agent cannot write lower than what it read), applied to source writes: a source is read at its
+ * connection's home, so a write lands there for everyone who reads it. When the section's home is stricter, so that
+ * someone who reads the source couldn't see the section, the write must not land: it goes as Proposed to a person with
+ * authority, the pending write homed no lower than the section (enterData's `held`). Whether or not the column held a
+ * value, whatever says_change is. Returns that `held` ({ home, why }), or null when the source's readers all see the
+ * section. NEEDS A RULING (I-39): the coordinator's reading, for the user's review; Proposed rather than refused or Held.
+ */
+export function readersMissSection(positions, sectionHome, readHome) {
+  if (!positions || readHome === undefined || readHome === null || !sectionHome) return false;
+  return !canSee(positions, [readHome], sectionHome);
+}
+async function sourceWriteFloor(env, sectionHome, system) {
+  const readHome = env.connectionHome ? await env.connectionHome(system) : undefined;
+  if (!readersMissSection(env.positions, sectionHome, readHome)) return null;
+  const name = (h) => (h === EVERYONE ? "everyone" : (env.positions?.positions?.[h]?.name ?? h));
+  return { home: sectionHome, why: `the section is seen only at ${name(sectionHome)} and above, and ${system} is read at ${name(readHome)}, so writing it would show it to people who can't see the record (R11.13): a person with authority decides` };
+}
+
 /** write one entry (normalized, append-only) */
 async function appendEntry(env, raw) {
   const e = normalizeEntry({ id: randomUUID(), at: env.now(), ...raw });
@@ -338,8 +357,11 @@ export async function fileToSource(args, identity, env) {
       return { outcome: HELD, entry: entry.id, ...(request ? { request } : {}), note: request ? "Held, and a conflict request went to the orchestrator: nothing was written. Carry on with the other pieces." : "Held: nothing was written, and the recorder is asked." };
     }
   }
+  // R11.13 on source writes (the coordinator's reading, I-39): a write the source's readers couldn't all see the section
+  // of doesn't land; it is Proposed to a person with authority, waiting where the section is seen (data-entry.js held)
+  const held = await sourceWriteFloor(env, ctx.home, key.system);
   const r = await env.enter(
-    { actsFor: ctx.recorder, by: identity.user, key: key.key, fields, cls: cls.key, reason: piece, identity, before: Object.fromEntries(Object.keys(fields).map((c) => [c, read.row[c] ?? null])), piece: { record: ctx.record, section, job: ctx.job, piece } },
+    { actsFor: ctx.recorder, by: identity.user, key: key.key, fields, cls: cls.key, reason: piece, identity, held, before: Object.fromEntries(Object.keys(fields).map((c) => [c, read.row[c] ?? null])), piece: { record: ctx.record, section, job: ctx.job, piece } },
     // a Proposed piece is an outcome, not a wait: the proposal names no thread (the person approves it as themselves)
     { proposal: (_identity, reason) => ({ note: String(reason ?? "").slice(0, 600) || "(no reason given)" }) },
   );

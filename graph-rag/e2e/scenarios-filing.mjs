@@ -89,20 +89,20 @@ async function withMap(ctx, fn) {
 }
 
 /** a record on record by bob at the floor: a document and its sections; and the filing job its worker runs as */
-async function record(ctx, tag, texts) {
+async function record(ctx, tag, texts, { home = "floor", by = "bob" } = {}) {
   const doc = `${PREFIX}-${tag}-${ctx.randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
-  let r = await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${doc} title', _kind = 'document', _doc_id = '${doc}', _home = 'floor', _origin = 'floor', _on_record = true, _recorded_by = 'bob', _record_position = 'floor', _record_reason = 'e2e', updated_at = '${now}'` });
+  let r = await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${doc} title', _kind = 'document', _doc_id = '${doc}', _home = '${home}', _origin = '${home}', _on_record = true, _recorded_by = '${by}', _record_position = '${home}', _record_reason = 'e2e', updated_at = '${now}'` });
   ctx.check(!r.error, `document made: ${JSON.stringify(r).slice(0, 200)}`);
   const sections = [];
   for (const [i, text] of texts.entries()) {
-    r = await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${doc} §${i + 1}', _kind = 'section', _doc_id = '${doc}', _section = ${i}, _home = 'floor', _origin = 'floor', _written_by = 'bob', text_identity = '${q(text)}', updated_at = '${now}'` });
+    r = await ctx.tool("admin", "execute_graph", { language: "sql", command: `CREATE VERTEX Entity SET name = '${doc} §${i + 1}', _kind = 'section', _doc_id = '${doc}', _section = ${i}, _home = '${home}', _origin = '${home}', _written_by = '${by}', text_identity = '${q(text)}', updated_at = '${now}'` });
     ctx.check(!r.error, `section made: ${JSON.stringify(r).slice(0, 200)}`);
     sections.push(String((await ctx.sql(`SELECT @rid AS rid FROM Entity WHERE name = '${doc} §${i + 1}' AND _kind = 'section'`))[0].rid));
   }
   const job = ctx.randomUUID();
-  const payload = JSON.stringify({ rid: sections[0], sections, record: doc, home: "floor", parent: "master", label: `${PREFIX} ${tag}` });
-  r = await ctx.tool("admin", "execute_graph", { language: "sql", command: `INSERT INTO Job SET id = '${job}', kind = 'review', job_key = 'file:${doc}:floor', payload = '${q(payload)}', status = 'running', attempts = 0, priority = 0, created_at = '${now}', updated_at = '${now}'` });
+  const payload = JSON.stringify({ rid: sections[0], sections, record: doc, home, parent: "master", label: `${PREFIX} ${tag}` });
+  r = await ctx.tool("admin", "execute_graph", { language: "sql", command: `INSERT INTO Job SET id = '${job}', kind = 'review', job_key = 'file:${doc}:${home}', payload = '${q(payload)}', status = 'running', attempts = 0, priority = 0, created_at = '${now}', updated_at = '${now}'` });
   ctx.check(!r.error, `job made: ${JSON.stringify(r).slice(0, 200)}`);
   return { doc, sections, job, worker: ctx.workerToken(sections[0], job) };
 }
@@ -370,6 +370,27 @@ export default [
         const ok = await ctx.tool(orchestrator(ctx), "answer_request", { request: h1, decision: "keep" });
         ctx.check(ok.answered === q1.request, `answered by handle: ${JSON.stringify(ok).slice(0, 200)}`);
         await ctx.tool(orchestrator(ctx), "answer_request", { request: h2, decision: "keep" });
+      });
+    },
+  },
+  {
+    name: "R11.13 on source writes (the A-4 leak): a section stricter than the source's read home is Proposed, nothing lands, no marker reaches the source; one at that home files as before",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const marker = `zebra-r1113-${ctx.randomUUID().slice(0, 6)}`;
+        // alice's Operations note, as in A-4; the source (dbo_FJob) is read at the floor, whose readers can't see ops
+        const ops = await record(ctx, "r1113-ops", [`Job 4471 is complete; ${marker} covers setups until the new hire is trained.`], { home: "ops", by: "alice" });
+        const f = await ctx.tool(ops.worker, "file_to_source", { section: "s1", piece: `Job 4471 is complete; ${marker} covers setups`, said: "writing Status to job 4471", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: `complete; ${marker} covers setups` }, says_change: true });
+        ctx.check(f.outcome === "proposed" && /R11\.13/.test(f.note ?? ""), `Proposed, saying why: ${JSON.stringify(f).slice(0, 300)}`);
+        ctx.check(!JSON.stringify(fake.tables).includes(marker), "nothing lands in the source: no row holds the marker");
+        ctx.check(!fake.calls.some((c) => c.name === "update_record" && JSON.stringify(c.args).includes(marker)), "no write carrying it was sent");
+        const pend = (await ctx.sql(`SELECT home FROM PendingWrite WHERE payload LIKE '%${marker}%'`))[0];
+        ctx.check(pend?.home === "ops", `the pending write waits where the section is seen: ${JSON.stringify(pend)}`);
+        // a section at the source's read home (the floor) files as before
+        const floor = await record(ctx, "r1113-floor", ["Job 4472 is complete."]);
+        const g = await ctx.tool(floor.worker, "file_to_source", { section: "s1", piece: "Job 4472 is complete", said: "writing Status to job 4472", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4472", fields: { Status: "complete" }, says_change: true });
+        ctx.check(g.outcome === "filed" && fake.tables.dbo_FJob.rows.find((r) => r.Job === 4472)?.Status === "complete", `a floor section into a source read at the floor is Filed: ${JSON.stringify(g).slice(0, 200)}`);
       });
     },
   },
