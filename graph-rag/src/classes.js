@@ -369,8 +369,34 @@ export async function qualifyTable(value, { sources, entitiesOf, field = "record
   );
 }
 
+/**
+ * Evidence naming a table with no source ("dbo_Job", "dbo_Job:4471", "dbo_Job.Status"): its table part as
+ * system:table by qualifyTable's rule, so the class's home comes from that connection rather than falling to the
+ * root. Notes and corrections, and refs already naming a declared source, are left as they are.
+ */
+export async function qualifyEvidence(evidence, { sources, entitiesOf } = {}) {
+  if (!Array.isArray(evidence)) return evidence;
+  const decls = sources ?? (await (await import("./sources.js")).loadSources(undefined, { ttlMs: 0 }).catch(() => ({})));
+  const out = [];
+  for (const e of evidence) {
+    const ref = typeof e?.ref === "string" ? e.ref.trim() : "";
+    // by its shape: a table or columns ref with no system has no ":" at all; a rows ref with none is table:row
+    // (a full one is system:table:row). Anything else names its connection already, declared source or not.
+    const parts = ref.split(":");
+    const bare = (e?.kind === "table" || e?.kind === "columns") ? parts.length === 1 : e?.kind === "rows" ? parts.length === 2 : false;
+    if (!ref || !bare) {
+      out.push(e);
+      continue;
+    }
+    const table = ref.split(":")[0].split(".")[0];
+    out.push({ ...e, ref: `${await qualifyTable(table, { sources: decls, entitiesOf, field: "evidence" })}${ref.slice(table.length)}` });
+  }
+  return out;
+}
+
 export async function createClass(input, actor) {
   if (input?.record_table) input = { ...input, record_table: await qualifyTable(input.record_table) };
+  if (input?.evidence) input = { ...input, evidence: await qualifyEvidence(input.evidence) };
   const all = await allClasses();
   const index = treeIndex(all);
   let cls;
@@ -411,6 +437,7 @@ export async function createClass(input, actor) {
  */
 export async function updateClass(name, patch, actor) {
   if (patch?.record_table) patch = { ...patch, record_table: await qualifyTable(patch.record_table) };
+  if (patch?.add_evidence) patch = { ...patch, add_evidence: await qualifyEvidence(patch.add_evidence) };
   const all = await allClasses();
   const cur = resolveClass(name, all);
   if (fixedClass(cur)) throw refuse(new ShapeError("class", `${fixedClass(cur)}: the orchestrator doesn't change it`));

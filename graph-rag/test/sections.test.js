@@ -88,3 +88,21 @@ test("class map: the record_table the model set; else its one table in evidence,
   assert.deepEqual(m.record_table_not_in_map.map((x) => x.class), ["Odd"]);
   assert.equal(rows[1]._record_table, null, "nothing is written on the class");
 });
+
+test("evidence: a bare table name gets its source, so the class's home is its connection's, not the root", async () => {
+  const { qualifyEvidence } = await import("../src/classes.js");
+  const { homeFromEvidence, normalizeEvidence } = await import("../src/model/classes.js");
+  const { parsePositionMap } = await import("../src/positions.js");
+  const positions = parsePositionMap({ root: "org", positions: { org: { name: "Top" }, ops: { name: "Operations", parent: "org" }, floor: { name: "Floor", parent: "ops" } } });
+  const opts = { sources: { mssql: { system: "mssql", read: { url: "http://m" } } }, entitiesOf: async () => ["dbo_Job", "dbo_Customer"] };
+  const ctx = { positions, connectionHome: (s) => (s === "mssql" ? "floor" : null) };
+  const bare = [{ kind: "table", ref: "dbo_Job" }];
+  // as B-2's discovery made Job: the bare ref names no connection, so the home fell to the root
+  assert.equal(homeFromEvidence(bare.map((e) => normalizeEvidence(e)), ctx), "org");
+  const q = await qualifyEvidence(bare, opts);
+  assert.deepEqual(q, [{ kind: "table", ref: "mssql:dbo_Job" }]);
+  assert.equal(homeFromEvidence(q.map((e) => normalizeEvidence(e)), ctx), "floor", "its connection's home");
+  // rows and already-qualified refs, notes left as they are
+  assert.deepEqual(await qualifyEvidence([{ kind: "rows", ref: "dbo_Customer:TORO" }, { kind: "table", ref: "mssql:dbo_Job" }, { kind: "notes", note: "the owners" }], opts), [{ kind: "rows", ref: "mssql:dbo_Customer:TORO" }, { kind: "table", ref: "mssql:dbo_Job" }, { kind: "notes", note: "the owners" }]);
+  await assert.rejects(qualifyEvidence([{ kind: "table", ref: "dbo_Nope" }], opts), /evidence: not system:table: dbo_Nope|not system:table: dbo_Nope/);
+});
