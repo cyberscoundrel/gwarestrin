@@ -102,9 +102,11 @@ export function scoreOutcomes(notes, entries, { noteOf, info = new Map(), change
     for (const rule of n.mustNot ?? []) {
       // a change counts against this note when its own Filed entry made it, or when no Filed entry accounts for it
       // (another note's legitimate write to the same row, ux-z01's to 3260356, say, is not this note's)
+      // a Filed entry wrote the row only when it changed it: one saying "the row already held it" wrote nothing
       if (rule.change && changes.some((c) => c.key === rule.change)) {
-        const mineWrote = mine.some((e) => e.outcome === "filed" && e.target?.key === rule.change);
-        const someoneWrote = entries.some((e) => e.outcome === "filed" && e.target?.key === rule.change);
+        const wrote = (e) => e.outcome === "filed" && e.target?.key === rule.change && !/already held it/i.test(String(e.reason ?? ""));
+        const mineWrote = mine.some(wrote);
+        const someoneWrote = entries.some(wrote);
         if (mineWrote || !someoneWrote) mustNot.push({ note: n.id, rule: `changed ${rule.change}${mineWrote ? "" : " (no Filed entry accounts for it)"}` });
       }
       if (rule.write && mine.some((e) => e.outcome === "filed" && e.target?.table === rule.write)) mustNot.push({ note: n.id, rule: `wrote to ${rule.write}` });

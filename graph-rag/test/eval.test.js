@@ -421,3 +421,30 @@ test("fake upstream: the dry run's policies over the OpenAI wire, as litellm for
     server.close();
   }
 });
+
+test("driver: a blank reply that says it stopped is asked once more, counted; a reply with text is never retried", async () => {
+  const { runAgent } = await import("../eval/driver/agent.mjs");
+  const scripted = (replies) => {
+    let i = 0;
+    return { complete: async () => replies[Math.min(i++, replies.length - 1)], get asked() { return i; } };
+  };
+  const logs = [];
+  const blank = { text: "\n\n", toolCalls: [], finish: "stop", provider: "P1", usage: { input: 10, output: 1 } };
+  const answer = { text: "done", toolCalls: [], finish: "stop", provider: "P2", usage: { input: 10, output: 2 } };
+  const c1 = scripted([blank, answer]);
+  const r1 = await runAgent({ client: c1, system: "s", prompt: "p", tools: [], log: (e) => logs.push(e) });
+  assert.equal(r1.text, "done");
+  assert.equal(c1.asked, 2);
+  assert.deepEqual([r1.usage.blank, r1.usage.blank_retries, r1.usage.calls], [1, 1, 2], "the blank one is counted and its tokens too");
+  assert.ok(logs.some((e) => e.blank && e.provider === "P1") && logs.some((e) => e.retry === 1 && e.provider === "P2"), "each reply is logged with its provider");
+  const c2 = scripted([blank, blank, answer]);
+  const r2 = await runAgent({ client: c2, system: "s", prompt: "p", tools: [] });
+  assert.equal(c2.asked, 2, "retried once only");
+  assert.equal(r2.usage.blank_retries, 1);
+  const c3 = scripted([{ ...blank, finish: "length" }, answer]);
+  await runAgent({ client: c3, system: "s", prompt: "p", tools: [] });
+  assert.equal(c3.asked, 1, "a blank reply cut at the cap isn't retried");
+  const c4 = scripted([answer]);
+  await runAgent({ client: c4, system: "s", prompt: "p", tools: [] });
+  assert.equal(c4.asked, 1, "a reply with text is never retried");
+});

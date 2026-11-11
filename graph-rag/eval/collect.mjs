@@ -25,7 +25,7 @@ export const QUERIES = {
   documents: "SELECT @rid AS rid, name, _doc_id, _doc_title, _home, _recorded_by, _recorded_at, _record_position FROM Entity WHERE _kind = 'document'",
   sections: "SELECT @rid AS rid, name, _doc_id, _section, _home, text_identity FROM Entity WHERE _kind = 'section'",
   classes: "SELECT @rid AS rid, _class_key, _class_name, _description, _evidence, _rows_are_nodes, _record_table, _stages, _status, _home, out('SUBCLASS_OF')._class_key AS parents FROM Entity WHERE _kind = 'class'",
-  instances: "SELECT @rid AS rid, name, _home, _homes, _record_key, record_key, key, out('INSTANCE_OF')._class_key AS classes FROM Entity WHERE out('INSTANCE_OF').size() > 0",
+  instances: "SELECT @rid AS rid, name, _home, _homes, _keys, _record_key, record_key, key, out('INSTANCE_OF')._class_key AS classes FROM Entity WHERE out('INSTANCE_OF').size() > 0",
   about: "SELECT @rid AS rid, _doc_id, out('ABOUT') AS about FROM Entity WHERE _kind = 'section' AND out('ABOUT').size() > 0",
 };
 
@@ -74,7 +74,8 @@ export async function collectGraph(query, { records = [] } = {}) {
     titles: documents.map((d) => ({ rid: rid(d.rid), record: rid(d.rid), home: d._home ?? null, title: d.name ?? d._doc_title ?? "" })),
     sections: sections.map((s) => ({ rid: rid(s.rid), record: rid(docByDocId.get(s._doc_id)?.rid) || null, home: s._home ?? null, text: s.text_identity ?? "" })),
     classes: classes.map((c) => ({ rid: rid(c.rid), key: c._class_key, name: c._class_name ?? c._class_key, parents: c.parents ?? [], home: c._home ?? null, description: c._description ?? null, evidence: parse(c._evidence, []), rows_are_nodes: Boolean(c._rows_are_nodes), record_table: c._record_table ?? null, stages: c._stages ?? [], status: c._status ?? "active" })),
-    instances: instances.map((i) => ({ rid: rid(i.rid), name: i.name, key: i._record_key ?? i.record_key ?? i.key ?? null, classes: i.classes ?? [], homes: i._homes?.length ? i._homes : i._home ? [i._home] : [] })),
+    // an instance's source keys are in _keys (instances.js); the older single-key fields are read too
+    instances: instances.map((i) => ({ rid: rid(i.rid), name: i.name, key: (Array.isArray(i._keys) && i._keys[0]) || i._record_key || i.record_key || i.key || null, keys: Array.isArray(i._keys) ? i._keys : [], classes: i.classes ?? [], homes: i._homes?.length ? i._homes : i._home ? [i._home] : [] })),
     about: aboutBy,
     noteOf,
     recordIds,

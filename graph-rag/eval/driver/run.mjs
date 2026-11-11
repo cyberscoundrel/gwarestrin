@@ -105,6 +105,8 @@ const addUsage = (role, u) => {
   x.sentChars += u.sentChars ?? 0;
   x.outChars += u.outChars ?? 0;
   x.dsml += u.dsml ?? 0;
+  x.blank = (x.blank ?? 0) + (u.blank ?? 0);
+  x.blank_retries = (x.blank_retries ?? 0) + (u.blank_retries ?? 0);
   for (const [k, n] of Object.entries(u.providers ?? {})) x.providers[k] = (x.providers[k] ?? 0) + n;
   x.agents++;
   // as it stands, for the runaway guard watching each setup's spend while the run goes

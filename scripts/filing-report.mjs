@@ -14,7 +14,7 @@
 //
 // --url is required and has no default: this never finds an instance on its own. The token needs the raw
 // capability (query_graph in SQL): the admin's.
-import { readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { collectGraph } from "../graph-rag/eval/collect.mjs";
 import { buildReport, compareRuns } from "../graph-rag/eval/report.mjs";
@@ -87,6 +87,19 @@ if (args._[0] === "run") {
   console.log(`${report.gates.ok ? "GATES PASS" : "GATES FAIL"}: rows ${report.gates.rows ? "pass" : "FAIL"}, leaks ${report.gates.leaks ? "pass" : "FAIL"}; pieces ${t.pieces}: ${t.exact} exact, ${t.accepted} accepted, ${t.wrong} wrong, ${t.missing} missing; ${report.changes.length} rows changed`);
   console.log(`wrote ${dir}/report.md, tree.md, report.json, snapshot.json`);
   process.exit(report.gates.ok ? 0 : 1);
+} else if (args._[0] === "rescore") {
+  // a finished run's report again, from its snapshot (the graph is gone): the old report kept as report.v1.*
+  const dir = args._[1];
+  if (!dir) usage("give the run dir");
+  const snap = read(`${dir}/snapshot.json`);
+  for (const f of ["report.md", "report.json", "tree.md"]) if (existsSync(`${dir}/${f}`) && !existsSync(`${dir}/${f.replace("report", "report.v1").replace("tree", "tree.v1")}`)) copyFileSync(`${dir}/${f}`, `${dir}/${f.replace("report", "report.v1").replace("tree", "tree.v1")}`);
+  const report = buildReport(snap);
+  writeFileSync(`${dir}/report.md`, report.markdown);
+  writeFileSync(`${dir}/tree.md`, report.tree);
+  const { markdown: _m, tree: _t, ...rest } = report;
+  writeFileSync(`${dir}/report.json`, `${JSON.stringify(rest, null, 2)}\n`);
+  const t = report.outcomes.totals;
+  console.log(`${dir}: ${report.gates.ok ? "GATES PASS" : "GATES FAIL"}; pieces ${t.pieces}: ${t.exact} exact, ${t.accepted} accepted, ${t.wrong} wrong, ${t.missing} missing; must-not ${report.outcomes.mustNot.length}`);
 } else if (args._[0] === "compare") {
   const dirs = args._.slice(1);
   if (!dirs.length) usage("give the run dirs");

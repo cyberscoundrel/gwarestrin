@@ -74,27 +74,37 @@ export async function runAgent({ client, system, prompt, tools, maxTurns = 40, l
   const byName = new Map(tools.map((t) => [t.name, t]));
   // sentChars: what every request carries (system, tool definitions, the history so far), summed over the turns;
   // with a fake model it is the measure a cost estimate starts from (about four characters a token)
-  const usage = { input: 0, output: 0, calls: 0, sentChars: 0, outChars: 0, dsml: 0, providers: {} };
+  const usage = { input: 0, output: 0, calls: 0, sentChars: 0, outChars: 0, dsml: 0, providers: {}, blank: 0, blank_retries: 0 };
   const toolChars = JSON.stringify(tools.map((t) => ({ n: t.name, d: t.description, s: t.schema }))).length;
   let calls = 0;
   for (let turn = 1; turn <= maxTurns; turn++) {
     usage.sentChars += system.length + toolChars + JSON.stringify(messages).length;
     let r;
-    try {
-      r = await client.complete({ system, messages, tools });
-    } catch (e) {
-      return { text: "", turns: turn, calls, usage, messages, stopped: `the model failed: ${String(e?.message ?? e).slice(0, 300)}` };
+    // a blank reply (no text, no tool call) that says it stopped is asked once more (harness handling, counted and
+    // reported); a reply with text or a tool call is never retried
+    const blank = (x) => !String(x?.text ?? "").trim() && !(x?.toolCalls ?? []).length;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        r = await client.complete({ system, messages, tools });
+      } catch (e) {
+        return { text: "", turns: turn, calls, usage, messages, stopped: `the model failed: ${String(e?.message ?? e).slice(0, 300)}` };
+      }
+      // every reply, blank or not: who served it, why it ended, how many tool calls
+      log({ turn, reply: String(r.text ?? "").slice(0, 2000), provider: r.provider ?? null, finish: r.finish ?? null, tool_calls: (r.toolCalls ?? []).length, ...(blank(r) ? { blank: true } : {}), ...(attempt ? { retry: attempt } : {}) });
+      // every request counts, a retried blank one too
+      usage.input += r.usage?.input ?? 0;
+      usage.output += r.usage?.output ?? 0;
+      usage.calls++;
+      if (r.provider) usage.providers[r.provider] = (usage.providers[r.provider] ?? 0) + 1;
+      if (blank(r)) usage.blank++;
+      if (!(blank(r) && r.finish === "stop" && attempt === 0)) break;
+      usage.blank_retries++;
     }
-    usage.input += r.usage?.input ?? 0;
-    usage.output += r.usage?.output ?? 0;
-    usage.calls++;
-    if (r.provider) usage.providers[r.provider] = (usage.providers[r.provider] ?? 0) + 1;
     // DSML markup cut out of tool arguments (models.mjs cutDsml): logged with the raw value, counted as a failure
     for (const tc of r.toolCalls ?? []) for (const c of tc.dsml ?? []) (usage.dsml++, log({ turn, dsml: true, tool: tc.name, path: c.path, provider: r.provider ?? null, raw: c.raw }));
     if (r.dsmlInText) (usage.dsml++, log({ turn, dsml: true, tool: null, path: "content", provider: r.provider ?? null, raw: String(r.text ?? "").slice(0, 2000) }));
     messages.push({ role: "assistant", content: r.text ?? "", toolCalls: (r.toolCalls ?? []).map(({ dsml, ...tc }) => tc) });
     // the model's own words each turn (the run's trace of why it did what it did)
-    if (String(r.text ?? "").trim()) log({ turn, reply: String(r.text).slice(0, 2000), provider: r.provider ?? null });
     usage.outChars += String(r.text ?? "").length + JSON.stringify(r.toolCalls ?? []).length;
     // why the model's turn ended ("stop", or "length" at the output cap), for the trace
     if (!r.toolCalls?.length) return { text: r.text ?? "", turns: turn, calls, usage, messages, stopped: null, finish: r.finish ?? null };
