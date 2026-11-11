@@ -71,13 +71,16 @@ const say = (s) => {
 // --models fake with no EVAL_VIA: the fake policies in this process (the dry run).
 const VIA = process.env.EVAL_VIA || (MODE === "fake" ? "none" : "direct");
 const modelOf = (role) => process.env[`EVAL_SETUP_${SETUP}_${role === "worker" || role === "part" ? "WORKER" : "ORCHESTRATOR"}`];
+// each reply's output cap (I-35): 16,384, raised from 4,096 after Flash's turns, its discovery among them, ended at
+// the cap; production gives a model discovered through litellm 8,192 (packages/shared DEFAULT_MAX_TOKENS)
+const MAX_TOKENS = Number(process.env.EVAL_MAX_TOKENS ?? 16384);
 function clientFor(role) {
   if (VIA === "none") return fakeClient(role === "part" ? "worker" : role);
   const env = process.env;
   const model = modelOf(role);
   if (!model) throw new Error(`the env file names no model for setup ${SETUP}'s ${role === "worker" || role === "part" ? "worker" : "orchestrator"} (EVAL_SETUP_${SETUP}_...)`);
-  if (VIA === "litellm") return openaiClient({ baseUrl: env.EVAL_LITELLM_URL, apiKey: env.EVAL_LITELLM_KEY, model });
-  return openaiClient({ baseUrl: env.EVAL_AGENT_BASE_URL || "https://openrouter.ai/api/v1", apiKey: env.EVAL_AGENT_API_KEY, model });
+  if (VIA === "litellm") return openaiClient({ baseUrl: env.EVAL_LITELLM_URL, apiKey: env.EVAL_LITELLM_KEY, model, maxTokens: MAX_TOKENS });
+  return openaiClient({ baseUrl: env.EVAL_AGENT_BASE_URL || "https://openrouter.ai/api/v1", apiKey: env.EVAL_AGENT_API_KEY, model, maxTokens: MAX_TOKENS });
 }
 /** through litellm, refuse early when a setup names a model the committed configuration doesn't define */
 async function checkLitellmModels() {
@@ -269,7 +272,7 @@ writeFileSync(
     2,
   )}\n`,
 );
-writeFileSync(`${RUN_DIR}/usage.json`,`${JSON.stringify({ setup: SETUP, run: RUN, models: MODE, via: VIA, ...(VIA === "none" ? {} : { orchestrator: modelOf("orchestrator"), worker: modelOf("worker") }), usage }, null, 2)}\n`);
+writeFileSync(`${RUN_DIR}/usage.json`,`${JSON.stringify({ setup: SETUP, run: RUN, models: MODE, via: VIA, max_tokens: MAX_TOKENS, ...(VIA === "none" ? {} : { orchestrator: modelOf("orchestrator"), worker: modelOf("worker") }), usage }, null, 2)}\n`);
 const rep = await node("scripts/filing-report.mjs", ["run", "--url", GRAPH, "--tokens", simpleTokens, "--run-dir", RUN_DIR, "--setup", SETUP, "--run", String(RUN)]);
 say(rep.out.trim());
 process.exit(rep.code ?? 1);
