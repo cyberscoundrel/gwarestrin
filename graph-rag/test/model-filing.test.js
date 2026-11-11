@@ -101,3 +101,12 @@ test("a Filed piece names its class and carries its account; a Kept piece is lin
   assert.throws(() => normalizeEntry({ ...base, outcome: "kept" }), /instances: a Kept piece is linked to the instances/);
   assert.deepEqual(normalizeEntry({ ...base, outcome: "kept", instances: ["#80:1"] }).instances, ["#80:1"]);
 });
+
+test("R15: a Kept piece needs instances, except the floor's for a worker that ended without filing", () => {
+  const kept = { id: "k1", outcome: "kept", record: "doc-1", section: "#71:3", home: "floor", piece: "the whole section", recorder: "bob", worker: "j1", at: "2026-11-10T00:00:00.000Z" };
+  assert.throws(() => normalizeEntry(kept), /linked to the instances/);
+  assert.deepEqual(normalizeEntry({ ...kept, reason: "worker ended without filing" }).instances, []);
+  assert.throws(() => normalizeEntry({ ...kept, reason: "no system holds it" }), /linked to the instances/);
+  assert.equal(normalizeRequest({ id: "r1", kind: "other", record: "doc-1", worker: "j1", home: "floor", question: "q", raised_by: "graph-rag" }).raised_by, "graph-rag");
+  assert.equal(normalizeRequest({ id: "r1", kind: "other", record: "doc-1", worker: "j1", home: "floor", question: "q" }).raised_by, null);
+});

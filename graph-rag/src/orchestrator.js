@@ -17,7 +17,7 @@ import { adbCommand, adbQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { effectiveHome, homeName } from "./positions.js";
 import { positionMap } from "./scope.js";
 import { accountEvidence, answerRequest, filingLog, keptPieces, liveEnv, recordVerdict, refileRefusal, REFILE_LIMIT } from "./filing.js";
-import { ANSWERS, VERDICTS } from "./model/filing.js";
+import { ANSWERS, GRAPH_RAG, VERDICTS } from "./model/filing.js";
 import { splitByHome } from "./model/brief.js";
 
 export const ORCHESTRATOR = "master"; // the role kind stays `master` (NEEDS A RULING F13): the shared GraphRole type is unchanged
@@ -65,6 +65,33 @@ export async function startRecordWorkers(record, { by, level, minutes, refile = 
     out.push({ home: g.audience, job });
   }
   return out;
+}
+
+/**
+ * R15: one fresh worker for one section graph-rag sent back (a kick-back still open), once every job that had the
+ * section has ended. It files just that section, at the kick-back's home. One per kick-back: starting it answers the
+ * request, so a second call finds none open. If that worker too ends without filing, graph-rag sends it back again.
+ */
+export async function startKickbackWorker(record, section, { by, level, minutes } = {}, { env, db = db0, enqueue, pool } = {}) {
+  const e = env ?? (await liveEnv());
+  const req = (await e.store.requests({ section: String(section), status: "open", raised_by: GRAPH_RAG })).find((r) => r.record === record);
+  if (!req) throw new Error(`no open kick-back for section ${section} of record ${record}: a fresh worker is started only for a section graph-rag sent back because its worker ended without filing it (R15)`);
+  const jobs = await db.adbQuery("SELECT id, status, payload FROM Job WHERE kind = 'review' AND job_key LIKE :k", { k: `%:${record}:%` }).catch(() => []);
+  const busy = jobs.filter((j) => ["pending", "running", "waiting"].includes(j.status)).filter((j) => {
+    const p = JSON.parse(j.payload || "{}");
+    return p.rid === section || (Array.isArray(p.sections) && p.sections.includes(section));
+  });
+  if (busy.length) throw new Error(`section ${section} still has a worker (${busy[0].id}, ${busy[0].status}): a fresh one starts only once its jobs have ended`);
+  const q = enqueue ?? (await import("./worker-pool.js")).enqueue;
+  const settings = pool ?? (await import("./worker-pool.js")).worker.pool;
+  const lvl = Math.max(1, Math.min(3, Number(level) || 2));
+  const job = await q(
+    "review",
+    { rid: section, sections: [section], record, home: req.home, parent: ORCHESTRATOR, by, label: `file 1 section again at ${positionMap ? homeName(positionMap, req.home) : req.home}`, minutes: Math.max(5, Math.min(180, Number(minutes) || settings.threadMinutes)), level: lvl, why: "the last worker for this section ended without filing it (R15)", kickback: req.id },
+    { key: `kickback:${record}:${req.home}:${req.id}`, priority: 3 },
+  );
+  await e.store.updateRequest(req.id, { status: "answered", answer: JSON.stringify({ decision: "fresh_worker", job }), answered_by: String(by).slice(0, 120) });
+  return [{ home: req.home, job, kickback: req.id }];
 }
 
 /** what a batch tells the orchestrator of each record: in full, it being the most privileged agent (R7) */
@@ -150,16 +177,24 @@ export function registerOrchestratorTools(server, { identity }) {
     "start_worker",
     `Start a record's workers (by its record id, as the batch names it): one per home of its sections,
 each seeing only what people at that home see. Every record gets a worker; a record already being filed
-keeps its workers. level picks the model: 1 quick, 2 the default, 3 a broad matter. Its brief is composed
-for it from the graph: you write none.`,
-    { record: z.string().min(3).max(120), level: z.number().int().min(1).max(3).optional(), minutes: z.number().int().min(5).max(180).optional() },
-    async (args) => reply({ started: await startRecordWorkers(args.record, { by: identity.user, level: args.level, minutes: args.minutes }), note: "You'll get a signal when each is done or stopped." }),
+keeps its workers. With section: one fresh worker for just that section, when graph-rag sent it back because
+its worker ended without filing it (R15); one per time it is sent back. level picks the model: 1 quick, 2 the
+default, 3 a broad matter. Its brief is composed for it from the graph: you write none.`,
+    { record: z.string().min(3).max(120), section: z.string().min(3).max(40).optional(), level: z.number().int().min(1).max(3).optional(), minutes: z.number().int().min(5).max(180).optional() },
+    async (args) =>
+      reply({
+        started: args.section
+          ? await startKickbackWorker(args.record, args.section, { by: identity.user, level: args.level, minutes: args.minutes })
+          : await startRecordWorkers(args.record, { by: identity.user, level: args.level, minutes: args.minutes }),
+        note: "You'll get a signal when each is done or stopped.",
+      }),
   );
   server.tool(
     "answer_request",
     `Answer a worker's request, structured: ${ANSWERS.join(", ")}. use_class and class_created name the
 class, one the worker's audience can see; update says a conflict with the source is really a change the
-record states. No free text reaches the worker.`,
+record states. No free text reaches the worker. A request graph-rag raised for a worker that ended (R15)
+takes keep (the section is Kept now) or hold (its recorder is asked); for a fresh worker use start_worker.`,
     { request: z.string().min(8).max(80), decision: z.enum(ANSWERS), class: z.string().max(80).optional() },
     async (args) => reply(await answerRequest(args.request, { decision: args.decision, ...(args.class ? { class: args.class } : {}) }, identity.user, await liveEnv())),
   );

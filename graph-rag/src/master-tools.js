@@ -134,11 +134,18 @@ export async function assertNotFilingProposal(id) {
 
 /** the master closes a worker it won't pursue: questions dismissed, proposals rejected, no resume */
 async function closeWorker(jobId, summary, identity) {
+  const before = (await adbQuery("SELECT payload, summary, status FROM Job WHERE id = :id AND kind = 'review'", { id: jobId }).catch(() => []))[0];
   await adbCommand("UPDATE Job SET status = 'closed', summary = :s, updated_at = :now WHERE id = :id AND kind = 'review'", "sql", { s: String(summary ?? "closed by the master").slice(0, 2000), now: new Date().toISOString(), id: jobId });
   const items = await openItems(jobId);
   if (items.questions.length) await answerQuestions(items.questions.map((q) => q.id), { answer: "", dismiss: true }, identity.user);
   for (const p of items.proposals) await rejectPending(p.id, identity, "closed by the master").catch(() => {});
-  return { closed: true };
+  // R15: a closed filing worker's sections left without an entry go back to the orchestrator, with its last reply
+  let kicked = [];
+  if (before && before.status !== "closed") {
+    const { kickBack, liveEnv } = await import("./filing.js");
+    kicked = await kickBack(jobId, JSON.parse(before.payload || "{}"), before.summary, await liveEnv()).catch((e) => (log.warn(`close ${String(jobId).slice(0, 8)}: no kick-back: ${String(e?.message ?? e).slice(0, 160)}`), []));
+  }
+  return { closed: true, ...(kicked.length ? { sent_back: kicked.map((r) => ({ request: r.id, section: r.section })), note: "graph-rag sent these sections back to you as requests (R15): start a fresh worker for one, keep it or hold it; left open past your turn, each is Kept as it stands" } : {}) };
 }
 
 /** the master hands a stop it can't decide to a handler, who settles it with the operator */

@@ -52,7 +52,11 @@ const ADMIN = tokenOf("admin");
 const sign = (claims) => signAgentToken(adminEntry.delegationKey, { u: "admin", a: randomUUID(), p: adminEntry.positions, iat: Math.floor(Date.now() / 1000), ...claims });
 
 const logFile = `${RUN_DIR}/driver.log`;
-const log = (event) => appendFileSync(logFile, `${JSON.stringify({ at: new Date().toISOString(), ...event })}\n`);
+// every key this process holds (a direct endpoint's, the run's own litellm key) is taken out of a line before it's
+// written; the OpenRouter key isn't in this process at all through litellm, and run.sh's files are scanned after
+const SECRETS = Object.entries(process.env).filter(([k, v]) => /KEY|TOKEN|SECRET|PASSWORD/i.test(k) && String(v ?? "").length >= 12).map(([, v]) => String(v));
+const scrub = (line) => SECRETS.reduce((s, k) => s.split(k).join("[key removed]"), line);
+const log = (event) => appendFileSync(logFile, `${scrub(JSON.stringify({ at: new Date().toISOString(), ...event }))}\n`);
 const say = (s) => {
   console.log(s);
   log({ say: s });

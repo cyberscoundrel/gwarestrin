@@ -89,6 +89,8 @@ export async function runAgent({ client, system, prompt, tools, maxTurns = 40, l
     usage.output += r.usage?.output ?? 0;
     usage.calls++;
     messages.push({ role: "assistant", content: r.text ?? "", toolCalls: r.toolCalls ?? [] });
+    // the model's own words each turn (the run's trace of why it did what it did)
+    if (String(r.text ?? "").trim()) log({ turn, reply: String(r.text).slice(0, 2000) });
     usage.outChars += String(r.text ?? "").length + JSON.stringify(r.toolCalls ?? []).length;
     if (!r.toolCalls?.length) return { text: r.text ?? "", turns: turn, calls, usage, messages, stopped: null };
     for (const tc of r.toolCalls) {
@@ -96,7 +98,7 @@ export async function runAgent({ client, system, prompt, tools, maxTurns = 40, l
       const tool = byName.get(tc.name);
       const res = tool ? await tool.call(tc.args ?? {}).catch((e) => ({ text: `error: ${String(e?.message ?? e)}`, error: true })) : { text: `error: no tool ${tc.name}`, error: true };
       // a refused call's own text, for the report's commonest errors (graph-rag's and the source's words, never a key)
-      log({ tool: tc.name, args: tc.args, error: res.error, ...(res.error ? { errorText: String(res.text).slice(0, 300) } : {}) });
+      log({ tool: tc.name, args: tc.args, error: res.error, ...(res.error ? { errorText: String(res.text).slice(0, 500) } : {}) });
       messages.push({ role: "tool", toolCallId: tc.id, name: tc.name, content: String(res.text).slice(0, 20_000) });
     }
   }

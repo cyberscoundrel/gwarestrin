@@ -179,6 +179,7 @@ export const TYPES = {
       status: "STRING",
       answer: "STRING",
       answered_by: "STRING",
+      raised_by: "STRING",
       at: "STRING",
     },
     indexes: [

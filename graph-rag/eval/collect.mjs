@@ -20,7 +20,7 @@ const rid = (v) => String(v?.["@rid"] ?? v ?? "");
 
 export const QUERIES = {
   entries: "SELECT id, outcome, record, section, home, piece, class, instances, target, recorder, worker, reason, pending_id, question, request, account, verdict, refiled_from, at FROM FilingEntry ORDER BY at",
-  requests: "SELECT id, kind, record, section, home, worker, question, suggestion, status, answer, answered_by, at FROM WorkerRequest ORDER BY at",
+  requests: "SELECT id, kind, record, section, home, worker, question, suggestion, status, answer, answered_by, raised_by, at FROM WorkerRequest ORDER BY at",
   briefs: "SELECT id, record, audience, worker, brief, dropped, at FROM BriefLog ORDER BY at",
   documents: "SELECT @rid AS rid, name, _doc_id, _doc_title, _home, _recorded_by, _recorded_at, _record_position FROM Entity WHERE _kind = 'document'",
   sections: "SELECT @rid AS rid, name, _doc_id, _section, _home, text_identity FROM Entity WHERE _kind = 'section'",

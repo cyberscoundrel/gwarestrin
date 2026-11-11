@@ -27,7 +27,7 @@ import { adbCommand as realCommand, adbQuery as realQuery, ENTITY_LABEL, RID_RE 
 import { canSee, EVERYONE, visibleHomes } from "./positions.js";
 import { classKey } from "./model/classes.js";
 import { parseKey } from "./model/schema.js";
-import { disagreeingColumns, FILED, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, onDisagreement, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
+import { disagreeingColumns, FILED, FLOOR_REASON, GRAPH_RAG, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, onDisagreement, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
 import { enterData, findRows, getRow, sameValue } from "./data-entry.js";
 import { sourceFor } from "./sources.js";
 import { addDependency, relateInstance } from "./instances.js";
@@ -55,7 +55,7 @@ const fromEntryRow = (r) => ({ ...Object.fromEntries(ENTRY_FIELDS.map((k) => [k,
 const ATTEMPT_FIELDS = ["id", "system", "table", "key", "action", "fields", "before", "piece", "status", "detail", "at", "settled_at"];
 // stored under names that are no SQL keyword in ArcadeDB: table -> source_table, key -> row_key, before -> row_before
 const ATTEMPT_COLUMN = (k) => (k === "table" ? "source_table" : k === "key" ? "row_key" : k === "before" ? "row_before" : k);
-const REQUEST_FIELDS = ["id", "kind", "record", "section", "home", "worker", "question", "suggestion", "status", "answer", "answered_by", "at"];
+const REQUEST_FIELDS = ["id", "kind", "record", "section", "home", "worker", "question", "suggestion", "status", "answer", "answered_by", "raised_by", "at"];
 
 /**
  * The log and the requests in ArcadeDB (the FilingEntry and WorkerRequest documents the contract declares,
@@ -75,10 +75,10 @@ export function arcadeStore(db = realDb) {
       if (verdict !== undefined) (sets.push("verdict = :verdict"), (params.verdict = json(verdict)));
       if (sets.length) await db.adbCommand(`UPDATE FilingEntry SET ${sets.join(", ")} WHERE id = :id`, "sql", params);
     },
-    async entries({ id, record, worker, outcome, refiled_from, pending_id, limit = 500 } = {}) {
+    async entries({ id, record, section, worker, outcome, refiled_from, pending_id, limit = 500 } = {}) {
       const where = [];
       const params = {};
-      for (const [k, v] of Object.entries({ id, record, worker, outcome, refiled_from, pending_id })) if (v !== undefined) (where.push(`${k} = :${k}`), (params[k] = v));
+      for (const [k, v] of Object.entries({ id, record, section, worker, outcome, refiled_from, pending_id })) if (v !== undefined) (where.push(`${k} = :${k}`), (params[k] = v));
       const rows = await db.adbQuery(`SELECT FROM FilingEntry${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY at ASC LIMIT ${Math.max(1, Math.min(5000, Math.floor(limit)))}`, params);
       return rows.map(fromEntryRow);
     },
@@ -102,10 +102,10 @@ export function arcadeStore(db = realDb) {
       const r = (await db.adbQuery("SELECT FROM FilingAttempt WHERE id = :id LIMIT 1", { id }))[0];
       return r ? { ...Object.fromEntries(ATTEMPT_FIELDS.map((k) => [k, r[ATTEMPT_COLUMN(k)] ?? null])), fields: parse(r.fields), before: parse(r.row_before), piece: parse(r.piece), detail: parse(r.detail) } : null;
     },
-    async requests({ id, worker, status } = {}) {
+    async requests({ id, worker, status, record, section, raised_by } = {}) {
       const where = [];
       const params = {};
-      for (const [k, v] of Object.entries({ id, worker, status })) if (v !== undefined) (where.push(`${k} = :${k}`), (params[k] = v));
+      for (const [k, v] of Object.entries({ id, worker, status, record, section, raised_by })) if (v !== undefined) (where.push(`${k} = :${k}`), (params[k] = v));
       const rows = await db.adbQuery(`SELECT FROM WorkerRequest${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY at ASC LIMIT 500`, params);
       return rows.map((r) => Object.fromEntries(REQUEST_FIELDS.map((k) => [k, r[k] ?? null])));
     },
@@ -431,6 +431,8 @@ export async function answerRequest(id, raw, by, env) {
   if (!r) throw refuse(`no request ${id}`);
   if (r.status !== "open") throw refuse(`request ${id} is ${r.status}`);
   const answer = normalizeAnswer(raw);
+  // R15: a section graph-rag sent back for a worker that ended: no worker waits on this answer
+  if (r.raised_by === GRAPH_RAG) return settleKickback(r, answer.decision, by, env);
   if (answer.class) {
     const cls = await env.classes.get(answer.class);
     // the worker sees only its audience (R11): a class above it can't be named to it
@@ -439,6 +441,111 @@ export async function answerRequest(id, raw, by, env) {
   await env.store.updateRequest(r.id, { status: "answered", answer: JSON.stringify(answer), answered_by: String(by).slice(0, 120) });
   await env.resume(r.worker, { request: r.id, decision: answer.decision, class: answer.class, answered_by: "the orchestrator" });
   return { answered: r.id, ...answer };
+}
+
+/** ---- R15: a worker that ends without filing ---- */
+
+/** a section's text, home and record, as stored */
+async function sectionRow(env, rid) {
+  if (!RID_RE.test(String(rid))) return null;
+  return (await env.db.adbQuery(`SELECT @rid AS rid, _doc_id, _home, text_identity FROM ${rid} WHERE _kind = 'section'`).catch(() => []))[0] ?? null;
+}
+
+/**
+ * A worker job ended (answered, out of turns, failed or closed): for each of its sections with no filing-log entry,
+ * graph-rag itself, not a model, sends the orchestrator a request of kind "other" on the worker's behalf, with the
+ * section's text and the worker's last reply (R15). A section that already has an open one isn't sent twice.
+ * Returns the requests raised.
+ */
+export async function kickBack(jobId, payload, lastReply, env) {
+  if (!payload?.record) return [];
+  const sections = [...new Set([payload.rid, ...(Array.isArray(payload.sections) ? payload.sections : [])].filter((r) => RID_RE.test(String(r))))];
+  const out = [];
+  for (const section of sections) {
+    if ((await env.store.entries({ record: payload.record, section })).length) continue;
+    if ((await env.store.requests({ section, status: "open", raised_by: GRAPH_RAG })).length) continue;
+    const row = await sectionRow(env, section);
+    const text = String(row?.text_identity ?? "").trim();
+    const reply = String(lastReply ?? "").trim();
+    const r = normalizeRequest({
+      id: randomUUID(),
+      kind: "other",
+      record: payload.record,
+      section,
+      home: payload.home ?? row?._home ?? "unknown",
+      worker: String(jobId),
+      question: clip(`The worker ended without filing this section (raised by graph-rag, R15). Section: "${text.slice(0, 500)}". The worker's last reply: "${reply.slice(0, 300) || "(none)"}". Start a fresh worker for the section (start_worker with record and section), keep it (answer keep), or send it to a person (answer hold). Left open past your turn, it is Kept as it stands.`, 1000),
+      status: "open",
+      raised_by: GRAPH_RAG,
+      at: env.now(),
+    });
+    await env.store.insertRequest(r);
+    await env.signal("request", { job_id: String(jobId), data: { request: r.id, kind: r.kind, record: r.record, home: r.home, section, raised_by: GRAPH_RAG, question: r.question } });
+    out.push(r);
+  }
+  return out;
+}
+const clip = (v, n) => String(v ?? "").slice(0, n);
+
+/** the floor (R15): the whole section as one Kept piece, at its home, with the instances related to it; no source written */
+async function fileFloor(r, reason, env) {
+  if ((await env.store.entries({ record: r.record, section: r.section })).length) return null; // filed meanwhile
+  const row = await sectionRow(env, r.section);
+  const about = await env.db.adbQuery(`SELECT @in AS dst FROM (SELECT expand(outE('ABOUT')) FROM ${r.section})`).catch(() => []);
+  const doc = (await env.db.adbQuery(`SELECT _recorded_by FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: r.record }).catch(() => []))[0];
+  return appendEntry(env, {
+    outcome: KEPT,
+    record: r.record,
+    section: r.section,
+    home: r.home,
+    piece: String(row?.text_identity ?? "").trim() || "(the section's text)",
+    class: null,
+    instances: [...new Set(about.map((e) => String(e.dst)).filter((x) => RID_RE.test(x)))],
+    target: null,
+    recorder: doc?._recorded_by ?? "unknown",
+    worker: r.worker,
+    reason,
+  });
+}
+
+/**
+ * The orchestrator settles a kick-back with answer_request: keep (Kept now, as the floor files it) or hold (a
+ * person decides: a question to whoever put the record on record). A fresh worker is start_worker's (orchestrator.js).
+ * NEEDS A RULING (I-27): "send it to a person" is read as a question to the recorder, since a Held entry needs a
+ * source table that a section nobody filed doesn't have.
+ */
+export async function settleKickback(r, decision, by, env) {
+  if (decision === "keep") {
+    const e = await fileFloor(r, `${FLOOR_REASON}; kept by the orchestrator`, env);
+    await env.store.updateRequest(r.id, { status: "answered", answer: JSON.stringify({ decision: "keep", entry: e?.id ?? null }), answered_by: String(by).slice(0, 120) });
+    return { answered: r.id, decision: "keep", entry: e?.id ?? null };
+  }
+  if (decision === "hold") {
+    const doc = (await env.db.adbQuery(`SELECT _recorded_by FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: r.record }).catch(() => []))[0];
+    const person = doc?._recorded_by ?? null;
+    const q = randomUUID();
+    await env.db.adbCommand(
+      "INSERT INTO WorkerQuestion SET id = :id, job_id = :job, entry = :entry, entry_name = :ename, question = :q, options = '[]', why = '', asked_by = :u, asked_of = :of, filing_entry = :fe, status = 'open', created_at = :now",
+      "sql",
+      { id: q, job: r.worker, entry: r.section, ename: null, q: "A worker couldn't file this section of your record. What should become of it?", u: GRAPH_RAG, of: person, fe: null, now: env.now() },
+    );
+    await env.store.updateRequest(r.id, { status: "answered", answer: JSON.stringify({ decision: "hold", question: q, asked_of: person }), answered_by: String(by).slice(0, 120) });
+    return { answered: r.id, decision: "hold", question: q, asked_of: person };
+  }
+  throw refuse("graph-rag sent this section back because its worker ended without filing it: start a fresh worker for it (start_worker with record and section), answer keep, or answer hold");
+}
+
+/** the end of the orchestrator's turn that saw these requests: any graph-rag one still open is Kept as it stands (R15) */
+export async function floorUnsettled(requestIds, env) {
+  const out = [];
+  for (const id of requestIds) {
+    const r = (await env.store.requests({ id: String(id) }))[0];
+    if (!r || r.raised_by !== GRAPH_RAG || r.status !== "open") continue;
+    const e = await fileFloor(r, FLOOR_REASON, env);
+    await env.store.updateRequest(r.id, { status: "answered", answer: JSON.stringify({ decision: "floor", entry: e?.id ?? null }), answered_by: GRAPH_RAG });
+    out.push({ request: r.id, entry: e?.id ?? null });
+  }
+  return out;
 }
 
 /** ---- instances, sections and dependency (R1, R3, R7) ---- */

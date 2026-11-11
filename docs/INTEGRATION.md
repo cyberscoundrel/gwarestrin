@@ -132,6 +132,19 @@ It lands on `build-base` with the first stream merge.
   before every later batch for an entry that would never come (kept as `runs/A-1-stall`). The seeder now
   counts a record as settled when all its workers finished without an entry; the record is reported as missing,
   which is the model's result. Restarting a worker for such a record (option (b)) is left for the user.
+- **R15, a worker that ends without filing** (the user: "Yes, build that", 2026-11-10). When a filing
+  worker's job ends (`finishThread` reaching done or failed for good, or `close_worker`) with sections left
+  without an entry, graph-rag itself raises a request of kind "other" for each one (`raised_by: graph-rag`),
+  carrying the section's text and the worker's last reply (`filing.js kickBack`). The orchestrator settles it
+  by starting one fresh worker for just that section (`start_worker` with `section`, once every job that
+  had it has ended; one per kick-back), by answering keep (Kept now), or by answering hold (a question to the
+  recorder). A kick-back still open when the orchestrator acks the signal that carried it, which ends its
+  turn, is filed by graph-rag as one Kept piece (`floorUnsettled`): the whole section, at its home, with the
+  instances related to it, reason "worker ended without filing", and no source written. It is re-fileable under
+  R14. Such a Kept piece may have no instances (`model/filing.js`). The run kept as `runs/A-1-prefallback`
+  is the one stopped for this.
+  `start_handler` refused the orchestrator in A-1-stall because the worker wasn't "waiting" (it had failed,
+  then been closed). It hands only a waiting worker to the operator, so the refusal is by design, not a bug.
 
 ### The review of ba583bc (`~/reviews/build-build-base-ba583bc.md`): the integrator's items
 
@@ -254,6 +267,8 @@ The integrator's (labels and evaluation, [build/integrate.md](build/integrate.md
 | I-23 | The eval's litellm uses the repository's own tag (`main-stable`, which moves) and records the image it ran in `litellm-image.txt`, rather than pinning a digest the repository doesn't |
 | I-24 | Without a `DECISION_API_KEY`, graph-rag's decision model uses the OpenRouter key, as the repository's compose does |
 | I-25 | R14's "a source table declared" is read as a class given its table by `update_class` (`_table_at`), or the stored source declarations (OrgPolicy `sources`) changing after the piece was Kept. A source declared only in the environment never counts as new, and classes made before `_created_at` existed count as older |
+| I-26 | R15 doesn't bound how often one section is sent back: a fresh worker that also ends without filing is sent back again, and the orchestrator may start another. Each kick-back allows one fresh worker, and the floor applies to any it leaves open |
+| I-27 | R15's "send it to a person" is read as a question to the record's recorder (`answer_request hold`), since a Held entry needs a source table that an unfiled section doesn't have; the section has no entry until they answer |
 
 ---
 

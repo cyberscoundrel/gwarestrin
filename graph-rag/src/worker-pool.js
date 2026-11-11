@@ -16,7 +16,7 @@ import { chat } from "./models.js";
 import { recordReads } from "./floor.js";
 import { assertBrief, scopeBrief } from "./model/brief.js";
 import { briefSource } from "./model/sources.js";
-import { accountGiven, ensureFilingSchema, liveEnv, settleProposals } from "./filing.js";
+import { accountGiven, ensureFilingSchema, kickBack, liveEnv, settleProposals } from "./filing.js";
 import { entriesByUser, positionMap, SCOPED } from "./scope.js";
 import { emitSignal, MASTER, masterStatus, openItems } from "./master-tools.js";
 import { describeEntry } from "./data-entry.js";
@@ -432,6 +432,9 @@ export async function finishThread(jobId, { status, summary, outage }) {
     if (next === "done") await emitSignal("done", { job_id: jobId, data: { title, summary: String(summary ?? "").slice(0, 2000), ...(outcomes ? { outcomes, check: true } : {}) } });
     else await emitSignal("stopped", { job_id: jobId, data: { title, reason: next === "failed" ? (account === "missing" ? "it gave no account of what it did" : "it failed three times") : "it's waiting on a decision", ...(outcomes ? { outcomes } : {}), ...(next === "failed" ? { error: String(summary ?? "").slice(0, 600) } : { ...(await openItems(jobId)), summary: String(summary ?? "").slice(0, 1200) }) } });
   }
+  // R15: a filing worker that ended (done, or failed for good) with sections it left without an entry: graph-rag sends
+  // each back to the orchestrator itself, with the worker's last reply
+  if (payload.record && (next === "done" || next === "failed")) await kickBack(jobId, payload, summary, await liveEnv()).catch((e) => log.warn(`thread ${String(jobId).slice(0, 8)}: no kick-back: ${String(e?.message ?? e).slice(0, 160)}`));
   // a task's report stays on its task entry (what the survey found, for the admin and later tasks)
   if (payload.task && RID_RE.test(String(payload.rid)) && summary) await adbCommand(`UPDATE ${payload.rid} SET text_state = :sum`, "sql", { sum: String(summary).slice(0, 6000) }).catch(() => {});
   return { status: next };

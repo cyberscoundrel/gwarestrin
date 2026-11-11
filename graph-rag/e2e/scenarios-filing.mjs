@@ -238,6 +238,58 @@ export default [
     },
   },
   {
+    name: "R15: a worker that ends without filing: graph-rag sends the section back; a fresh worker files it, or, left open, it is Kept",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const requestsOf = (doc) => ctx.sql(`SELECT id, section, status, raised_by, worker, question, answer FROM WorkerRequest WHERE record = '${doc}'`);
+        const signalFor = async (request) => ((await ctx.api("/api/worker/signals")).signals ?? []).find((x) => x.kind === "request" && x.data?.request === request);
+        // (a) the worker answers with nothing filed (its empty account given): graph-rag sends the section back
+        const a = await record(ctx, "r15a", ["Job 4471 is complete."]);
+        const acc = await ctx.tool(a.worker, "give_account", { pieces: [], summary: "nothing filed" });
+        ctx.check(!acc.error, `an empty account: ${JSON.stringify(acc).slice(0, 200)}`);
+        const fin = await ctx.api(`/api/worker/threads/${a.job}/finish`, { method: "POST", body: JSON.stringify({ status: "done", summary: "I read the jobs table and couldn't tell which job it was." }) });
+        ctx.check(fin.status === "done", `the worker ended: ${JSON.stringify(fin)}`);
+        const [ra] = await requestsOf(a.doc);
+        ctx.check(ra?.raised_by === "graph-rag" && ra.section === a.sections[0] && ra.worker === a.job && ra.status === "open", `graph-rag raised a request for the section: ${JSON.stringify(ra).slice(0, 300)}`);
+        ctx.check(/Job 4471 is complete/.test(ra.question) && /couldn't tell which job/.test(ra.question), "it carries the section's text and the worker's last reply");
+        const sa = await signalFor(ra.id);
+        ctx.check(sa?.data?.raised_by === "graph-rag", "the orchestrator hears of it with its signals");
+        const none = await ctx.tool(orchestrator(ctx), "start_worker", { record: a.doc, section: a.sections[0] + "0" });
+        ctx.check(none.error && /no open kick-back/.test(none.error), `no fresh worker for a section that wasn't sent back: ${JSON.stringify(none).slice(0, 200)}`);
+        const fresh = await ctx.tool(orchestrator(ctx), "start_worker", { record: a.doc, section: a.sections[0] });
+        const job = fresh.started?.[0]?.job;
+        ctx.check(job && fresh.started[0].kickback === ra.id, `a fresh worker for just that section: ${JSON.stringify(fresh).slice(0, 300)}`);
+        await ctx.tool("admin", "execute_graph", { language: "sql", command: `UPDATE Job SET status = 'running' WHERE id = '${job}'` });
+        const again = await ctx.tool(orchestrator(ctx), "start_worker", { record: a.doc, section: a.sections[0] });
+        ctx.check(again.error && /no open kick-back/.test(again.error), "one fresh worker per kick-back");
+        const filed = await ctx.tool(ctx.workerToken(a.sections[0], job), "file_to_source", { section: a.sections[0], piece: "job 4471 is complete", said: "writing it: job 4471 is complete", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: "complete" } });
+        ctx.check(filed.outcome === "filed", `the fresh worker files it: ${JSON.stringify(filed).slice(0, 300)}`);
+        const acka = await ctx.api("/api/worker/signals/ack", { method: "POST", body: JSON.stringify({ ids: [sa.id] }) });
+        ctx.check(!acka.kept_by_graph_rag, "settled by the fresh worker: nothing for the floor");
+        const la = await log(ctx, a.doc);
+        ctx.check(la.length === 1 && la[0].outcome === "filed", `one entry, the fresh worker's: ${JSON.stringify(la).slice(0, 300)}`);
+        // (b) the orchestrator closes a worker that filed nothing and leaves the kick-back: at its turn's end it is Kept
+        const b = await record(ctx, "r15b", ["The forklift is booked Thursday for the Toro move."]);
+        const fork = await ctx.tool(b.worker, "create_instance", { section: b.sections[0], name: "e2e-filing r15 forklift", class: "e2e_filing_equipment" });
+        ctx.check(fork.instance, `the worker related an instance: ${JSON.stringify(fork).slice(0, 200)}`);
+        const closed = await ctx.tool(orchestrator(ctx), "close_worker", { job: b.job, summary: "it read for a long time and filed nothing" });
+        ctx.check(closed.sent_back?.length === 1, `closing it sends the section back: ${JSON.stringify(closed).slice(0, 300)}`);
+        const [rb] = await requestsOf(b.doc);
+        const sb = await signalFor(rb.id);
+        const ackb = await ctx.api("/api/worker/signals/ack", { method: "POST", body: JSON.stringify({ ids: [sb.id] }) });
+        ctx.check(ackb.kept_by_graph_rag?.[0]?.request === rb.id, `left open past the turn: Kept by graph-rag: ${JSON.stringify(ackb).slice(0, 300)}`);
+        const lb = await log(ctx, b.doc);
+        ctx.check(lb.length === 1 && lb[0].outcome === "kept" && !lb[0].target, `one Kept entry, no source: ${JSON.stringify(lb).slice(0, 300)}`);
+        const kept = (await ctx.sql(`SELECT piece, reason, instances, home FROM FilingEntry WHERE id = '${lb[0].id}'`))[0];
+        ctx.check(kept.reason === "worker ended without filing" && kept.piece === "The forklift is booked Thursday for the Toro move." && kept.home === "floor", `the whole section at its home, marked: ${JSON.stringify(kept).slice(0, 300)}`);
+        ctx.check(JSON.stringify(kept.instances).includes(fork.instance), "with the instance the worker related");
+        ctx.check((await requestsOf(b.doc))[0].status === "answered", "the request is settled");
+        ctx.check(!fake.calls.some((c) => c.name === "update_record" && JSON.stringify(c.args).includes("forklift")), "no source written for it");
+      });
+    },
+  },
+  {
     name: "the filing log is outside the graph: no graph read returns an entry, and the worker can't file another record's section (R7, R9)",
     run: async (ctx) => {
       await setup(ctx);

@@ -37,6 +37,14 @@ export const VERDICTS = ["matches", "differs", "unverifiable"];
 export const REQUEST_KINDS = ["class", "conflict", "other"];
 export const REQUEST_STATUSES = ["open", "answered", "withdrawn"];
 
+/**
+ * R15: a worker that ends without filing. graph-rag itself raises a request for each section left without an entry
+ * (raised_by GRAPH_RAG), and a section nobody settles is filed as one Kept piece with this reason: the whole section,
+ * at its home, with whatever instances the worker related (none, possibly: the document itself is the source).
+ */
+export const GRAPH_RAG = "graph-rag";
+export const FLOOR_REASON = "worker ended without filing";
+
 const date = (v, field, fallback = null) => {
   if (v === undefined || v === null || v === "") {
     if (fallback !== null) return fallback;
@@ -102,7 +110,8 @@ export function normalizeEntry(raw) {
   // R10: a worker that resolves a piece to storage reports what it did
   if (raw.outcome === FILED && (raw.account === undefined || raw.account === null)) throw new ShapeError("account", "a Filed piece carries the account of what was written");
   // R2: Kept is "linked to instances"
-  if (raw.outcome === KEPT && !instances.length) throw new ShapeError("instances", "a Kept piece is linked to the instances it is about");
+  // R15: the floor's Kept piece carries whatever instances the worker related, which may be none
+  if (raw.outcome === KEPT && !instances.length && !String(raw.reason ?? "").startsWith(FLOOR_REASON)) throw new ShapeError("instances", "a Kept piece is linked to the instances it is about");
   return {
     id: String(raw.id).trim(),
     outcome: raw.outcome,
@@ -153,6 +162,8 @@ export function normalizeRequest(raw) {
     status,
     answer: str(raw.answer, 2000),
     answered_by: str(raw.answered_by, 120),
+    // who raised it: the worker (null), or graph-rag itself for a worker that ended without filing (R15)
+    raised_by: str(raw.raised_by, 40),
     at: date(raw.at, "at", new Date().toISOString()),
   };
 }

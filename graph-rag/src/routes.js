@@ -234,8 +234,16 @@ app.post("/api/worker/signals/ack", (req, res) => {
   if (!rootOnly(req, res)) return;
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).filter((i) => JOB_ID_RE.test(String(i))).slice(0, 100);
   void (async () => {
+    // R15: the orchestrator's turn that saw these signals is over: a request graph-rag raised that it left open is Kept
+    const kickbacks = [];
+    for (const id of ids) {
+      const row = (await adbQuery("SELECT kind, data FROM Signal WHERE id = :id AND status = 'new'", { id }).catch(() => []))[0];
+      const data = row?.kind === "request" ? JSON.parse(row.data || "{}") : null;
+      if (data?.raised_by === "graph-rag" && data.request) kickbacks.push(data.request);
+    }
     for (const id of ids) await adbCommand("UPDATE Signal SET status = 'delivered' WHERE id = :id", "sql", { id });
-    return { acked: ids.length };
+    const floored = kickbacks.length ? await (await import("./filing.js")).floorUnsettled(kickbacks, await (await import("./filing.js")).liveEnv()) : [];
+    return { acked: ids.length, ...(floored.length ? { kept_by_graph_rag: floored } : {}) };
   })().then((r) => res.json(r), (e) => httpError(res, e));
 });
 /** handlers to start (not limited by the pool: they wait on the operator) */

@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dabTool } from "../e2e/fake-dab-core.mjs";
 import { enterData, forgetPrimaryKeys, forgetSources } from "../src/data-entry.js";
-import { accountEvidence, accountGiven, answerRequest, createInstance, makeJournal, fileToSource, giveAccount, holdPiece, keepPiece, keptPieces, laterClassOrSource, readSourceRow, REFILE_LIMIT, refileRefusal, recordVerdict, requestOrchestrator, settleProposals } from "../src/filing.js";
+import { accountEvidence, accountGiven, answerRequest, createInstance, makeJournal, fileToSource, giveAccount, holdPiece, floorUnsettled, keepPiece, keptPieces, kickBack, laterClassOrSource, readSourceRow, REFILE_LIMIT, refileRefusal, recordVerdict, requestOrchestrator, settleProposals } from "../src/filing.js";
 import { normalizeClass } from "../src/model/classes.js";
 import { parsePositionMap } from "../src/positions.js";
 
@@ -73,6 +73,9 @@ function fakeDb({ writable = true, payload } = {}) {
       if (sql.includes("FROM Job WHERE id")) return [{ payload: JSON.stringify(db.payload) }];
       if (sql.includes("_kind = 'document'")) return [{ rid: "#70:1", _recorded_by: db.recorder ?? "bob", _record_position: db.position ?? "floor" }];
       if (sql.includes("FROM PendingWrite")) return db.pending.has(params.id) ? [db.pending.get(params.id)] : [];
+      // R15: a section's own text, and the instances the worker related to it (ABOUT edges)
+      if (/FROM #71:\d+ WHERE _kind = 'section'/.test(sql)) return [{ rid: sql.match(/#71:\d+/)[0], _doc_id: "doc-1", _home: "floor", text_identity: `the text of ${sql.match(/#71:\d+/)[0]}` }];
+      if (sql.includes("expand(outE('ABOUT'))")) return (db.about ?? {})[sql.match(/FROM (#\d+:\d+)\)/)?.[1]] ?? [];
       if (sql.includes("FROM #80:1 WHERE _kind = 'thing'")) return [{ rid: "#80:1", label: "forklift 2", _homes: ["floor"], _keys: [] }];
       if (sql.includes("FROM #80:9 WHERE _kind = 'thing'")) return [{ rid: "#80:9", label: "the payroll", _homes: ["org"], _keys: [] }];
       return [];
@@ -677,4 +680,90 @@ test("R14: what counts as new: a class created or given its table after the entr
   assert.equal(await laterClassOrSource(at, db([{ created: "2026-11-10T11:00:00.000Z", table: "2026-11-10T13:00:00.000Z" }])), true, "a table declared since");
   assert.equal(await laterClassOrSource(at, db([], "2026-11-10T12:30:00.000Z")), true, "the stored sources changed since");
   assert.equal(await laterClassOrSource(at, db([], "2026-11-10T11:30:00.000Z")), false);
+});
+
+/** ---- R15: a worker that ends without filing ---- */
+
+const ended = { record: "doc-1", home: "floor", rid: "#71:3", sections: ["#71:3", "#71:4"] };
+
+test("R15: a worker that ends with a section unfiled: graph-rag itself sends that section back, once, with its text and the worker's last reply", async () => {
+  const h = setup();
+  await keepPiece({ section: "#71:4", piece: "the forklift is booked Thursday", instances: ["#80:1"] }, identity, h.env);
+  const raised = await kickBack(identity.role.job, ended, "I read the maintenance table and found nothing to file.", h.env);
+  assert.deepEqual(raised.map((r) => r.section), ["#71:3"], "only the section with no entry");
+  const [r] = h.store.requests_;
+  assert.deepEqual([r.kind, r.raised_by, r.worker, r.home, r.status], ["other", "graph-rag", identity.role.job, "floor", "open"]);
+  assert.match(r.question, /the text of #71:3/);
+  assert.match(r.question, /found nothing to file/);
+  const sig = h.signals.find((x) => x.kind === "request");
+  assert.deepEqual([sig.data.request, sig.data.raised_by, sig.data.section], [r.id, "graph-rag", "#71:3"]);
+  assert.deepEqual(await kickBack(identity.role.job, ended, "again", h.env), [], "an open kick-back for the section isn't raised twice");
+  assert.deepEqual(await kickBack(identity.role.job, { sections: ["#71:3"] }, "", h.env), [], "a job with no record isn't a filing worker");
+});
+
+test("R15: left open past the orchestrator's turn, the section is Kept as it stands: its whole text, its home, the instances related to it, no source written", async () => {
+  const h = setup();
+  h.db.about = { "#71:3": [{ dst: "#80:1" }] };
+  const [r] = await kickBack(identity.role.job, ended, "", h.env);
+  const worker = await answerRequest(r.id, { decision: "keep" }, "orchestrator", h.env).catch((e) => e);
+  assert.ok(!(worker instanceof Error));
+  const h2 = setup();
+  h2.db.about = { "#71:3": [{ dst: "#80:1" }] };
+  const [open] = await kickBack(identity.role.job, ended, "", h2.env);
+  await openRequestFor(h2);
+  const floored = await floorUnsettled([open.id, h2.store.requests_.at(-1).id], h2.env);
+  assert.equal(floored.length, 1, "only graph-rag's open request is floored, not a worker's own");
+  const e = h2.store.entries_.find((x) => x.id === floored[0].entry);
+  assert.deepEqual([e.outcome, e.section, e.home, e.piece, e.target, e.reason, e.recorder, e.worker], ["kept", "#71:3", "floor", "the text of #71:3", null, "worker ended without filing", "bob", identity.role.job]);
+  assert.deepEqual(e.instances, ["#80:1"]);
+  assert.equal(h2.store.requests_.find((x) => x.id === open.id).status, "answered");
+  assert.deepEqual(await floorUnsettled([open.id], h2.env), [], "settled once");
+  assert.equal(h2.dab.calls.filter((c) => c.name === "update_record").length, 0, "no source written");
+  h2.env.laterClassOrSource = async () => true;
+  assert.ok((await keptPieces(h2.env)).some((p) => p.entry === e.id), "re-fileable under R14");
+  // with no instance related, the floor's piece is still Kept
+  const h3 = setup();
+  const [bare] = await kickBack(identity.role.job, ended, "", h3.env);
+  const [f] = await floorUnsettled([bare.id], h3.env);
+  assert.deepEqual(h3.store.entries_.find((x) => x.id === f.entry).instances, []);
+});
+async function openRequestFor(h) {
+  await h.store.insertRequest({ id: "worker-own-1", kind: "other", record: "doc-1", section: "#71:4", home: "floor", worker: identity.role.job, question: "q", suggestion: null, status: "open", answer: null, answered_by: null, raised_by: null, at: "2026-11-10T00:00:00.000Z" });
+}
+
+test("R15: the orchestrator settles a kick-back: keep files it Kept now, hold asks the recorder, nothing resumes the ended worker, and other answers are refused", async () => {
+  const h = setup();
+  const [a] = await kickBack(identity.role.job, ended, "", h.env);
+  const k = await answerRequest(a.id, { decision: "keep" }, "orchestrator", h.env);
+  const e = h.store.entries_.find((x) => x.id === k.entry);
+  assert.equal(e.outcome, "kept");
+  assert.match(e.reason, /^worker ended without filing; kept by the orchestrator/);
+  assert.equal(h.resumed.length, 0, "the ended worker isn't woken");
+  const h2 = setup();
+  const [b] = await kickBack(identity.role.job, ended, "", h2.env);
+  await assert.rejects(answerRequest(b.id, { decision: "use_class", class: "jobs" }, "orchestrator", h2.env), /start a fresh worker/);
+  const held = await answerRequest(b.id, { decision: "hold" }, "orchestrator", h2.env);
+  assert.equal(held.asked_of, "bob", "the person who put it on record");
+  assert.ok(h2.db.statements.some((x) => x.startsWith("INSERT INTO WorkerQuestion")));
+  assert.equal(h2.store.entries_.length, 0, "no entry until the person answers");
+  assert.equal(h2.resumed.length, 0);
+});
+
+test("R15: one fresh worker per kick-back, only for a section whose jobs have all ended", async () => {
+  const { startKickbackWorker } = await import("../src/orchestrator.js");
+  const h = setup();
+  const jobs = [{ id: "j-old", status: "running", payload: JSON.stringify({ sections: ["#71:3", "#71:4"] }) }];
+  const db = { adbQuery: async (sql) => (sql.includes("FROM Job") ? jobs : []) };
+  const queued = [];
+  const enqueue = async (kind, payload, opts) => (queued.push({ kind, payload, opts }), "j-new");
+  const pool = { threadMinutes: 20 };
+  await assert.rejects(startKickbackWorker("doc-1", "#71:3", { by: "o" }, { env: h.env, db, enqueue, pool }), /no open kick-back/);
+  const [r] = await kickBack(identity.role.job, ended, "", h.env);
+  await assert.rejects(startKickbackWorker("doc-1", "#71:3", { by: "o" }, { env: h.env, db, enqueue, pool }), /still has a worker/);
+  jobs[0].status = "failed";
+  const started = await startKickbackWorker("doc-1", "#71:3", { by: "o" }, { env: h.env, db, enqueue, pool });
+  assert.deepEqual(started, [{ home: "floor", job: "j-new", kickback: r.id }]);
+  assert.deepEqual([queued[0].payload.sections, queued[0].payload.rid, queued[0].payload.record, queued[0].payload.kickback, queued[0].opts.key], [["#71:3"], "#71:3", "doc-1", r.id, `kickback:doc-1:floor:${r.id}`]);
+  assert.equal(JSON.parse(h.store.requests_[0].answer).decision, "fresh_worker");
+  await assert.rejects(startKickbackWorker("doc-1", "#71:3", { by: "o" }, { env: h.env, db, enqueue, pool }), /no open kick-back/, "one per kick-back");
 });
