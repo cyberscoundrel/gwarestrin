@@ -64,33 +64,65 @@ tables, actions, guard } | { via: "none" } }`. A source with no commit is not wr
 - `delete` may be among the actions only beside a table that takes new rows, and is used for one thing: undoing a
   row graph-rag added, while it still holds what was added.
 
-**The source interface** (R19; `data-entry.js sourceClient`, reached through `sourceConnection(decl, side)`). Every
-read and write graph-rag makes of a source goes through these calls and nothing else. The test's DAB connection is
-one implementation; a production middleman (an MCP server in front of a real system) is another, and the two are
-swapped behind the declaration's `via` without touching filing. `side` is `read` (the read endpoint) or `write` (the
-write endpoint, whose reads are made through the write connection).
+**The two source contracts** (R19, R20). In production, reads go straight to the database and writes go through a
+separate service built around the source, and the two are decoupled (R20). So a source has two seams, each replaceable
+on its own: a **read side** and a **write side**. In the test both are one DAB client (`data-entry.js sourceClient`,
+reached through `sourceConnection(decl, "read" | "write")`), and graph-rag still reads through the write connection
+before it writes; each place is named below.
 
-| call | takes | answers | used for |
-|---|---|---|---|
-| `tables()` | | the table names the endpoint exposes | which tables a class may come from; a search's table check |
-| `describe(table)` | | `{ pk: [{ name, type }] \| null, columns: { column: "number" \| "string" \| "unknown" } \| null }` | the key a record key names; column checks |
-| `find(table, { where, orderby, first })` | `where`: `[[column, op, value]]`, every one holding, `op` one of eq ne gt ge lt le; `orderby`: columns, ascending | rows. A value the column's type can't hold matches nothing | names resolved against the source (R3), searches, paging by key, the guard |
-| `read(table, key)` | the row's key value | `{ row, key_column, key_value }` or nothing; more than one row, or a row whose key isn't the one asked, is an error | the row before a write, and after a lost answer |
-| `update(table, hit, fields)` | the row as read, the columns to write | the source's answer | R16 writes. The key is never written |
-| `add(table, data)` | the new row's columns, never its key | the row the source made, its key included | R19 adds |
-| `remove(table, hit)` | the row as read | the source's answer | undoing an add, only |
+*The read side.* What graph-rag reads for itself:
+- to check a write: the row as it stands (condition 4's expected old values, a value the row already holds), the
+  table's rows (condition 2's "only match", R19's "a row already holds it"), and the rows of a table a reference
+  column names (I-58);
+- to resolve names: rows by a column's value or by words in them (`resolve_name`, `find_rows`);
+- for discovery: the tables, each table's key and columns, row counts, the values of few-valued columns, a few rows.
 
-The contract around the calls:
-- An implementation throws with `transport: true` when the source couldn't be reached, so that nothing is known,
-  and throws a plain error when the source said no. A write call is never sent twice: a lost answer is settled by
-  reading the row back.
-- The checks stay in graph-rag, outside the interface: the declaration, the guard (`checkGuard`, a `find` on the
-  connection's identity view through the write side), the filing log (begun before each write and settled after),
-  `before` and `expect` (a row that has moved is never written over or removed), R16's conditions and R19's.
-- Where the DAB implementation differs from a middleman: `describe` learns the key from DAB's paging cursor (DAB
-  2.0.12 names no fields), and `find` writes DAB's OData filter.
-- What still goes around the interface: the test harness's own checks (`test-sql/check.mjs` calls DAB directly to
-  test it), and `mcpToolCall` itself, which is the DAB implementation's transport.
+| call | takes | answers |
+|---|---|---|
+| `tables()` | | the table names the connection exposes |
+| `describe(table)` | | `{ pk: [{ name, type }] \| null, columns: { column: "number" \| "string" \| "unknown" } \| null }` |
+| `find(table, { where, orderby, first })` | `where`: `[[column, op, value]]`, every one holding, `op` one of eq ne gt ge lt le; `orderby`: columns, ascending | rows. A value the column's type can't hold matches nothing |
+| `read(table, key)` | the row's key value | `{ row, key_column, key_value }` or nothing; more than one row, or a row whose key isn't the one asked, is an error |
+
+Every read is made for an audience (R11.6, R11.9): a declaration's `read.home` is who may read through that
+connection, and graph-rag refuses a read for an audience that can't see it, before anything is read.
+
+*An agent reading the database directly* (R20's production shape) needs in place of graph-rag's `describe_source`,
+`find_rows` and `resolve_name` (I-59, the test's simplification):
+- a read connection per audience: a database login or role whose grants are exactly what that position may see. It's
+  handed only connections whose `read.home` its audience sees, as a brief lists sources today;
+- the tables and columns it may read, and the key of each (graph-rag names tables and keys in record keys,
+  `system:table:row`, and the agent must use the same);
+- a search it can actually use: text matching and paging that the database's own read tool takes. DAB 2.0.12's filter
+  has no contains or startswith, which is why `find_rows` exists;
+- nothing written: a read-only login.
+graph-rag no longer sees such reads. What keeps an agent within its audience is then the connection it is handed and
+the database's permissions, including the tables a class homed above the agent records (today
+`filing.js assertTableReadable` refuses those at the call).
+
+*The write side.* What a source's write service must offer for R16 to R19 to hold when graph-rag isn't the one
+touching the database. "Test" says how the test's connection (DAB 2.0.12 over the synthetic SQL Server) does it
+today.
+
+| the service must | why | test |
+|---|---|---|
+| **update a row given the expected old values** of the columns it writes, refusing when the row no longer holds them, atomically | condition 4: a row that moved is never written over (R2) | graph-rag does it: commitRow reads the row through the write connection, compares, then sends `update_record`. Not atomic: a change between the read and the write is not caught |
+| **say whether the row already holds the values**, or treat such an update as done | a write that changes nothing lands with nothing sent, and is logged | graph-rag does it, from the same read |
+| **add a row and return the key the source made**, refusing a key the caller gives | R19: the key is the source's | native (`create_record` returns the row; an IDENTITY key refuses one given) |
+| **make an add safe to repeat**: take an idempotency key (the piece: record, section, table), and answer a repeat with the row the first one made | one piece adds at most one row, however often it is filed or retried, a lost answer included | graph-rag does it: its filing log (`FilingAttempt`) and an in-process lock. A lost answer leaves the attempt unknown, and the piece is Held rather than risk a second row. The source has no idempotency key |
+| **remove an added row only while it still holds what was added**, atomically | undo (I-48, I-52) | graph-rag does it: removeAdded reads the row through the write connection, compares, then sends `delete_record` (granted only on the tables that take new rows). Not atomic |
+| **read back a row after a lost answer**, by its key | a transport error mid-write is settled by reading, never by sending again | graph-rag does it through the write connection |
+| **declare its shape**: which tables take updates, which take new rows, the columns a new row needs and those the source fills, the fixed-choice values, the yes/no columns, the reference columns | R18, R19, I-58 decide from it | declared beside the source (`commit.tables` shapes, `model/sources.js`); DAB doesn't describe it |
+| **say which server and database it writes to**, so a write never lands in the wrong place | the guard | the identity view, read through the write connection (`checkGuard`) |
+| **refuse what the caller may not do** (a table or action not granted) | defence in depth beyond the declaration | native: DAB's per-entity permissions and the SQL login's grants |
+
+The checks stay in graph-rag whatever stands behind either side: the declaration, the class map (condition 1), R16's
+conditions 2 and 3 and R19's, I-39 as narrowed, and the filing log (begun before each write and settled after).
+A service that takes the expected old values and an idempotency key makes conditions 4, the one-row rule and undo
+atomic, where today they are read-then-write.
+
+*What still goes around both seams:* the test harness's own checks (`test-sql/check.mjs` calls DAB directly to test
+it), the eval's before and after dumps, and `mcpToolCall`, the DAB implementation's transport.
 
 **Brief** (`brief.js scopeBrief`, `assertBrief`): `{ audience, record, sections, classes, instances, sources }`.
 The audience is the home of the sections the brief is for. `splitByHome` gives one brief, and one worker, per home
