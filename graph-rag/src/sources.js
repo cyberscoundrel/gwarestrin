@@ -116,10 +116,10 @@ export function testDeclaration({ read = "http://dab-read:5000/mcp", write = "ht
  * Sales_Order's key would have to come from the writer.
  */
 export const TEST_SHAPES = {
-  dbo_Job: { columns: { Certs_Required: "boolean", Status: { values: ["Active", "Hold", "Complete", "Closed"] } } },
-  dbo_Job_Operation: { columns: { Status: { values: ["Open", "Active", "Complete"] } } },
+  dbo_Job: { columns: { Certs_Required: "boolean", Status: { values: ["Active", "Hold", "Complete", "Closed"] }, Customer: { references: "dbo_Customer" }, Sales_Order: { references: "dbo_Sales_Order" }, Part_Number: { references: "dbo_Material" } } },
+  dbo_Job_Operation: { columns: { Status: { values: ["Open", "Active", "Complete"] }, Job: { references: "dbo_Job" }, Work_Center: { references: "dbo_Work_Center" } } },
   dbo_Work_Center: { columns: { Status: { values: ["Up", "Down"] } } },
-  dbo_Sales_Order: { columns: { Status: { values: ["Open", "Shipped", "Closed"] } } },
-  dbo_Purchase_Order: { adds: true, columns: { Status: { values: ["Open", "Received", "Closed"] } }, required: ["Vendor", "Description", "Order_Date", "Status"] },
-  dbo_Maintenance: { adds: true, columns: { Status: { values: ["Open", "Closed"] } }, required: ["Opened", "Description", "Status"] },
+  dbo_Sales_Order: { columns: { Status: { values: ["Open", "Shipped", "Closed"] }, Customer: { references: "dbo_Customer" } } },
+  dbo_Purchase_Order: { adds: true, columns: { Status: { values: ["Open", "Received", "Closed"] }, Vendor: { references: "dbo_Vendor" } }, required: ["Vendor", "Description", "Order_Date", "Status"] },
+  dbo_Maintenance: { adds: true, columns: { Status: { values: ["Open", "Closed"] }, Equipment: { references: "dbo_Equipment" }, Work_Center: { references: "dbo_Work_Center" } }, required: ["Opened", "Description", "Status"] },
 };

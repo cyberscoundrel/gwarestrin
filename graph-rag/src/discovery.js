@@ -105,6 +105,9 @@ export const DISCOVERY_TOOLS = new Set([
   "read_dependencies",
   "read_history",
   "new_tables",
+  // the sources, through graph-rag only (I-59: agents get no source tool of their own)
+  "describe_source",
+  "find_rows",
   // the class tree and instances (R5, R7), tagged with the run
   "create_class",
   "update_class",
@@ -123,7 +126,7 @@ export const DISCOVERY_TOOLS = new Set([
  * `request`, kind "class"). The graph's own search tools read as a worker's record's audience, which a part
  * has none of, so a part doesn't get them.
  */
-export const DISCOVERY_PART_TOOLS = new Set(["list_classes", "read_dependencies", "read_history", "new_tables", "relate_instance", "add_dependency", "record_examined", "request", "raise_question"]);
+export const DISCOVERY_PART_TOOLS = new Set(["list_classes", "read_dependencies", "read_history", "new_tables", "relate_instance", "add_dependency", "record_examined", "request", "raise_question", "describe_source", "find_rows"]);
 
 export const DISCOVERY_REFUSAL = "discovery is read-only: this tool isn't one a discovery run has (R11)";
 
@@ -259,7 +262,7 @@ export function discoveryBrief({ run, connections = [], history = 0, examined = 
     ...(focus ? [`Focus (from the admin): ${String(focus).slice(0, 1000)}`] : []),
     "----------",
     "You are discovering how this organization is structured, from an empty graph, without changing anything outside it. Every source and the history are read-only to you; you have no tool that writes to them.",
-    "1. Read. List each connection's tables, count rows, read a few rows of the tables that look central, and read distinct values of status-like columns. Read the history for what the organization does that no table records. Never copy personal details (pay, social security numbers, home addresses, phone numbers) into anything.",
+    "1. Read, through graph-rag only (graph-rag_describe_source and graph-rag_find_rows): list each connection's tables, and for the tables that look central their key, columns, row count, the values of status-like columns and a few rows (describe_source with the table), and look rows up with find_rows. Read the history for what the organization does that no table records. Never copy personal details (pay, social security numbers, home addresses, phone numbers) into anything.",
     "2. Build the class tree. Four roots are there already: agent (people, organizations, positions, AI agents), commitment (an obligation one agent has to another to do or deliver something by some time), event (something that happened at a time; decision and action sit under it) and resource (anything of value the organization controls). Create the classes and subclasses the evidence shows with graph-rag_create_class: each under one or more parents, with its evidence (the tables, row keys or note ids it rests on). A class may have several parents. You don't choose a class's home: it is worked out from the evidence you cite.",
     "3. Decide, for each class with a table, whether its rows become nodes: lasting individuals (employees, vehicles, buildings, machines, customers, software) do; transactional rows (order lines, operations, invoices, time punches) stay in the source and are referred to by key. Commitment classes may carry their stages.",
     "4. Seed only what the organization's structure needs: the lasting individuals the tree is about, with graph-rag_relate_instance and their record keys. Don't seed transactional rows.",
@@ -279,6 +282,6 @@ export function discoveryPartBrief({ run, part, connection = null, notes = null 
     ...(connection ? [`Connection: ${connection}`] : []),
     ...(notes ? [`History: ${notes}`] : []),
     "----------",
-    "Read this part with your read tools only; nothing outside the graph changes. List the classes (graph-rag_list_classes) and relate the lasting individuals you find to them with graph-rag_relate_instance and their record keys. When no class fits, ask the orchestrator for one with graph-rag_request (kind \"class\") and leave those individuals; you never create a class. Record the tables you examined with graph-rag_record_examined. Finish with a short report: what you read, what you related, what you asked for.",
+    "Read this part with your read tools only (a source through graph-rag_describe_source and graph-rag_find_rows, read as your part's home); nothing outside the graph changes. List the classes (graph-rag_list_classes) and relate the lasting individuals you find to them with graph-rag_relate_instance and their record keys. When no class fits, ask the orchestrator for one with graph-rag_request (kind \"class\") and leave those individuals; you never create a class. Record the tables you examined with graph-rag_record_examined. Finish with a short report: what you read, what you related, what you asked for.",
   ].join("\n");
 }

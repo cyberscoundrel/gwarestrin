@@ -537,3 +537,23 @@ test("I-53: the labels R18 and R19 change, over R16's; every earlier set stays s
   assert.equal(at(r19, "ux-aq07", 0).outcome, "proposed", "a purchase order is Operations': Proposed, though the table takes new rows");
   assert.deepEqual(notesUnder(), r19, "r19 is the default");
 });
+
+test("I-56: leaked arg markup is split back into the arguments it names, and counted by provider apart from errors", async () => {
+  const { repairArgMarkup } = await import("../eval/driver/models.mjs");
+  const leaked = repairArgMarkup({ entry: "e1", "note</arg_key> Section:</arg_value><arg_key>result": "matches" });
+  assert.deepEqual(leaked.args, { entry: "e1", note: "Section:", result: "matches" }, "C-2's shape: the markup in the key");
+  assert.deepEqual(leaked.repaired[0].into, ["note", "result"]);
+  assert.deepEqual(repairArgMarkup({ note: "fine</arg_value><arg_key>result</arg_key><arg_value>differs" }).args, { note: "fine", result: "differs" }, "and in a value");
+  assert.deepEqual(repairArgMarkup({ entry: "e1", result: "matches", n: 3 }), { args: { entry: "e1", result: "matches", n: 3 }, repaired: [] });
+  const { toolCallCounts } = await import("../eval/toolcalls.mjs");
+  const c = toolCallCounts([
+    { agent: "orchestrator", id: "o", turn: 1, reply: "", provider: "OpenInference" },
+    { agent: "orchestrator", id: "o", turn: 1, markup: true, tool: "graph-rag_record_verdict", provider: "OpenInference" },
+    { agent: "orchestrator", id: "o", tool: "graph-rag_record_verdict", error: false },
+    { agent: "worker", id: "w", turn: 1, reply: "", provider: "Together" },
+    { agent: "worker", id: "w", tool: "graph-rag_keep_piece", error: true, errorText: "MCP error -32602: Input validation error" },
+  ]);
+  assert.deepEqual([c.byProvider.OpenInference.calls, c.byProvider.OpenInference.repaired, c.byProvider.OpenInference.errors], [1, 1, 0], "the repaired call isn't an error, and is counted");
+  assert.deepEqual([c.byProvider.Together.calls, c.byProvider.Together.malformed], [1, 1]);
+  assert.equal(c.all.calls, 2, "a markup event is no tool call");
+});

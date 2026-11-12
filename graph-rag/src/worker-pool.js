@@ -275,9 +275,9 @@ export async function composeFilingBrief(payload, { db = { adbQuery }, positions
     .sort((a, b) => order(a.rid) - order(b.rid))
     .map((r) => ({ section: shortSectionId(order(r.rid)), rid: String(r.rid), heading: r.heading ?? null, text: String(r.text_identity ?? "").slice(0, 4000), home: effectiveHome(positions, r._home) }));
   if (!sections.length) throw new Error("the record's sections are gone");
-  const doc = (await db.adbQuery(`SELECT name, _home, description FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: payload.record }))[0];
+  const doc = (await db.adbQuery(`SELECT name, _home, description, _recorded_at FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: payload.record }))[0];
   // the title takes the strictest home among the sections (R11): the document's own home
-  const record = doc ? { id: payload.record, title: doc.name ?? null, description: doc.description ?? null, home: effectiveHome(positions, doc._home) } : null;
+  const record = doc ? { id: payload.record, title: doc.name ?? null, description: doc.description ?? null, home: effectiveHome(positions, doc._home), recorded_at: doc._recorded_at ?? null } : null;
   const classRows = await db.adbQuery(`SELECT @rid AS rid, _class_key, _class_name, _home, _rows_are_nodes, _record_table, _status, _description FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND (_status IS NULL OR _status <> 'retired') LIMIT 1000`).catch(() => []);
   const keyOf = new Map(classRows.map((c) => [String(c.rid), c._class_key]));
   const sub = classRows.length ? await db.adbQuery("SELECT @out AS o, @in AS i FROM SUBCLASS_OF").catch(() => []) : [];

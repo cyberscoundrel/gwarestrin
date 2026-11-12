@@ -118,3 +118,9 @@ test("orchestrator mode: a batch names records in full, requests come structured
   assert.match(h, /Worker: 2 sections at Production floor \(job j1\)/);
   assert.match(h, /Never decide for them/);
 });
+
+test("I-57: the brief says the day the record was put on record, and that a date column may take it", async () => {
+  const { taskBrief } = await import("../src/pool.js");
+  const b = taskBrief({ brief: { audience: "floor", record: { id: "doc-1", title: "coolant", description: null, home: "floor", recorded_at: "2026-11-09T08:00:00.000Z" }, sections: [], classes: [], instances: [], sources: [] } });
+  assert.match(b, /Put on record 2026-11-09\. A date column may take that day/);
+});

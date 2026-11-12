@@ -205,11 +205,26 @@ export const CHOICES = {
   Purchase_Order: { Status: ["Open", "Received", "Closed"] },
   Maintenance: { Status: ["Open", "Closed"] },
 };
+/**
+ * The columns that hold another table's keys (I-58): condition 3 takes for them only a key of that table the record
+ * names, never words from the note. Every value the test rows hold in them is such a key (a test checks it).
+ */
+export const REFERENCES = {
+  Job: { Customer: "Customer", Sales_Order: "Sales_Order", Part_Number: "Material" },
+  Job_Operation: { Job: "Job", Work_Center: "Work_Center" },
+  Sales_Order: { Customer: "Customer" },
+  Purchase_Order: { Vendor: "Vendor" },
+  Maintenance: { Equipment: "Equipment", Work_Center: "Work_Center" },
+};
 export function shapes() {
   const out = {};
   for (const [table, actions] of Object.entries(WRITABLE)) {
     const cols = TABLES[table].columns;
-    const columns = { ...Object.fromEntries(cols.filter((c) => c.type === "bit").map((c) => [c.name, "boolean"])), ...Object.fromEntries(Object.entries(CHOICES[table] ?? {}).map(([c, values]) => [c, { values }])) };
+    const columns = {
+      ...Object.fromEntries(cols.filter((c) => c.type === "bit").map((c) => [c.name, "boolean"])),
+      ...Object.fromEntries(Object.entries(CHOICES[table] ?? {}).map(([c, values]) => [c, { values }])),
+      ...Object.fromEntries(Object.entries(REFERENCES[table] ?? {}).map(([c, t]) => [c, { references: entityOf(t) }])),
+    };
     const adds = actions.includes("delete") && actions.includes("create");
     out[entityOf(table)] = { ...(adds ? { adds: true } : {}), columns, ...(adds ? { required: cols.filter((c) => !c.key && !c.nullable).map((c) => c.name) } : {}) };
   }

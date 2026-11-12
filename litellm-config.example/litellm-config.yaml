@@ -48,11 +48,17 @@ model_list:
       model: openrouter/nvidia/nemotron-3.5-lightning
       api_key: os.environ/OPENROUTER_API_KEY
   # GLM 5.3 Flash by its exact OpenRouter id (listed 2026-11-11; not the FlashX, FlashX Legal or :batch variants).
-  # Setup C of the evaluation.
+  # Setup C of the evaluation. OpenInference is excluded from the routing (OpenRouter's provider ignore list): in C-2
+  # it served 61 record_verdict calls and 54 came back with the model's own tool-call markup (</arg_key>) inside an
+  # argument name; every other provider together served 37 and 3 leaked. It was also C-1's slow provider. Every
+  # other provider OpenRouter lists for this model stays allowed (41 endpoints on 2026-11-12; I-56 names them).
   - model_name: glm-5.3-flash
     litellm_params:
       model: openrouter/z-ai/glm-5.3-flash
       api_key: os.environ/OPENROUTER_API_KEY
+      extra_body:
+        provider:
+          ignore: ["OpenInference"]
 
 litellm_settings:
   drop_params: true   # tolerate client params a backend doesn't support

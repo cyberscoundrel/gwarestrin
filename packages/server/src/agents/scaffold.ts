@@ -23,8 +23,8 @@ export const GRAPH_MCP = "graph-rag";
 
 /**
  * pi's tools for a graph worker agent: reading files and the MCP tools (the
- * graph in full, other connections' read tools). No shell, no writing files:
- * nothing to reach a connection around its read-only list.
+ * graph in full; a liaison or handler also other connections' read tools). No
+ * shell, no writing files: nothing to reach a connection around its read-only list.
  */
 export const WORKER_TOOLS = ["read", "mcp"];
 
@@ -132,6 +132,13 @@ export async function scaffoldAgent(
       const applied = applyInstanceSubstitution(def, getInstanceMetadata());
       if (!applied) {
         log.warn(`mcp server ${name} omitted for ${agent.name}: unresolvable instance references`);
+        continue;
+      }
+      // I-59 (R11.6): a filing worker and the orchestrator (discovery included) read a source only through
+      // graph-rag (describe_source, find_rows, resolve_name), as their audience; they get no other connection
+      const role = agent.graphRole?.kind ?? "worker";
+      if (instanceOpts?.graphWorker && name !== GRAPH_MCP && (role === "worker" || role === "master")) {
+        log.info(`mcp server ${name} left out for graph ${role} ${agent.name}: it reads sources through graph-rag only`);
         continue;
       }
       if (instanceOpts?.graphWorker && name !== GRAPH_MCP) {

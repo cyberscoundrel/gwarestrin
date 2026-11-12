@@ -21,7 +21,8 @@
 // a model or guessing from the rows present (model/write-conditions.js):
 //   commit.tables: [ "dbo_Job" | { name, adds, columns, required, defaults } ]
 //     adds:     true when the table takes new rows (R19; "create" must be among the actions). Default false.
-//     columns:  { Column: "boolean" | { values: [..] } }: a yes/no column, or one with a fixed set of values (R18).
+//     columns:  { Column: "boolean" | { values: [..] } | { references: "<table>" } }: a yes/no column, one with a
+//               fixed set of values (R18), or one holding another table's keys (I-58)
 //     required: the columns a new row needs; defaults: those the source fills itself when not given.
 // Normalized, `tables` stays the list of names and `shapes` holds each table's shape by name.
 import { clip, nonEmpty, ShapeError } from "./text.js";
@@ -102,7 +103,8 @@ function tableShapeOf(raw, field) {
   for (const [col, k] of Object.entries(raw.columns ?? {})) {
     if (k === "boolean" || k?.type === "boolean") columns[col] = { type: "boolean" };
     else if (Array.isArray(k?.values) && k.values.length && k.values.every((v) => nonEmpty(v))) columns[col] = { values: k.values.map((v) => String(v).trim()) };
-    else throw new ShapeError(`${field}.columns.${col}`, 'must be "boolean" or { values: [..] }');
+    else if (nonEmpty(k?.references)) columns[col] = { references: String(k.references).trim() };
+    else throw new ShapeError(`${field}.columns.${col}`, 'must be "boolean", { values: [..] } or { references: "<table>" }');
   }
   if (raw.adds !== undefined && typeof raw.adds !== "boolean") throw new ShapeError(`${field}.adds`, "must be true or false");
   return { name: String(raw.name).trim(), adds: raw.adds === true, columns, required: names(raw.required, "required"), defaults: names(raw.defaults, "defaults") };

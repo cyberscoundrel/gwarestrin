@@ -110,3 +110,19 @@ test("both together: the first that fails, and one sentence for the recorder", (
   const part = writeConditions({ text: "job 3260410, 750 floaters", key: "mssql:dbo_Job:3260410", fields: { Customer: "EXATRON", Order_Quantity: 750 }, rows: jobs, primaryKey: "Job", current: jobs[3] });
   assert.deepEqual([part.ok, part.values.map((v) => v.column)], [true, ["Order_Quantity"]], "only the changing value is tested");
 });
+
+test("I-58: a column holding another table's keys takes only a key the record names, by condition 2's rule", () => {
+  const equipment = { rows: [{ Equipment: "FL-HYSTER", Description: "Hyster forklift" }, { Equipment: "FL-TOYOTA", Description: "Toyota forklift" }, { Equipment: "SAW-BLADE", Description: "Band saw blade stock" }], primaryKey: "Equipment" };
+  const shape = { columns: { Equipment: { references: "dbo_Equipment" } } };
+  const references = { dbo_Equipment: equipment };
+  const at = (text, value) => addConditions({ text, data: { Equipment: value }, shape, references }).values[0];
+  const aa05 = at("Near miss at the dock: the Toyota forklift backed up without the beeper working.", "FL-TOYOTA");
+  assert.deepEqual([aa05.ok, aa05.kind, aa05.write], [true, "reference", "FL-TOYOTA"], "named by its own Description, the only match");
+  const blade = at("Swapped the Hyd-Mech blade; the old one goes back to Breskund for resharpening.", "the Hyd-Mech blade");
+  assert.deepEqual([blade.ok, blade.kind], [false, "reference"], "C-2's free words: not a key");
+  assert.match(blade.why, /takes a key of dbo_Equipment, and there is no dbo_Equipment row "the Hyd-Mech blade"/);
+  const saw = at("Swapped the Hyd-Mech blade; the old one goes back to Breskund for resharpening.", "SAW-BLADE");
+  assert.deepEqual([saw.ok, saw.why], [false, "Equipment takes a key of dbo_Equipment the record names, and it doesn't name SAW-BLADE"], "a real key the record doesn't name");
+  assert.ok(at("FL-HYSTER is due its inspection.", "fl-hyster").ok, "the key named in the text, written as the table holds it");
+  assert.equal(at("FL-HYSTER is due its inspection.", "fl-hyster").write, "FL-HYSTER");
+});

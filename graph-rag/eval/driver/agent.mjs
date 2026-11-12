@@ -85,7 +85,7 @@ export async function runAgent({ client, system, prompt, tools, maxTurns = 40, l
   const byName = new Map(tools.map((t) => [t.name, t]));
   // sentChars: what every request carries (system, tool definitions, the history so far), summed over the turns;
   // with a fake model it is the measure a cost estimate starts from (about four characters a token)
-  const usage = { input: 0, output: 0, calls: 0, sentChars: 0, outChars: 0, dsml: 0, providers: {}, blank: 0, blank_retries: 0 };
+  const usage = { input: 0, output: 0, calls: 0, sentChars: 0, outChars: 0, dsml: 0, markup: 0, providers: {}, blank: 0, blank_retries: 0 };
   const toolChars = JSON.stringify(tools.map((t) => ({ n: t.name, d: t.description, s: t.schema }))).length;
   let calls = 0;
   for (let turn = 1; turn <= maxTurns; turn++) {
@@ -114,7 +114,9 @@ export async function runAgent({ client, system, prompt, tools, maxTurns = 40, l
     // DSML markup cut out of tool arguments (models.mjs cutDsml): logged with the raw value, counted as a failure
     for (const tc of r.toolCalls ?? []) for (const c of tc.dsml ?? []) (usage.dsml++, log({ turn, dsml: true, tool: tc.name, path: c.path, provider: r.provider ?? null, raw: c.raw }));
     if (r.dsmlInText) (usage.dsml++, log({ turn, dsml: true, tool: null, path: "content", provider: r.provider ?? null, raw: String(r.text ?? "").slice(0, 2000) }));
-    messages.push({ role: "assistant", content: r.text ?? "", toolCalls: (r.toolCalls ?? []).map(({ dsml, ...tc }) => tc) });
+    // GLM's arg markup split back into arguments (models.mjs repairArgMarkup): logged apart, with who served it (I-56)
+    for (const tc of r.toolCalls ?? []) for (const m of tc.markup ?? []) (usage.markup++, log({ turn, markup: true, tool: tc.name, key: m.key, into: m.into, provider: r.provider ?? null }));
+    messages.push({ role: "assistant", content: r.text ?? "", toolCalls: (r.toolCalls ?? []).map(({ dsml, markup, ...tc }) => tc) });
     // the model's own words each turn (the run's trace of why it did what it did)
     usage.outChars += String(r.text ?? "").length + JSON.stringify(r.toolCalls ?? []).length;
     // why the model's turn ended ("stop", or "length" at the output cap), for the trace

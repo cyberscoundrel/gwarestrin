@@ -11,7 +11,7 @@
  * The filing stream owns this module.
  */
 import { z } from "zod";
-import { createInstance, fileToSource, findText, giveAccount, holdPiece, jobContext, keepPiece, liveEnv, relateSection, requestOrchestrator, resolveName, sectionKey, stateDependency } from "./filing.js";
+import { createInstance, describeSourceFor, fileToSource, findText, giveAccount, holdPiece, jobContext, keepPiece, liveEnv, relateSection, requestOrchestrator, resolveName, sectionKey, stateDependency } from "./filing.js";
 import { REQUEST_KINDS } from "./model/filing.js";
 import { resolveEntryRef, resolveSectionRef, shortSectionId } from "./model/brief.js";
 
@@ -37,6 +37,14 @@ export const FIND_ROWS_HELP = `Find rows of a source table, read-only: text is w
 columns, or in every column when none are named); where narrows by equal values ({ "Status": "Active",
 "Job": 3260356 }). Use this, not a filter with contains or startswith, which the source doesn't take.
 An unknown table or column is refused with the real ones. More rows: call again with offset: next_offset.`;
+/** describe_source (I-59): what a source holds, read as the agent's audience, in place of the source's own tools */
+export const DESCRIBE_SOURCE_HELP = `What a connected source holds, read-only: with no table, the tables of each source you may read;
+with table ("system:table", like mssql:dbo_Job), its key, its columns and their types, how many rows, the values of
+each column that holds only a few (a status, a type), and a few rows. Then find_rows to look rows up.`;
+export const DESCRIBE_SOURCE_ARGS = {
+  table: z.string().max(200).optional().describe('"system:table", or a system alone, or nothing for every source'),
+  sample: z.number().int().min(0).max(10).optional(),
+};
 export const FIND_ROWS_ARGS = {
   table: z.string().min(1).max(200).describe('"system:table", like mssql:dbo_Customer'),
   text: z.string().max(200).optional(),
@@ -69,6 +77,7 @@ export function registerWorkerTools(server, { identity, need }) {
     run(resolveName, "read", null, { tables: true }),
   );
   server.tool("find_rows", FIND_ROWS_HELP, FIND_ROWS_ARGS, run(findText, "read", null, { tables: true }));
+  server.tool("describe_source", DESCRIBE_SOURCE_HELP, DESCRIBE_SOURCE_ARGS, run(describeSourceFor, "read", null, { tables: true }));
   server.tool(
     "file_to_source",
     `File one piece of the record into its source row: the row's key ("mssql:dbo_Job:4471"), the columns
@@ -162,7 +171,7 @@ again to correct it); the orchestrator checks it against the source itself.`,
 }
 
 /** for tests and the integrator: the tools a worker has now, and the ones earlier designs had */
-export const WORKER_TOOLS = ["resolve_name", "find_rows", "file_to_source", "hold_piece", "keep_piece", "create_instance", "relate_section", "section_key", "state_dependency", "request", "give_account"];
+export const WORKER_TOOLS = ["resolve_name", "find_rows", "describe_source", "file_to_source", "hold_piece", "keep_piece", "create_instance", "relate_section", "section_key", "state_dependency", "request", "give_account"];
 export const REMOVED_WORKER_TOOLS = [
   // asking the admin: Held pieces ask the recorder, and requests go to the orchestrator (R2, R10)
   "raise_question",
@@ -250,7 +259,9 @@ export async function withTables(args) {
   const { qualifyTable } = await import("./classes.js");
   const out = { ...args };
   try {
-    if (typeof out.table === "string" && out.table.trim() && !out.table.includes(":")) out.table = await qualifyTable(out.table, { field: "table" });
+    // a system named alone (describe_source's "mssql") stays as it is
+    const systemsNow = async () => Object.keys(await (await import("./sources.js")).loadSources().catch(() => ({})));
+    if (typeof out.table === "string" && out.table.trim() && !out.table.includes(":") && !(await systemsNow()).includes(out.table.trim())) out.table = await qualifyTable(out.table, { field: "table" });
     if (typeof out.key === "string") {
       const parts = out.key.trim().split(":");
       if (parts.length === 2 && parts[0] && parts[1]) {

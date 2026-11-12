@@ -61,7 +61,7 @@ test("B1: a brief holds the record's title and description only; a record carryi
   const record = { id: "doc-1", title: "Shift notes", description: "the handover", home: "floor", recorded_by: "bob", sections: [{ home: "org", text: "SECRET: Bob's pay rises to 41/h" }] };
   const { brief } = scopeBrief({ audience: "floor", record, sections: [] }, positions);
   assert.deepEqual(Object.keys(brief.record), RECORD_FIELDS);
-  assert.deepEqual(brief.record, { id: "doc-1", title: "Shift notes", description: "the handover", home: "floor" });
+  assert.deepEqual(brief.record, { id: "doc-1", title: "Shift notes", description: "the handover", home: "floor", recorded_at: null }, "and the day it was put on record (I-57), here none");
   assert.doesNotMatch(JSON.stringify(brief), /SECRET/);
   // the sender's last check refuses one built by hand
   const bare = { audience: "floor", record, sections: [], classes: [], instances: [], sources: [] };

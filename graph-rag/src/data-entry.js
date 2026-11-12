@@ -555,6 +555,39 @@ export async function tableRows({ system, table }, opts = {}) {
   }
 }
 
+/**
+ * What an agent may learn of one table (I-59, R11.6: agents read a source only through graph-rag, as their audience):
+ * its key, its columns and their types, how many rows (up to the scan's limit), for each column holding few distinct
+ * values those values (a status, a type), and a few rows. One scan by key through the interface; nothing written.
+ * Returns { status: "found", system, table, primary_key, columns, rows, complete, values, sample } or a refusal.
+ */
+export const DESCRIBE_VALUES_MAX = 12;
+export async function describeTable({ system, table, sample = 3 }, opts = {}) {
+  const { decl, refusal } = await declared(system, table, opts);
+  if (refusal) return refusal;
+  try {
+    const c = readClient(decl, opts.fetch);
+    const names = (await c.tables()).filter((n) => !opts.tables || opts.tables.includes(n));
+    if (!names.includes(table)) return answer("refused", { why: `${system} has no table ${table}: it has ${names.join(", ")}` });
+    const { pk, columns } = await c.describe(table);
+    const scan = await scanRows(decl, table, opts);
+    const values = {};
+    for (const col of Object.keys(columns ?? {})) {
+      if (pk?.some((k) => k.name === col)) continue;
+      const seen = new Set();
+      for (const r of scan.matches) {
+        if (r[col] === null || r[col] === undefined) continue;
+        seen.add(r[col]);
+        if (seen.size > DESCRIBE_VALUES_MAX) break;
+      }
+      if (seen.size && seen.size <= DESCRIBE_VALUES_MAX && seen.size < scan.matches.length) values[col] = [...seen];
+    }
+    return answer("found", { system, table, primary_key: pk?.map((k) => k.name) ?? null, columns, rows: scan.matches.length, complete: scan.complete, values, sample: scan.matches.slice(0, Math.max(0, Math.min(10, Number(sample) || 0))) });
+  } catch (e) {
+    return failed(e);
+  }
+}
+
 /** ---- the guard ---- */
 
 const sameName = (a, b) => String(a ?? "").trim().toLowerCase() === String(b ?? "").trim().toLowerCase();

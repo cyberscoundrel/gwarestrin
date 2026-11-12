@@ -7,12 +7,12 @@
  * How "named", "matches" and "appears" are tested is the coordinator's choice under R16 and can change: every
  * definition is in DEFINITIONS and the small functions right below it, and nothing else in graph-rag decides them.
  *
- *   writeConditions({ text, key, fields, rows, primaryKey, current, shape, recordedAt }) -> {
+ *   writeConditions({ text, key, fields, rows, primaryKey, current, shape, recordedAt, references }) -> {
  *     ok,                       // both hold, or nothing would change
  *     unchanged,                // the row already holds every value: nothing is written, so nothing is tested
  *     failed: 2 | 3 | null,     // the first that fails (3: some value; `values` says which, field by field)
  *     row: { ok, how, why },    // how: "named" (its key is in the text) or "only match" (the one row the text matches best)
- *     values: [{ column, value, ok, kind, why, write }],   // kind: number, date, boolean, choice, text, empty;
+ *     values: [{ column, value, ok, kind, why, write }],   // kind: number, date, boolean, choice, reference, text, empty;
  *                                                          // write: the value as the column takes it (R18's canonical)
  *     passing, failing,         // the changing fields that hold condition 3, and those that don't, as { column: value }
  *     why,                      // one sentence for the recorder when one fails
@@ -23,7 +23,8 @@
  * candidates for condition 2); primaryKey: the table's key column; current: the row as read, when there is one;
  * shape: the table's shape as its source declares it (model/sources.js tableShape: which columns are yes/no, which
  * take a fixed set of values, which a new row needs); recordedAt: when the record was put on record. A value the row
- * already holds isn't written, so condition 3 tests only the values that change the row.
+ * already holds isn't written, so condition 3 tests only the values that change the row. references: { table: { rows,
+ * primaryKey } } for the tables the shape's reference columns name (I-58).
  */
 
 export const DEFINITIONS = {
@@ -44,6 +45,9 @@ export const DEFINITIONS = {
   // those are is declared, never inferred from the rows present (I-49): a column the source declaration marks
   // "boolean", or whose row the source serves as true/false (a SQL bit), is yes/no; a column the declaration gives a
   // list of values is fixed-choice.
+  // I-58 (the coordinator's choice under R16): a column the declaration says holds another table's keys
+  // ({ references: "<table>" }) takes only a key of that table that the record names, by condition 2's own rule
+  // (rowNamed: the key in the text, or the one row the text matches best). Never free words from the note.
   booleanWords: { true: ["true", "yes", "y", "1"], false: ["false", "no", "n", "0"] },
 };
 
@@ -108,8 +112,9 @@ const numberOf = (v) => (typeof v === "number" ? v : Number(String(v).trim().rep
  * serves it: "boolean" (declared so, or the source serves the cell as true/false), "choice" (the declaration lists
  * its values), or null (numbers, dates and text, checked against the record's words).
  */
-export function columnKind(column, { shape = null, current = null } = {}) {
+export function columnKind(column, { shape = null, current = null, references = {} } = {}) {
   const declared = shape?.columns?.[column];
+  if (declared?.references) return { kind: "reference", table: declared.references, rows: references?.[declared.references]?.rows ?? [], primaryKey: references?.[declared.references]?.primaryKey ?? null };
   if (declared?.type === "boolean") return { kind: "boolean" };
   if (Array.isArray(declared?.values) && declared.values.length) return { kind: "choice", values: declared.values };
   if (current && typeof current[column] === "boolean") return { kind: "boolean" };
@@ -145,6 +150,12 @@ export function valueAppears(value, text, { column = null, kind = null, recorded
   if (kind?.kind === "boolean") {
     const b = asBoolean(value);
     return b === undefined ? { ok: false, kind: "boolean", why: `${name} takes yes or no, not "${String(value).slice(0, 40)}"` } : { ok: true, kind: "boolean", write: b };
+  }
+  if (kind?.kind === "reference") {
+    const hit = kind.primaryKey ? kind.rows.find((r) => sameCell(r[kind.primaryKey], value)) : null;
+    if (!hit) return { ok: false, kind: "reference", why: `${name} takes a key of ${kind.table}, and there is no ${kind.table} row "${String(value).slice(0, 40)}"` };
+    const named = rowNamed({ text, key: `x:${kind.table}:${hit[kind.primaryKey]}`, rows: kind.rows, primaryKey: kind.primaryKey });
+    return named.ok ? { ok: true, kind: "reference", write: hit[kind.primaryKey] } : { ok: false, kind: "reference", why: `${name} takes a key of ${kind.table} the record names, and it doesn't name ${hit[kind.primaryKey]}` };
   }
   if (kind?.kind === "choice") {
     const hit = kind.values.find((v) => normText(v) === normText(value));
@@ -205,18 +216,18 @@ export function sameCell(a, b) {
 }
 
 /** the values of a write, each through condition 3 with its column's kind */
-const checkValues = (entries, text, { shape, current, recordedAt }) => entries.map(([column, value]) => ({ column, value, ...valueAppears(value, text, { column, kind: columnKind(column, { shape, current }), recordedAt }) }));
+const checkValues = (entries, text, { shape, current, recordedAt, references }) => entries.map(([column, value]) => ({ column, value, ...valueAppears(value, text, { column, kind: columnKind(column, { shape, current, references }), recordedAt }) }));
 const asFields = (vs) => Object.fromEntries(vs.map((v) => [v.column, v.ok ? v.write : v.value]));
 
 /**
  * R16 conditions 2 and 3 together, field by field: `failed` and `why` name the first that fails; when it is 3,
  * `passing` holds the fields that may still land and `failing` those that may not.
  */
-export function writeConditions({ text, key, fields, rows = [], primaryKey = null, current = null, shape = null, recordedAt = null }) {
+export function writeConditions({ text, key, fields, rows = [], primaryKey = null, current = null, shape = null, recordedAt = null, references = {} }) {
   const changing = Object.entries(fields ?? {}).filter(([column, value]) => !(current && column in current && sameCell(current[column], value)));
   if (current && !changing.length) return { ok: true, unchanged: true, failed: null, row: { ok: true, how: "unchanged" }, values: [], passing: {}, failing: {}, why: null };
   const row = rowNamed({ text, key, rows, primaryKey });
-  const values = checkValues(changing, text, { shape, current, recordedAt });
+  const values = checkValues(changing, text, { shape, current, recordedAt, references });
   const bad = values.filter((v) => !v.ok);
   const failed = !row.ok ? 2 : bad.length ? 3 : null;
   const why = failed === 2 ? `It isn't clear which row: ${row.why}.` : failed === 3 ? `Not every value is in your words: ${bad.map((v) => v.why).join("; ")}.` : null;
@@ -232,10 +243,10 @@ export function writeConditions({ text, key, fields, rows = [], primaryKey = nul
  * One piece adding at most one row however often it is filed is the caller's (filing.js), which knows the piece.
  * Returns { ok, failed: "values" | "required" | null, values, passing, failing, data, dropped, missing, existing, why }.
  */
-export function addConditions({ text, table = null, data, rows = [], primaryKey = null, shape = null, recordedAt = null }) {
+export function addConditions({ text, table = null, data, rows = [], primaryKey = null, shape = null, recordedAt = null, references = {} }) {
   const entries = Object.entries(data ?? {}).filter(([c]) => c !== primaryKey);
   const dropped = primaryKey && data && primaryKey in data ? [primaryKey] : [];
-  const values = checkValues(entries, text, { shape, current: null, recordedAt });
+  const values = checkValues(entries, text, { shape, current: null, recordedAt, references });
   const bad = values.filter((v) => !v.ok);
   const given = new Set(entries.filter(([, v]) => v !== null && v !== undefined && !(typeof v === "string" && !v.trim())).map(([c]) => c));
   const missing = (shape?.required ?? []).filter((c) => c !== primaryKey && !given.has(c) && !(shape?.defaults ?? []).includes(c));

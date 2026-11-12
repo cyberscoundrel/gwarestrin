@@ -31,6 +31,55 @@ export function cutDsml(args) {
   return { args: walk(args, ""), cut };
 }
 
+/**
+ * GLM's own tool-call markup ("<arg_key>K</arg_key><arg_value>V</arg_value>") sometimes comes back inside the JSON
+ * arguments, the provider's parser having missed it: an argument named "note</arg_key> Section:</arg_value><arg_key>result"
+ * holding "matches" is two arguments, note (" Section:") and result ("matches"). In C-2, 54 of 61 record_verdict calls
+ * OpenInference served leaked, and 3 of 37 elsewhere (I-56). Each key or string value carrying the markup is split back
+ * into the arguments it names; the last named argument keeps the original value. What was repaired is returned, so the
+ * driver logs it apart from DSML and from errors, and a run shows how often the repair, not the routing, did the work.
+ */
+export const ARG_MARKUP_RE = /<\/?arg_(?:key|value)>/;
+export function repairArgMarkup(args) {
+  const repaired = [];
+  if (!args || typeof args !== "object" || Array.isArray(args)) return { args, repaired };
+  const PH = "\u0000";
+  // walk the tags: text before </arg_key> is a name, text before </arg_value> (or the next name, or the end) its value
+  const walk = (t) => {
+    const found = [];
+    let key = null;
+    let buf = "";
+    for (const tok of t.split(/(<\/?arg_(?:key|value)>)/)) {
+      if (tok === "</arg_key>") (key = buf.trim()), (buf = "");
+      else if (tok === "</arg_value>" || (tok === "<arg_key>" && key !== null && buf.trim())) {
+        if (key) found.push([key, buf]);
+        key = null;
+        buf = "";
+      } else if (tok === "<arg_key>" || tok === "<arg_value>") buf = "";
+      else buf += tok;
+    }
+    if (key) found.push([key, buf]);
+    return found;
+  };
+  const out = {};
+  for (const [k, v] of Object.entries(args)) {
+    const inKey = ARG_MARKUP_RE.test(k);
+    const inValue = typeof v === "string" && ARG_MARKUP_RE.test(v);
+    if (!inKey && !inValue) {
+      out[k] = v;
+      continue;
+    }
+    const found = walk(`${k}</arg_key>${inValue ? v : PH}`).filter(([name]) => name && !ARG_MARKUP_RE.test(name));
+    if (!found.length) {
+      out[k] = v;
+      continue;
+    }
+    for (const [name, value] of found) out[name] = value === PH ? v : value.trim();
+    repaired.push({ key: k.slice(0, 200), into: found.map(([name]) => name), raw: (typeof v === "string" ? v : JSON.stringify(v)).slice(0, 500) });
+  }
+  return { args: out, repaired };
+}
+
 /** an OpenAI-compatible client; `apiKey` is read once and kept in this closure only */
 export function openaiClient({ baseUrl, apiKey, model, maxTokens = 4096, temperature = null, fetch: f = globalThis.fetch, timeoutMs = 300_000, headers = {} }) {
   if (!baseUrl || !model) throw new Error("a model client needs a base URL and a model");
@@ -77,7 +126,8 @@ export function openaiClient({ baseUrl, apiKey, model, maxTokens = 4096, tempera
           args = { _unparsed: String(t.function?.arguments ?? "").slice(0, 500) };
         }
         const { args: clean, cut } = cutDsml(args);
-        return { id: t.id, name: t.function?.name, args: clean, ...(cut.length ? { dsml: cut } : {}) };
+        const { args: fixed, repaired } = repairArgMarkup(clean);
+        return { id: t.id, name: t.function?.name, args: fixed, ...(cut.length ? { dsml: cut } : {}), ...(repaired.length ? { markup: repaired } : {}) };
       });
       // which upstream served it (OpenRouter names its provider; litellm passes it through)
       return { text: msg.content ?? "", toolCalls, finish: j.choices?.[0]?.finish_reason ?? null, provider: j.provider ?? null, dsmlInText: DSML_RE.test(String(msg.content ?? "")), usage: { input: j.usage?.prompt_tokens ?? 0, output: j.usage?.completion_tokens ?? 0 } };
@@ -101,14 +151,14 @@ const call = (name, args) => ({ id: `fake-${fakeId++}`, name, args });
 const has = (tools, name) => tools.some((t) => t.name === name);
 const turnsSoFar = (messages) => messages.filter((m) => m.role === "assistant").length;
 
-/** discovery: list the connection's tables, make one class per table under resource, record each examined, then report */
+/** discovery: list the connection's tables (through graph-rag), make one class per table under resource, record each examined, then report */
 function discoveryPolicy({ messages, tools }) {
-  const conn = tools.find((t) => t.name.endsWith("_describe_entities"))?.name;
+  const conn = has(tools, "graph-rag_describe_source") ? "graph-rag_describe_source" : null;
   const n = turnsSoFar(messages);
-  if (n === 0 && conn) return { toolCalls: [call(conn, {})] };
+  if (n === 0 && conn) return { toolCalls: [call(conn, { table: "mssql" })] };
   if (n === 1) {
     const described = parse(toolResults(messages, conn)[0] ?? "") ?? {};
-    const tables = (described.entities ?? []).map((e) => e.name).filter((t) => !/GwConnectionIdentity/.test(t));
+    const tables = (described.tables ?? []).filter((t) => !/GwConnectionIdentity/.test(t));
     const calls = [];
     for (const t of tables) {
       const name = t.replace(/^dbo_/, "").replace(/_/g, " ");

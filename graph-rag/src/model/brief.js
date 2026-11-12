@@ -48,8 +48,11 @@ export function scopeBrief({ audience, record, sections = [], classes = [], inst
   };
 }
 
-/** what a brief may say of a record: its id, title, description and the title's home; nothing else */
-export const RECORD_FIELDS = ["id", "title", "description", "home"];
+/**
+ * what a brief may say of a record: its id, title, description, the title's home, and the day it was put on record
+ * (a date column may take that day: write-conditions.js, I-57); nothing else
+ */
+export const RECORD_FIELDS = ["id", "title", "description", "home", "recorded_at"];
 const briefRecord = (r) => Object.fromEntries(RECORD_FIELDS.map((k) => [k, r[k] ?? null]));
 
 /** the check the brief's sender runs last: throws ShapeError when anything in it is above the audience */

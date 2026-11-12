@@ -28,7 +28,7 @@ import { canSee, EVERYONE, visibleHomes } from "./positions.js";
 import { classKey } from "./model/classes.js";
 import { parseKey, parseTable } from "./model/schema.js";
 import { FILED, FLOOR_REASON, GRAPH_RAG, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
-import { addData, assertApproverHolds, commitRow, enterData, findRows, getRow, removeAdded, sameValue, searchRows, tableRows } from "./data-entry.js";
+import { addData, assertApproverHolds, commitRow, describeSource, describeTable, enterData, findRows, getRow, removeAdded, sameValue, searchRows, tableRows } from "./data-entry.js";
 import { addConditions, writeConditions } from "./model/write-conditions.js";
 import { tableShape, writable as declaredWritable } from "./model/sources.js";
 import { loadSources, sourceFor } from "./sources.js";
@@ -184,6 +184,10 @@ export async function liveEnv(over = {}) {
     // R16 condition 2: the table's rows, as the audience may read them
     tableRows: over.tableRows ?? ((system, table, o = {}) => tableRows({ system, table }, { db, fetch: over.fetch, positions, ...o })),
     systems: over.systems ?? (async () => Object.keys(await loadSources(db).catch(() => ({})))),
+    // I-59: what an agent may learn of a source's tables, as its audience
+    describeSource: over.describeSource ?? ((system, o = {}) => describeSource(system, { db, fetch: over.fetch, positions, ...o })),
+    describeTable: over.describeTable ?? ((args, o = {}) => describeTable(args, { db, fetch: over.fetch, positions, ...o })),
+    discoveryPart: over.discoveryPart ?? (async (rid) => (await import("./classes.js")).discoveryPartOf(rid)),
     laterClassOrSource: over.laterClassOrSource ?? ((at) => laterClassOrSource(at, db)),
     classesForTable: over.classesForTable ?? (async (table) => (await db.adbQuery(`SELECT _class_key AS key, _home AS home FROM ${ENTITY_LABEL} WHERE _kind = 'class' AND _record_table = :t AND (_status IS NULL OR _status <> 'retired')`, { t: table }).catch(() => [])).map((r) => ({ key: r.key, home: r.home ?? null }))),
     // the home of the connection that reads a system (its declaration's read.home; none, or no such system: the root)
@@ -341,9 +345,15 @@ const rowsFor = async (env, ctx, system, table) => {
   return t?.status === "ok" ? { rows: t.rows, primaryKey: t.primaryKey } : { rows: [], primaryKey: null };
 };
 const shapeFor = async (env, system, table) => (env.tableShape ? await env.tableShape(system, table).catch(() => null) : null);
+/** I-58: the rows of the tables the shape's reference columns name, among the fields written, as the audience reads them */
+async function referencesFor(env, ctx, system, shape, fields) {
+  const out = {};
+  for (const [col, k] of Object.entries(shape?.columns ?? {})) if (k?.references && col in (fields ?? {}) && !out[k.references]) out[k.references] = await rowsFor(env, ctx, system, k.references);
+  return out;
+}
 async function recordConditions(env, ctx, section, key, fields, current, shape) {
   const { rows, primaryKey } = await rowsFor(env, ctx, key.system, key.table);
-  return writeConditions({ text: await sectionTextOf(env, section), key: key.key, fields, rows, primaryKey, current, shape, recordedAt: ctx.recordedAt ?? null });
+  return writeConditions({ text: await sectionTextOf(env, section), key: key.key, fields, rows, primaryKey, current, shape, recordedAt: ctx.recordedAt ?? null, references: await referencesFor(env, ctx, key.system, shape, fields) });
 }
 
 /**
@@ -364,13 +374,27 @@ async function setCorrection(env, ctx, claim, value) {
   await env.db.adbCommand("UPDATE Job SET payload = :p WHERE id = :id", "sql", { p: JSON.stringify(p), id: ctx.job });
   ctx.corrections = corrections;
 }
-const correctionReply = (target, c, { add = false } = {}) => ({
-  outcome: "not_filed",
-  [add ? "table" : "key"]: target,
-  fields: Object.entries(c.failing).map(([column, value]) => ({ column, value, why: c.values.find((v) => v.column === column)?.why ?? null })),
-  ...(c.missing?.length ? { missing: c.missing } : {}),
-  note: `Nothing was filed yet. ${c.why} Send file_to_source again for this piece, once: give each of these in the record's exact words, or leave it out${c.missing?.length ? `, and give ${c.missing.join(", ")} from the record` : ""}. Whatever you leave out, or still isn't in the record, is held for whoever put it on record; the rest is written.`,
-});
+/**
+ * I-57: when a date is what's missing or failing, the answer names the record's own day, which counts as a date
+ * (write-conditions.js): a worker that reads "the record gives no date" otherwise leaves a needed date out. A column
+ * is a date here when the value failed as one, or when the table's rows hold ISO dates in it.
+ */
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}/;
+const dateColumns = (rows) => new Set(rows.flatMap((r) => Object.entries(r).filter(([, v]) => typeof v === "string" && ISO_DAY.test(v)).map(([k]) => k)));
+function correctionReply(target, c, { add = false, recordedAt = null, rows = [] } = {}) {
+  const day = ISO_DAY.exec(String(recordedAt ?? ""))?.[0] ?? null;
+  const dates = dateColumns(rows);
+  const dated = [...c.values.filter((v) => !v.ok && v.kind === "date").map((v) => v.column), ...(c.missing ?? []).filter((m) => dates.has(m))];
+  const hint = day && dated.length ? ` The record was put on record ${day}, and that day counts as a date (${dated.join(", ")} may take it; the day before or after only when the record says yesterday or tomorrow).` : "";
+  return {
+    outcome: "not_filed",
+    [add ? "table" : "key"]: target,
+    fields: Object.entries(c.failing).map(([column, value]) => ({ column, value, why: c.values.find((v) => v.column === column)?.why ?? null })),
+    ...(c.missing?.length ? { missing: c.missing } : {}),
+    ...(hint ? { record_day: day } : {}),
+    note: `Nothing was filed yet. ${c.why}${hint} Send file_to_source again for this piece, once: give each of these in the record's exact words, or leave it out${c.missing?.length ? `, and give ${c.missing.join(", ")} from the record` : ""}. Whatever you leave out, or still isn't in the record, is held for whoever put it on record; the rest is written.`,
+  };
+}
 
 /** a held piece for the fields that didn't hold (R16 condition 3, per field): nothing of them is written, the recorder is asked */
 async function holdFields(env, ctx, base, target, failing, why) {
@@ -468,7 +492,7 @@ async function addPiece(args, identity, env, ctx, aim, { section, piece, cls, re
       return { outcome: HELD, entry: entry.id, note: "Held: an earlier add of this piece may have landed; no second row is risked." };
     }
     const { rows, primaryKey } = await rowsFor(env, ctx, aim.system, aim.table);
-    const c = addConditions({ text: await sectionTextOf(env, section), table: tkey, data: fields, rows, primaryKey, shape, recordedAt: ctx.recordedAt ?? null });
+    const c = addConditions({ text: await sectionTextOf(env, section), table: tkey, data: fields, rows, primaryKey, shape, recordedAt: ctx.recordedAt ?? null, references: await referencesFor(env, ctx, aim.system, shape, fields) });
     // a row already holding these values: the piece is in the source (only once every value and needed column holds)
     if (c.ok && c.existing?.key !== undefined && c.existing?.key !== null) {
       const key = `${tkey}:${c.existing.key}`;
@@ -490,7 +514,7 @@ async function addPiece(args, identity, env, ctx, aim, { section, piece, cls, re
     if (r.outcome === "held" && r.status === "conditions") {
       if (!offered) {
         await setCorrection(env, ctx, claim, { args: correctionArgs(args), failing: c.failing, at: env.now() });
-        const reply = correctionReply(tkey, c, { add: true });
+        const reply = correctionReply(tkey, c, { add: true, recordedAt: ctx.recordedAt, rows });
         return { ...reply, note: `${reply.note}${unused}` };
       }
       await setCorrection(env, ctx, claim, null);
@@ -610,7 +634,7 @@ export async function fileToSource(args, identity, env) {
     // I-50: condition 3 failing for some fields: the worker is told once, and nothing is filed yet
     if (!offered && !args[SETTLING]) {
       await setCorrection(env, ctx, claim, { args: correctionArgs(args), failing: conditions.failing, at: env.now() });
-      return correctionReply(key.key, conditions);
+      return correctionReply(key.key, conditions, { recordedAt: ctx.recordedAt, rows: (await rowsFor(env, ctx, key.system, key.table)).rows });
     }
     failing = conditions.failing;
     write = canonical(Object.fromEntries(Object.entries(fields).filter(([c]) => !(c in failing))));
@@ -1027,9 +1051,22 @@ export async function resolveName(args, identity, env) {
  * on the read. The orchestrator reads with no audience (`scope` null). A system or table that isn't there is refused
  * with the real ones.
  */
+/**
+ * Whom a source read is made for (I-59, R11.6): a filing worker reads as its record's audience, a discovery part's
+ * worker as its part's home, the orchestrator with none. Agents read a source only through graph-rag, so every read
+ * an agent makes is one of these.
+ */
+async function readerOf(identity, env, orchestrator) {
+  if (orchestrator) return { ctx: null, opts: {} };
+  const ctx = await jobContext(identity, env.db);
+  if (ctx) return { ctx, opts: { audience: ctx.home } };
+  const part = identity?.role?.discovery && env.discoveryPart ? await env.discoveryPart(identity.role.entry) : null;
+  if (part) return { ctx: null, opts: { audience: part.home ?? env.positions?.root ?? null } };
+  throw refuse("this thread has no record to file");
+}
+
 export async function findText(args, identity, env, { orchestrator = false } = {}) {
-  const ctx = orchestrator ? null : await jobContext(identity, env.db);
-  if (!orchestrator && !ctx) throw refuse("this thread has no record to file");
+  const { ctx, opts } = await readerOf(identity, env, orchestrator);
   const table = String(args.table ?? "").trim();
   const [system, name, ...rest] = table.split(":");
   const systems = await env.systems();
@@ -1038,11 +1075,45 @@ export async function findText(args, identity, env, { orchestrator = false } = {
   if (ctx) await assertTableReadable(env, ctx, table);
   const r = await env.searchRows(
     { system, table: name, text: args.text ?? null, columns: args.columns ?? null, where: args.where ?? null, select: args.select ?? null, first: args.first ?? 10, offset: args.offset ?? 0 },
-    ctx ? { audience: ctx.home } : {},
+    opts,
   );
   if (r.status === "refused") throw refuse(`${table}: ${r.why}`);
   if (!["found", "ambiguous", "none"].includes(r.status)) return { status: "unreachable", note: `The source can't be reached: ${String(r.why ?? "").slice(0, 200)}. A piece that needs it is Held.` };
   const { filing: _f, ...out } = r;
+  return out;
+}
+
+/**
+ * describe_source (I-59): a source's tables, or one table's key, columns, row count, few-valued columns and a few rows,
+ * read as the agent's audience (readerOf). In place of the source's own describe and read tools, which agents no
+ * longer get: discovery maps a source with this and find_rows.
+ */
+export async function describeSourceFor(args, identity, env, { orchestrator = false } = {}) {
+  const { ctx, opts } = await readerOf(identity, env, orchestrator);
+  const systems = await env.systems();
+  const want = String(args.table ?? args.system ?? "").trim();
+  const [system, name, ...rest] = want.split(":");
+  if (!want) {
+    const out = [];
+    for (const sys of systems) {
+      const r = await env.describeSource(sys, opts);
+      out.push(r.status === "found" ? { system: sys, tables: r.tables } : { system: sys, unreadable: r.why ?? r.status });
+    }
+    return { sources: out, note: "Name a table (system:table) to see its key, columns, rows and values." };
+  }
+  if (!systems.includes(system)) throw refuse(`no connected source called ${system}: the sources are ${systems.join(", ") || "none"}`);
+  if (rest.length) throw refuse(`table: system:table, like ${system}:dbo_Job`);
+  if (!name) {
+    const r = await env.describeSource(system, opts);
+    if (r.status === "refused") throw refuse(`${system}: ${r.why}`);
+    if (r.status !== "found") return { status: "unreachable", note: `The source can't be reached: ${String(r.why ?? "").slice(0, 200)}` };
+    return { system, tables: r.tables };
+  }
+  if (ctx) await assertTableReadable(env, ctx, `${system}:${name}`);
+  const r = await env.describeTable({ system, table: name, sample: args.sample ?? 3 }, opts);
+  if (r.status === "refused") throw refuse(`${system}:${name}: ${r.why}`);
+  if (r.status !== "found") return { status: "unreachable", note: `The source can't be reached: ${String(r.why ?? "").slice(0, 200)}` };
+  const { filing: _f, status: _s, ...out } = r;
   return out;
 }
 

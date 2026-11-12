@@ -99,13 +99,14 @@ const conversations = new Map();
 
 const usage = {};
 const addUsage = (role, u) => {
-  const x = (usage[role] ??= { input: 0, output: 0, calls: 0, agents: 0, sentChars: 0, outChars: 0, dsml: 0, providers: {} });
+  const x = (usage[role] ??= { input: 0, output: 0, calls: 0, agents: 0, sentChars: 0, outChars: 0, dsml: 0, markup: 0, providers: {} });
   x.input += u.input;
   x.output += u.output;
   x.calls += u.calls;
   x.sentChars += u.sentChars ?? 0;
   x.outChars += u.outChars ?? 0;
   x.dsml += u.dsml ?? 0;
+  x.markup += u.markup ?? 0;
   x.blank = (x.blank ?? 0) + (u.blank ?? 0);
   x.blank_retries = (x.blank_retries ?? 0) + (u.blank_retries ?? 0);
   for (const [k, n] of Object.entries(u.providers ?? {})) x.providers[k] = (x.providers[k] ?? 0) + n;
@@ -120,8 +121,8 @@ const { MASTER_INSTRUCTIONS } = await import(`${REPO}packages/server/src/agents/
 function instructions(role) {
   const src = ["Your sources", ""];
   src.push(role === "worker" ? "- The knowledge graph (graph-rag): as the people who see your sections see it, and nothing above it." : "- The knowledge graph (graph-rag): the whole organization's, in full.");
-  src.push(`- ${CONNECTION} (read-only): the synthetic test ERP (jobs, operations, work centers, equipment, employees, customers, vendors, material, orders, purchases, maintenance)`);
-  src.push("  Look up what you need directly, with a filter. Never read a whole table.");
+  src.push(`- ${CONNECTION}, read through graph-rag only (graph-rag_describe_source, graph-rag_find_rows, graph-rag_resolve_name, as your audience): the synthetic test ERP (jobs, operations, work centers, equipment, employees, customers, vendors, material, orders, purchases, maintenance)`);
+  src.push("  Look up what you need with find_rows. Never read a whole table.");
   return [src.join("\n"), role === "worker" ? WORKER_INSTRUCTIONS : MASTER_INSTRUCTIONS].join("\n\n");
 }
 
@@ -139,14 +140,11 @@ async function api(path, init = {}) {
 }
 const admin = mcpSession(`${GRAPH}/mcp`, ADMIN);
 const sql = async (query) => JSON.parse((await admin.call("query_graph", { query, language: "sql" })).text || "{}").rows ?? [];
-const dabRead = mcpSession(DAB_READ);
-const READ_TOOLS = ["describe_entities", "read_records"];
+// I-59: agents read the source only through graph-rag (describe_source, find_rows, resolve_name), so its audience
+// check (R11.6) applies to every read: no agent gets the source's own tools. DAB_READ is the harness's dumps' alone.
 
 async function agent(role, token, prompt, extra = {}) {
-  const tools = await toolsFrom([
-    { prefix: "graph-rag", session: mcpSession(`${GRAPH}/mcp`, token) },
-    { prefix: CONNECTION, session: dabRead, only: READ_TOOLS },
-  ]);
+  const tools = await toolsFrom([{ prefix: "graph-rag", session: mcpSession(`${GRAPH}/mcp`, token) }]);
   const client = clientFor(role);
   const id = extra.job ?? role;
   // sizes, for the cost estimate: what every request of this agent carries before its own history

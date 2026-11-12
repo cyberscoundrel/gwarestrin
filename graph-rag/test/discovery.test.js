@@ -116,3 +116,10 @@ test("a discovery part's worker gets only tools that read as its part's home: no
   for (const name of ["search_graph", "read_document", "about_thing", "list_classes", "relate_instance", "read_history", "request", "create_class", "start_discovery_worker"]) server.tool(name, {}, async () => "ok");
   assert.deepEqual([...server.tools.keys()].sort(), ["list_classes", "read_history", "relate_instance", "request"]);
 });
+
+test("I-59: discovery reads a source through graph-rag alone: describe_source and find_rows, for the run and its parts", async () => {
+  const { DISCOVERY_TOOLS, DISCOVERY_PART_TOOLS } = await import("../src/discovery.js");
+  for (const t of ["describe_source", "find_rows"]) assert.ok(DISCOVERY_TOOLS.has(t) && DISCOVERY_PART_TOOLS.has(t), t);
+  const { discoveryBrief } = await import("../src/discovery.js");
+  assert.match(discoveryBrief({ run: "r", connections: [{ name: "mssql" }] }), /graph-rag_describe_source/);
+});

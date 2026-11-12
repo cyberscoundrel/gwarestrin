@@ -533,6 +533,25 @@ export default [
     },
   },
   {
+    name: "I-59: an agent reads a source through graph-rag alone: describe_source gives a worker its tables, a table's key, columns, rows and values; a discovery part has it and find_rows",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const rec = await record(ctx, "describe", ["Job 4471 is complete."]);
+        const all = await ctx.tool(rec.worker, "describe_source", {});
+        ctx.check(all.sources?.[0]?.system === "mssql" && all.sources[0].tables?.includes("dbo_FJob"), `the tables: ${JSON.stringify(all).slice(0, 300)}`);
+        const one = await ctx.tool(rec.worker, "describe_source", { table: "mssql:dbo_FJob" });
+        ctx.check(one.primary_key?.[0] === "Job" && one.rows === 2 && "Quantity" in (one.columns ?? {}) && one.sample?.length === 2, `a table: ${JSON.stringify(one).slice(0, 300)}`);
+        const bare = await ctx.tool(rec.worker, "describe_source", { table: "mssql" });
+        ctx.check(bare.tables?.includes("dbo_FJob"), `a system alone: ${JSON.stringify(bare).slice(0, 200)}`);
+        const schemas = await toolSchemas(ctx, rec.worker);
+        ctx.check(schemas.has("describe_source") && schemas.has("find_rows"), `the worker has both: ${[...schemas.keys()].join(", ").slice(0, 300)}`);
+        const orch = await toolSchemas(ctx, orchestrator(ctx));
+        ctx.check(orch.has("describe_source") && orch.has("find_rows"), "and the orchestrator");
+      });
+    },
+  },
+  {
     name: "I-40: find_rows keeps the audience rules: a worker below the source's read home reads nothing",
     run: async (ctx) => {
       await setup(ctx);
@@ -552,6 +571,8 @@ export default [
           }
           ctx.check(/above your audience|above this audience/.test(r.error ?? ""), `refused: ${JSON.stringify(r).slice(0, 300)}`);
           ctx.check(!fake.calls.some((c) => c.name === "read_records" && c.args?.entity === "dbo_FJob" && c.args?.first !== 1), "no rows were read for it");
+          const d = await ctx.tool(rec.worker, "describe_source", { table: "mssql:dbo_FJob" });
+          ctx.check(/above your audience|above this audience/.test(d.error ?? ""), `describe_source refused the same way (I-59): ${JSON.stringify(d).slice(0, 300)}`);
         } finally {
           await upsertPolicyRow(ctx, "sources", JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: `${url}/read/mcp`, home: "floor" }, commit: { via: "dab-mcp", url: `${url}/write/mcp`, tables: ["dbo_FJob"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } }]));
         }

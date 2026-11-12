@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { envDeclaration, forgetSources, loadSources, testDeclaration } from "../src/sources.js";
 import { normalizeSource, writable } from "../src/model/sources.js";
 import { parseKey } from "../src/model/schema.js";
-import { DATABASE, SERVER, TABLES, WRITABLE, entityOf, keyColumn, shapes } from "../../test-sql/data.mjs";
+import { DATABASE, REFERENCES, SERVER, TABLES, WRITABLE, entityOf, keyColumn, shapes } from "../../test-sql/data.mjs";
 import { accessSql, schemaSql } from "../../test-sql/seed.mjs";
 import { readConfig, writeConfig } from "../../test-sql/render-dab.mjs";
 
@@ -127,4 +127,13 @@ test("the DAB configs carry no credentials; the write one exposes only the writa
   assert.deepEqual(Object.keys(w.entities).sort(), [...Object.keys(WRITABLE).map(entityOf), "dbo_GwConnectionIdentity"].sort());
   assert.deepEqual(Object.entries(w.entities).filter(([, e]) => e.permissions[0].actions.some((a) => a.action === "delete")).map(([n]) => n).sort(), ["dbo_Maintenance", "dbo_Purchase_Order"]);
   assert.deepEqual(readConfig().autoentities["all-dbo"].permissions[0].actions, [{ action: "read" }]);
+});
+
+test("I-58: every value the test rows hold in a reference column is a key of the table it names", () => {
+  for (const [table, refs] of Object.entries(REFERENCES))
+    for (const [col, target] of Object.entries(refs)) {
+      const keys = new Set(TABLES[target].rows.map((r) => String(r[keyColumn(target)])));
+      for (const r of TABLES[table].rows) if (r[col] !== null) assert.ok(keys.has(String(r[col])), `${table}.${col} = ${r[col]} is a ${target} key`);
+    }
+  assert.deepEqual(shapes().dbo_Maintenance.columns.Equipment, { references: "dbo_Equipment" });
 });

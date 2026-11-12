@@ -129,6 +129,12 @@ function markdown(r, snap) {
     L.push("| | calls | errors | malformed | source rejections | graph-rag refusals | corrections |", "|---|--:|--:|--:|--:|--:|--:|");
     L.push(line("all", r.toolCalls.all), line("filing (no discovery)", r.toolCalls.filing));
     for (const [role, x] of Object.entries(r.toolCalls.byRole)) L.push(line(role, x));
+    if (r.toolCalls.byProvider && Object.keys(r.toolCalls.byProvider).length) {
+      // I-56: which upstream served the reply each call came in, and how many replies had their tool-call markup repaired
+      L.push("", "By the provider that served the call (the reply it came in). Repaired: replies whose leaked tool-call markup the driver split back into arguments (I-56), counted apart from errors.", "");
+      L.push("| provider | calls | errors | malformed | source rejections | graph-rag refusals | repaired |", "|---|--:|--:|--:|--:|--:|--:|");
+      for (const [p, x] of Object.entries(r.toolCalls.byProvider).sort((a, b) => b[1].calls - a[1].calls)) L.push(`| ${p} | ${x.calls} | ${x.errors} (${x.calls ? Math.round((100 * x.errors) / x.calls) : 0}%) | ${x.malformed} | ${x.source} | ${x.graph_rag} | ${x.repaired ?? 0} |`);
+    }
   }
   L.push("", "## Source changes", "");
   if (!r.changes.length) L.push("No row changed.");

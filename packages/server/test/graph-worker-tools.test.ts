@@ -47,6 +47,22 @@ describe("graph worker tools", () => {
     expect(instructions).toMatch(/You are a graph worker/);
   });
 
+  it("I-59: a filing worker and the orchestrator get no source connection beside graph-rag, even one whose read tools are known", async () => {
+    for (const kind of ["worker", "master"] as const) {
+      const stateDir = await mkdtemp(path.join(tmpdir(), "gw-worker-"));
+      const mcp = new McpRegistryStore(stateDir);
+      await mcp.load();
+      await mcp.put("graph-rag", { url: "http://graph-rag:8000/mcp" });
+      await mcp.put("mssql", { url: "http://127.0.0.1:9/mcp", readTools: ["read_records"] } as never);
+      const dirs = await scaffoldAgent(stateDir, agent({ graphRole: { ...agent().graphRole!, kind } as never }), new ProviderRegistry(), stateDir, mcp, { graphWorker: true });
+      const cfg = JSON.parse(await readFile(path.join(dirs.workspace, ".mcp.json"), "utf8"));
+      expect(Object.keys(cfg.mcpServers), kind).toEqual(["graph-rag"]);
+      const instructions = await readFile(path.join(dirs.home, STANDING_INSTRUCTIONS_FILE), "utf8");
+      expect(instructions).not.toMatch(/mssql \(read-only\)/);
+      expect(instructions).toMatch(/graph-rag_describe_source/);
+    }
+  });
+
   it("the liaison's and worker's instructions: their own preamble, sources read-only, the profile's guidance", () => {
     const w = buildStandingInstructions({ graph: true, connections: [{ name: "mssql", description: "the ERP" }], profileInstructions: "Customers go by ERP code.", graphRole: "worker" });
     expect(w).toMatch(/mssql \(read-only\): the ERP/);

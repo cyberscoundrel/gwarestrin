@@ -7,10 +7,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dabTool } from "../e2e/fake-dab-core.mjs";
-import { addData, commitRow, enterData, forgetPrimaryKeys, forgetSources, removeAdded, tableRows } from "../src/data-entry.js";
+import { addData, commitRow, describeSource, describeTable, enterData, forgetPrimaryKeys, forgetSources, removeAdded, searchRows, tableRows } from "../src/data-entry.js";
 import { sourceFor } from "../src/sources.js";
 import { tableShape, writable as declaredWritable } from "../src/model/sources.js";
-import { accountEvidence, accountGiven, answerRequest, createInstance, makeJournal, fileToSource, giveAccount, undoFiled, holdPiece, floorUnsettled, keepPiece, keptPieces, kickBack, laterClassOrSource, readSourceRow, REFILE_LIMIT, refileRefusal, recordVerdict, requestOrchestrator, settleProposals } from "../src/filing.js";
+import { accountEvidence, accountGiven, answerRequest, createInstance, describeSourceFor, findText, makeJournal, fileToSource, giveAccount, undoFiled, holdPiece, floorUnsettled, keepPiece, keptPieces, kickBack, laterClassOrSource, readSourceRow, REFILE_LIMIT, refileRefusal, recordVerdict, requestOrchestrator, settleProposals } from "../src/filing.js";
 import { normalizeClass } from "../src/model/classes.js";
 import { parsePositionMap } from "../src/positions.js";
 
@@ -44,6 +44,7 @@ function fakeDab(rows, { down = false } = {}) {
     dbo_Job: { primaryKey: ["Job"], rows },
     dbo_Crew: { primaryKey: ["Emp"], rows: [{ Emp: "E1", Name: "Diep" }, { Emp: "E2", Name: "Sam" }] },
     // R19: a table that takes new rows, its key made by the source, deletable only to undo an add
+    dbo_Equipment: { primaryKey: ["Equipment"], rows: [{ Equipment: "FL-HYSTER", Description: "Hyster forklift" }, { Equipment: "FL-TOYOTA", Description: "Toyota forklift" }] },
     dbo_Maintenance: { primaryKey: ["Maintenance"], identity: true, deletes: true, rows: [{ Maintenance: 1, Work_Center: "CNC 2", Opened: "2026-10-27", Description: "Warm-up runs long", Status: "Open" }, { Maintenance: 2, Work_Center: null, Opened: "2026-09-14", Description: "Annual inspection", Status: "Closed" }] },
   };
   const calls = [];
@@ -76,7 +77,7 @@ function fakeDb({ writable = true, payload } = {}) {
     },
     async adbQuery(sql, params = {}) {
       // the declaration (model/sources.js): read at the floor's home, written to dbo_Job behind the guard
-      if (sql.includes("FROM OrgPolicy")) return sql.includes("'sources'") ? [{ json: JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: "http://fake/read", home: db.readHome ?? "floor" }, commit: writable ? { via: "dab-mcp", url: "http://fake/write", tables: [{ name: "dbo_Job", columns: db.jobColumns ?? {} }, { name: "dbo_Maintenance", adds: true, columns: { Status: { values: ["Open", "Closed"] } }, required: ["Opened", "Description", "Status"] }], actions: ["create", "update", "delete"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } : { via: "none" } }]) }] : [];
+      if (sql.includes("FROM OrgPolicy")) return sql.includes("'sources'") ? [{ json: JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: "http://fake/read", home: db.readHome ?? "floor" }, commit: writable ? { via: "dab-mcp", url: "http://fake/write", tables: [{ name: "dbo_Job", columns: db.jobColumns ?? {} }, { name: "dbo_Maintenance", adds: true, columns: { Status: { values: ["Open", "Closed"] }, Equipment: { references: "dbo_Equipment" } }, required: ["Opened", "Description", "Status"] }], actions: ["create", "update", "delete"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } : { via: "none" } }]) }] : [];
       if (sql.includes("FROM Job WHERE id")) return [{ payload: JSON.stringify(db.payload) }];
       if (sql.includes("_kind = 'document'")) return [{ rid: "#70:1", _recorded_by: db.recorder ?? "bob", _record_position: db.position ?? "floor", _recorded_at: "2026-11-09T08:00:00.000Z" }];
       if (sql.includes("FROM PendingWrite")) return db.pending.has(params.id) ? [db.pending.get(params.id)] : [];
@@ -1142,4 +1143,63 @@ test("I-50 keeps R16's order: without the authority a piece is Proposed whole, a
   a.db.recorder = "bob";
   const p = await fileToSource(add({ class: "maintenance", fields: { Opened: "2026-11-09", Description: "blades for the Hyd-Mech", Status: "Open" } }), identity, a.env);
   assert.equal(p.outcome, "not_filed", "with the authority (the floor's maintenance), the add's reworded value is told once");
+});
+
+test("I-57: a needed date the worker left out: the answer names the record's own day, which counts", async () => {
+  const h = setup();
+  h.env.texts = { "#71:3": coolant };
+  const told = await fileToSource(add({ fields: { Work_Center: "CNC 1", Description: "Coolant concentration on CNC 1 read 4 percent", Status: "Closed" } }), identity, h.env);
+  assert.deepEqual([told.outcome, told.missing, told.record_day], ["not_filed", ["Opened"], "2026-11-09"]);
+  assert.match(told.note, /put on record 2026-11-09, and that day counts as a date \(Opened may take it/);
+  const r = await fileToSource(add(), identity, h.env);
+  assert.deepEqual([r.outcome, r.key], ["filed", "mssql:dbo_Maintenance:3"], "given the record's day, the row is added");
+  // no date involved: no hint
+  const h2 = setup();
+  h2.env.texts = { "#71:3": "Job 4471 is complete." };
+  assert.equal((await fileToSource(piece({ fields: { Status: "done" } }), identity, h2.env)).record_day, undefined);
+});
+
+test("I-58: a reference column in a new row takes a key the record names; free words are told once, then left out and held", async () => {
+  const h = setup();
+  h.env.texts = { "#71:3": "Near miss at the dock: the Toyota forklift backed up without the beeper working. Beeper tagged out until maintenance replaces it." };
+  const fields = { Equipment: "FL-TOYOTA", Opened: "2026-11-09", Description: "Beeper tagged out until maintenance replaces it", Status: "Open" };
+  const ok = await fileToSource(add({ fields }), identity, h.env);
+  assert.deepEqual([ok.outcome, h.dab.tables.dbo_Maintenance.rows.at(-1).Equipment], ["filed", "FL-TOYOTA"]);
+  const b = setup();
+  b.env.texts = { "#71:3": "Swapped the Hyd-Mech blade; the old one goes back to Breskund for resharpening." };
+  const blade = { Equipment: "the Hyd-Mech blade", Opened: "2026-11-09", Description: "Swapped the Hyd-Mech blade", Status: "Closed" };
+  const told = await fileToSource(add({ fields: blade }), identity, b.env);
+  assert.deepEqual([told.outcome, told.fields.map((x) => x.column)], ["not_filed", ["Equipment"]]);
+  const again = await fileToSource(add({ fields: blade }), identity, b.env);
+  assert.deepEqual([again.outcome, again.held?.fields], ["filed", ["Equipment"]], "the row is added without it, and Equipment is held");
+  assert.equal(b.dab.tables.dbo_Maintenance.rows.at(-1).Equipment, undefined, "never the note's free words");
+});
+
+test("I-59: describe_source and find_rows read a source as the agent's audience: a worker its record's, a discovery part its part's, the orchestrator none", async () => {
+  const h = setup();
+  Object.assign(h.env, {
+    systems: async () => ["mssql"],
+    describeSource: (system, o = {}) => describeSource(system, { db: h.db, fetch: h.dab.fetch, positions: map, ...o }),
+    describeTable: (args, o = {}) => describeTable(args, { db: h.db, fetch: h.dab.fetch, positions: map, ...o }),
+    searchRows: (args, o = {}) => searchRows(args, { db: h.db, fetch: h.dab.fetch, positions: map, ...o }),
+    discoveryPart: async (rid) => (rid === "#90:1" ? { run: "run-1", home: "floor" } : null),
+  });
+  const all = await describeSourceFor({}, identity, h.env);
+  assert.ok(all.sources[0].tables.includes("dbo_Job"), JSON.stringify(all).slice(0, 200));
+  const job = await describeSourceFor({ table: "mssql:dbo_Job" }, identity, h.env);
+  assert.deepEqual([job.primary_key, Object.keys(job.columns), job.rows, job.values], [["Job"], ["Job", "Status", "Quantity"], 2, { Status: ["planned"] }], "a column with fewer values than rows lists them; one unique per row doesn't");
+  const m = await describeSourceFor({ table: "mssql:dbo_Maintenance", sample: 1 }, identity, h.env);
+  assert.equal(m.sample.length, 1);
+  // read above the audience: refused before anything is read
+  h.db.readHome = "ops";
+  forgetSources();
+  await assert.rejects(describeSourceFor({ table: "mssql:dbo_Job" }, identity, h.env), /above/);
+  await assert.rejects(findText({ table: "mssql:dbo_Job", where: { Job: 4471 } }, identity, h.env), /above/);
+  // the orchestrator reads with no audience; a discovery part reads as its part's home (floor, below ops: refused)
+  assert.equal((await describeSourceFor({ table: "mssql:dbo_Job" }, { user: "admin/agent:o", role: { kind: "master" } }, h.env, { orchestrator: true })).rows, 2);
+  const part = { user: "admin/agent:p", role: { kind: "worker", discovery: true, entry: "#90:1" } };
+  await assert.rejects(describeSourceFor({ table: "mssql:dbo_Job" }, part, h.env), /above/);
+  h.db.readHome = "floor";
+  forgetSources();
+  assert.equal((await findText({ table: "mssql:dbo_Job", where: { Job: 4471 } }, part, h.env)).rows[0].key, "mssql:dbo_Job:4471");
 });

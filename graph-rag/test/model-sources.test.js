@@ -28,7 +28,7 @@ test("the write endpoint is never the read endpoint; actions are create and upda
   assert.deepEqual([writable(adds, "dbo_M", "create"), writable(adds, "dbo_Job", "create"), writable(adds, "dbo_M", "delete"), writable(adds, "dbo_Job", "delete"), writable(adds, "dbo_Job", "update")], [true, false, true, false, true], "create and delete only where the table takes new rows");
   assert.deepEqual(tableShape(adds, "dbo_M").columns, { Done: { type: "boolean" }, Status: { values: ["Open", "Closed"] } });
   assert.deepEqual(tableShape(adds, "dbo_Job"), { name: "dbo_Job", adds: false, columns: {}, required: [], defaults: [] });
-  assert.throws(() => normalizeSource({ ...sql, commit: { ...sql.commit, tables: [{ name: "dbo_M", columns: { Status: "fixed" } }] } }), /must be "boolean" or \{ values/);
+  assert.throws(() => normalizeSource({ ...sql, commit: { ...sql.commit, tables: [{ name: "dbo_M", columns: { Status: "fixed" } }] } }), /must be "boolean", \{ values: \[..\] \} or \{ references/);
   assert.throws(() => normalizeSource({ ...sql, system: "bad system" }), /system id/);
 });
 

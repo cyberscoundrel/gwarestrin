@@ -248,7 +248,7 @@ await scenario("a worker cannot read above its audience by any tool it is offere
   // list_classes and read_dependencies: the classes stream's (routes-classes.js), read through this audience
   // resolve_name: the filing stream's read of instances and source rows (worker-tools.js); find_rows: its search of a
   // source table (I-40), through the same audience gate
-  const READS = ["search_graph", "about_thing", "read_document", "schema_graph", "list_classes", "read_dependencies", "resolve_name", "find_rows"];
+  const READS = ["search_graph", "about_thing", "read_document", "schema_graph", "list_classes", "read_dependencies", "resolve_name", "find_rows", "describe_source"];
   // writes that find what they act on by name, id or key: each must neither reveal nor touch what the audience can't see
   const FINDS = ["set_home", "file_to_source", "hold_piece", "keep_piece", "create_instance", "relate_section", "state_dependency"];
   // execute_graph: a worker's raw command is always a proposal for an admin (write.js), never run for it;
