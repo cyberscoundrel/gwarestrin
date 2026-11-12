@@ -30,7 +30,7 @@ export function fakeSource() {
     const reply = (result) => ({ jsonrpc: "2.0", id: msg.id ?? null, result });
     if (msg.method === "initialize") return reply({ protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: `fake-dab-${write ? "write" : "read"}`, version: "2.0.12" } });
     if (msg.method === "notifications/initialized") return null;
-    if (msg.method === "tools/list") return reply({ tools: ["describe_entities", "read_records", ...(write ? ["create_record", "update_record"] : [])].map((name) => ({ name, inputSchema: { type: "object" } })) });
+    if (msg.method === "tools/list") return reply({ tools: ["describe_entities", "read_records", ...(write ? ["create_record", "update_record", "delete_record"] : [])].map((name) => ({ name, inputSchema: { type: "object" } })) });
     if (msg.method === "tools/call") {
       const { name, arguments: args } = msg.params ?? {};
       const out = dabTool(tables, name, args ?? {}, { write });

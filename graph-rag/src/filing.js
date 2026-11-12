@@ -26,10 +26,11 @@ import { randomUUID } from "node:crypto";
 import { adbCommand as realCommand, adbQuery as realQuery, ENTITY_LABEL, RID_RE } from "./db.js";
 import { canSee, EVERYONE, visibleHomes } from "./positions.js";
 import { classKey } from "./model/classes.js";
-import { parseKey } from "./model/schema.js";
+import { parseKey, parseTable } from "./model/schema.js";
 import { FILED, FLOOR_REASON, GRAPH_RAG, HELD, KEPT, normalizeAccount, normalizeAnswer, normalizeEntry, normalizeRequest, normalizeVerdict, OUTCOMES, PROPOSED, suggestVerdict } from "./model/filing.js";
-import { assertApproverHolds, commitRow, enterData, findRows, getRow, sameValue, searchRows, tableRows } from "./data-entry.js";
-import { writeConditions } from "./model/write-conditions.js";
+import { addData, assertApproverHolds, commitRow, enterData, findRows, getRow, removeAdded, sameValue, searchRows, tableRows } from "./data-entry.js";
+import { addConditions, writeConditions } from "./model/write-conditions.js";
+import { tableShape, writable as declaredWritable } from "./model/sources.js";
 import { loadSources, sourceFor } from "./sources.js";
 import { addDependency, relateInstance } from "./instances.js";
 
@@ -100,6 +101,11 @@ export function arcadeStore(db = realDb) {
     async updateAttempt(id, { status, detail }) {
       await db.adbCommand("UPDATE FilingAttempt SET status = :status, detail = :detail, settled_at = :at WHERE id = :id", "sql", { id, status, detail: json(detail), at: new Date().toISOString() });
     },
+    /** the add attempts on a table (R19: one piece adds at most one row), newest last */
+    async createAttempts({ system, table }) {
+      const rows = await db.adbQuery("SELECT FROM FilingAttempt WHERE action = 'create' AND system = :system AND source_table = :table ORDER BY at ASC LIMIT 2000", { system, table });
+      return rows.map((r) => ({ ...Object.fromEntries(ATTEMPT_FIELDS.map((k) => [k, r[ATTEMPT_COLUMN(k)] ?? null])), fields: parse(r.fields), before: parse(r.row_before), piece: parse(r.piece), detail: parse(r.detail) }));
+    },
     async attempt(id) {
       const r = (await db.adbQuery("SELECT FROM FilingAttempt WHERE id = :id LIMIT 1", { id }))[0];
       return r ? { ...Object.fromEntries(ATTEMPT_FIELDS.map((k) => [k, r[ATTEMPT_COLUMN(k)] ?? null])), fields: parse(r.fields), before: parse(r.row_before), piece: parse(r.piece), detail: parse(r.detail) } : null;
@@ -166,8 +172,14 @@ export async function liveEnv(over = {}) {
     findRows: over.findRows ?? ((system, table, column, value, o = {}) => findSourceRows(system, table, column, value, { db, fetch: over.fetch, positions, ...o })),
     // rows by text and column values (data-entry.js searchRows, I-40), and the declared systems' names
     searchRows: over.searchRows ?? ((args, o = {}) => searchRows(args, { db, fetch: over.fetch, positions, ...o })),
-    // R16's undo: a write back through the write adapter, begun and settled in this env's log
+    // R16's undo: a write back through the write adapter, begun and settled in this env's log; R19's, a row removed
     commit: over.commit ?? ((args, o = {}) => commitRow(args, { db, fetch: over.fetch, journal: makeJournal(env), ...o })),
+    removeAdded: over.removeAdded ?? ((args, o = {}) => removeAdded(args, { db, fetch: over.fetch, journal: makeJournal(env), ...o })),
+    // R18, R19: a table's shape as its source declares it (which columns are yes/no or fixed-choice; whether it takes new rows)
+    tableShape: over.tableShape ?? (async (system, table) => {
+      const d = await sourceFor(system, db).catch(() => null);
+      return { ...tableShape(d, table), adds: declaredWritable(d, table, "create") };
+    }),
     approverHolds: over.approverHolds ?? ((p, person, entry) => assertApproverHolds(p, person, entry, { positions, db })),
     // R16 condition 2: the table's rows, as the audience may read them
     tableRows: over.tableRows ?? ((system, table, o = {}) => tableRows({ system, table }, { db, fetch: over.fetch, positions, ...o })),
@@ -183,6 +195,7 @@ export async function liveEnv(over = {}) {
     // instances and dependencies: the classes stream's one implementation (instances.js)
     instances: over.instances ?? { relate: relateInstance, depend: addDependency },
     enter: over.enter ?? ((args, opts = {}) => enterData(args, { db, fetch: over.fetch, positions, people: over.people, policy: over.policy, journal: makeJournal(env), index: over.index, ...opts })),
+    add: over.add ?? ((args, opts = {}) => addData(args, { db, fetch: over.fetch, positions, people: over.people, policy: over.policy, journal: makeJournal(env), index: over.index, ...opts })),
     signal: over.signal ?? (async (kind, payload) => (await import("./master-tools.js")).emitSignal(kind, payload)),
     resume: over.resume ?? (async (job, message) => (await import("./worker-pool.js")).resumeThread(job, message)),
     now: over.now ?? (() => new Date().toISOString()),
@@ -204,8 +217,8 @@ export async function jobContext(identity, db = realDb) {
   const row = (await db.adbQuery("SELECT payload FROM Job WHERE id = :id AND kind = 'review'", { id: job }).catch(() => []))[0];
   const p = parse(row?.payload) ?? {};
   if (!p.record || !Array.isArray(p.sections) || !p.home) return null;
-  const doc = (await db.adbQuery(`SELECT @rid AS rid, _recorded_by, _record_position FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: p.record }).catch(() => []))[0];
-  return { job, record: p.record, document: doc ? String(doc.rid) : null, sections: p.sections.map(String), home: p.home, recorder: doc?._recorded_by ? { person: doc._recorded_by, position: doc._record_position ?? null } : null, refile: Array.isArray(p.refile) ? p.refile : [] };
+  const doc = (await db.adbQuery(`SELECT @rid AS rid, _recorded_by, _record_position, _recorded_at FROM ${ENTITY_LABEL} WHERE _kind = 'document' AND _doc_id = :d LIMIT 1`, { d: p.record }).catch(() => []))[0];
+  return { job, record: p.record, document: doc ? String(doc.rid) : null, sections: p.sections.map(String), home: p.home, recorder: doc?._recorded_by ? { person: doc._recorded_by, position: doc._record_position ?? null } : null, recordedAt: doc?._recorded_at ?? null, refile: Array.isArray(p.refile) ? p.refile : [], corrections: p.corrections && typeof p.corrections === "object" ? p.corrections : {} };
 }
 
 const refuse = (msg) => Object.assign(new Error(msg), { refused: true });
@@ -322,10 +335,48 @@ async function sourceWriteFloor(env, ctx, system) {
  * R16 conditions 2 and 3 for one write, from the section's own text and the table's rows (model/write-conditions.js);
  * rows the audience can't read, or a table that can't be read, leave condition 2 to the row's key alone.
  */
-async function recordConditions(env, ctx, section, key, fields, current) {
-  const text = env.sectionText ? await env.sectionText(section) : String((await env.db.adbQuery(`SELECT text_identity FROM ${section} WHERE _kind = 'section'`).catch(() => []))[0]?.text_identity ?? "");
-  const t = env.tableRows ? await env.tableRows(key.system, key.table, { audience: ctx.home }).catch(() => null) : null;
-  return writeConditions({ text, key: key.key, fields, rows: t?.status === "ok" ? t.rows : [], primaryKey: t?.status === "ok" ? t.primaryKey : null, current });
+const sectionTextOf = async (env, section) => (env.sectionText ? await env.sectionText(section) : String((await env.db.adbQuery(`SELECT text_identity FROM ${section} WHERE _kind = 'section'`).catch(() => []))[0]?.text_identity ?? ""));
+const rowsFor = async (env, ctx, system, table) => {
+  const t = env.tableRows ? await env.tableRows(system, table, { audience: ctx.home }).catch(() => null) : null;
+  return t?.status === "ok" ? { rows: t.rows, primaryKey: t.primaryKey } : { rows: [], primaryKey: null };
+};
+const shapeFor = async (env, system, table) => (env.tableShape ? await env.tableShape(system, table).catch(() => null) : null);
+async function recordConditions(env, ctx, section, key, fields, current, shape) {
+  const { rows, primaryKey } = await rowsFor(env, ctx, key.system, key.table);
+  return writeConditions({ text: await sectionTextOf(env, section), key: key.key, fields, rows, primaryKey, current, shape, recordedAt: ctx.recordedAt ?? null });
+}
+
+/**
+ * The per-field mechanism (the coordinator's choice under R16, recorded as I-50): when condition 3 fails for some
+ * fields, the worker is told once which and why, with nothing filed, so it can send the write again without them or in
+ * the record's exact words. The next attempt at the same piece (its section and row, or its section and table for a
+ * new row) is decided field by field: what holds lands, and what doesn't, or what the worker left out since, becomes
+ * its own Held piece asking the recorder. A correction offered and never taken is settled Held when the worker gives
+ * its account. Code decides everything; the worker's one chance is to correct wording. Kept in the job's payload.
+ */
+async function setCorrection(env, ctx, claim, value) {
+  const row = (await env.db.adbQuery("SELECT payload FROM Job WHERE id = :id", { id: ctx.job }))[0];
+  const p = parse(row?.payload) ?? {};
+  const corrections = p.corrections && typeof p.corrections === "object" ? { ...p.corrections } : {};
+  if (value) corrections[claim] = value;
+  else delete corrections[claim];
+  p.corrections = corrections;
+  await env.db.adbCommand("UPDATE Job SET payload = :p WHERE id = :id", "sql", { p: JSON.stringify(p), id: ctx.job });
+  ctx.corrections = corrections;
+}
+const correctionReply = (target, c, { add = false } = {}) => ({
+  outcome: "not_filed",
+  [add ? "table" : "key"]: target,
+  fields: Object.entries(c.failing).map(([column, value]) => ({ column, value, why: c.values.find((v) => v.column === column)?.why ?? null })),
+  ...(c.missing?.length ? { missing: c.missing } : {}),
+  note: `Nothing was filed yet. ${c.why} Send file_to_source again for this piece, once: give each of these in the record's exact words, or leave it out${c.missing?.length ? `, and give ${c.missing.join(", ")} from the record` : ""}. Whatever you leave out, or still isn't in the record, is held for whoever put it on record; the rest is written.`,
+});
+
+/** a held piece for the fields that didn't hold (R16 condition 3, per field): nothing of them is written, the recorder is asked */
+async function holdFields(env, ctx, base, target, failing, why) {
+  const cols = Object.keys(failing);
+  const question = `"${base.piece}": ${cols.join(", ")} wasn't written to ${target.key ?? target.table}. ${why}`;
+  return holdEntry(env, ctx, { ...base, piece: `${base.piece} (${cols.join(", ")})`.slice(0, 1000), target: { ...target, fields: failing }, question, reason: `R16 condition 3: ${why}`.slice(0, 600) });
 }
 
 /** write one entry (normalized, append-only) */
@@ -352,6 +403,143 @@ async function holdEntry(env, ctx, { section, piece, cls, target, question, requ
   return entry;
 }
 
+/** a key as the worker gives it: a row (system:table:row), or a row to add (system:table, or system:table:new) */
+const ADD_ROW = /^(new|add|auto|next|\?|\+|\*)$/i;
+export function targetOf(raw) {
+  const s = String(raw ?? "").trim();
+  const k = parseKey(s);
+  if (k && !ADD_ROW.test(String(k.row_key).trim())) return { ...k, table_key: `${k.system}:${k.table}`, add: false };
+  const t = k ? { system: k.system, table: k.table } : parseTable(s);
+  return t ? { system: t.system, table: t.table, key: `${t.system}:${t.table}`, table_key: `${t.system}:${t.table}`, add: true } : null;
+}
+
+/** the arguments a correction keeps, to settle it Held if the worker never sends the piece again */
+const SETTLING = Symbol("settling");
+const correctionArgs = (a) => ({ section: a.section, piece: a.piece, said: a.said, class: a.class, key: a.key, fields: a.fields, ...(a.question ? { question: a.question } : {}) });
+
+/** one piece's add at a time in this process (R19: one piece adds at most one row, however often it is filed) */
+const claims = new Map();
+async function withClaim(claim, fn) {
+  const prev = claims.get(claim) ?? Promise.resolve();
+  let release;
+  const mine = new Promise((r) => (release = r));
+  claims.set(claim, prev.then(() => mine));
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (claims.get(claim) === mine || claims.size > 1000) claims.delete(claim);
+  }
+}
+
+/**
+ * R19: add a row for a piece (the user, 2026-11-11; the coordinator's reading), decided by code as an update is under R16:
+ *   - the table takes new rows (its declaration; else the piece is Proposed, as for any table that takes no such write);
+ *   - one piece adds at most one row: an add this section already made to this table (Filed or Proposed, not undone)
+ *     stands, and a new attempt is Filed "already" (or Proposed again) pointing at it; an earlier attempt whose end isn't
+ *     known holds the piece rather than risk a second row. The piece is its record, section and table (I-51);
+ *   - every value from the record (R18's exception), the columns a new row needs, the key the source's
+ *     (model/write-conditions.js addConditions); a row already holding these values is the piece already in the source;
+ *   - I-39 as narrowed (R17), then the recorder's authority (condition 1, addData);
+ *   - Filed: logged with the key the source made, and undone by removing the row (undoFiled).
+ */
+async function addPiece(args, identity, env, ctx, aim, { section, piece, cls, refiled, account, fields, shape }) {
+  const tkey = aim.table_key;
+  await assertTableReadable(env, ctx, tkey);
+  const target = { table: tkey, key: null, fields, added: true };
+  const base = { section, piece, cls: cls.key, target, refiled, account };
+  const unused = aim.unused ? ` The key ${aim.unused} names no row, so a row is added and the source makes its key.` : "";
+  return withClaim(`${ctx.record}|${section}|${tkey}`, async () => {
+    const mine = (await env.store.entries({ record: ctx.record, section })).filter((e) => e.target?.table === tkey && e.target?.added && !e.undone);
+    const filed = mine.find((e) => e.outcome === FILED && e.target.key);
+    if (filed) {
+      const entry = await appendEntry(env, { outcome: FILED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target: { table: tkey, key: filed.target.key, fields: filed.target.fields }, recorder: ctx.recorder.person, worker: ctx.job, reason: `this piece added its row already (entry ${filed.id}): nothing was added`, refiled_from: refiled, account });
+      return { outcome: FILED, entry: entry.id, key: filed.target.key, note: `Filed: this piece added ${filed.target.key} already; no second row is added.` };
+    }
+    const proposed = mine.find((e) => e.outcome === PROPOSED && e.pending_id);
+    if (proposed) {
+      const entry = await appendEntry(env, { outcome: PROPOSED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target: proposed.target, recorder: ctx.recorder.person, worker: ctx.job, reason: `this piece's row is proposed already (entry ${proposed.id}): nothing more is proposed`, pending_id: proposed.pending_id, refiled_from: refiled, account });
+      return { outcome: PROPOSED, entry: entry.id, note: "Proposed already: a person with authority approves the one row; carry on." };
+    }
+    const open = env.store.createAttempts ? (await env.store.createAttempts({ system: aim.system, table: aim.table })).filter((a) => a.piece?.record === ctx.record && a.piece?.section === section && ["begun", "unknown"].includes(a.status)) : [];
+    if (open.length) {
+      const entry = await holdEntry(env, ctx, { ...base, question: `An earlier attempt to add "${piece}" to ${tkey} may have landed, and the source couldn't say: it is held rather than risk a second row. Can you check whether it's there?`, reason: `an earlier add's end isn't known (attempt ${open.at(-1).id})` });
+      return { outcome: HELD, entry: entry.id, note: "Held: an earlier add of this piece may have landed; no second row is risked." };
+    }
+    const { rows, primaryKey } = await rowsFor(env, ctx, aim.system, aim.table);
+    const c = addConditions({ text: await sectionTextOf(env, section), table: tkey, data: fields, rows, primaryKey, shape, recordedAt: ctx.recordedAt ?? null });
+    // a row already holding these values: the piece is in the source (only once every value and needed column holds)
+    if (c.ok && c.existing?.key !== undefined && c.existing?.key !== null) {
+      const key = `${tkey}:${c.existing.key}`;
+      const entry = await appendEntry(env, { outcome: FILED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target: { table: tkey, key, fields: c.data }, recorder: ctx.recorder.person, worker: ctx.job, reason: "a row already held it: nothing was added", refiled_from: refiled, account });
+      return { outcome: FILED, entry: entry.id, key, note: `Filed: ${key} already holds this; no row was added.` };
+    }
+    const claim = `${section}|${tkey}|add`;
+    const offered = ctx.corrections?.[claim] ?? null;
+    const held = await sourceWriteFloor(env, ctx, aim.system);
+    const add = (data, cond) =>
+      env.add(
+        { actsFor: ctx.recorder, by: identity.user, system: aim.system, table: aim.table, data, cls: cls.key, reason: piece, identity, held, conditions: cond, piece: { record: ctx.record, section, job: ctx.job, piece } },
+        { proposal: (_identity, reason) => ({ note: String(reason ?? "").slice(0, 600) || "(no reason given)" }) },
+      );
+    // authority first (condition 1): without it the add is Proposed whole, and a person decides; with it, R19's conditions
+    let data = { ...c.failing, ...c.passing };
+    let r = await add(data, c.ok ? { ok: true } : { ok: false, failed: c.failed, why: c.why });
+    let failing = {};
+    if (r.outcome === "held" && r.status === "conditions") {
+      if (!offered) {
+        await setCorrection(env, ctx, claim, { args: correctionArgs(args), failing: c.failing, at: env.now() });
+        const reply = correctionReply(tkey, c, { add: true });
+        return { ...reply, note: `${reply.note}${unused}` };
+      }
+      await setCorrection(env, ctx, claim, null);
+      // per field: a value that didn't hold is left out of the row and held, unless the row needs it (then the piece is Held)
+      const required = new Set(shape?.required ?? []);
+      if (c.failed === "required" || Object.keys(c.failing).some((col) => required.has(col)) || !Object.keys(c.passing).length) {
+        const entry = await holdEntry(env, ctx, { ...base, question: `"${piece}" wasn't added to ${tkey}. ${c.why}`, reason: `R19: ${c.why}`.slice(0, 600) });
+        return { outcome: HELD, entry: entry.id, note: `Held: ${c.why} Nothing was added, and whoever put it on record is asked.` };
+      }
+      failing = c.failing;
+      data = c.passing;
+      r = await add(data, { ok: true });
+    } else if (offered) await setCorrection(env, ctx, claim, null);
+    const leftOut = offered ? Object.fromEntries(Object.entries(offered.failing ?? {}).filter(([col]) => !(col in fields))) : {};
+    const heldFields = { ...leftOut, ...failing };
+    const heldWhy = [Object.keys(failing).length ? c.why : null, Object.keys(leftOut).length ? `${Object.keys(leftOut).join(", ")} was left out after the record's words didn't give it` : null].filter(Boolean).join(" ");
+    const heldRest = async (key) => {
+      if (!Object.keys(heldFields).length) return [{}, ""];
+      const part = await holdFields(env, ctx, base, { table: tkey, key }, heldFields, heldWhy);
+      return [{ held: { entry: part.id, fields: Object.keys(heldFields) } }, ` ${Object.keys(heldFields).join(", ")} wasn't written: held, and whoever put it on record is asked.`];
+    };
+    if (r.outcome === "filed" && r.key) {
+      const entry = await appendEntry(env, { outcome: FILED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target: { table: tkey, key: r.key, fields: data, added: true }, recorder: ctx.recorder.person, worker: ctx.job, reason: `added: ${r.key}`, refiled_from: refiled, account });
+      const [alsoHeld, heldNote] = await heldRest(r.key);
+      return { outcome: FILED, entry: entry.id, key: r.key, ...alsoHeld, note: `Filed: added ${r.key}.${unused}${heldNote}` };
+    }
+    if (r.outcome === "proposed") {
+      const entry = await appendEntry(env, { outcome: PROPOSED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target: { table: tkey, key: null, fields: data, added: true }, recorder: ctx.recorder.person, worker: ctx.job, reason: r.reason || "the recorder doesn't hold the authority", pending_id: r.pendingId ?? null, refiled_from: refiled, account });
+      const [alsoHeld, heldNote] = await heldRest(null);
+      return { outcome: PROPOSED, entry: entry.id, ...alsoHeld, note: `Proposed: ${entry.reason}. A person with authority approves adding the row; carry on.${heldNote}` };
+    }
+    const why = r.why ?? r.reason ?? r.status ?? "the row wasn't added";
+    const entry = await holdEntry(env, ctx, { ...base, question: args.question || `"${piece}" wasn't added to ${tkey} (${why}). Can you confirm it?`, reason: `${r.status ?? r.outcome ?? "held"}: ${why}`.slice(0, 600) });
+    return { outcome: HELD, entry: entry.id, note: "Held: no row was added, and whoever put it on record is asked." };
+  });
+}
+
+/** corrections offered and never taken (I-50): each is Held as its first attempt stood, asking the recorder; nothing is written */
+async function settleCorrections(env, ctx) {
+  for (const [claim, c] of Object.entries(ctx.corrections ?? {})) {
+    const a = c?.args ?? {};
+    const aim = targetOf(a.key);
+    const cols = Object.keys(c?.failing ?? {});
+    const target = aim ? { table: aim.table_key, key: aim.add ? null : aim.key, fields: a.fields ?? null, ...(aim.add ? { added: true } : {}) } : null;
+    if (target) await holdEntry(env, ctx, { section: a.section, piece: String(a.piece ?? "a piece").slice(0, 1000), cls: a.class ? classKey(a.class) : null, target, refiled: null, account: { said: String(a.said ?? "(no account)").slice(0, 2000) || "(no account)", at: env.now() }, question: `"${a.piece}" wasn't written: ${cols.join(", ")} isn't in the record's words, and it wasn't sent again.`, reason: `R16 condition 3, not corrected: ${cols.join(", ")}` });
+    await setCorrection(env, ctx, claim, null);
+  }
+}
+
 const tableOf = (key) => {
   const k = parseKey(key);
   return k ? `${k.system}:${k.table}` : null;
@@ -374,19 +562,25 @@ export async function fileToSource(args, identity, env) {
   if (!said) throw refuse("said: your account of what this piece writes, in a sentence (the orchestrator checks it against the source)");
   const account = { said, at: env.now() };
   const cls = await visibleClass(env, ctx, args.class);
-  const key = parseKey(args.key);
-  if (!key) throw refuse(`key: not system:table:row: ${args.key ?? "(none)"}`);
+  const aim = targetOf(args.key);
+  if (!aim) throw refuse(`key: not system:table:row, nor system:table:new to add a row: ${args.key ?? "(none)"}`);
   const fields = args.fields && typeof args.fields === "object" && !Array.isArray(args.fields) ? args.fields : null;
   if (!fields || !Object.keys(fields).length) throw refuse("fields: the columns to write, with their values");
   const refiled = await refiledFrom(env, ctx, args.refiles);
   // the row must be in the class's own table: a key elsewhere would read a table the class doesn't vouch for (F-B1)
-  if (!cls.record_table || tableOf(key.key).toLowerCase() !== String(cls.record_table).toLowerCase()) throw refuse(`${key.key} isn't a row of ${cls.key}'s table (${cls.record_table ?? "it has none"}): file it under the class whose table holds it`);
+  if (!cls.record_table || aim.table_key.toLowerCase() !== String(cls.record_table).toLowerCase()) throw refuse(`${aim.key} isn't ${aim.add ? "a table" : "a row"} of ${cls.key}'s table (${cls.record_table ?? "it has none"}): file it under the class whose table holds it`);
+  const shape = await shapeFor(env, aim.system, aim.table);
+  const addCtx = { section, piece, cls, refiled, account, fields, shape };
+  if (aim.add) return addPiece(args, identity, env, ctx, aim, addCtx);
+  const key = aim;
   const target = { table: tableOf(key.key), key: key.key, fields };
   const base = { section, piece, cls: cls.key, target, refiled, account };
   const read = await workerRead(env, ctx, key.key);
   if (read.status === "unreachable") {
     return { outcome: HELD, entry: (await holdEntry(env, ctx, { ...base, question: args.question || `${key.system} couldn't be reached to file this: "${piece}". It waits for you to confirm it once the source is back.`, reason: read.error })).id };
   }
+  // R19: a row the key names that isn't there, in a table that takes new rows, is a row to add; the key isn't used (the source makes it)
+  if (read.status === "not_found" && shape?.adds) return addPiece(args, identity, env, ctx, { ...aim, add: true, key: aim.table_key, unused: key.key }, addCtx);
   if (read.status === "not_found") {
     return { outcome: HELD, entry: (await holdEntry(env, ctx, { ...base, question: args.question || `No row ${key.key} was found for "${piece}". Which record did you mean?`, reason: read.error ?? null })).id };
   }
@@ -396,20 +590,60 @@ export async function fileToSource(args, identity, env) {
   // R16: whether a write lands is decided here, in code: (1) the recorder's authority (enterData), (2) the record names
   // the row, (3) every value written is in the record (model/write-conditions.js), (4) the row unchanged since it was read
   // (commitRow). Nothing the worker says about the piece being a change counts (R12's state-versus-change test is gone).
-  const conditions = await recordConditions(env, ctx, section, key, fields, read.row);
-  const r = await env.enter(
-    { actsFor: ctx.recorder, by: identity.user, key: key.key, fields, cls: cls.key, reason: piece, identity, held, conditions, before: Object.fromEntries(Object.keys(fields).map((c) => [c, read.row[c] ?? null])), piece: { record: ctx.record, section, job: ctx.job, piece } },
-    // a Proposed piece is an outcome, not a wait: the proposal names no thread (the person approves it as themselves)
-    { proposal: (_identity, reason) => ({ note: String(reason ?? "").slice(0, 600) || "(no reason given)" }) },
-  );
+  const conditions = await recordConditions(env, ctx, section, key, fields, read.row, shape);
+  const claim = `${section}|${key.key}`;
+  const offered = ctx.corrections?.[claim] ?? null;
+  // the values as the columns take them (R18: a choice in its declared spelling, a yes/no as a boolean)
+  const canonical = (f) => Object.fromEntries(Object.entries(f).map(([c, v]) => [c, c in (conditions.passing ?? {}) ? conditions.passing[c] : v]));
+  const enter = (write, cond) =>
+    env.enter(
+      { actsFor: ctx.recorder, by: identity.user, key: key.key, fields: write, cls: cls.key, reason: piece, identity, held, conditions: cond, before: Object.fromEntries(Object.keys(write).map((c) => [c, read.row[c] ?? null])), piece: { record: ctx.record, section, job: ctx.job, piece } },
+      // a Proposed piece is an outcome, not a wait: the proposal names no thread (the person approves it as themselves)
+      { proposal: (_identity, reason) => ({ note: String(reason ?? "").slice(0, 600) || "(no reason given)" }) },
+    );
+  // authority first (condition 1, R2): a recorder without it is Proposed whole, and a person decides the values.
+  // With it, conditions 2 and 3 decide; nothing is written or queued while one fails (enterData).
+  let write = canonical(fields);
+  let r = await enter(write, conditions);
+  let failing = {};
+  if (r.outcome === "held" && r.status === "conditions" && r.condition === 3) {
+    // I-50: condition 3 failing for some fields: the worker is told once, and nothing is filed yet
+    if (!offered && !args[SETTLING]) {
+      await setCorrection(env, ctx, claim, { args: correctionArgs(args), failing: conditions.failing, at: env.now() });
+      return correctionReply(key.key, conditions);
+    }
+    failing = conditions.failing;
+    write = canonical(Object.fromEntries(Object.entries(fields).filter(([c]) => !(c in failing))));
+    if (!Object.keys(write).length) {
+      // nothing of the write holds: the piece is Held, as before the per-field mechanism
+      if (offered) await setCorrection(env, ctx, claim, null);
+      const entry = await holdEntry(env, ctx, { ...base, question: `"${piece}" wasn't written to ${key.key}. ${conditions.why}`, reason: `R16 condition 3: ${conditions.why}`.slice(0, 600) });
+      return { outcome: HELD, entry: entry.id, note: `Held (R16 condition 3): ${conditions.why} Nothing was written, and whoever put it on record is asked.` };
+    }
+    r = await enter(write, { ...conditions, ok: true, failed: null, why: null });
+  }
+  if (offered) await setCorrection(env, ctx, claim, null);
+  // what the first attempt failed on and this one left out: held for the recorder, never dropped silently
+  const leftOut = offered ? Object.fromEntries(Object.entries(offered.failing ?? {}).filter(([c]) => !(c in fields))) : {};
+  const heldFields = { ...leftOut, ...failing };
+  const heldWhy = [Object.keys(failing).length ? conditions.why : null, Object.keys(leftOut).length ? `${Object.keys(leftOut).join(", ")} was left out after the record's words didn't give it` : null].filter(Boolean).join(" ");
+  const writeTarget = { ...target, fields: write };
+  // what didn't hold, field by field, is its own Held piece, whatever happened to the rest (logged after it)
+  const heldRest = async () => {
+    if (!Object.keys(heldFields).length) return [{}, ""];
+    const part = await holdFields(env, ctx, base, target, heldFields, heldWhy);
+    return [{ held: { entry: part.id, fields: Object.keys(heldFields) } }, ` ${Object.keys(heldFields).join(", ")} wasn't written: held, and whoever put it on record is asked.`];
+  };
   if (r.outcome === "filed") {
     const before = r.status === "already" ? "the row already held it: nothing was written" : r.before && Object.keys(r.before).length ? `before: ${JSON.stringify(r.before)}` : null;
-    const entry = await appendEntry(env, { outcome: FILED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target, recorder: ctx.recorder.person, worker: ctx.job, reason: before, refiled_from: refiled, account });
-    return { outcome: FILED, entry: entry.id, note: "Filed: written to the source." };
+    const entry = await appendEntry(env, { outcome: FILED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target: writeTarget, recorder: ctx.recorder.person, worker: ctx.job, reason: before, refiled_from: refiled, account });
+    const [alsoHeld, heldNote] = await heldRest();
+    return { outcome: FILED, entry: entry.id, ...alsoHeld, note: `Filed: written to the source.${heldNote}` };
   }
   if (r.outcome === "proposed") {
-    const entry = await appendEntry(env, { outcome: PROPOSED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target, recorder: ctx.recorder.person, worker: ctx.job, reason: r.reason || "the recorder doesn't hold the authority", pending_id: r.pendingId ?? null, refiled_from: refiled, account });
-    return { outcome: PROPOSED, entry: entry.id, note: `Proposed: ${entry.reason}. A person with authority approves it; carry on.` };
+    const entry = await appendEntry(env, { outcome: PROPOSED, record: ctx.record, section, home: ctx.home, piece, class: cls.key, target: writeTarget, recorder: ctx.recorder.person, worker: ctx.job, reason: r.reason || "the recorder doesn't hold the authority", pending_id: r.pendingId ?? null, refiled_from: refiled, account });
+    const [alsoHeld, heldNote] = await heldRest();
+    return { outcome: PROPOSED, entry: entry.id, ...alsoHeld, note: `Proposed: ${entry.reason}. A person with authority approves it; carry on.${heldNote}` };
   }
   if (r.outcome === "refused") {
     // NEEDS A RULING (BUILD.md 12): the recorder has left or moved, so nothing stands behind the write: Held, asking them
@@ -824,6 +1058,17 @@ export async function undoFiled(entryId, person, env) {
   if (!e) throw refuse(`no filing-log entry ${entryId}`);
   if (e.outcome !== FILED || !e.target?.key || !e.target.fields) throw refuse(`entry ${e.id} is ${e.outcome}, not a Filed write: nothing to undo`);
   if (e.undone) throw refuse(`entry ${e.id} was undone already, by ${e.undone.by}`);
+  if (e.target.added) {
+    // R19: undoing an added row removes it, while it still holds what was added (never a row changed since)
+    if (!/^added: /.test(String(e.reason ?? ""))) throw refuse(`entry ${e.id} added no row (${e.reason ?? "none"}): nothing is undone`);
+    await env.approverHolds({ class: e.class, fields: e.target.fields }, person, env.people ? await env.people(person) : null);
+    const r = await env.removeAdded({ key: e.target.key, expect: e.target.fields, piece: { undo_of: e.id, by: person, record: e.record, section: e.section } });
+    if (r.status === "moved") throw refuse(`${e.target.key} changed since entry ${e.id} added it: it isn't removed`);
+    if (r.filing !== "filed") throw refuse(`the undo didn't land (${r.status}): ${r.why ?? "the source refused it"}`);
+    const undone = { by: person, at: env.now(), log_id: r.log_id ?? null, removed: true };
+    await env.store.annotateEntry(e.id, { undone });
+    return { entry: e.id, key: e.target.key, removed: true, undone };
+  }
   const m = /^before: (\{.*\})$/s.exec(String(e.reason ?? ""));
   if (!m) throw refuse(`entry ${e.id} logged no value it replaced (${e.reason ?? "none"}): nothing was written, so nothing is undone`);
   const before = JSON.parse(m[1]);
@@ -843,6 +1088,7 @@ export async function undoFiled(entryId, person, env) {
 export async function giveAccount(args, identity, env) {
   const ctx = await jobContext(identity, env.db);
   if (!ctx) throw refuse("this thread has no record to file");
+  if (Object.keys(ctx.corrections ?? {}).length) await settleCorrections(env, ctx);
   const mine = await env.store.entries({ worker: ctx.job });
   const byId = new Map(mine.map((e) => [e.id, e]));
   for (const p of args.pieces ?? []) {
@@ -906,11 +1152,20 @@ export async function recordVerdict(entryId, { result, note }, by, env) {
 /** ---- after the fact: approvals, Held answers ---- */
 
 /** the Filed entry an approval appends, pointing back at the Proposed one (NEEDS A RULING F6); once only */
-async function fileApproved(e, approver, env) {
+async function fileApproved(e, approver, env, addedKey = null) {
   if ((await env.store.entries({ refiled_from: e.id })).length) return false;
+  // one proposal, one Filed entry: a piece proposed again (R19's add) shares the proposal, and the first entry settles it
+  if (e.pending_id) {
+    const same = (await env.store.entries({ pending_id: e.pending_id })).filter((x) => x.outcome === PROPOSED).map((x) => x.id);
+    for (const id of same) if ((await env.store.entries({ refiled_from: id })).length) return false;
+  }
+  // an approved add names the row the source made (R19); without it, it can't be Filed
+  if (e.target?.added && !e.target.key && !addedKey) return false;
   // the account is the worker's for the write it proposed; the approval is the reason (the worker didn't write it)
   const account = e.account ?? { said: `proposed: ${e.piece}`, at: env.now() };
-  await appendEntry(env, { outcome: FILED, record: e.record, section: e.section, home: e.home, piece: e.piece, class: e.class, instances: e.instances, target: e.target, recorder: e.recorder, worker: e.worker, reason: `approved by ${approver ?? "a person"}`, refiled_from: e.id, account });
+  const target = addedKey ? { ...e.target, key: addedKey } : e.target;
+  const reason = addedKey ? `added: ${addedKey}, approved by ${approver ?? "a person"}` : `approved by ${approver ?? "a person"}`;
+  await appendEntry(env, { outcome: FILED, record: e.record, section: e.section, home: e.home, piece: e.piece, class: e.class, instances: e.instances, target, recorder: e.recorder, worker: e.worker, reason, refiled_from: e.id, account });
   return true;
 }
 
@@ -927,7 +1182,7 @@ export function makeJournal(envOrPromise) {
     async begin(attempt) {
       const env = await envOf();
       const a = { id: randomUUID(), system: attempt?.system ?? null, table: attempt?.table ?? null, key: attempt?.key ?? null, action: attempt?.action ?? null, fields: attempt?.fields ?? null, before: attempt?.before ?? null, piece: attempt?.piece ?? null, status: "begun", detail: null, at: env.now(), settled_at: null };
-      if (!a.system || !a.table || !["update", "create"].includes(a.action)) throw new Error("a write's attempt names its system, table and action");
+      if (!a.system || !a.table || !["update", "create", "delete"].includes(a.action)) throw new Error("a write's attempt names its system, table and action");
       await env.store.insertAttempt(a);
       return a.id;
     },
@@ -939,7 +1194,7 @@ export function makeJournal(envOrPromise) {
       const pending = a?.piece?.pending_id;
       if (status !== "written" || !pending) return;
       const proposed = (await env.store.entries({ pending_id: String(pending) })).find((e) => e.outcome === PROPOSED);
-      if (proposed) await fileApproved(proposed, a.piece.approved_by, env);
+      if (proposed) await fileApproved(proposed, a.piece.approved_by, env, a.action === "create" ? (a.detail?.key ?? null) : null);
     },
   };
 }

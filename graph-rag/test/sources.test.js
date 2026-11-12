@@ -3,10 +3,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { forgetSources, loadSources, testDeclaration } from "../src/sources.js";
-import { writable } from "../src/model/sources.js";
+import { envDeclaration, forgetSources, loadSources, testDeclaration } from "../src/sources.js";
+import { normalizeSource, writable } from "../src/model/sources.js";
 import { parseKey } from "../src/model/schema.js";
-import { DATABASE, SERVER, TABLES, WRITABLE, entityOf, keyColumn } from "../../test-sql/data.mjs";
+import { DATABASE, SERVER, TABLES, WRITABLE, entityOf, keyColumn, shapes } from "../../test-sql/data.mjs";
 import { accessSql, schemaSql } from "../../test-sql/seed.mjs";
 import { readConfig, writeConfig } from "../../test-sql/render-dab.mjs";
 
@@ -62,8 +62,12 @@ test("the test declaration: home everyone (test configuration only), the synthet
   const d = testDeclaration();
   assert.equal(d.read.home, "everyone");
   assert.deepEqual(d.commit.guard, { server: SERVER, database: DATABASE, login: "gwsynth_write" });
-  assert.deepEqual(d.commit.tables.sort(), Object.keys(WRITABLE).map(entityOf).sort());
+  assert.deepEqual(d.commit.tables.map((t) => t.name ?? t).sort(), Object.keys(WRITABLE).map(entityOf).sort());
   assert.equal(writable({ ...d, commit: { ...d.commit, actions: ["create", "update"] } }, "dbo_Customer"), false);
+  // R18, R19: graph-rag's declaration and the harness's (test-sql/data.mjs shapes, passed as DAB_TABLE_SHAPES) are one
+  const n = normalizeSource(d);
+  assert.deepEqual(normalizeSource(envDeclaration({ DAB_READ_URL: "http://r/mcp", DAB_WRITE_URL: "http://w/mcp", DAB_WRITE_TABLES: Object.keys(WRITABLE).map(entityOf).join(","), DAB_WRITE_ACTIONS: "create,update,delete", DAB_TABLE_SHAPES: JSON.stringify(shapes()) })).commit.shapes, n.commit.shapes);
+  assert.deepEqual(Object.values(n.commit.shapes).filter((s) => s.adds).map((s) => s.name).sort(), ["dbo_Maintenance", "dbo_Purchase_Order"], "the tables a label adds a row to, keyed by the source");
 });
 
 // ---- the synthetic database ----
@@ -105,21 +109,22 @@ test("every row holds its table's columns, keys are unique, and nullable columns
   }
 });
 
-test("the seed SQL holds no password, and the write login is granted create and update on chosen tables, never delete", () => {
+test("the seed SQL holds no password, and the write login is granted create and update on chosen tables, delete only where a table takes new rows", () => {
   const access = accessSql();
-  assert.ok(!/DELETE/i.test(access.replace(/DROP VIEW/g, "")), "no DELETE grant");
+  assert.deepEqual([...access.matchAll(/GRANT [^;]*DELETE ON dbo\.\[(\w+)\]/g)].map((m) => m[1]).sort(), ["Maintenance", "Purchase_Order"], "DELETE only to undo an added row (R19)");
+  assert.throws(() => accessSql(DATABASE, { Job: ["update", "delete"] }), /needs create/);
   assert.match(access, /\$\(GWSYNTH_READ_PASSWORD\)/, "the password comes from the container's environment");
   assert.match(access, /GRANT SELECT, UPDATE ON dbo\.\[Job\] TO \[gwsynth_write\]/);
   assert.ok(!/ON dbo\.\[Customer\] TO \[gwsynth_write\]/.test(access));
-  assert.throws(() => accessSql(DATABASE, { Job: ["delete"] }), /only create and update/);
+  assert.throws(() => accessSql(DATABASE, { Job: ["drop"] }), /only create, update/);
   assert.throws(() => accessSql("x]; DROP DATABASE y; --"), /not a plain SQL name/);
   assert.match(schemaSql(), /CREATE TABLE dbo\.\[Job\]/);
 });
 
-test("the DAB configs carry no credentials; the write one exposes only the writable tables and the guard's view, never delete", () => {
+test("the DAB configs carry no credentials; the write one exposes only the writable tables and the guard's view, delete only where a table takes new rows", () => {
   const w = writeConfig();
   assert.equal(w["data-source"]["connection-string"], "@env('GWSYNTH_DAB_CONNECTION')");
   assert.deepEqual(Object.keys(w.entities).sort(), [...Object.keys(WRITABLE).map(entityOf), "dbo_GwConnectionIdentity"].sort());
-  for (const e of Object.values(w.entities)) assert.ok(!e.permissions[0].actions.some((a) => a.action === "delete"));
+  assert.deepEqual(Object.entries(w.entities).filter(([, e]) => e.permissions[0].actions.some((a) => a.action === "delete")).map(([n]) => n).sort(), ["dbo_Maintenance", "dbo_Purchase_Order"]);
   assert.deepEqual(readConfig().autoentities["all-dbo"].permissions[0].actions, [{ action: "read" }]);
 });

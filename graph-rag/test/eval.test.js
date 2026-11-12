@@ -453,6 +453,7 @@ test("I-43: tool errors split three ways: malformed calls, source rejections, gr
   const { errorKind, parseLog, toolCallCounts } = await import("../eval/toolcalls.mjs");
   const log = [
     { agent: "worker", tool: "graph-rag_keep_piece", error: false },
+    { agent: "worker", tool: "graph-rag_file_to_source", error: false, outcome: "not_filed" },
     { agent: "worker", tool: "graph-rag_keep_piece", error: true, errorText: "MCP error -32602: Input validation error: Invalid arguments for tool keep_piece" },
     { agent: "worker", tool: "graph-pool_status", error: true, errorText: "error: no tool graph-pool_status" },
     { agent: "worker", tool: "mssql_read_records", error: true, errorText: '{ "toolName": "read_records", "status": "error", "error": { "message": "$filter query parameter is not well formed." } }' },
@@ -460,14 +461,14 @@ test("I-43: tool errors split three ways: malformed calls, source rejections, gr
     { agent: "discovery", tool: "mssql_describe_entities", error: true, errorText: "No entities found" },
     { agent: "worker", turn: 1, reply: "" },
   ];
-  assert.equal(errorKind(log[1]), "malformed");
-  assert.equal(errorKind(log[2]), "malformed", "a tool that doesn't exist");
-  assert.equal(errorKind(log[3]), "source");
-  assert.equal(errorKind(log[4]), "graph_rag");
+  assert.equal(errorKind(log[2]), "malformed");
+  assert.equal(errorKind(log[3]), "malformed", "a tool that doesn't exist");
+  assert.equal(errorKind(log[4]), "source");
+  assert.equal(errorKind(log[5]), "graph_rag");
   const c = toolCallCounts(log);
-  assert.deepEqual(c.all, { calls: 6, errors: 5, malformed: 2, source: 2, graph_rag: 1 });
-  assert.deepEqual(c.filing, { calls: 5, errors: 4, malformed: 2, source: 1, graph_rag: 1 }, "discovery left out");
-  assert.deepEqual(c.byRole.orchestrator, { calls: 1, errors: 1, malformed: 0, source: 0, graph_rag: 1 });
+  assert.deepEqual(c.all, { calls: 7, errors: 5, malformed: 2, source: 2, graph_rag: 1, corrections: 1 }, "a correction (I-50) is an answer, not an error");
+  assert.deepEqual(c.filing, { calls: 6, errors: 4, malformed: 2, source: 1, graph_rag: 1, corrections: 1 }, "discovery left out");
+  assert.deepEqual(c.byRole.orchestrator, { calls: 1, errors: 1, malformed: 0, source: 0, graph_rag: 1, corrections: 0 });
   assert.equal(parseLog(`${JSON.stringify(log[0])}\nnot json\n`).length, 1);
 });
 
@@ -522,5 +523,17 @@ test("I-47: the labels R16 changes, applied only when a run is scored under R16;
   assert.equal(NOTES.find((n) => n.id === "ux-m01").pieces[0].outcome, "held", "the R12 label unchanged");
   assert.ok(!r16.find((n) => n.id === "ux-m01").mustNot.some((m) => m.change), "changing INSPECT-2 is what m01 says, under R16");
   assert.deepEqual(r16.find((n) => n.id === "ux-t06").pieces[0].accept, ["filed"]);
-  assert.throws(() => notesUnder("r99"), /r12 or r16/);
+  assert.throws(() => notesUnder("r99"), /r12, r16, r19, not r99/);
+});
+
+test("I-53: the labels R18 and R19 change, over R16's; every earlier set stays scoreable", async () => {
+  const { notesUnder, R19_CHANGES } = await import("../eval/labels.mjs");
+  assert.deepEqual(R19_CHANGES.map((c) => [c.note, c.piece, c.from, c.to, c.accept.join("/")]), [["ux-t06", 0, "held", "filed", ""], ["ux-z01", 0, "held", "filed", ""], ["ux-aa03", 0, "filed", "filed", ""], ["ux-aa05", 1, "filed", "filed", ""]]);
+  const [r16, r19] = [notesUnder("r16"), notesUnder("r19")];
+  const at = (set, id, i) => set.find((n) => n.id === id).pieces[i];
+  assert.deepEqual([at(r16, "ux-t06", 0).outcome, at(r19, "ux-t06", 0).outcome], ["held", "filed"]);
+  assert.deepEqual([at(r16, "ux-aa03", 0).accept, at(r19, "ux-aa03", 0).accept], [["kept"], []], "Kept no longer stands in for a row R19 can add");
+  assert.equal(at(r19, "ux-m01", 0).outcome, "filed", "R16's changes carry over");
+  assert.equal(at(r19, "ux-aq07", 0).outcome, "proposed", "a purchase order is Operations': Proposed, though the table takes new rows");
+  assert.deepEqual(notesUnder(), r19, "r19 is the default");
 });

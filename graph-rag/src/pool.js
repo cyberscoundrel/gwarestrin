@@ -90,7 +90,7 @@ export function taskBrief({ brief, dropped = {}, dependencies = [], refile = [],
   if (!brief.instances.length) lines.push("- none yet");
   for (const d of dependencies) lines.push(`- ${d.from} depends on ${d.to}${d.note ? `: ${d.note}` : ""}`);
   lines.push("Sources, and how each is committed to:");
-  for (const s of brief.sources) lines.push(`- ${s.system}: ${s.commits ? `takes ${(s.actions ?? []).join(" and ") || "no"} writes ${s.tables ? `on ${s.tables.join(", ")} only` : "on any table it grants"}; a piece for another table is Proposed` : "read-only: a clear piece for it is Proposed"}${s.description ? `. ${s.description}` : ""}`);
+  for (const s of brief.sources) lines.push(`- ${s.system}: ${s.commits ? `takes updates ${s.tables ? `on ${s.tables.join(", ")} only` : "on any table it grants"}${s.adds?.length ? `, and new rows on ${s.adds.join(", ")} (key ${s.system}:<table>:new; the source makes the key)` : ""}; a piece for another table is Proposed` : "read-only: a clear piece for it is Proposed"}${s.description ? `. ${s.description}` : ""}`);
   if (!brief.sources.length) lines.push("- none connected: a piece no system holds is Kept");
   if (refile.length) {
     lines.push("Pieces to file again, now that a fitting class or source may exist (give refiles: <entry> when you file each):");
@@ -100,7 +100,7 @@ export function taskBrief({ brief, dropped = {}, dependencies = [], refile = [],
     "----------",
     ...(why ? [`Why it's here: ${why}`] : []),
     `File the record piece by piece: one filing-log entry per piece, the split is yours. Name a section by its id above (${brief.sections.map((s) => s.section ?? s.rid).join(", ")}), never by its text.`,
-    "Resolve names against the source (graph-rag_resolve_name; graph-rag_find_rows to search a table by words or column values). For each piece: graph-rag_file_to_source with your account of it (the code decides Filed or Proposed, or Held when the row is unclear or the source disagrees with a record that states no change), graph-rag_hold_piece when it's unclear which record, or graph-rag_keep_piece when no system holds it. Relate sections to the lasting individuals they are about (graph-rag_create_instance, graph-rag_relate_section), keep a transactional row's key on the section (graph-rag_section_key), and state dependencies the record gives (graph-rag_state_dependency).",
+    "Resolve names against the source (graph-rag_resolve_name; graph-rag_find_rows to search a table by words or column values). For each piece: graph-rag_file_to_source with your account of it (the code decides Filed, Proposed or Held; a new row in a table that takes them is filed with key <system>:<table>:new; if it tells you a value isn't in the record's words, send that piece again once, in the record's exact words or without that value), graph-rag_hold_piece when it's unclear which record, or graph-rag_keep_piece when no system holds it. Relate sections to the lasting individuals they are about (graph-rag_create_instance, graph-rag_relate_section), keep a transactional row's key on the section (graph-rag_section_key), and state dependencies the record gives (graph-rag_state_dependency).",
     "Decide low-stakes matters yourself. When no class fits a piece, or the source conflicts with the record, request it of the orchestrator (graph-rag_request) and don't file that piece. Keep requests few.",
     "Finish with your account (graph-rag_give_account): each entry you wrote and what you did. Then a short report.",
   );

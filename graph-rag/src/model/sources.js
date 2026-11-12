@@ -13,13 +13,23 @@
 //
 // `system` is the first part of a record key (`mssql` in mssql:dbo_Job:4471). A source that is not
 // writable makes a clear piece Proposed (R2).
-// NEEDS A RULING (what a write may do): smallest choice, create and update only, never delete, as the
-// write login's grants already are (dab-config.example/dab-config-write.json).
+// NEEDS A RULING (what a write may do): smallest choice, create and update only, as the write login's grants
+// already are (dab-config.example/dab-config-write.json). "delete" may be declared only to undo a row graph-rag added
+// (R19, I-52): it is refused for any table that doesn't take new rows, and the write adapter uses it for nothing else.
+//
+// R18 and R19: each table the write side names may carry its shape, so code knows what the table takes without asking
+// a model or guessing from the rows present (model/write-conditions.js):
+//   commit.tables: [ "dbo_Job" | { name, adds, columns, required, defaults } ]
+//     adds:     true when the table takes new rows (R19; "create" must be among the actions). Default false.
+//     columns:  { Column: "boolean" | { values: [..] } }: a yes/no column, or one with a fixed set of values (R18).
+//     required: the columns a new row needs; defaults: those the source fills itself when not given.
+// Normalized, `tables` stays the list of names and `shapes` holds each table's shape by name.
 import { clip, nonEmpty, ShapeError } from "./text.js";
 
 /** how a source is reached: Data API builder's MCP endpoint today */
 export const SOURCE_VIA = ["dab-mcp"];
-export const COMMIT_ACTIONS = ["create", "update"];
+export const COMMIT_ACTIONS = ["create", "update", "delete"];
+const DEFAULT_ACTIONS = ["create", "update"];
 const SYSTEM_RE = /^[a-z0-9_-]{1,40}$/i;
 
 function endpoint(raw, field) {
@@ -58,21 +68,61 @@ export function normalizeSource(raw) {
   else {
     commit = endpoint(c, "commit");
     if (commit.url === read.url) throw new ShapeError("commit.url", "the write endpoint must not be the read endpoint");
-    const tables = c.tables === undefined || c.tables === null ? null : c.tables;
-    if (tables !== null && (!Array.isArray(tables) || tables.some((t) => !nonEmpty(t)))) throw new ShapeError("commit.tables", "must list table names");
-    const actions = c.actions === undefined ? [...COMMIT_ACTIONS] : c.actions;
+    const raw = c.tables === undefined || c.tables === null ? null : c.tables;
+    if (raw !== null && !Array.isArray(raw)) throw new ShapeError("commit.tables", "must list table names, or { name, adds, columns, required, defaults }");
+    const actions = c.actions === undefined ? [...DEFAULT_ACTIONS] : c.actions;
     if (!Array.isArray(actions) || !actions.length || actions.some((a) => !COMMIT_ACTIONS.includes(a))) throw new ShapeError("commit.actions", `must be some of ${COMMIT_ACTIONS.join(", ")}`);
-    commit = { ...commit, tables: tables && tables.map((t) => String(t).trim()), actions: [...new Set(actions)], guard: guard(c.guard) };
+    const shapes = {};
+    // a declaration normalized already keeps its shapes beside the names: normalizing it again changes nothing
+    const tables = raw && raw.map((t, i) => {
+      const sh = tableShapeOf(typeof t === "string" && c.shapes?.[t.trim()] ? c.shapes[t.trim()] : t, `commit.tables[${i}]`);
+      shapes[sh.name] = sh;
+      return sh.name;
+    });
+    if (Object.values(shapes).some((sh) => sh.adds) && !actions.includes("create")) throw new ShapeError("commit.actions", "a table that takes new rows needs create among the actions");
+    if (actions.includes("delete") && !Object.values(shapes).some((sh) => sh.adds)) throw new ShapeError("commit.actions", "delete only undoes a row graph-rag added, so it needs a table that takes new rows");
+    commit = { ...commit, tables, shapes, actions: [...new Set(actions)], guard: guard(c.guard) };
   }
   return { system: String(raw.system).trim(), description: nonEmpty(raw.description) ? clip(raw.description, 600) : null, read, commit };
 }
 
-/** may this source take this action on this table (a table list of null means any table it grants) */
+/** one table of the write side, as a shape: { name, adds, columns, required, defaults } */
+function tableShapeOf(raw, field) {
+  if (typeof raw === "string") {
+    if (!nonEmpty(raw)) throw new ShapeError(field, "must name a table");
+    return { name: raw.trim(), adds: false, columns: {}, required: [], defaults: [] };
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || !nonEmpty(raw.name)) throw new ShapeError(field, "must be a table name or { name, adds, columns, required, defaults }");
+  const names = (v, f) => {
+    if (v === undefined || v === null) return [];
+    if (!Array.isArray(v) || v.some((x) => !nonEmpty(x))) throw new ShapeError(`${field}.${f}`, "must list column names");
+    return v.map((x) => String(x).trim());
+  };
+  const columns = {};
+  for (const [col, k] of Object.entries(raw.columns ?? {})) {
+    if (k === "boolean" || k?.type === "boolean") columns[col] = { type: "boolean" };
+    else if (Array.isArray(k?.values) && k.values.length && k.values.every((v) => nonEmpty(v))) columns[col] = { values: k.values.map((v) => String(v).trim()) };
+    else throw new ShapeError(`${field}.columns.${col}`, 'must be "boolean" or { values: [..] }');
+  }
+  if (raw.adds !== undefined && typeof raw.adds !== "boolean") throw new ShapeError(`${field}.adds`, "must be true or false");
+  return { name: String(raw.name).trim(), adds: raw.adds === true, columns, required: names(raw.required, "required"), defaults: names(raw.defaults, "defaults") };
+}
+
+/** a table's shape as declared (R18, R19), or an empty one: no column is yes/no or fixed-choice, and it takes no new rows */
+export function tableShape(decl, table) {
+  return decl?.commit?.shapes?.[String(table)] ?? { name: String(table), adds: false, columns: {}, required: [], defaults: [] };
+}
+
+/**
+ * may this source take this action on this table (a table list of null means any table it grants, for an update).
+ * Adding a row (create) needs the table declared as taking new rows (R19); delete, only to undo one, the same.
+ */
 export function writable(decl, table, action = "update") {
   if (!decl || decl.commit.via === "none") return false;
   if (!decl.commit.actions.includes(action)) return false;
+  if (action === "create" || action === "delete") return tableShape(decl, table).adds;
   return decl.commit.tables === null || decl.commit.tables.includes(String(table));
 }
 
 /** what a brief says about a source: how it is committed to, never its URLs */
-export const briefSource = (decl) => ({ system: decl.system, description: decl.description, commits: decl.commit.via !== "none", actions: decl.commit.actions ?? [], tables: decl.commit.tables ?? null });
+export const briefSource = (decl) => ({ system: decl.system, description: decl.description, commits: decl.commit.via !== "none", actions: (decl.commit.actions ?? []).filter((a) => a !== "delete"), tables: decl.commit.tables ?? null, ...(decl.commit.shapes ? { adds: Object.values(decl.commit.shapes).filter((sh) => sh.adds).map((sh) => sh.name) } : {}) });

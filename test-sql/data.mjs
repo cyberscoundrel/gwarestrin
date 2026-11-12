@@ -177,17 +177,44 @@ export const TABLES = {
 };
 
 /**
- * What the write login may do, table by table: create and update only, never delete (model/sources.js, NEEDS A
- * RULING 11). Every other table is read-only to it, and it cannot even read them.
+ * What the write login may do, table by table: create and update (model/sources.js, NEEDS A RULING 11), and delete
+ * only on the tables that take new rows (R19), where graph-rag's write adapter uses it for one thing: undoing a row it
+ * added, while the row still holds what was added (I-52). Every other table is read-only to it, and it cannot even
+ * read them.
  */
 export const WRITABLE = {
   Job: ["update"],
   Job_Operation: ["create", "update"],
   Work_Center: ["update"],
   Sales_Order: ["create", "update"],
-  Purchase_Order: ["create", "update"],
-  Maintenance: ["create", "update"],
+  Purchase_Order: ["create", "update", "delete"],
+  Maintenance: ["create", "update", "delete"],
 };
+
+/**
+ * The shapes the source declaration gives graph-rag for these tables (R18, R19; graph-rag/src/sources.js TEST_SHAPES
+ * holds the same, and graph-rag/test/sources.test.js holds them equal): yes/no columns (a SQL bit), the columns with a
+ * fixed set of values, and the tables that take new rows, with the columns a new row needs (not null, no default,
+ * not the identity key). Passed to graph-rag as DAB_TABLE_SHAPES by the harness.
+ */
+export const CHOICES = {
+  Job: { Status: ["Active", "Hold", "Complete", "Closed"] },
+  Job_Operation: { Status: ["Open", "Active", "Complete"] },
+  Work_Center: { Status: ["Up", "Down"] },
+  Sales_Order: { Status: ["Open", "Shipped", "Closed"] },
+  Purchase_Order: { Status: ["Open", "Received", "Closed"] },
+  Maintenance: { Status: ["Open", "Closed"] },
+};
+export function shapes() {
+  const out = {};
+  for (const [table, actions] of Object.entries(WRITABLE)) {
+    const cols = TABLES[table].columns;
+    const columns = { ...Object.fromEntries(cols.filter((c) => c.type === "bit").map((c) => [c.name, "boolean"])), ...Object.fromEntries(Object.entries(CHOICES[table] ?? {}).map(([c, values]) => [c, { values }])) };
+    const adds = actions.includes("delete") && actions.includes("create");
+    out[entityOf(table)] = { ...(adds ? { adds: true } : {}), columns, ...(adds ? { required: cols.filter((c) => !c.key && !c.nullable).map((c) => c.name) } : {}) };
+  }
+  return out;
+}
 
 /** the DAB entity name of a table, as the autoentities pattern names them ({schema}_{object}) */
 export const entityOf = (table) => `dbo_${table}`;

@@ -172,6 +172,9 @@ if [ "$MODELS" = "real" ]; then
   GR_RUN=(--env-file "$ENV_FILE" --dns 1.1.1.1 --dns 1.0.0.1 --entrypoint sh)
   GR_CMD=(-c 'export DECISION_API_KEY="${DECISION_API_KEY:-${OPENROUTER_API_KEY:-}}"; exec node src/server.js')
 fi
+# R18, R19: the tables' shapes the source declaration gives graph-rag (yes/no and fixed-choice columns; the tables
+# that take new rows), from the test database's own definition
+SHAPES="$(node --input-type=module -e 'const m = await import(process.argv[1]); console.log(JSON.stringify(m.shapes()))' "$REPO/test-sql/data.mjs")"
 docker create --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$CFG:/cfg:ro" "${GR_RUN[@]}" \
   -e ARCADEDB_URL=http://arcadedb:2480 -e ARCADEDB_DB=gwarestrin -e ARCADEDB_USER=root -e ARCADEDB_PASSWORD=eval-throwaway \
   -e LITELLM_BASE_URL=http://models:4000/v1 -e LITELLM_API_KEY=fake -e EMBED_MODEL=embed "${CHECK_ENV[@]}" \
@@ -180,6 +183,7 @@ docker create --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$C
   -e DAB_SYSTEM=mssql -e DAB_READ_URL=http://dab-read:5000/mcp -e DAB_WRITE_URL=http://dab-write:5000/mcp -e DAB_READ_HOME=everyone \
   -e 'CONNECTION_HOMES={"mssql":"everyone"}' \
   -e DAB_WRITE_TABLES=dbo_Job,dbo_Job_Operation,dbo_Work_Center,dbo_Sales_Order,dbo_Purchase_Order,dbo_Maintenance \
+  -e DAB_WRITE_ACTIONS=create,update,delete -e "DAB_TABLE_SHAPES=$SHAPES" \
   -e DAB_GUARD_SERVER=gwsynth-sql -e DAB_GUARD_DATABASE=GwSynthMfg \
   "$GR_IMAGE" "${GR_CMD[@]}" >/dev/null
 docker network connect "${SYNTH}_api" "$NET-gr"

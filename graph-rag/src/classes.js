@@ -351,7 +351,7 @@ export async function qualifyTable(value, { sources, entitiesOf, field = "record
   const v = String(value ?? "").trim();
   if (!v || v.includes(":")) return value;
   const decls = Object.values(sources ?? (await (await import("./sources.js")).loadSources(undefined, { ttlMs: 0 }).catch(() => ({})))).filter(Boolean);
-  const list = entitiesOf ?? (async (d) => (d.read?.url ? await (await import("./data-entry.js")).sourceClient(d.system, { read: d.read.url }).entities().catch(() => []) : []));
+  const list = entitiesOf ?? (async (d) => (d.read?.url ? await (await import("./data-entry.js")).sourceConnection(d, "read").tables().catch(() => []) : []));
   const has = [];
   for (const d of decls) {
     const name = (await list(d)).find((n) => String(n).toLowerCase() === v.toLowerCase());

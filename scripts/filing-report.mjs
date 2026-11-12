@@ -10,7 +10,7 @@
 //        pass mark. The two gates and their zero tolerance are proposal B's (the assistant's proposal, which the
 //        user read and approved with docs/ORGANIZATION-MODEL.md), not a ruling of their own.
 //
-//   node scripts/filing-report.mjs rescore <dir> [--only ids] [--out dir] [--labels r12|r16]   the report again from snapshot.json
+//   node scripts/filing-report.mjs rescore <dir> [--only ids] [--out dir] [--labels r12|r16|r19]   the report again from snapshot.json
 //
 //   node scripts/filing-report.mjs compare <dir> <dir> ...   writes compare.md next to the first dir's parent
 //
@@ -75,7 +75,7 @@ if (args._[0] === "run") {
   const graph = await collectGraph(query, { records: run.records });
   const markers = run.markers.map((m) => ({ ...m, recordId: graph.recordIds[m.record] ?? null }));
   const snap = {
-    meta: { setup: typeof args.setup === "string" ? args.setup : "setup", run: Number(args.run ?? 1), seed: run.seed, ...(run.only ? { only: run.only } : {}), labels: typeof args.labels === "string" ? args.labels : "r16", noteOf: graph.noteOf, markers },
+    meta: { setup: typeof args.setup === "string" ? args.setup : "setup", run: Number(args.run ?? 1), seed: run.seed, ...(run.only ? { only: run.only } : {}), labels: typeof args.labels === "string" ? args.labels : "r19", noteOf: graph.noteOf, markers },
     positions: POSITIONS,
     before: read(`${dir}/before.json`),
     after: read(`${dir}/after.json`),
@@ -101,7 +101,7 @@ if (args._[0] === "run") {
   if (!dir) usage("give the run dir");
   const snap = { ...read(`${dir}/snapshot.json`), ...toolCallsOf(dir) };
   if (typeof args.only === "string") snap.meta = { ...snap.meta, only: args.only.split(",").map((s) => s.trim()).filter(Boolean) };
-  // --labels r12|r16 (I-47): a run from before R16 is scored by the labels as written unless asked otherwise
+  // --labels r12|r16|r19 (I-47, I-53): a run is scored by the labels it was made under unless asked otherwise
   if (typeof args.labels === "string") snap.meta = { ...snap.meta, labels: args.labels };
   const to = typeof args.out === "string" ? args.out.replace(/\/$/, "") : dir;
   if (to === dir) {

@@ -1,7 +1,7 @@
 // R16 conditions 2 and 3 (model/write-conditions.js): the record names the row, and every value written appears in it.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { booleanByColumnWords, columnWords, DEFINITIONS, datesIn, hasRun, normText, numbersIn, rowNamed, valueAppears, writeConditions } from "../src/model/write-conditions.js";
+import { addConditions, asBoolean, columnKind, datesIn, hasRun, normText, numbersIn, rowNamed, valueAppears, writeConditions } from "../src/model/write-conditions.js";
 
 const jobs = [
   { Job: 4471, Customer: "TORO", Part_Number: "TORO-SHAFT-7", Order_Quantity: 300, Status: "Active", Promised_Date: "2026-11-24", Certs_Required: false },
@@ -30,11 +30,53 @@ test("numbers are compared after their separators go; dates as day and month; te
   const reworded = valueAppears("Second shift runs this machine from next Monday. Grazzalt covers setups until the new hire is trained.", "Second shift runs CNC 3 and CNC 5 from next Monday; Grazzalt covers setups until the new hire is trained.");
   assert.deepEqual([reworded.ok, reworded.kind], [false, "text"], "a reworded sentence fails");
   assert.match(reworded.why, /isn't the record's own words/);
-  assert.deepEqual([valueAppears(true, "needs certs with the shipment", { column: "Certs_Required" }).ok, valueAppears(true, "x").kind], [false, "boolean"]);
+  assert.deepEqual([valueAppears(true, "x", { column: "Certs_Required" }).ok, valueAppears(true, "x").kind], [false, "boolean"], "a boolean for a column not declared yes/no doesn't appear");
   assert.deepEqual([valueAppears(null, "x").ok, valueAppears(null, "x").kind], [false, "empty"]);
-  const closed = valueAppears("Complete", "job 3260356 shipped Thursday", { column: "Status", rows: jobs });
-  assert.deepEqual([closed.ok, closed.kind], [false, "closed"], "a Status from a small set is reported apart");
-  assert.deepEqual([valueAppears("Down", "INSPECT-2 is down", { column: "Status", rows: [...centers, { Work_Center: "X", Status: "Down" }] }).ok], [true]);
+  assert.ok(!valueAppears("Complete", "job 3260356 shipped Thursday", { column: "Status" }).ok, "a Status not declared fixed-choice is text");
+  // a date is the record's own day, or a day "yesterday" or "tomorrow" counts from it
+  assert.ok(valueAppears("2026-11-09", "Topped up and rechecked at 7.", { recordedAt: "2026-11-09T08:00:00.000Z" }).ok);
+  assert.ok(valueAppears("2026-11-08", "The beeper failed yesterday.", { recordedAt: "2026-11-09T08:00:00.000Z" }).ok);
+  assert.ok(!valueAppears("2026-11-08", "The beeper failed.", { recordedAt: "2026-11-09T08:00:00.000Z" }).ok);
+});
+
+test("R18: a yes/no or fixed-choice column takes the model's reading when the column allows it; declared, never guessed from the rows", () => {
+  const shape = { columns: { Certs_Required: { type: "boolean" }, Status: { values: ["Active", "Hold", "Complete", "Closed"] } } };
+  assert.deepEqual(columnKind("Status", { shape }), { kind: "choice", values: ["Active", "Hold", "Complete", "Closed"] });
+  assert.deepEqual(columnKind("Certs_Required", { current: jobs[4] }), { kind: "boolean" }, "the source serves a bit as true/false: that is its type");
+  assert.equal(columnKind("Status", { current: jobs[4] }), null, "a Status the declaration doesn't list is text, however few values the rows hold");
+  assert.deepEqual([asBoolean("yes"), asBoolean(0), asBoolean("maybe")], [true, false, undefined]);
+  const t06 = writeConditions({ text: "Job 3260372 for BSE needs certs with the shipment.", key: "mssql:dbo_Job:3260372", fields: { Certs_Required: true }, rows: jobs, primaryKey: "Job", current: jobs[4], shape });
+  assert.deepEqual([t06.ok, t06.values[0].kind], [true, "boolean"], "t06: certs required, the model's reading");
+  const yes = writeConditions({ text: "Job 3260372 for BSE needs certs with the shipment.", key: "mssql:dbo_Job:3260372", fields: { Certs_Required: "yes" }, rows: jobs, primaryKey: "Job", current: jobs[4], shape });
+  assert.deepEqual(yes.passing, { Certs_Required: true }, "written as the column takes it");
+  const status = writeConditions({ text: "job 3260356 shipped", key: "mssql:dbo_Job:3260356", fields: { Status: "complete" }, rows: jobs, primaryKey: "Job", current: jobs[1], shape });
+  assert.deepEqual([status.ok, status.passing], [true, { Status: "Complete" }], "in the declared spelling");
+  const shipped = writeConditions({ text: "job 3260356 shipped", key: "mssql:dbo_Job:3260356", fields: { Status: "Shipped" }, rows: jobs, primaryKey: "Job", current: jobs[1], shape });
+  assert.deepEqual([shipped.ok, shipped.failed], [false, 3]);
+  assert.match(shipped.why, /Status takes one of Active, Hold, Complete, Closed, not "Shipped"/);
+  assert.equal(writeConditions({ text: "Exatron moved the floater due date.", key: "mssql:dbo_Job:3260357", fields: { Status: "Hold" }, rows: jobs, primaryKey: "Job", current: jobs[2], shape }).failed, 2, "the choice of row stays checked");
+});
+
+test("per field: z01's Status lands and its 800 doesn't; the result says which", () => {
+  const shape = { columns: { Status: { values: ["Active", "Complete"] } } };
+  const z01 = writeConditions({ text: "Correction: only Exatron job 3260356 shipped Thursday. 3260357 is still waiting on FINAL INSP.", key: "mssql:dbo_Job:3260356", fields: { Status: "Complete", Shipped_Quantity: 800 }, rows: jobs, primaryKey: "Job", current: { ...jobs[1], Shipped_Quantity: 0 }, shape });
+  assert.deepEqual([z01.ok, z01.failed, z01.passing, z01.failing], [false, 3, { Status: "Complete" }, { Shipped_Quantity: 800 }]);
+});
+
+test("R19's conditions for a new row: the record's values, the key the source's, the columns a row needs, and no row already holding it", () => {
+  const shape = { adds: true, columns: { Status: { values: ["Open", "Closed"] } }, required: ["Opened", "Description", "Status"] };
+  const text = "Coolant concentration on CNC 1 read 4 percent, below the 6 to 8 percent target. Topped up and rechecked at 7.";
+  const rows = [{ Maintenance: 1, Equipment: null, Work_Center: "CNC 2", Opened: "2026-10-27", Description: "Warm-up routine runs long", Status: "Open" }];
+  const aa03 = addConditions({ text, table: "dbo_Maintenance", data: { Maintenance: 3, Work_Center: "CNC 1", Opened: "2026-11-09", Description: "Coolant concentration on CNC 1 read 4 percent", Status: "closed" }, rows, primaryKey: "Maintenance", shape, recordedAt: "2026-11-09T08:00:00.000Z" });
+  assert.deepEqual([aa03.ok, aa03.dropped, aa03.data], [true, ["Maintenance"], { Work_Center: "CNC 1", Opened: "2026-11-09", Description: "Coolant concentration on CNC 1 read 4 percent", Status: "Closed" }], "the key the worker gave is dropped, never sent");
+  const short = addConditions({ text, table: "dbo_Maintenance", data: { Work_Center: "CNC 1", Status: "Closed" }, rows, primaryKey: "Maintenance", shape });
+  assert.deepEqual([short.ok, short.failed, short.missing], [false, "required", ["Opened", "Description"]]);
+  assert.match(short.why, /needs Opened, Description/);
+  const reworded = addConditions({ text, table: "dbo_Maintenance", data: { Work_Center: "CNC 1", Opened: "2026-11-09", Description: "Coolant low on CNC 1; topped up", Status: "Closed" }, rows, primaryKey: "Maintenance", shape, recordedAt: "2026-11-09" });
+  assert.deepEqual([reworded.failed, Object.keys(reworded.failing)], ["values", ["Description"]]);
+  const there = addConditions({ text: "CNC 2 warm-up routine runs long, opened 10/27", table: "dbo_Maintenance", data: { Work_Center: "CNC 2", Opened: "2026-10-27", Description: "Warm-up routine runs long", Status: "Open" }, rows, primaryKey: "Maintenance", shape });
+  assert.deepEqual([there.ok, there.existing?.key], [true, 1], "a row already holds it: the piece is in the source");
+  assert.equal(addConditions({ text, data: { Work_Center: "CNC 1", Opened: "2026-11-09", Description: "Coolant concentration on CNC 1 read 4 percent", Status: "Closed" }, rows, primaryKey: "Maintenance", shape, recordedAt: "2026-11-09" }).existing, null);
 });
 
 test("condition 2: the row is named by its key, or is the one row the text matches best; otherwise not", () => {
@@ -67,19 +109,4 @@ test("both together: the first that fails, and one sentence for the recorder", (
   assert.deepEqual([ag03.ok, ag03.unchanged], [true, true]);
   const part = writeConditions({ text: "job 3260410, 750 floaters", key: "mssql:dbo_Job:3260410", fields: { Customer: "EXATRON", Order_Quantity: 750 }, rows: jobs, primaryKey: "Job", current: jobs[3] });
   assert.deepEqual([part.ok, part.values.map((v) => v.column)], [true, ["Order_Quantity"]], "only the changing value is tested");
-});
-
-test("the boolean treatment the replay proposes: the column's own words in a sentence, negated or not (off until chosen)", () => {
-  assert.equal(DEFINITIONS.booleans, null, "not chosen: a boolean doesn't appear");
-  assert.deepEqual(columnWords("Certs_Required"), ["certs"]);
-  assert.ok(booleanByColumnWords(true, "Job 3260372 for BSE needs certs with the shipment.", "Certs_Required"));
-  assert.equal(booleanByColumnWords(true, "Job 3260372 ships without certs.", "Certs_Required"), null);
-  assert.ok(booleanByColumnWords(false, "Job 3260372 doesn't need certs after all.", "Certs_Required"));
-  assert.equal(booleanByColumnWords(true, "Job 3260372 ships Friday.", "Certs_Required"), null);
-  DEFINITIONS.booleans = booleanByColumnWords;
-  try {
-    assert.ok(valueAppears(true, "Job 3260372 for BSE needs certs with the shipment.", { column: "Certs_Required" }).ok);
-  } finally {
-    DEFINITIONS.booleans = null;
-  }
 });

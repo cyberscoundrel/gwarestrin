@@ -39,7 +39,13 @@ export function matchNote(note, entries, info = new Map()) {
   for (const p of pairs) {
     if (!rowTarget(p.piece)) continue;
     const t = p.piece.target;
-    p.entry = take((e) => e.target?.key && e.target.key === t.key) ?? (t.kind === "new-row" ? take((e) => e.target?.table === t.table) : null);
+    // a write decided field by field (I-50) leaves a Filed entry and a Held one on the same row: the one writing the
+    // labelled columns is the piece's
+    const covers = (e) => (t.columns ?? []).some((c) => e.target?.fields && c in e.target.fields);
+    p.entry =
+      take((e) => e.target?.key && e.target.key === t.key && covers(e)) ??
+      take((e) => e.target?.key && e.target.key === t.key) ??
+      (t.kind === "new-row" ? take((e) => e.target?.table === t.table && covers(e)) ?? take((e) => e.target?.table === t.table) : null);
   }
   // 2: by outcome, then overlap
   const rank = (e) => -overlap(e, note, info);

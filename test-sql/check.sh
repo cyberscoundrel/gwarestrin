@@ -35,6 +35,7 @@ allowed() {
   if out=$(as_login "$3" "$2" "$4"); then ok "$1"; else bad "$1: $(head -c 200 <<<"$out")"; fi
 }
 denied "the write login can't delete" gwsynth_write GWSYNTH_WRITE_PASSWORD "DELETE FROM dbo.Job WHERE Job = 4471"
+allowed "the write login may delete where a table takes new rows (R19's undo; nothing matches)" gwsynth_write GWSYNTH_WRITE_PASSWORD "DELETE FROM dbo.Maintenance WHERE 1 = 0"
 denied "the write login can't read a table it doesn't write" gwsynth_write GWSYNTH_WRITE_PASSWORD "SELECT TOP 1 * FROM dbo.Customer"
 denied "the write login can't update a table it doesn't write" gwsynth_write GWSYNTH_WRITE_PASSWORD "UPDATE dbo.Customer SET Terms = Terms"
 denied "the write login can't insert where it may only update" gwsynth_write GWSYNTH_WRITE_PASSWORD "INSERT INTO dbo.Job (Job) VALUES (1)"

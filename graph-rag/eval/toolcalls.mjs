@@ -13,7 +13,8 @@ export function errorKind(call) {
   return String(call.tool ?? "").startsWith("graph-rag_") ? "graph_rag" : "source";
 }
 
-const blank = () => ({ calls: 0, errors: 0, malformed: 0, source: 0, graph_rag: 0 });
+// corrections: file_to_source answered not_filed (I-50: a value not in the record's words, told once). Not an error
+const blank = () => ({ calls: 0, errors: 0, malformed: 0, source: 0, graph_rag: 0, corrections: 0 });
 
 /** counts in all and per agent role (discovery, orchestrator, worker, part): { all, byRole, filing } */
 export function toolCallCounts(events) {
@@ -24,6 +25,7 @@ export function toolCallCounts(events) {
     const r = (byRole[e.agent ?? "unknown"] ??= blank());
     for (const x of [all, r]) {
       x.calls++;
+      if (!e.error && e.outcome === "not_filed") x.corrections++;
       if (e.error) {
         x.errors++;
         x[errorKind(e)]++;

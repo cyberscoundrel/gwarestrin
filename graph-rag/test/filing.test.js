@@ -7,8 +7,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { dabTool } from "../e2e/fake-dab-core.mjs";
-import { commitRow, enterData, forgetPrimaryKeys, forgetSources, tableRows } from "../src/data-entry.js";
-import { accountEvidence, accountGiven, answerRequest, createInstance, makeJournal, fileToSource, giveAccount, holdPiece, floorUnsettled, keepPiece, keptPieces, kickBack, laterClassOrSource, readSourceRow, REFILE_LIMIT, refileRefusal, recordVerdict, requestOrchestrator, settleProposals } from "../src/filing.js";
+import { addData, commitRow, enterData, forgetPrimaryKeys, forgetSources, removeAdded, tableRows } from "../src/data-entry.js";
+import { sourceFor } from "../src/sources.js";
+import { tableShape, writable as declaredWritable } from "../src/model/sources.js";
+import { accountEvidence, accountGiven, answerRequest, createInstance, makeJournal, fileToSource, giveAccount, undoFiled, holdPiece, floorUnsettled, keepPiece, keptPieces, kickBack, laterClassOrSource, readSourceRow, REFILE_LIMIT, refileRefusal, recordVerdict, requestOrchestrator, settleProposals } from "../src/filing.js";
 import { normalizeClass } from "../src/model/classes.js";
 import { parsePositionMap } from "../src/positions.js";
 
@@ -38,7 +40,12 @@ const classes = new Map(
 
 /** a fake DAB over fetch: the read-only endpoint and the write-capable one, or none that answers */
 function fakeDab(rows, { down = false } = {}) {
-  const tables = { dbo_Job: { primaryKey: ["Job"], rows }, dbo_Crew: { primaryKey: ["Emp"], rows: [{ Emp: "E1", Name: "Diep" }, { Emp: "E2", Name: "Sam" }] } };
+  const tables = {
+    dbo_Job: { primaryKey: ["Job"], rows },
+    dbo_Crew: { primaryKey: ["Emp"], rows: [{ Emp: "E1", Name: "Diep" }, { Emp: "E2", Name: "Sam" }] },
+    // R19: a table that takes new rows, its key made by the source, deletable only to undo an add
+    dbo_Maintenance: { primaryKey: ["Maintenance"], identity: true, deletes: true, rows: [{ Maintenance: 1, Work_Center: "CNC 2", Opened: "2026-10-27", Description: "Warm-up runs long", Status: "Open" }, { Maintenance: 2, Work_Center: null, Opened: "2026-09-14", Description: "Annual inspection", Status: "Closed" }] },
+  };
   const calls = [];
   const fetch = async (url, init) => {
     if (down) throw new Error("fetch failed: ECONNREFUSED");
@@ -51,7 +58,7 @@ function fakeDab(rows, { down = false } = {}) {
     // the write side's identity view: the guard asks it which server and database the write connection holds
     return reply(dabTool(write ? { ...tables, dbo_GwConnectionIdentity: { primaryKey: ["id"], rows: [{ id: 1, server_name: "gwsynth-sql", database_name: "GwSynthMfg", login_name: "gwsynth_write" }] } } : tables, name, args, { write }));
   };
-  return { fetch, calls, rows };
+  return { fetch, calls, rows, tables };
 }
 
 /** a fake database: the Job and document rows filing reads, OrgPolicy (sources), and every statement it saw */
@@ -69,9 +76,9 @@ function fakeDb({ writable = true, payload } = {}) {
     },
     async adbQuery(sql, params = {}) {
       // the declaration (model/sources.js): read at the floor's home, written to dbo_Job behind the guard
-      if (sql.includes("FROM OrgPolicy")) return sql.includes("'sources'") ? [{ json: JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: "http://fake/read", home: db.readHome ?? "floor" }, commit: writable ? { via: "dab-mcp", url: "http://fake/write", tables: ["dbo_Job"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } : { via: "none" } }]) }] : [];
+      if (sql.includes("FROM OrgPolicy")) return sql.includes("'sources'") ? [{ json: JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: "http://fake/read", home: db.readHome ?? "floor" }, commit: writable ? { via: "dab-mcp", url: "http://fake/write", tables: [{ name: "dbo_Job", columns: db.jobColumns ?? {} }, { name: "dbo_Maintenance", adds: true, columns: { Status: { values: ["Open", "Closed"] } }, required: ["Opened", "Description", "Status"] }], actions: ["create", "update", "delete"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } : { via: "none" } }]) }] : [];
       if (sql.includes("FROM Job WHERE id")) return [{ payload: JSON.stringify(db.payload) }];
-      if (sql.includes("_kind = 'document'")) return [{ rid: "#70:1", _recorded_by: db.recorder ?? "bob", _record_position: db.position ?? "floor" }];
+      if (sql.includes("_kind = 'document'")) return [{ rid: "#70:1", _recorded_by: db.recorder ?? "bob", _record_position: db.position ?? "floor", _recorded_at: "2026-11-09T08:00:00.000Z" }];
       if (sql.includes("FROM PendingWrite")) return db.pending.has(params.id) ? [db.pending.get(params.id)] : [];
       // R15: a section's own text, and the instances the worker related to it (ABOUT edges)
       if (/FROM #71:\d+ WHERE _kind = 'section'/.test(sql)) return [{ rid: sql.match(/#71:\d+/)[0], _doc_id: "doc-1", _home: "floor", text_identity: `the text of ${sql.match(/#71:\d+/)[0]}` }];
@@ -129,6 +136,9 @@ function memoryStore() {
       const a = this.attempts_.find((x) => x.id === id);
       return a ? structuredClone(a) : null;
     },
+    async createAttempts({ system, table }) {
+      return this.attempts_.filter((a) => a.action === "create" && a.system === system && a.table === table).map((a) => structuredClone(a));
+    },
   };
 }
 
@@ -155,6 +165,11 @@ function setup({ rows = [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472
     // R16: the section's own text (env.texts by rid), and the table's rows from the fake DAB, as the audience reads them
     // R16's undo: the write adapter over the fake DAB; who holds the authority for the class, as an approver must
     commit: (args, o = {}) => commitRow(args, { db, fetch: dab.fetch, journal: makeJournal(env), ...o }),
+    removeAdded: (args, o = {}) => removeAdded(args, { db, fetch: dab.fetch, journal: makeJournal(env), ...o }),
+    tableShape: async (system, table) => {
+      const d = await sourceFor(system, db);
+      return { ...tableShape(d, table), adds: declaredWritable(d, table, "create") };
+    },
     approverHolds: async (p, person) => {
       if (person !== "bob") throw new Error(`not applied: ${person} doesn't hold the authority the map names for ${p.class}`);
     },
@@ -169,6 +184,7 @@ function setup({ rows = [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472
     // the real decision: data-entry.js over the class map, the recorder as the token map holds them, and the fake DAB
     entered: [],
     enter: (args, opts = {}) => (env.entered.push(args), enterData(args, { journal: makeJournal(env), index: null, ...opts, db, fetch: dab.fetch, positions: map, policy, people: (name) => people[name], queue: async (e) => (queued.push(e), { queued: true, pendingId: `pend-${queued.length}` }) })),
+    add: (args, opts = {}) => (env.entered.push(args), addData(args, { journal: makeJournal(env), index: null, ...opts, db, fetch: dab.fetch, positions: map, policy, people: (name) => people[name], queue: async (e) => (queued.push(e), { queued: true, pendingId: `pend-${queued.length}` }) })),
     signal: async (kind, payload) => signals.push({ kind, ...payload }),
     resume: async (job, message) => resumed.push({ job, message }),
     now: () => `2026-11-10T00:00:${String(n++).padStart(2, "0")}.000Z`,
@@ -253,7 +269,10 @@ test("R16: one condition failing holds the piece, nothing written, and the recor
   // 3: a value the record doesn't give (a reworded one)
   let h = setup({ rows: rows() });
   h.env.texts = { "#71:3": "Job 4471 is done." };
+  // I-50: the worker is told once, with nothing filed; the same piece again is decided
   let r = await fileToSource(piece(), identity, h.env);
+  assert.deepEqual([r.outcome, r.fields.map((x) => x.column), h.store.entries_.length], ["not_filed", ["Status"], 0]);
+  r = await fileToSource(piece(), identity, h.env);
   assert.equal(r.outcome, "held");
   assert.match(r.note, /R16 condition 3/);
   assert.equal(h.dab.rows[0].Status, "open", "nothing written");
@@ -966,4 +985,161 @@ test("R16: a Filed write can be undone by a person with authority for its class:
   // a piece that wrote nothing, or wasn't Filed, has nothing to undo
   const k = await keepPiece({ section: "#71:4", piece: "the forklift is booked", instances: ["#80:1"] }, identity, h.env);
   await assert.rejects(undoFiled(k.entry, "bob", h.env), /not a Filed write/);
+});
+
+test("R18: a fixed-choice column takes the model's reading when the declaration allows it; one it doesn't allow is told once, then held", async () => {
+  const h = setup();
+  h.db.jobColumns = { Status: { values: ["Open", "Complete", "Closed"] } };
+  h.env.texts = { "#71:3": "Job 4471 shipped Thursday." };
+  const r = await fileToSource(piece({ fields: { Status: "COMPLETE" } }), identity, h.env);
+  assert.equal(r.outcome, "filed");
+  assert.equal(h.dab.rows[0].Status, "Complete", "written in its declared spelling, though the record never says complete");
+  const h2 = setup();
+  h2.db.jobColumns = { Status: { values: ["Open", "Complete", "Closed"] } };
+  const told = await fileToSource(piece({ fields: { Status: "Shipped" } }), identity, h2.env);
+  assert.equal(told.outcome, "not_filed");
+  assert.match(told.fields[0].why, /takes one of Open, Complete, Closed/);
+});
+
+test("I-50, per field: Status lands and an 800 the record doesn't give is held on its own; told once, never twice", async () => {
+  const h = setup();
+  h.env.texts = { "#71:3": "Job 4471 is complete." };
+  const p = piece({ fields: { Status: "complete", Quantity: 800 } });
+  const first = await fileToSource(p, identity, h.env);
+  assert.deepEqual([first.outcome, first.fields.map((x) => x.column)], ["not_filed", ["Quantity"]]);
+  assert.match(first.note, /Send file_to_source again for this piece, once/);
+  assert.equal(h.dab.rows[0].Status, null, "nothing written while the worker is told");
+  const second = await fileToSource(p, identity, h.env);
+  assert.equal(second.outcome, "filed");
+  assert.deepEqual([h.dab.rows[0].Status, h.dab.rows[0].Quantity], ["complete", 500], "Status written, the 800 not");
+  const [filed, held] = [h.store.entries_.find((e) => e.outcome === "filed"), h.store.entries_.find((e) => e.outcome === "held")];
+  assert.deepEqual(filed.target.fields, { Status: "complete" });
+  assert.deepEqual([held.target.fields, second.held.fields], [{ Quantity: 800 }, ["Quantity"]]);
+  assert.match(held.question, /Quantity wasn't written to mssql:dbo_Job:4471\. Not every value is in your words: Quantity would be 800/);
+  assert.equal(h.db.questions.length, 1, "the recorder is asked about the 800 alone");
+  // the worker left it out the second time: it is held all the same, never dropped silently
+  const h2 = setup();
+  h2.env.texts = { "#71:3": "Job 4471 is complete." };
+  await fileToSource(p, identity, h2.env);
+  const dropped = await fileToSource(piece({ fields: { Status: "complete" } }), identity, h2.env);
+  assert.deepEqual([dropped.outcome, dropped.held?.fields], ["filed", ["Quantity"]]);
+  assert.match(h2.store.entries_.find((e) => e.outcome === "held").question, /was left out after the record's words didn't give it/);
+  // a reworded value sent again in the record's own words lands whole, with nothing held
+  const h3 = setup();
+  h3.env.texts = { "#71:3": "Job 4471 is complete." };
+  await fileToSource(piece({ fields: { Status: "done" } }), identity, h3.env);
+  const fixed = await fileToSource(piece({ fields: { Status: "complete" } }), identity, h3.env);
+  assert.deepEqual([fixed.outcome, fixed.held, h3.store.entries_.length], ["filed", undefined, 1]);
+});
+
+test("I-50: a correction offered and never taken is held when the worker gives its account", async () => {
+  const h = setup();
+  h.env.texts = { "#71:3": "Job 4471 is complete." };
+  await fileToSource(piece({ fields: { Status: "done" } }), identity, h.env);
+  const r = await giveAccount({ pieces: [] }, identity, h.env);
+  const [e] = h.store.entries_;
+  assert.deepEqual([e.outcome, e.target.key, r.missing, Boolean(e.account)], ["held", "mssql:dbo_Job:4471", [], true], "held with the worker's own account");
+  assert.match(e.question, /isn't in the record's words, and it wasn't sent again/);
+  assert.deepEqual(h.db.payload.corrections, {});
+});
+
+const add = (over = {}) => ({ section: "#71:3", piece: "CNC 1 coolant topped up", said: "adding a maintenance row for CNC 1", class: "maintenance", key: "mssql:dbo_Maintenance:new", fields: { Work_Center: "CNC 1", Opened: "2026-11-09", Description: "Coolant concentration on CNC 1 read 4 percent", Status: "Closed" }, ...over });
+const coolant = "Coolant concentration on CNC 1 read 4 percent, below the 6 to 8 percent target. Topped up and rechecked at 7.";
+
+test("R19: a row is added when the table takes new rows; the key is the source's; one piece adds one row however often it is filed", async () => {
+  const h = setup();
+  h.env.texts = { "#71:3": coolant };
+  const r = await fileToSource(add({ fields: { ...add().fields, Maintenance: 7 } }), identity, h.env);
+  assert.deepEqual([r.outcome, r.key], ["filed", "mssql:dbo_Maintenance:3"], "the key the worker gave is dropped; the source made 3");
+  const rows = () => h.dab.tables.dbo_Maintenance.rows;
+  assert.deepEqual(rows()[2], { Maintenance: 3, Work_Center: "CNC 1", Opened: "2026-11-09", Description: "Coolant concentration on CNC 1 read 4 percent", Status: "Closed" });
+  const e = h.store.entries_[0];
+  assert.deepEqual([e.outcome, e.target.key, e.target.added, e.reason], ["filed", "mssql:dbo_Maintenance:3", true, "added: mssql:dbo_Maintenance:3"]);
+  // filed again, retried with another made-up key, and re-filed with reworded values: still one row
+  for (const again of [add(), add({ key: "mssql:dbo_Maintenance" }), add({ key: "mssql:dbo_Maintenance:99", fields: { ...add().fields, Description: "Topped up and rechecked at 7" } })]) {
+    const x = await fileToSource(again, identity, h.env);
+    assert.deepEqual([x.outcome, x.key], ["filed", "mssql:dbo_Maintenance:3"], JSON.stringify(again.key));
+  }
+  // the row it added is a row now: naming it is an update, and it already holds the values
+  assert.equal((await fileToSource(add({ key: "mssql:dbo_Maintenance:3" }), identity, h.env)).outcome, "filed");
+  assert.equal(rows().length, 3, "one row added, however often the piece is filed");
+  assert.equal(h.dab.calls.filter((c) => c.name === "create_record").length, 1);
+  assert.equal(h.store.attempts_.filter((a) => a.action === "create").length, 1);
+  // a different section of the same record adds its own row
+  h.env.texts["#71:4"] = coolant;
+  const other = await fileToSource(add({ section: "#71:4", piece: "the beeper", fields: { Work_Center: "CNC 1", Opened: "2026-11-09", Description: "Topped up and rechecked at 7", Status: "Open" } }), identity, h.env);
+  assert.deepEqual([other.outcome, other.key, rows().length], ["filed", "mssql:dbo_Maintenance:4", 4]);
+});
+
+test("R19: concurrent and retried adds of one piece make one row; an add whose end isn't known holds the next attempt", async () => {
+  const h = setup();
+  h.env.texts = { "#71:3": coolant };
+  const all = await Promise.all([1, 2, 3].map(() => fileToSource(add(), identity, h.env)));
+  assert.deepEqual(all.map((x) => x.key), ["mssql:dbo_Maintenance:3", "mssql:dbo_Maintenance:3", "mssql:dbo_Maintenance:3"]);
+  assert.equal(h.dab.tables.dbo_Maintenance.rows.length, 3);
+  const u = setup();
+  u.env.texts = { "#71:3": coolant };
+  u.store.attempts_.push({ id: "a-1", system: "mssql", table: "dbo_Maintenance", action: "create", status: "unknown", piece: { record: "doc-1", section: "#71:3" } });
+  const r = await fileToSource(add(), identity, u.env);
+  assert.equal(r.outcome, "held");
+  assert.match(u.store.entries_[0].question, /may have landed/);
+  assert.equal(u.dab.tables.dbo_Maintenance.rows.length, 2, "no second row risked");
+});
+
+test("R19: an add's conditions: told once of a missing or reworded value, then held; a row already holding it is Filed with nothing added; no authority is Proposed once", async () => {
+  let h = setup();
+  h.env.texts = { "#71:3": coolant };
+  const short = add({ fields: { Work_Center: "CNC 1", Status: "Closed" } });
+  const told = await fileToSource(short, identity, h.env);
+  assert.deepEqual([told.outcome, told.missing], ["not_filed", ["Opened", "Description"]]);
+  const held = await fileToSource(short, identity, h.env);
+  assert.equal(held.outcome, "held");
+  assert.match(h.store.entries_[0].question, /wasn't added to mssql:dbo_Maintenance\. A new row to mssql:dbo_Maintenance needs Opened, Description/);
+  assert.equal(h.dab.tables.dbo_Maintenance.rows.length, 2);
+  // a row already holds these values: the piece is in the source
+  h = setup();
+  h.env.texts = { "#71:3": "CNC 2: warm-up runs long, opened 10/27." };
+  const there = await fileToSource(add({ fields: { Work_Center: "CNC 2", Opened: "2026-10-27", Description: "Warm-up runs long", Status: "Open" } }), identity, h.env);
+  assert.deepEqual([there.outcome, there.key, h.dab.tables.dbo_Maintenance.rows.length], ["filed", "mssql:dbo_Maintenance:1", 2]);
+  // the recorder lacks the authority (alice's class map says ops for orders; here the floor recorder files under a class above it)
+  h = setup();
+  h.env.texts = { "#71:3": coolant };
+  h.db.recorder = "carol";
+  const p1 = await fileToSource(add(), identity, h.env);
+  const p2 = await fileToSource(add(), identity, h.env);
+  if (p1.outcome === "proposed") {
+    assert.equal(p2.outcome, "proposed");
+    assert.equal(h.queued.length, 1, "proposed once, however often filed");
+  }
+});
+
+test("R19: undo removes an added row while it holds what was added; a row changed since is never removed", async () => {
+  const h = setup();
+  h.env.texts = { "#71:3": coolant };
+  const r = await fileToSource(add(), identity, h.env);
+  const u = await undoFiled(r.entry, "bob", h.env);
+  assert.deepEqual([u.removed, h.dab.tables.dbo_Maintenance.rows.length], [true, 2]);
+  assert.ok(h.dab.calls.some((c) => c.name === "delete_record" && c.url === "http://fake/write"));
+  assert.ok(h.store.entries_[0].undone.removed);
+  const del = h.store.attempts_.find((a) => a.action === "delete");
+  assert.deepEqual([del.status, del.key], ["written", "mssql:dbo_Maintenance:3"]);
+  // added again after the undo (the undone add doesn't count), then changed behind graph-rag's back: not removed
+  const again = await fileToSource(add(), identity, h.env);
+  assert.equal(again.key, "mssql:dbo_Maintenance:4");
+  h.dab.tables.dbo_Maintenance.rows.at(-1).Status = "Open";
+  await assert.rejects(undoFiled(again.entry, "bob", h.env), /changed since entry .* added it: it isn't removed/);
+  assert.equal(h.dab.tables.dbo_Maintenance.rows.length, 3);
+  await assert.rejects(undoFiled(again.entry, "admin/agent:w1", h.env), /never an agent/);
+});
+
+test("I-50 keeps R16's order: without the authority a piece is Proposed whole, and no correction is offered", async () => {
+  const h = setup();
+  h.env.texts = { "#71:3": "Job 4471 ships Friday." };
+  const r = await fileToSource(piece({ class: "deliveries", fields: { Status: "shipping" } }), identity, h.env);
+  assert.deepEqual([r.outcome, h.queued.length, h.db.payload.corrections ?? {}], ["proposed", 1, {}]);
+  const a = setup();
+  a.env.texts = { "#71:3": "Three saw blades ordered." };
+  a.db.recorder = "bob";
+  const p = await fileToSource(add({ class: "maintenance", fields: { Opened: "2026-11-09", Description: "blades for the Hyd-Mech", Status: "Open" } }), identity, a.env);
+  assert.equal(p.outcome, "not_filed", "with the authority (the floor's maintenance), the add's reworded value is told once");
 });

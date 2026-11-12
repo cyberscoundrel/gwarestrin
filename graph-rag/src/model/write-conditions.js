@@ -1,23 +1,29 @@
 /**
  * R16's conditions 2 and 3 for a source write, pure: does the record name the row, and does every value written
- * appear in it. graph-rag checks these in code; no model decides them (R16). Conditions 1 (the recorder's
- * authority, R11.7) and 4 (the row unchanged since it was read, commitRow) are checked where they always were.
+ * appear in it; with R18's exception for yes/no and fixed-choice columns, and R19's conditions for adding a row.
+ * graph-rag checks these in code; no model decides them (R16). Conditions 1 (the recorder's authority, R11.7) and 4
+ * (the row unchanged since it was read, commitRow) are checked where they always were.
  *
  * How "named", "matches" and "appears" are tested is the coordinator's choice under R16 and can change: every
  * definition is in DEFINITIONS and the small functions right below it, and nothing else in graph-rag decides them.
  *
- *   writeConditions({ text, key, fields, rows, primaryKey, current }) -> {
+ *   writeConditions({ text, key, fields, rows, primaryKey, current, shape, recordedAt }) -> {
  *     ok,                       // both hold, or nothing would change
  *     unchanged,                // the row already holds every value: nothing is written, so nothing is tested
- *     failed: 2 | 3 | null,     // the first that fails
+ *     failed: 2 | 3 | null,     // the first that fails (3: some value; `values` says which, field by field)
  *     row: { ok, how, why },    // how: "named" (its key is in the text) or "only match" (the one row the text matches best)
- *     values: [{ column, value, ok, kind, why }],   // kind: number, date, boolean, closed, text, empty
+ *     values: [{ column, value, ok, kind, why, write }],   // kind: number, date, boolean, choice, text, empty;
+ *                                                          // write: the value as the column takes it (R18's canonical)
+ *     passing, failing,         // the changing fields that hold condition 3, and those that don't, as { column: value }
  *     why,                      // one sentence for the recorder when one fails
  *   }
+ *   addConditions({ text, table, data, rows, primaryKey, shape, recordedAt }) -> R19's, below
  *
  * text: the section's text; key: "system:table:row"; fields: { column: value }; rows: the table's rows (the
- * candidates for condition 2); primaryKey: the table's key column; current: the row as read, when there is one. A value
- * the row already holds isn't written, so condition 3 tests only the values that change the row.
+ * candidates for condition 2); primaryKey: the table's key column; current: the row as read, when there is one;
+ * shape: the table's shape as its source declares it (model/sources.js tableShape: which columns are yes/no, which
+ * take a fixed set of values, which a new row needs); recordedAt: when the record was put on record. A value the row
+ * already holds isn't written, so condition 3 tests only the values that change the row.
  */
 
 export const DEFINITIONS = {
@@ -29,43 +35,17 @@ export const DEFINITIONS = {
   matchMinDigits: 3,
   // condition 3. A number appears when the text holds the same number, separators removed (1,200 = 1200, 21.50 = 21.5).
   // A date appears when the text gives its day and month ("December 12", "12 Dec", "12/12" as month/day, or the ISO
-  // date); a weekday, "today" or "mid December" gives no day, so it doesn't. Text appears when it is a run of the
-  // section's words: case and runs of whitespace ignored, punctuation kept, starting and ending at word edges, so a
-  // reworded sentence doesn't. A boolean never appears (true/false aren't words a note uses: the measured gap,
-  // BOOLEANS below). A closed-set value (a column whose rows hold at most closedSetMax distinct values, like a
-  // Status) is tested as text, and reported apart, so the replay can measure it.
-  closedSetMax: 8,
-  // the treatment for booleans and closed-set values: null (they don't appear, so the piece is Held and the recorder
-  // asked) until the coordinator picks one. The replay's proposal for booleans is columnWords, below (I-45); for
-  // closed sets it proposes none.
-  booleans: null,
-  closedSets: null,
+  // date), or when it is the record's own day (a record carries the day it was put on record; "yesterday" and
+  // "tomorrow" in the text count from it); a weekday or "mid December" gives no day, so it doesn't. Text appears when
+  // it is a run of the section's words: case and runs of whitespace ignored, punctuation kept, starting and ending at
+  // word edges, so a reworded sentence doesn't.
+  // R18 (the user: "yes sure", 2026-11-11): a yes/no column, and a column with a fixed set of values, takes the
+  // model's reading: the value must be one the column allows, and nothing more is asked of the text. Which columns
+  // those are is declared, never inferred from the rows present (I-49): a column the source declaration marks
+  // "boolean", or whose row the source serves as true/false (a SQL bit), is yes/no; a column the declaration gives a
+  // list of values is fixed-choice.
+  booleanWords: { true: ["true", "yes", "y", "1"], false: ["false", "no", "n", "0"] },
 };
-
-/** the words that name a column ("Certs_Required" -> ["certs"]): its parts, less the ones that only say it's a flag */
-const FLAG_WORDS = new Set(["is", "has", "required", "flag", "needed", "yn", "bool", "ind"]);
-export const columnWords = (column) =>
-  String(column ?? "")
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .split(/[^A-Za-z0-9]+/)
-    .map((w) => w.toLowerCase())
-    .filter((w) => w.length >= 3 && !FLAG_WORDS.has(w));
-
-/**
- * The boolean treatment the replay proposes (I-45), for DEFINITIONS.booleans: a column set true appears when a sentence
- * of the record names the column's own words (Certs_Required: "certs") with no negation in that sentence; set false,
- * when such a sentence does negate it ("no certs", "doesn't need certs"). Returns why it counts, or null.
- */
-export function booleanByColumnWords(value, text, column) {
-  const words = columnWords(column);
-  if (!words.length) return null;
-  const negated = /\b(no|not|never|without|none)\b|n't\b/;
-  for (const sentence of normText(text).split(/(?<=[.;!?])\s+/)) {
-    if (!words.every((w) => new RegExp(`\\b${w}`).test(sentence))) continue;
-    if (negated.test(sentence) === !value) return `the record says "${sentence.slice(0, 80)}"`;
-  }
-  return null;
-}
 
 /** text as compared: lower case, whitespace runs as one space, curly quotes and dashes as plain ones */
 export const normText = (s) =>
@@ -123,46 +103,67 @@ const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})(?:[T ][\d:.]+Z?)?$/;
 const isNumeric = (v) => typeof v === "number" || (typeof v === "string" && /^-?\d[\d,]*(\.\d+)?$/.test(v.trim()));
 const numberOf = (v) => (typeof v === "number" ? v : Number(String(v).trim().replace(/,/g, "")));
 
-/** the distinct values a column holds across the rows, when there are few enough to call it a closed set */
-export function closedSet(rows, column) {
-  const seen = new Set();
-  for (const r of rows ?? []) {
-    const v = r?.[column];
-    if (v === null || v === undefined || typeof v !== "string") continue;
-    seen.add(normText(v));
-    if (seen.size > DEFINITIONS.closedSetMax) return null;
-  }
-  return seen.size ? seen : null;
+/**
+ * R18: what a column takes, from the table's declared shape (model/sources.js tableShape) and the row as the source
+ * serves it: "boolean" (declared so, or the source serves the cell as true/false), "choice" (the declaration lists
+ * its values), or null (numbers, dates and text, checked against the record's words).
+ */
+export function columnKind(column, { shape = null, current = null } = {}) {
+  const declared = shape?.columns?.[column];
+  if (declared?.type === "boolean") return { kind: "boolean" };
+  if (Array.isArray(declared?.values) && declared.values.length) return { kind: "choice", values: declared.values };
+  if (current && typeof current[column] === "boolean") return { kind: "boolean" };
+  return null;
 }
 
-/** condition 3 for one value: does it appear in the text */
-export function valueAppears(value, text, { column = null, rows = [] } = {}) {
+/** a yes/no as the column takes it: true or false, from a boolean, 1/0 or yes/no words; undefined when it is none */
+export function asBoolean(value) {
+  if (typeof value === "boolean") return value;
+  const w = normText(value);
+  if (DEFINITIONS.booleanWords.true.includes(w)) return true;
+  if (DEFINITIONS.booleanWords.false.includes(w)) return false;
+  return undefined;
+}
+
+/** the record's own day as YYYY-MM-DD, and the days "yesterday" and "tomorrow" name when the text uses them */
+function recordDays(text, recordedAt) {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(recordedAt ?? ""));
+  if (!m) return [];
+  const day = (d) => new Date(Date.parse(`${m[1]}T00:00:00Z`) + d * 86_400_000).toISOString().slice(0, 10);
   const t = normText(text);
-  if (value === null || value === undefined || (typeof value === "string" && !value.trim())) return { ok: false, kind: "empty", why: `${column ?? "the column"} would be emptied, which the record doesn't say` };
-  if (typeof value === "boolean") {
-    const treated = DEFINITIONS.booleans?.(value, t, column);
-    if (treated) return { ok: true, kind: "boolean", why: treated };
-    return { ok: false, kind: "boolean", why: `${column ?? "the column"} would be set ${value}, and a yes or no doesn't appear in the record as written` };
+  return [day(0), ...(/\byesterday\b/.test(t) ? [day(-1)] : []), ...(/\btomorrow\b/.test(t) ? [day(1)] : [])];
+}
+
+/**
+ * condition 3 for one value: does it appear in the text, or, for a yes/no or fixed-choice column (R18), is it one the
+ * column allows. `write` is the value as the column takes it (a choice in its declared spelling, a yes/no as a boolean).
+ */
+export function valueAppears(value, text, { column = null, kind = null, recordedAt = null } = {}) {
+  const t = normText(text);
+  const name = column ?? "the column";
+  if (value === null || value === undefined || (typeof value === "string" && !value.trim())) return { ok: false, kind: "empty", why: `${name} would be emptied, which the record doesn't say` };
+  if (kind?.kind === "boolean") {
+    const b = asBoolean(value);
+    return b === undefined ? { ok: false, kind: "boolean", why: `${name} takes yes or no, not "${String(value).slice(0, 40)}"` } : { ok: true, kind: "boolean", write: b };
   }
+  if (kind?.kind === "choice") {
+    const hit = kind.values.find((v) => normText(v) === normText(value));
+    return hit === undefined ? { ok: false, kind: "choice", why: `${name} takes one of ${kind.values.join(", ")}, not "${String(value).slice(0, 40)}"` } : { ok: true, kind: "choice", write: hit };
+  }
+  if (typeof value === "boolean") return { ok: false, kind: "boolean", why: `${name} would be set ${value}, and ${name} isn't declared a yes/no column` };
   if (isNumeric(value)) {
     const n = numberOf(value);
-    return numbersIn(text).includes(n) ? { ok: true, kind: "number" } : { ok: false, kind: "number", why: `${column ?? "the column"} would be ${n}, a number the record doesn't give` };
+    return numbersIn(text).includes(n) ? { ok: true, kind: "number", write: value } : { ok: false, kind: "number", why: `${name} would be ${n}, a number the record doesn't give` };
   }
   const s = String(value);
   const d = DATE_RE.exec(s.trim());
   if (d) {
     const [y, m, day] = [Number(d[1]), Number(d[2]), Number(d[3])];
-    const hit = datesIn(text).some((x) => x.month === m && x.day === day && (x.year === undefined || x.year === y));
-    return hit ? { ok: true, kind: "date" } : { ok: false, kind: "date", why: `${column ?? "the column"} would be ${s.slice(0, 10)}, a day the record doesn't give` };
+    const hit = datesIn(text).some((x) => x.month === m && x.day === day && (x.year === undefined || x.year === y)) || recordDays(text, recordedAt).includes(`${d[1]}-${d[2]}-${d[3]}`);
+    return hit ? { ok: true, kind: "date", write: value } : { ok: false, kind: "date", why: `${name} would be ${s.slice(0, 10)}, a day the record doesn't give` };
   }
-  const set = column ? closedSet(rows, column) : null;
-  const kind = set && set.has(normText(s)) ? "closed" : "text";
-  if (hasRun(t, normText(s))) return { ok: true, kind };
-  if (kind === "closed") {
-    const treated = DEFINITIONS.closedSets?.(s, t, column);
-    if (treated) return { ok: true, kind, why: treated };
-  }
-  return { ok: false, kind, why: `${column ?? "the column"} would read "${s.slice(0, 80)}${s.length > 80 ? "…" : ""}", which isn't the record's own words` };
+  if (hasRun(t, normText(s))) return { ok: true, kind: "text", write: value };
+  return { ok: false, kind: "text", why: `${name} would read "${s.slice(0, 80)}${s.length > 80 ? "…" : ""}", which isn't the record's own words` };
 }
 
 /** does the text give a row's cell (for condition 2's "only match") */
@@ -203,14 +204,45 @@ export function sameCell(a, b) {
   return normText(a) === normText(b);
 }
 
-/** R16 conditions 2 and 3 together; `failed` and `why` name the first that fails */
-export function writeConditions({ text, key, fields, rows = [], primaryKey = null, current = null }) {
+/** the values of a write, each through condition 3 with its column's kind */
+const checkValues = (entries, text, { shape, current, recordedAt }) => entries.map(([column, value]) => ({ column, value, ...valueAppears(value, text, { column, kind: columnKind(column, { shape, current }), recordedAt }) }));
+const asFields = (vs) => Object.fromEntries(vs.map((v) => [v.column, v.ok ? v.write : v.value]));
+
+/**
+ * R16 conditions 2 and 3 together, field by field: `failed` and `why` name the first that fails; when it is 3,
+ * `passing` holds the fields that may still land and `failing` those that may not.
+ */
+export function writeConditions({ text, key, fields, rows = [], primaryKey = null, current = null, shape = null, recordedAt = null }) {
   const changing = Object.entries(fields ?? {}).filter(([column, value]) => !(current && column in current && sameCell(current[column], value)));
-  if (current && !changing.length) return { ok: true, unchanged: true, failed: null, row: { ok: true, how: "unchanged" }, values: [], why: null };
+  if (current && !changing.length) return { ok: true, unchanged: true, failed: null, row: { ok: true, how: "unchanged" }, values: [], passing: {}, failing: {}, why: null };
   const row = rowNamed({ text, key, rows, primaryKey });
-  const values = changing.map(([column, value]) => ({ column, value, ...valueAppears(value, text, { column, rows }) }));
+  const values = checkValues(changing, text, { shape, current, recordedAt });
   const bad = values.filter((v) => !v.ok);
   const failed = !row.ok ? 2 : bad.length ? 3 : null;
   const why = failed === 2 ? `It isn't clear which row: ${row.why}.` : failed === 3 ? `Not every value is in your words: ${bad.map((v) => v.why).join("; ")}.` : null;
-  return { ok: failed === null, failed, row, values, why };
+  return { ok: failed === null, failed, row, values, passing: asFields(values.filter((v) => v.ok)), failing: asFields(bad), why };
+}
+
+/**
+ * R19's conditions for adding a row (the user, 2026-11-11; the coordinator's reading), in place of "the row is named":
+ *   - every value is from the record (condition 3, with R18's exception), field by field;
+ *   - the key is the source's to make: a value the worker gives for the key column is dropped (`dropped`), never sent;
+ *   - every column the declaration says a new row needs is given, or the source fills it (shape.required, shape.defaults);
+ *   - no existing row already holds these values (`existing`, that row: the piece is then already in the source).
+ * One piece adding at most one row however often it is filed is the caller's (filing.js), which knows the piece.
+ * Returns { ok, failed: "values" | "required" | null, values, passing, failing, data, dropped, missing, existing, why }.
+ */
+export function addConditions({ text, table = null, data, rows = [], primaryKey = null, shape = null, recordedAt = null }) {
+  const entries = Object.entries(data ?? {}).filter(([c]) => c !== primaryKey);
+  const dropped = primaryKey && data && primaryKey in data ? [primaryKey] : [];
+  const values = checkValues(entries, text, { shape, current: null, recordedAt });
+  const bad = values.filter((v) => !v.ok);
+  const given = new Set(entries.filter(([, v]) => v !== null && v !== undefined && !(typeof v === "string" && !v.trim())).map(([c]) => c));
+  const missing = (shape?.required ?? []).filter((c) => c !== primaryKey && !given.has(c) && !(shape?.defaults ?? []).includes(c));
+  const out = asFields(values.filter((v) => v.ok));
+  const existing = entries.length ? rows.find((r) => entries.every(([c, v]) => c in r && sameCell(r[c], out[c] ?? v))) ?? null : null;
+  const where = table ? ` to ${table}` : "";
+  const failed = bad.length ? "values" : missing.length ? "required" : null;
+  const why = failed === "values" ? `Not every value is in your words: ${bad.map((v) => v.why).join("; ")}.` : failed === "required" ? `A new row${where} needs ${missing.join(", ")}, which the record doesn't give.` : null;
+  return { ok: failed === null, failed, values, passing: out, failing: asFields(bad), data: out, dropped, missing, existing: existing && primaryKey ? { key: existing[primaryKey], row: existing } : existing ? { key: null, row: existing } : null, why };
 }

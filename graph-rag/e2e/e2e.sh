@@ -77,6 +77,8 @@ docker run --rm --network "$NET" "$NODE" node -e '
     process.exit(1);
   })();'
 
+# R18, R19: the tables' shapes the source declaration gives graph-rag, from the test database's own definition
+SHAPES="$(docker run --rm -v "$PWD/../test-sql:/test-sql:ro" "$NODE" node --input-type=module -e 'const m = await import("/test-sql/data.mjs"); console.log(JSON.stringify(m.shapes()))')"
 docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$CFG:/cfg:ro" "${CLOCK_ENV[@]}" "${CLOCK_MOUNT[@]}" \
   -e ARCADEDB_URL=http://arcadedb:2480 -e ARCADEDB_DB=gwarestrin -e ARCADEDB_USER=root -e ARCADEDB_PASSWORD=e2e-password \
   -e LITELLM_BASE_URL=http://models:4000/v1 -e LITELLM_API_KEY=e2e \
@@ -86,6 +88,7 @@ docker run -d --name "$NET-gr" --network "$NET" --network-alias graph-rag -v "$C
   -e SWEEP_INTERVAL_MS=5000 -e DOC_STORE=fs:/tmp/documents \
   -e DAB_SYSTEM=mssql -e DAB_READ_URL=http://source:5000/mcp -e DAB_WRITE_URL=http://source:5001/mcp \
   -e DAB_READ_HOME=everyone -e DAB_WRITE_TABLES=dbo_Job,dbo_Job_Operation,dbo_Work_Center,dbo_Sales_Order,dbo_Purchase_Order,dbo_Maintenance \
+  -e DAB_WRITE_ACTIONS=create,update,delete -e "DAB_TABLE_SHAPES=$SHAPES" \
   -e DAB_GUARD_SERVER=gr-e2e-fake -e DAB_GUARD_DATABASE=S0Fake \
   "$GR_IMAGE" >/dev/null
 

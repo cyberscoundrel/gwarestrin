@@ -5,8 +5,10 @@
 //
 //   tables  { dbo_Job: { primaryKey: ["Job"], identity?: true, rows: [...] } }
 //           identity: the server makes the key (an IDENTITY column), so a create may not give it
+//           deletes: the write instance grants delete on it (R19: only a table that takes new rows, to undo one)
 //   dabTool(tables, name, args, { write }) -> an MCP tools/call result
-//     write: the write-capable instance (the read-only one refuses create and update; neither deletes)
+//     write: the write-capable instance (the read-only one refuses create, update and delete; the write one deletes only
+//     where the table says `deletes`)
 //
 // What DAB 2.0.12 does that this keeps:
 //   - a filter is `col op literal` joined by `and` / `or`, with op one of eq ne gt ge lt le; no string functions
@@ -78,7 +80,18 @@ const selected = (row, select) => (select ? Object.fromEntries(String(select).sp
 
 export function dabTool(tables, name, args = {}, { write = false } = {}) {
   if (name === "describe_entities") return ok({ entities: Object.keys(tables).map((n) => ({ name: n, description: "", fields: [], permissions: [] })), count: Object.keys(tables).length, status: "success" });
-  if (name === "delete_record") return err(name, "PermissionDenied", `Permission denied for delete on entity '${args.entity}'. You do not have permission to perform Delete operation for this entity.`);
+  if (name === "delete_record") {
+    const t = tables[args.entity];
+    if (!write || !t?.deletes) return err(name, "PermissionDenied", `Permission denied for delete on entity '${args.entity}'. You do not have permission to perform Delete operation for this entity.`);
+    const missing = needs(name, args, ["entity", "keys"]);
+    if (missing) return missing;
+    if (!sameKeys(args.keys, t.primaryKey)) return err(name, "UnexpectedError", "Primary key column(s) provided do not match DB schema.");
+    const i = t.rows.findIndex(byKey(args.keys));
+    // as DAB 2.0.12 answered against the synthetic SQL Server (test-sql/check.mjs, 2026-11-11)
+    if (i < 0) return err(name, "RecordNotFound", `No record found with the specified primary key: ${Object.entries(args.keys).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+    t.rows.splice(i, 1);
+    return ok({ entity: args.entity, result: {}, message: `Successfully deleted record from entity '${args.entity}'`, status: "success" });
+  }
   if (name !== "read_records" && name !== "update_record" && name !== "create_record") return { isError: true, content: [{ type: "text", text: `no tool ${name}` }] };
   const required = needs(name, args, name === "read_records" ? ["entity"] : name === "update_record" ? ["entity", "keys", "fields"] : ["entity", "data"]);
   if (required) return required;
@@ -110,7 +123,9 @@ export function dabTool(tables, name, args = {}, { write = false } = {}) {
   if (t.identity) {
     const given = t.primaryKey.find((c) => c in args.data);
     if (given) return err(name, "ValidationFailed", `Request validation failed: Field '${given}' cannot be included in the request body.`);
-    const next = Math.max(0, ...t.rows.map((r) => Number(r[t.primaryKey[0]]) || 0)) + 1;
+    // SQL Server's IDENTITY never hands out a key again, even after its row is deleted
+    const next = Math.max(t.lastKey ?? 0, ...t.rows.map((r) => Number(r[t.primaryKey[0]]) || 0)) + 1;
+    t.lastKey = next;
     const row = { [t.primaryKey[0]]: next, ...args.data };
     t.rows.push(row);
     return ok({ entity: args.entity, result: { value: [{ ...row }] }, message: `Successfully created record in entity '${args.entity}'`, status: "success" });

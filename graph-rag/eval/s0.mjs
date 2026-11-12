@@ -34,7 +34,8 @@ const entity = (table) => `dbo_${table}`;
 
 /** the dataset: table name (as DAB names it) -> { primaryKey, rows }, a fresh copy each call */
 export function dataset() {
-  return Object.fromEntries(Object.entries(TABLES).map(([t, v]) => [entity(t), { primaryKey: [keyColumn(t)], rows: v.rows.map((r) => ({ ...r })) }]));
+  // identity: the source makes the key (a create may not give it); deletes: the write side may delete there (R19's undo)
+  return Object.fromEntries(Object.entries(TABLES).map(([t, v]) => [entity(t), { primaryKey: [keyColumn(t)], ...(v.columns.find((c) => c.key)?.identity ? { identity: true } : {}), ...(WRITABLE[t]?.includes("delete") ? { deletes: true } : {}), rows: v.rows.map((r) => ({ ...r })) }]));
 }
 
 /**

@@ -4,7 +4,7 @@
 // snapshot: {
 //   meta: { setup, run, seed, noteOf: { recordId: noteId }, markers: [{ word, record, recordId, floor, expect? }],
 //           only?: [noteId],             // a run on a subset of the notes: only those are scored
-//           labels?: "r12" | "r16" },    // the labels it is scored by (I-47): none, r12 (a run from before R16)
+//           labels?: "r12" | "r16" | "r19" },    // the labels it is scored by (I-47, I-53): none, r12 (a run from before R16)
 //   positions, before, after,            // the test positions; the source dumps
 //   entries, requests, briefs,           // the filing log, workers' requests, every brief as sent
 //   classes, instances, sections, about, // the graph: classes; [{ rid, name, key, classes, homes }];
@@ -88,7 +88,8 @@ function markdown(r, snap) {
     L.push("", "### Note wording that reached a wider table by authority (R17)", "", "Not counted as leaks: each was written by its recorder's authority from a note at their own level. Listed so every case is seen.", "");
     for (const b of r.leaks.byAuthority) L.push(`- "${b.word}" (home ${b.home}) in ${b.row} (${b.columns.join(", ")}), seen by ${b.seen_by}: from ${b.notes.join(", ")}`);
   }
-  L.push("", "## Filing outcomes against the labels", "", `Labels: ${labelsOf(snap) === "r16" ? "under R16 (R16_CHANGES applied: m01, t06, z01)" : "as written, under R12 (before R16)"}.`, "");
+  const LABEL_WORDS = { r12: "as written, under R12 (before R16)", r16: "under R16 (R16_CHANGES applied: m01, t06, z01)", r19: "under R18 and R19 (R16_CHANGES, then R19_CHANGES: t06, z01, aa03, aa05)" };
+  L.push("", "## Filing outcomes against the labels", "", `Labels: ${LABEL_WORDS[labelsOf(snap)] ?? labelsOf(snap)}.`, "");
   L.push(`${o.totals.pieces} labelled pieces: ${o.totals.exact} exact, ${o.totals.accepted} accepted, ${o.totals.wrong} wrong (${o.totals.wrongTarget} wrong target, ${o.totals.wrongRule} wrong outcome on the right target), ${o.totals.missing} missing. ${o.totals.extra} extra entries, ${o.totals.extraWrites} of them writes.`, "");
   L.push(`| label \\ logged | ${[...OUTCOME_ORDER, "missing"].join(" | ")} |`, `|---|${[...OUTCOME_ORDER, "missing"].map(() => "--:").join("|")}|`);
   for (const lab of OUTCOME_ORDER) L.push(`| ${lab} | ${[...OUTCOME_ORDER, "missing"].map((x) => o.confusion[lab][x]).join(" | ")} |`);
@@ -123,9 +124,9 @@ function markdown(r, snap) {
   }
   if (r.toolCalls) {
     // I-43: a tool error is one of three things, and only the first is a model failing to call a tool
-    const line = (name, x) => `| ${name} | ${x.calls} | ${x.errors} (${x.calls ? Math.round((100 * x.errors) / x.calls) : 0}%) | ${x.malformed} | ${x.source} | ${x.graph_rag} |`;
-    L.push("", "## Tool calls", "", "Errors split three ways: malformed (the call didn't fit the tool's schema, or named no tool), source rejections (a connection's own tool refused a well-formed call) and graph-rag refusals (a graph-rag tool refused a well-formed call).", "");
-    L.push("| | calls | errors | malformed | source rejections | graph-rag refusals |", "|---|--:|--:|--:|--:|--:|");
+    const line = (name, x) => `| ${name} | ${x.calls} | ${x.errors} (${x.calls ? Math.round((100 * x.errors) / x.calls) : 0}%) | ${x.malformed} | ${x.source} | ${x.graph_rag} | ${x.corrections ?? 0} |`;
+    L.push("", "## Tool calls", "", "Errors split three ways: malformed (the call didn't fit the tool's schema, or named no tool), source rejections (a connection's own tool refused a well-formed call) and graph-rag refusals (a graph-rag tool refused a well-formed call). Corrections are file_to_source answering not_filed (I-50: a value not in the record's words, told once); they are answers, not errors.", "");
+    L.push("| | calls | errors | malformed | source rejections | graph-rag refusals | corrections |", "|---|--:|--:|--:|--:|--:|--:|");
     L.push(line("all", r.toolCalls.all), line("filing (no discovery)", r.toolCalls.filing));
     for (const [role, x] of Object.entries(r.toolCalls.byRole)) L.push(line(role, x));
   }

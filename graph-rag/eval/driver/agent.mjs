@@ -62,12 +62,23 @@ export async function toolsFrom(sources) {
   return out;
 }
 
+/** a graph-rag answer's outcome (filed, not_filed, held ...), for the log: I-50's corrections are counted from it */
+function outcomeOf(text) {
+  try {
+    const o = JSON.parse(String(text ?? ""))?.outcome;
+    return typeof o === "string" ? { outcome: o.slice(0, 20) } : {};
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Run one agent: the system text, the first user message, and turns until the model answers with no tool call or
  * `maxTurns` is spent. Returns { text, turns, calls, usage, messages, stopped } where stopped says why it ended early.
  * `history`: the conversation a resumed thread had, continued with `prompt`.
  * `log(event)` sees every call (name, args, whether it errored), never the model's credentials.
  */
+
 export async function runAgent({ client, system, prompt, tools, maxTurns = 40, log = () => {}, history = null }) {
   // a resumed thread goes on with its own conversation, as the workspace wakes the agent it had (graph-pool.ts)
   const messages = [...(history ?? []), { role: "user", content: prompt }];
@@ -113,7 +124,7 @@ export async function runAgent({ client, system, prompt, tools, maxTurns = 40, l
       const tool = byName.get(tc.name);
       const res = tool ? await tool.call(tc.args ?? {}).catch((e) => ({ text: `error: ${String(e?.message ?? e)}`, error: true })) : { text: `error: no tool ${tc.name}`, error: true };
       // a refused call's own text, for the report's commonest errors (graph-rag's and the source's words, never a key)
-      log({ tool: tc.name, args: tc.args, error: res.error, ...(res.error ? { errorText: String(res.text).slice(0, 500) } : {}) });
+      log({ tool: tc.name, args: tc.args, error: res.error, ...(res.error ? { errorText: String(res.text).slice(0, 500) } : outcomeOf(res.text)) });
       messages.push({ role: "tool", toolCallId: tc.id, name: tc.name, content: String(res.text).slice(0, 20_000) });
     }
   }

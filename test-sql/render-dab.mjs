@@ -5,7 +5,8 @@
 //   node test-sql/render-dab.mjs <out> [writable.json]
 //
 // read:  every dbo table and view, read only (the read login's grant is SELECT on the dbo schema)
-// write: only the chosen tables, with read plus their create or update, never delete; and the identity view
+// write: only the chosen tables, with read plus their create or update, and delete where a table takes new rows (to
+// undo one graph-rag added, R19); and the identity view
 //        the guard reads (data.mjs IDENTITY_VIEW)
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -56,7 +57,7 @@ export function writeConfig(writable = WRITABLE) {
     $schema: SCHEMA,
     "data-source": source,
     entities,
-    runtime: runtime("The write-capable instance over the synthetic test database: create and update on chosen tables, never delete. Only graph-rag's write adapter reaches it, after the guard."),
+    runtime: runtime("The write-capable instance over the synthetic test database: create and update on chosen tables, and delete only where a table takes new rows, to undo an added row. Only graph-rag's write adapter reaches it, after the guard."),
   };
 }
 

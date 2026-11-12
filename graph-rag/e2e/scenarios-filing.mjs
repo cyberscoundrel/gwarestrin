@@ -50,6 +50,9 @@ const CLASSES = [
   { key: "e2e_filing_deliveries", home: "floor", table: "mssql:dbo_FJob", authority: "ops" },
   // lasting individuals no source holds: what a Kept piece links to
   { key: "e2e_filing_equipment", home: "floor", table: null, authority: "floor", rowsAreNodes: true },
+  // R19: a table that takes new rows; the floor adds them, and a class whose authority is Operations' proposes them
+  { key: "e2e_filing_maint", home: "floor", table: "mssql:dbo_FMaint", authority: "floor" },
+  { key: "e2e_filing_maint_ops", home: "floor", table: "mssql:dbo_FMaint", authority: "ops" },
 ];
 
 async function upsertPolicyRow(ctx, scope, json) {
@@ -62,10 +65,14 @@ async function upsertPolicyRow(ctx, scope, json) {
 async function setup(ctx) {
   const url = await startFakeDab();
   // a table's cursor needs a second row: DAB pages by primary key, and this is how the key is learned
-  fake.tables = { dbo_FJob: { primaryKey: ["Job"], rows: [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472, Status: "open", Quantity: 20 }] } };
+  fake.tables = {
+    dbo_FJob: { primaryKey: ["Job"], rows: [{ Job: 4471, Status: null, Quantity: 500 }, { Job: 4472, Status: "open", Quantity: 20 }] },
+    // R19: its key made by the source, deletable only to undo an added row
+    dbo_FMaint: { primaryKey: ["Maint"], identity: true, deletes: true, rows: [{ Maint: 1, Work_Center: "CNC 2", Opened: "2026-10-27", Description: "Warm-up runs long", Status: "Open" }, { Maint: 2, Work_Center: null, Opened: "2026-09-14", Description: "Annual inspection", Status: "Closed" }] },
+  };
   fake.calls = [];
-  // the declaration (model/sources.js): read at the floor's home, written to dbo_FJob behind the guard
-  await upsertPolicyRow(ctx, "sources", JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: `${url}/read/mcp`, home: "floor" }, commit: { via: "dab-mcp", url: `${url}/write/mcp`, tables: ["dbo_FJob"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } }]));
+  // the declaration (model/sources.js): read at the floor's home, written to dbo_FJob behind the guard, and new rows to dbo_FMaint
+  await upsertPolicyRow(ctx, "sources", JSON.stringify([{ system: "mssql", read: { via: "dab-mcp", url: `${url}/read/mcp`, home: "floor" }, commit: { via: "dab-mcp", url: `${url}/write/mcp`, tables: ["dbo_FJob", { name: "dbo_FMaint", adds: true, columns: { Status: { values: ["Open", "Closed"] } }, required: ["Opened", "Description", "Status"] }], actions: ["create", "update", "delete"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } }]));
   for (const c of CLASSES) {
     const have = await ctx.sql(`SELECT @rid AS rid FROM Entity WHERE _kind = 'class' AND _class_key = '${c.key}'`);
     if (have.length) continue;
@@ -175,7 +182,11 @@ export default [
         ctx.check(entry?.reason === 'before: {"Status":"open"}', `logged with the value it replaced: ${JSON.stringify(entry?.reason)}`);
         // a value the record doesn't give: Held, the recorder asked which condition failed, nothing overwritten
         const other = await record(ctx, "r16-held", ["Job 4471 is finished."]);
-        const h = await ctx.tool(other.worker, "file_to_source", { section: other.sections[0], piece: "job 4471 is finished", said: "writing Status complete to job 4471", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: "complete" } });
+        const finished = { section: other.sections[0], piece: "job 4471 is finished", said: "writing Status complete to job 4471", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: "complete" } };
+        // I-50: told once, nothing filed; the same piece again is Held
+        const told = await ctx.tool(other.worker, "file_to_source", finished);
+        ctx.check(told.outcome === "not_filed" && told.fields?.[0]?.column === "Status" && !told.error, `told once, as an answer, not an error: ${JSON.stringify(told).slice(0, 300)}`);
+        const h = await ctx.tool(other.worker, "file_to_source", finished);
         ctx.check(h.outcome === "held" && /R16 condition 3/.test(h.note ?? ""), `Held by condition 3: ${JSON.stringify(h).slice(0, 300)}`);
         ctx.check(fake.tables.dbo_FJob.rows[0].Status === null && writes().length === 1, "nothing written for it");
         const q1 = (await ctx.sql(`SELECT asked_of, status, question FROM WorkerQuestion WHERE job_id = '${other.job}'`))[0];
@@ -191,6 +202,57 @@ export default [
         ctx.check(marked?.outcome === "filed" && /"by"/.test(String(marked?.undone ?? "")), `the entry stays, marked undone: ${JSON.stringify(marked)}`);
         const again = await ctx.api(`/api/filing/entries/${r.entry}/undo`, { method: "POST" });
         ctx.check(/undone already/.test(again.error ?? ""), `not twice: ${JSON.stringify(again).slice(0, 200)}`);
+      });
+    },
+  },
+  {
+    name: "I-50, per field: told once which values aren't in the record; then what holds lands and the rest is its own Held piece, asking the recorder",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const rec = await record(ctx, "per-field", ["Job 4471 is complete."]);
+        const p = { section: rec.sections[0], piece: "job 4471 shipped", said: "writing Status complete and 800 shipped to job 4471", class: "e2e_filing_jobs", key: "mssql:dbo_FJob:4471", fields: { Status: "complete", Quantity: 800 } };
+        const told = await ctx.tool(rec.worker, "file_to_source", p);
+        ctx.check(told.outcome === "not_filed" && told.fields?.map((x) => x.column).join() === "Quantity" && writes().length === 0, `told which, nothing written: ${JSON.stringify(told).slice(0, 300)}`);
+        const r = await ctx.tool(rec.worker, "file_to_source", { ...p, fields: { Status: "complete" } });
+        ctx.check(r.outcome === "filed" && r.held?.fields?.join() === "Quantity", `Status Filed, the 800 left out and held: ${JSON.stringify(r).slice(0, 300)}`);
+        ctx.check(fake.tables.dbo_FJob.rows[0].Status === "complete" && fake.tables.dbo_FJob.rows[0].Quantity === 500, "Status written, Quantity not");
+        const entries = await log(ctx, rec.doc);
+        ctx.check(entries.map((e) => e.outcome).sort().join() === "filed,held", `one Filed, one Held: ${JSON.stringify(entries.map((e) => e.outcome))}`);
+        const q1 = (await ctx.sql(`SELECT asked_of, question FROM WorkerQuestion WHERE job_id = '${rec.job}'`))[0];
+        ctx.check(q1?.asked_of === "bob" && /Quantity wasn't written/.test(q1.question ?? ""), `the recorder is asked about the 800: ${JSON.stringify(q1)}`);
+      });
+    },
+  },
+  {
+    name: "R19: a worker adds a row to a table that takes new rows; the key is the source's; one piece adds one row however often it is filed; a person undoes it by removing the row",
+    run: async (ctx) => {
+      await setup(ctx);
+      await withMap(ctx, async () => {
+        const rec = await record(ctx, "r19", ["On 11/09 coolant concentration on CNC 1 read 4 percent. Topped up and rechecked at 7."]);
+        const p = { section: rec.sections[0], piece: "CNC 1 coolant topped up", said: "adding a maintenance row for CNC 1", class: "e2e_filing_maint", key: "mssql:dbo_FMaint:new", fields: { Work_Center: "CNC 1", Opened: "2026-11-09", Description: "coolant concentration on CNC 1 read 4 percent", Status: "Closed", Maint: 9 } };
+        const r = await ctx.tool(rec.worker, "file_to_source", p);
+        ctx.check(r.outcome === "filed" && r.key === "mssql:dbo_FMaint:3" && fake.tables.dbo_FMaint.rows.length === 3, `added, its key the source's: ${JSON.stringify(r).slice(0, 300)}`);
+        const created = () => fake.calls.filter((c) => c.name === "create_record");
+        ctx.check(created().length === 1 && !("Maint" in created()[0].args.data), `the key the worker gave is never sent: ${JSON.stringify(created()[0]?.args).slice(0, 200)}`);
+        for (const key of ["mssql:dbo_FMaint:new", "mssql:dbo_FMaint", "mssql:dbo_FMaint:77"]) {
+          const again = await ctx.tool(rec.worker, "file_to_source", { ...p, key });
+          ctx.check(again.outcome === "filed" && again.key === "mssql:dbo_FMaint:3", `filed again (${key}): the same row: ${JSON.stringify(again).slice(0, 200)}`);
+        }
+        ctx.check(created().length === 1 && fake.tables.dbo_FMaint.rows.length === 3, "one row, however often the piece is filed");
+        const e = (await ctx.sql(`SELECT reason, target FROM FilingEntry WHERE id = '${r.entry}'`))[0];
+        ctx.check(e?.reason === "added: mssql:dbo_FMaint:3" && JSON.parse(e.target).added === true, `logged as an added row: ${JSON.stringify(e)}`);
+        const u = await ctx.api(`/api/filing/entries/${r.entry}/undo`, { method: "POST" });
+        ctx.check(u.removed === true && fake.tables.dbo_FMaint.rows.length === 2 && fake.calls.some((c) => c.name === "delete_record" && c.url.includes("/write")), `undone: the row removed: ${JSON.stringify(u).slice(0, 300)}`);
+        // a proposed add (the recorder lacks the authority): one proposal, however often filed; approved, the row is added
+        const ops = await record(ctx, "r19-ops", ["On 11/09 the Toyota forklift beeper was tagged out until maintenance replaces it."]);
+        const q2 = { section: ops.sections[0], piece: "forklift beeper tagged out", said: "adding a maintenance row", class: "e2e_filing_maint_ops", key: "mssql:dbo_FMaint:new", fields: { Opened: "2026-11-09", Description: "the Toyota forklift beeper was tagged out until maintenance replaces it", Status: "Open" } };
+        const pr = await ctx.tool(ops.worker, "file_to_source", q2);
+        const pr2 = await ctx.tool(ops.worker, "file_to_source", q2);
+        const pending = [...new Set((await log(ctx, ops.doc)).map((x) => x.pending_id).filter(Boolean))];
+        ctx.check(pr.outcome === "proposed" && pr2.outcome === "proposed" && pending.length === 1, `proposed once: ${JSON.stringify([pr, pr2, pending]).slice(0, 300)}`);
+        const ok = await ctx.api(`/api/queue/${pending[0]}/approve`, { method: "POST", body: "{}" });
+        ctx.check(!ok.error && fake.tables.dbo_FMaint.rows.length === 3 && fake.tables.dbo_FMaint.rows.at(-1).Maint === 4, `approved: the row added, key 4 (the source never reuses 3): ${JSON.stringify(ok).slice(0, 300)}`);
       });
     },
   },

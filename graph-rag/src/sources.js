@@ -7,7 +7,9 @@
  *     The older shape { "<system>": { "read": url, "write": url } } still loads, with no tables named and no
  *     guard, so nothing is written through it until a guard is declared.
  *   - the environment, for a system nothing stored declares: DAB_SYSTEM (default mssql), DAB_READ_URL,
- *     DAB_READ_HOME, DAB_WRITE_URL, DAB_WRITE_TABLES (comma-separated), DAB_GUARD_SERVER, DAB_GUARD_DATABASE.
+ *     DAB_READ_HOME, DAB_WRITE_URL, DAB_WRITE_TABLES (comma-separated), DAB_WRITE_ACTIONS (comma-separated; default
+ *     create,update), DAB_TABLE_SHAPES (JSON: { table: { adds, columns, required, defaults } }, the shapes R18 and R19
+ *     read, model/sources.js), DAB_GUARD_SERVER, DAB_GUARD_DATABASE.
  * A stored declaration that doesn't hold leaves its source undeclared. It never falls back to the environment's,
  * which may point somewhere else.
  */
@@ -28,10 +30,12 @@ export function envDeclaration(env = process.env) {
   if (!url) return null;
   const write = env.DAB_WRITE_URL || null;
   const guard = env.DAB_GUARD_SERVER && env.DAB_GUARD_DATABASE ? { server: env.DAB_GUARD_SERVER, database: env.DAB_GUARD_DATABASE } : null;
+  const shapes = env.DAB_TABLE_SHAPES ? JSON.parse(env.DAB_TABLE_SHAPES) : {};
+  const tables = env.DAB_WRITE_TABLES ? list(env.DAB_WRITE_TABLES).map((t) => (shapes[t] ? { ...shapes[t], name: t } : t)) : null;
   return normalizeSource({
     system: env.DAB_SYSTEM || "mssql",
     read: { via: "dab-mcp", url, home: env.DAB_READ_HOME || null },
-    commit: write ? { via: "dab-mcp", url: write, tables: env.DAB_WRITE_TABLES ? list(env.DAB_WRITE_TABLES) : null, guard } : { via: "none" },
+    commit: write ? { via: "dab-mcp", url: write, tables, ...(env.DAB_WRITE_ACTIONS ? { actions: list(env.DAB_WRITE_ACTIONS) } : {}), guard } : { via: "none" },
   });
 }
 
@@ -89,6 +93,7 @@ export async function sourceFor(system, db, opts = {}) {
  * otherwise the root.
  */
 export function testDeclaration({ read = "http://dab-read:5000/mcp", write = "http://dab-write:5000/mcp", server = "gwsynth-sql", database = "GwSynthMfg" } = {}) {
+  const shapes = TEST_SHAPES;
   return {
     system: "mssql",
     description: "The synthetic test database (invented data)",
@@ -96,8 +101,25 @@ export function testDeclaration({ read = "http://dab-read:5000/mcp", write = "ht
     commit: {
       via: "dab-mcp",
       url: write,
-      tables: ["dbo_Job", "dbo_Job_Operation", "dbo_Work_Center", "dbo_Sales_Order", "dbo_Purchase_Order", "dbo_Maintenance"],
+      tables: ["dbo_Job", "dbo_Job_Operation", "dbo_Work_Center", "dbo_Sales_Order", "dbo_Purchase_Order", "dbo_Maintenance"].map((t) => (shapes[t] ? { ...shapes[t], name: t } : t)),
+      actions: ["create", "update", "delete"],
       guard: { server, database, login: "gwsynth_write" },
     },
   };
 }
+
+/**
+ * The shapes the synthetic test database declares (R18, R19; test-sql/data.mjs SHAPES makes the same for the harness,
+ * and a test in test/sources.test.js holds them equal): which columns are yes/no or take a fixed set of values, and
+ * which tables take new rows: Maintenance (aa03, aa05) and Purchase_Order (aq07), the tables a label expects a new row
+ * in whose key the source makes (an identity column). Sales_Order and Job_Operation are not: no label adds one, and
+ * Sales_Order's key would have to come from the writer.
+ */
+export const TEST_SHAPES = {
+  dbo_Job: { columns: { Certs_Required: "boolean", Status: { values: ["Active", "Hold", "Complete", "Closed"] } } },
+  dbo_Job_Operation: { columns: { Status: { values: ["Open", "Active", "Complete"] } } },
+  dbo_Work_Center: { columns: { Status: { values: ["Up", "Down"] } } },
+  dbo_Sales_Order: { columns: { Status: { values: ["Open", "Shipped", "Closed"] } } },
+  dbo_Purchase_Order: { adds: true, columns: { Status: { values: ["Open", "Received", "Closed"] } }, required: ["Vendor", "Description", "Order_Date", "Status"] },
+  dbo_Maintenance: { adds: true, columns: { Status: { values: ["Open", "Closed"] } }, required: ["Opened", "Description", "Status"] },
+};

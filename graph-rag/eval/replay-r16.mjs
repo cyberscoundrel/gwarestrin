@@ -3,8 +3,9 @@
 // for a row, put through the order a source write now takes, with each run's own record text, rows (before.json) and
 // recorder, and reported per run and against the labels.
 //
-//   node graph-rag/eval/replay-r16.mjs <runs dir> A-1 A-2 ... [--json out.json] [--booleans] [--labels]
-//   --booleans: with the proposed boolean treatment (write-conditions.js booleanByColumnWords) switched on
+//   node graph-rag/eval/replay-r16.mjs <runs dir> A-1 A-2 ... [--json out.json] [--r18] [--labels]
+//   --r18: with the declared shapes (test-sql/data.mjs shapes: R18's yes/no and fixed-choice columns), the record's own
+//          day counting as a date, and per field (I-50: an entry whose row is named lands what holds; "part")
 //   --labels:   the entries tied to a labelled piece or a must-not line, each with what R16 does to it
 //
 // The order, for each entry (I-44, I-45):
@@ -18,7 +19,12 @@
 //   5. R16 conditions 2 and 3 (model/write-conditions.js)       -> Held, by condition, and for 3 by the kind of value
 //   6. otherwise it lands (condition 4, the row unchanged since read, is checked at the write and can't be replayed)
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
-import { booleanByColumnWords, DEFINITIONS, writeConditions } from "../src/model/write-conditions.js";
+import { writeConditions } from "../src/model/write-conditions.js";
+import { normalizeSource, tableShape } from "../src/model/sources.js";
+import { shapes } from "../../test-sql/data.mjs";
+
+const DECL = normalizeSource({ system: "mssql", read: { via: "dab-mcp", url: "http://r/mcp" }, commit: { via: "dab-mcp", url: "http://w/mcp", tables: Object.entries(shapes()).map(([name, sh]) => ({ ...sh, name })), actions: ["create", "update", "delete"] } });
+let R18 = false;
 import { NOTES } from "./labels.mjs";
 import { atOrAbove, sees, EVERYONE } from "./positions.mjs";
 import { COMMIT, MAP } from "./s0.mjs";
@@ -26,7 +32,7 @@ import { COMMIT, MAP } from "./s0.mjs";
 const VARIANTS = ["built", "narrowed", "none"];
 
 /** one entry's outcome under R16 with an I-39 variant: { outcome, by, kinds? } */
-export function decide(e, { text, recorderPos, sectionHome, rows, primaryKey, positions, readHome = EVERYONE }, variant) {
+export function decide(e, { text, recorderPos, sectionHome, rows, primaryKey, positions, readHome = EVERYONE, recordedAt = null }, variant) {
   const [, table] = String(e.target.key).split(":");
   if (!COMMIT.tables[table]?.includes("update")) return { outcome: "proposed", by: "not writable" };
   if (variant === "built" && !sees(positions, readHome, sectionHome)) return { outcome: "proposed", by: "I-39" };
@@ -35,9 +41,10 @@ export function decide(e, { text, recorderPos, sectionHome, rows, primaryKey, po
   if (!authority || !recorderPos || !atOrAbove(positions, recorderPos, authority)) return { outcome: "proposed", by: "condition 1" };
   const current = rows.find((r) => String(r[primaryKey]).toLowerCase() === String(e.target.key).split(":").slice(2).join(":").toLowerCase());
   if (!current) return { outcome: "held", by: "no such row" };
-  const c = writeConditions({ text, key: e.target.key, fields: e.target.fields, rows, primaryKey, current });
+  const c = writeConditions({ text, key: e.target.key, fields: e.target.fields, rows, primaryKey, current, ...(R18 ? { shape: tableShape(DECL, table), recordedAt } : {}) });
   if (c.unchanged) return { outcome: "lands", by: "already" };
   if (c.failed === 2) return { outcome: "held", by: "condition 2", why: c.why };
+  if (R18 && c.failed === 3 && Object.keys(c.passing).length) return { outcome: "lands", by: "part", kinds: [...new Set(c.values.filter((v) => !v.ok).map((v) => v.kind))], why: c.why };
   if (c.failed === 3) return { outcome: "held", by: "condition 3", kinds: [...new Set(c.values.filter((v) => !v.ok).map((v) => v.kind))], why: c.why };
   return { outcome: "lands", by: "conditions hold" };
 }
@@ -57,7 +64,7 @@ export function replayRun(dir) {
     const [, table] = String(e.target.key).split(":");
     const t = before[table];
     const section = sections.get(e.section);
-    const ctx = { text: section?.text ?? "", recorderPos: docs.get(e.record)?._record_position ?? null, sectionHome: section?.home ?? e.home, rows: t?.rows ?? [], primaryKey: t?.primaryKey?.[0] ?? null, positions: snap.positions };
+    const ctx = { recordedAt: docs.get(e.record)?._recorded_at ?? null, text: section?.text ?? "", recorderPos: docs.get(e.record)?._record_position ?? null, sectionHome: section?.home ?? e.home, rows: t?.rows ?? [], primaryKey: t?.primaryKey?.[0] ?? null, positions: snap.positions };
     const note = snap.meta?.noteOf?.[e.record] ?? null;
     const mustNot = NOTES.find((n) => n.id === note)?.mustNot?.some((m) => m.change && m.change.toLowerCase() === String(e.target.key).toLowerCase()) ?? false;
     out.push({ entry: e.id, note, was: e.outcome, key: e.target.key, fields: e.target.fields, text: ctx.text, recorderPos: ctx.recorderPos, sectionHome: ctx.sectionHome, label: labelOf.get(e.id) ?? null, mustNot, r16: Object.fromEntries(VARIANTS.map((v) => [v, decide(e, ctx, v)])) });
@@ -67,10 +74,10 @@ export function replayRun(dir) {
 
 /** counts for one run under one variant: lands, Held by condition (and by kind for 3), Proposed by reason */
 export function tally(rows, variant) {
-  const c = { entries: rows.length, lands: 0, already: 0, held: {}, heldKinds: {}, proposed: {} };
+  const c = { entries: rows.length, lands: 0, already: 0, part: 0, held: {}, heldKinds: {}, proposed: {} };
   for (const r of rows) {
     const d = r.r16[variant];
-    if (d.outcome === "lands") (c.lands++, d.by === "already" && c.already++);
+    if (d.outcome === "lands") (c.lands++, d.by === "already" && c.already++, d.by === "part" && c.part++);
     else if (d.outcome === "held") {
       c.held[d.by] = (c.held[d.by] ?? 0) + 1;
       for (const k of d.kinds ?? []) c.heldKinds[k] = (c.heldKinds[k] ?? 0) + 1;
@@ -81,9 +88,9 @@ export function tally(rows, variant) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [root, ...argv] = process.argv.slice(2);
-  if (argv.includes("--booleans")) DEFINITIONS.booleans = booleanByColumnWords;
+  R18 = argv.includes("--r18");
   const showLabels = argv.includes("--labels");
-  const rest = argv.filter((a) => a !== "--booleans" && a !== "--labels");
+  const rest = argv.filter((a) => a !== "--r18" && a !== "--labels");
   const jsonAt = rest.indexOf("--json");
   const runs = (jsonAt >= 0 ? rest.slice(0, jsonAt) : rest).filter(Boolean);
   const all = {};
@@ -91,12 +98,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   if (jsonAt >= 0) writeFileSync(rest[jsonAt + 1], JSON.stringify(all, null, 2));
   for (const v of VARIANTS) {
     console.log(`\n## I-39 ${v}\n`);
-    console.log("| run | entries | lands (already) | Held: cond 2 | Held: cond 3 (kinds) | Held: no such row | Proposed: I-39 | Proposed: cond 1 | Proposed: not writable |");
+    console.log("| run | entries | lands (already, part) | Held: cond 2 | Held: cond 3 (kinds) | Held: no such row | Proposed: I-39 | Proposed: cond 1 | Proposed: not writable |");
     console.log("|---|--:|--:|--:|--:|--:|--:|--:|--:|");
     for (const r of runs) {
       const c = tally(all[r], v);
       const kinds = Object.entries(c.heldKinds).map(([k, n]) => `${k} ${n}`).join(", ");
-      console.log(`| ${r} | ${c.entries} | ${c.lands} (${c.already}) | ${c.held["condition 2"] ?? 0} | ${c.held["condition 3"] ?? 0}${kinds ? ` (${kinds})` : ""} | ${c.held["no such row"] ?? 0} | ${(c.proposed["I-39"] ?? 0) + (c.proposed["I-39 (raised)"] ?? 0)} | ${c.proposed["condition 1"] ?? 0} | ${c.proposed["not writable"] ?? 0} |`);
+      console.log(`| ${r} | ${c.entries} | ${c.lands} (${c.already}, ${c.part}) | ${c.held["condition 2"] ?? 0} | ${c.held["condition 3"] ?? 0}${kinds ? ` (${kinds})` : ""} | ${c.held["no such row"] ?? 0} | ${(c.proposed["I-39"] ?? 0) + (c.proposed["I-39 (raised)"] ?? 0)} | ${c.proposed["condition 1"] ?? 0} | ${c.proposed["not writable"] ?? 0} |`);
     }
   }
   if (showLabels) {

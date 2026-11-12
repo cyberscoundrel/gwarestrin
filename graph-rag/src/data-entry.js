@@ -92,7 +92,12 @@ export const DAB_CALLS = {
   read: (entity, keyColumn, literal) => ({ name: "read_records", args: { entity, filter: `${keyColumn} eq ${literal}`, first: 2 } }),
   update: (entity, keys, fields) => ({ name: "update_record", args: { entity, keys, fields } }),
   create: (entity, data) => ({ name: "create_record", args: { entity, data } }),
+  // R19: only to undo a row graph-rag added (removeAdded), on a table that takes new rows
+  remove: (entity, keys) => ({ name: "delete_record", args: { entity, keys } }),
 };
+
+/** the comparisons a find takes (DAB 2.0.12's filter operators; no string functions) */
+export const FIND_OPS = ["eq", "ne", "gt", "ge", "lt", "le"];
 
 /**
  * An OData literal for a column of `type` ("number" or "string"; DAB refuses a number for a text column
@@ -228,6 +233,19 @@ async function firstPageOf(url, table, call) {
 }
 
 /**
+ * The source interface (model/README.md, "The source interface"), as the test's DAB connection implements it: every
+ * read and write graph-rag makes of a source goes through one of these, so a production middleman can stand behind
+ * the same six calls.
+ *   tables()                         the tables the endpoint exposes
+ *   describe(table)                  { pk: [{ name, type }] | null, columns: { column: "number" | "string" | "unknown" } | null }
+ *   find(table, { where, orderby, first })   rows; where: [[column, op, value]] (op in FIND_OPS, all must hold),
+ *                                    orderby: [column] (ascending); a value the column's type can't hold matches no row
+ *   read(table, key)                 { row, key_column, key_value } | null: one row by its verified primary key
+ *   update(table, hit, fields)       write fields to the row read (hit); the key is never written
+ *   add(table, data)                 the row the source made, its key included (R19: the key is the source's)
+ *   remove(table, hit)               delete the row read: only to undo a row graph-rag added (R19, I-52)
+ * The older names (readRow, writeRow, createRow, columns, entities, readWhere) are the same calls.
+ *
  * A client for one system: read a row by its verified primary key, write fields to it, create one. `urls`
  * { read, write }; `fetch` injectable. The key column is the table's primary key, learned from the source;
  * a `key_column` a worker gives must be that column, or the call is refused, and a key that can't be
@@ -246,11 +264,28 @@ export function sourceClient(system, urls, opts = {}) {
     if (keyColumn && keyColumn !== pk[0].name) throw new Error(`${keyColumn} is not the primary key of ${system}:${table}; the row is keyed by ${pk[0].name}`);
     return pk[0];
   };
-  return {
+  const client = {
     system,
     canRead: Boolean(urls?.read),
     canWrite: Boolean(urls?.write),
     primaryKey,
+    /** the table's key and columns, as the source shows them (learned once per endpoint) */
+    async describe(table) {
+      const { pk, sample } = await firstPageOf(urls.read, table, call);
+      return { pk, columns: sample ? Object.fromEntries(Object.entries(sample).map(([c, v]) => [c, typeof v === "number" ? "number" : v === null ? "unknown" : "string"])) : null };
+    },
+    /** rows where every [column, op, value] holds, typed by the column (a value its type can't hold: no rows) */
+    async find(table, { where = [], orderby = [], first } = {}) {
+      const cols = where.length ? (await client.describe(table)).columns : null;
+      const parts = [];
+      for (const [column, op, value] of where) {
+        if (!FIND_OPS.includes(op)) throw new Error(`a find compares with ${FIND_OPS.join(", ")}, not ${op}`);
+        const literal = odata(value, cols?.[column] === "number" || (cols?.[column] !== "string" && typeof value === "number") ? "number" : "string");
+        if (literal === null) return [];
+        parts.push(`${column} ${op} ${literal}`);
+      }
+      return client.readWhere(table, { ...(parts.length ? { filter: parts.join(" and ") } : {}), ...(orderby.length ? { orderby: orderby.map((c) => `${c} asc`) } : {}), ...(first ? { first } : {}) });
+    },
     /** the columns a table shows and their types ("number", "string", or "unknown" for an empty value), from its first row */
     async columns(table) {
       const { sample } = await firstPageOf(urls.read, table, call);
@@ -287,8 +322,19 @@ export function sourceClient(system, urls, opts = {}) {
       if (!urls?.write) throw new Error(`no write-capable endpoint for ${system}: data entry can only be proposed`);
       return rowsOf(await call(urls.write, DAB_CALLS.create(table, data)))[0] ?? null;
     },
+    /** delete the row read (`hit`): only to undo a row graph-rag added (removeAdded) */
+    async remove(table, hit) {
+      if (!urls?.write) throw new Error(`no write-capable endpoint for ${system}`);
+      return call(urls.write, DAB_CALLS.remove(table, { [hit.key_column]: hit.key_value }));
+    },
   };
+  Object.assign(client, { tables: client.entities, read: client.readRow, update: client.writeRow, add: client.createRow });
+  return client;
 }
+
+/** the interface to a declared source's read side, or its write side (whose reads go through the write connection) */
+export const sourceConnection = (decl, side = "read", { fetch: f } = {}) =>
+  side === "write" ? sourceClient(decl.system, { read: decl.commit.url, write: decl.commit.url }, f ? { fetch: f } : {}) : sourceClient(decl.system, { read: decl.read.url, write: null }, f ? { fetch: f } : {});
 
 /** the columns to write must be the row's, and never its key: a write changes one row's facts, not which row it is */
 export function assertWritable(fields, hit) {
@@ -329,7 +375,7 @@ async function declared(system, table, { db = realDb, sources, tables, audience,
   return { decl };
 }
 
-const readClient = (decl, f) => sourceClient(decl.system, { read: decl.read.url, write: null }, f ? { fetch: f } : {});
+const readClient = (decl, f) => sourceConnection(decl, "read", { fetch: f });
 const keyOf = (system, table, pk, row) => (pk?.length === 1 && row?.[pk[0].name] !== undefined && row[pk[0].name] !== null ? `${system}:${table}:${row[pk[0].name]}` : null);
 
 /** the tables a source's read side exposes (within `tables` when the caller narrows them) */
@@ -378,24 +424,16 @@ export async function findRows({ system, table, column, value, mode = "eq", firs
     if (cols && !(column in cols)) return answer("refused", { why: `${system}:${table} has no column ${column}: it has ${Object.keys(cols).join(", ")}` });
     const unknown = Object.keys(also ?? {}).filter((c) => cols && !(c in cols));
     if (unknown.length) return answer("refused", { why: `${system}:${table} has no column ${unknown.join(", ")}: it has ${Object.keys(cols).join(", ")}` });
-    const extra = [];
-    for (const [c, v] of Object.entries(also ?? {})) {
-      const l = odata(v, cols?.[c] === "number" ? "number" : "string");
-      if (l === null) return answer("none", { rows: [], more: false });
-      extra.push(`${c} eq ${l}`);
-    }
-    const and = extra.map((x) => ` and ${x}`).join("");
+    const extra = Object.entries(also ?? {}).map(([c, v]) => [c, "eq", v]);
     const type = cols?.[column] === "number" ? "number" : "string";
     if (mode === "prefix" && type === "number") return answer("refused", { why: `${column} is a number column: find it by eq` });
-    const literal = odata(String(value).trim(), type);
-    if (literal === null) return answer("none", { rows: [], more: false });
-    const { pk } = await firstPageOf(decl.read.url, table, (url, call) => mcpToolCall(url, call.name, call.args, opts.fetch ? { fetch: opts.fetch } : {}));
+    const { pk } = await c.describe(table);
     let rows;
-    if (mode === "eq") rows = await c.readWhere(table, { filter: `${column} eq ${literal}${and}`, first: cap + 1 });
+    if (mode === "eq") rows = await c.find(table, { where: [[column, "eq", String(value).trim()], ...extra], first: cap + 1 });
     else {
       const page = 4 * cap;
       const prefix = String(value).trim().toLowerCase();
-      const read = await c.readWhere(table, { filter: `${column} ge ${literal}${and}`, orderby: [`${column} asc`], first: page });
+      const read = await c.find(table, { where: [[column, "ge", String(value).trim()], ...extra], orderby: [column], first: page });
       rows = read.filter((r) => String(r[column] ?? "").toLowerCase().startsWith(prefix));
       // a full page all matching may have more past it
       if (read.length === page && rows.length === page) rows.push(null);
@@ -448,8 +486,8 @@ export async function searchRows({ system, table, text = null, columns = null, w
       if (v === null || v === undefined || s === "") return answer("refused", { why: `where ${col}: give a value` });
       if (cols[col] === "number") {
         if (!/^-?\d+(\.\d+)?$/.test(s)) return answer("refused", { why: `${col} is a number column: compare it with a number, not "${s.slice(0, 60)}"; to find words in it, use text` });
-        sent.push(`${col} eq ${s}`);
-      } else if (cols[col] === "string") sent.push(`${col} eq ${odata(s, "string")}`);
+        sent.push([col, "eq", s]);
+      } else if (cols[col] === "string") sent.push([col, "eq", s]);
       else here.push([col, s]);
     }
     const searchIn = columns?.length ? columns : Object.keys(cols);
@@ -474,12 +512,12 @@ export async function searchRows({ system, table, text = null, columns = null, w
 
 /**
  * A table's rows read page by page by primary key (`key gt last`, never a cursor), up to SEARCH_SCAN rows (opts.scanLimit),
- * `sent` an OData filter's conditions the source applies and `keep` a test applied here. Returns { pk, byKey, scanned,
+ * `sent` the [column, op, value] conditions the source applies and `keep` a test applied here. Returns { pk, byKey, scanned,
  * complete, matches }.
  */
 async function scanRows(decl, table, { sent = [], keep = () => true, scanLimit, fetch: f } = {}) {
   const c = readClient(decl, f);
-  const { pk } = await firstPageOf(decl.read.url, table, (url, call) => mcpToolCall(url, call.name, call.args, f ? { fetch: f } : {}));
+  const { pk } = await c.describe(table);
   const byKey = pk?.length === 1 ? pk[0] : null;
   const limit = Math.max(SEARCH_PAGE, Number(scanLimit ?? SEARCH_SCAN));
   const matches = [];
@@ -487,11 +525,9 @@ async function scanRows(decl, table, { sent = [], keep = () => true, scanLimit, 
   let last = null;
   let complete = false;
   while (scanned < limit) {
-    const after = byKey && last !== null ? odata(last, byKey.type) : null;
-    if (byKey && last !== null && after === null) break;
-    const filter = [...sent, ...(after !== null ? [`${byKey.name} gt ${after}`] : [])].join(" and ");
+    if (byKey && last !== null && odata(last, byKey.type) === null) break;
     const size = byKey ? SEARCH_PAGE : limit;
-    const rows = await c.readWhere(table, { ...(filter ? { filter } : {}), ...(byKey ? { orderby: [`${byKey.name} asc`] } : {}), first: size });
+    const rows = await c.find(table, { where: [...sent, ...(byKey && last !== null ? [[byKey.name, "gt", last]] : [])], orderby: byKey ? [byKey.name] : [], first: size });
     scanned += rows.length;
     for (const r of rows) if (keep(r)) matches.push(r);
     if (rows.length < size || !byKey) {
@@ -536,7 +572,7 @@ export async function checkGuard(decl, { fetch: f } = {}) {
   if (g.entity !== GUARD_ENTITY) return answer("refused", { ok: false, why: `the guard must be read through ${GUARD_ENTITY}, the view that computes the connection's names, not ${g.entity}` });
   let rows;
   try {
-    rows = rowsOf(await mcpToolCall(decl.commit.url, "read_records", { entity: g.entity, first: 2 }, f ? { fetch: f } : {}));
+    rows = await sourceConnection(decl, "write", { fetch: f }).find(g.entity, { first: 2 });
   } catch (e) {
     return failed(e, { ok: false, why: `the guard couldn't read ${g.entity} through the write connection: ${String(e?.message ?? e).slice(0, 200)}` });
   }
@@ -591,7 +627,7 @@ export async function commitRow({ key, fields, before = null, piece = null }, op
   if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).length) return answer("refused", { why: "fields: the columns to write, with their values" });
   const { decl, journal, refusal } = await writeGate(k.system, k.table, "update", opts);
   if (refusal) return { ...refusal, key: k.key };
-  const client = sourceClient(k.system, { read: decl.commit.url, write: decl.commit.url }, opts.fetch ? { fetch: opts.fetch } : {});
+  const client = sourceConnection(decl, "write", { fetch: opts.fetch });
   let hit;
   try {
     hit = await client.readRow(k.table, k.row_key);
@@ -653,7 +689,7 @@ export async function createRow({ system, table, data, piece = null }, opts = {}
   if (!data || typeof data !== "object" || Array.isArray(data) || !Object.keys(data).length) return answer("refused", { why: "data: the new row's columns, with their values" });
   const { decl, journal, refusal } = await writeGate(system, table, "create", opts);
   if (refusal) return refusal;
-  const client = sourceClient(system, { read: decl.commit.url, write: decl.commit.url }, opts.fetch ? { fetch: opts.fetch } : {});
+  const client = sourceConnection(decl, "write", { fetch: opts.fetch });
   let pk;
   try {
     pk = await client.primaryKey(table);
@@ -679,6 +715,43 @@ export async function createRow({ system, table, data, piece = null }, opts = {}
   }
 }
 
+/**
+ * Undo a row graph-rag added (R19: "undo removes the added row under the same guard as now"): only on a table that
+ * takes new rows, through the guard, and only while the row still holds what was added (`expect`); a row that changed
+ * since is never removed (`moved`). Begun and settled in the filing log like every write.
+ */
+export async function removeAdded({ key, expect, piece = null }, opts = {}) {
+  const k = parseKey(key);
+  if (!k) return answer("refused", { why: `not a record key (system:table:row): ${key}` });
+  if (!expect || typeof expect !== "object" || !Object.keys(expect).length) return answer("refused", { key: k.key, why: "expect: what the row was added with, so a row that changed since is never removed" });
+  const { decl, journal, refusal } = await writeGate(k.system, k.table, "delete", opts);
+  if (refusal) return { ...refusal, key: k.key };
+  const client = sourceConnection(decl, "write", { fetch: opts.fetch });
+  let hit;
+  try {
+    hit = await client.read(k.table, k.row_key);
+    if (!hit) return answer("not_found", { key: k.key, why: `no row ${k.row_key} in ${k.table}: nothing to remove` });
+  } catch (e) {
+    return failed(e, { key: k.key });
+  }
+  if (!holds(hit.row, expect)) return answer("moved", { key: k.key, row: hit.row, why: "the row no longer holds what was added: it isn't removed" });
+  let id;
+  try {
+    id = await journal.begin({ system: k.system, table: k.table, key: k.key, action: "delete", fields: null, before: hit.row, piece });
+  } catch (e) {
+    return answer("refused", { key: k.key, why: `the filing log couldn't record the attempt, so nothing is removed: ${String(e?.message ?? e).slice(0, 200)}` });
+  }
+  try {
+    await client.remove(k.table, hit);
+    const settled = await settle(journal, id, "written", { removed: true });
+    return answer("written", { key: k.key, before: hit.row, removed: true, log_id: id, ...(settled ? {} : { log_unsettled: true }) });
+  } catch (e) {
+    const error = String(e?.message ?? e).slice(0, 300);
+    await settle(journal, id, e?.transport ? "unknown" : "refused", { error });
+    return answer(e?.transport ? "unknown" : "refused", { key: k.key, log_id: id, why: error });
+  }
+}
+
 /** a client for the system a key names (`mssql:dbo_Job:4471` -> mssql), read side only */
 export async function clientFor(key, { db = realDb, fetch: f, sources } = {}) {
   const k = parseKey(key);
@@ -686,7 +759,7 @@ export async function clientFor(key, { db = realDb, fetch: f, sources } = {}) {
   const decl = (sources ?? (await loadSources(db, { ttlMs: 0 })))[k.system];
   if (!decl) throw new Error(`no connected source called ${k.system}`);
   // read only: every write goes through commitRow or createRow (the declaration, the journal, the guard)
-  return { client: sourceClient(k.system, { read: decl.read.url, write: null }, f ? { fetch: f } : {}), key: k, declaration: decl };
+  return { client: sourceConnection(decl, "read", { fetch: f }), key: k, declaration: decl };
 }
 
 /** ---- columns and values (pure) ---- */
@@ -801,10 +874,28 @@ export const approvingPerson = (user) => String(user ?? "").split(/[/ ]/)[0];
  * NEEDS A RULING (recorder gone or moved): which filing outcome such a piece gets; smallest choice, the adapter
  * says "refused" and the filing stream records it as Held, asking whoever put it on record.
  */
-export async function enterData({ actsFor, by, key, fields, before = null, cls, reason, identity, held = null, conditions = null, piece = null }, { db = realDb, fetch: f, positions, policy, queue, proposal, people, journal, sources, index } = {}) {
+export async function enterData({ actsFor, by, key, fields, before = null, cls, reason, identity, held = null, conditions = null, piece = null }, opts = {}) {
   const k = parseKey(key);
   if (!k) throw new Error(`not a record key (system:table:row): ${key}`);
-  if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).length) throw new Error("fields: the columns to write, with their values");
+  return entry({ action: "update", system: k.system, table: k.table, key: k.key, actsFor, by, fields, before, cls, reason, identity, held, conditions, piece }, opts);
+}
+
+/**
+ * Add a row to `table` of `system` (R19), for the person who put the record on record, decided as an update is
+ * (enterData): Filed when the recorder holds the authority (condition 1) and the caller's `conditions` hold
+ * (model/write-conditions.js addConditions); Proposed when they lack it or the table takes no new rows; Held when a
+ * condition fails or the source refuses. Filed: { outcome: "filed", status: "written", key (the source's), row }. One
+ * piece adding at most one row is the caller's (filing.js), which knows the piece; createRow logs the attempt.
+ */
+export async function addData({ actsFor, by, system, table, data, cls, reason, identity, held = null, conditions = null, piece = null }, opts = {}) {
+  if (!system || !table) throw new Error("the table to add a row to (system:table) is needed");
+  return entry({ action: "create", system, table, key: `${system}:${table}`, actsFor, by, fields: data, before: null, cls, reason, identity, held, conditions, piece }, opts);
+}
+
+/** enterData's and addData's one path: who stands behind it, the class map, the conditions, then the write or the proposal */
+async function entry({ action, system, table, key, actsFor, by, fields, before, cls, reason, identity, held, conditions, piece }, { db = realDb, fetch: f, positions, policy, queue, proposal, people, journal, sources, index } = {}) {
+  const k = { system, table, key };
+  if (!fields || typeof fields !== "object" || Array.isArray(fields) || !Object.keys(fields).length) throw new Error(action === "create" ? "data: the new row's columns, with their values" : "fields: the columns to write, with their values");
   if (!actsFor?.person) throw new Error("the person the entry is made for is needed");
   positions ??= await livePositions();
   const lookup = people ?? (await livePeople());
@@ -812,7 +903,7 @@ export async function enterData({ actsFor, by, key, fields, before = null, cls, 
   if (!standing.ok) return { outcome: "refused", reason: `Not written: ${standing.why}.` };
   const decl = (sources ?? (await loadSources(db, { ttlMs: 0 })))[k.system] ?? null;
   if (!decl) return { outcome: "held", status: "refused", why: `no connected source called ${k.system}` };
-  const writable = declaredWritable(decl, k.table, "update");
+  const writable = declaredWritable(decl, k.table, action);
   let map = null;
   let decision;
   try {
@@ -831,14 +922,15 @@ export async function enterData({ actsFor, by, key, fields, before = null, cls, 
   // Condition 4, the row unchanged since it was read, is commitRow's.
   if (decision.outcome === "filed" && conditions && !conditions.ok) return { outcome: "held", status: "conditions", condition: conditions.failed, why: conditions.why };
   if (decision.outcome === "proposed") {
-    const payload = { kind: "data_entry", key: k.key, fields, ...(before ? { before } : {}), class: cls ?? null, acts_for: { person: standing.person, position: standing.position }, by, reason: String(reason ?? "").slice(0, 600) || null };
+    const payload = { kind: "data_entry", ...(action === "create" ? { action, table: k.key } : { key: k.key }), fields, ...(before ? { before } : {}), class: cls ?? null, acts_for: { person: standing.person, position: standing.position }, by, reason: String(reason ?? "").slice(0, 600) || null, ...(action === "create" && piece ? { piece } : {}) };
     // where it waits: where the map's position (else the root) and anything the agent's limit holds it at are seen
     const home = positions ? commonAncestor(positions, [standing.position ?? positions.root, decision.authority ?? positions.root, ...(held ? [held.home] : [])]) : undefined;
     const w = queue && proposal ? null : await liveQueue();
     const queued = await (queue ?? w.queueWrite)({ kind: "data_entry", payload: JSON.stringify(payload), user: by, home, ...(proposal ?? w.proposalFields)(identity ?? { role: null }, reason) });
     return { outcome: "proposed", pendingId: queued.pendingId, reason: decision.reason };
   }
-  return asEntry(await commitRow({ key: k.key, fields, before, piece }, { db, fetch: f, journal, sources: sources ?? { [k.system]: decl } }));
+  const adapter = { db, fetch: f, journal, sources: sources ?? { [k.system]: decl } };
+  return asEntry(action === "create" ? await createRow({ system: k.system, table: k.table, data: fields, piece }, adapter) : await commitRow({ key: k.key, fields, before, piece }, adapter));
 }
 
 /** a write adapter's answer as data entry's outcome: filed when it landed, held otherwise */
@@ -869,15 +961,17 @@ export async function assertApproverHolds(p, person, entry, { positions, db, ind
  */
 export async function applyProposedEntry(payload, pendingId, approver, { db = realDb, fetch: f, people, positions, journal, sources, index } = {}) {
   const p = typeof payload === "string" ? JSON.parse(payload) : payload;
-  const k = parseKey(p.key);
-  if (!k) throw new Error(`not a record key: ${p.key}`);
+  const added = p.action === "create" ? parseTable(p.table) : null;
+  const k = added ? null : parseKey(p.key);
+  if (!k && !added) throw new Error(`not a record key: ${p.key ?? p.table}`);
   positions ??= await livePositions();
   if (/\/agent:/.test(String(approver ?? ""))) throw new Error("not applied: an agent can't approve a data entry; a person with authority for the class does (R11.7)");
   const authorized_by = approvingPerson(approver);
   if (!authorized_by) throw new Error("not applied: an approved entry needs the person who approved it");
   const entry = await (people ?? (await livePeople()))(authorized_by);
   await assertApproverHolds(p, authorized_by, entry, { positions, db, index });
-  const r = asEntry(await commitRow({ key: k.key, fields: p.fields, before: p.before ?? null, piece: { ...(p.piece ?? {}), pending_id: pendingId ?? null, approved_by: authorized_by } }, { db, fetch: f, journal, sources }));
+  const piece = { ...(p.piece ?? {}), pending_id: pendingId ?? null, approved_by: authorized_by };
+  const r = asEntry(added ? await createRow({ system: added.system, table: added.table, data: p.fields, piece }, { db, fetch: f, journal, sources }) : await commitRow({ key: k.key, fields: p.fields, before: p.before ?? null, piece }, { db, fetch: f, journal, sources }));
   if (r.outcome !== "filed") throw new Error(`not applied (${r.status}): ${r.why ?? "the write didn't land"}`);
   return { ...r, authorized_by, pending_id: pendingId ?? null };
 }
@@ -891,6 +985,10 @@ export async function refuseProposedEntry() {
 export function describeEntry(payload) {
   try {
     const p = typeof payload === "string" ? JSON.parse(payload) : payload;
+    if (p.action === "create") {
+      const at = parseTable(p.table);
+      return [`adds a row to ${at ? `${at.table} (${at.system})` : p.table}: ${Object.entries(p.fields ?? {}).map(([c, v]) => `${c} = ${JSON.stringify(v)}`).join(", ")}, for ${p.acts_for?.person ?? "?"} at ${p.acts_for?.position ?? "?"}`];
+    }
     const t = parseTable(`${parseKey(p.key)?.system}:${parseKey(p.key)?.table}`);
     return [`writes ${Object.entries(p.fields ?? {}).map(([c, v]) => `${c} = ${JSON.stringify(v)}`).join(", ")} to row ${parseKey(p.key)?.row_key} of ${t ? `${t.table} (${t.system})` : p.key}, for ${p.acts_for?.person ?? "?"} at ${p.acts_for?.position ?? "?"}`];
   } catch {

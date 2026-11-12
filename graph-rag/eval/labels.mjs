@@ -121,20 +121,41 @@ export const R16_CHANGES = [
   { note: "ux-z01", piece: 0, from: "filed", to: "held", accept: ["filed"], dropMustNot: null, why: "Held by condition 3: the Status \"shipped Thursday\" means is a closed-set value (Complete) not in the note's words; no treatment for closed sets is proposed (I-45)" },
 ];
 
-/** the notes as labelled under "r12" (the labels as written) or "r16" (with R16_CHANGES applied) */
-export function notesUnder(labels = "r16") {
-  if (labels === "r12") return NOTES;
-  if (labels !== "r16") throw new Error(`labels: r12 or r16, not ${labels}`);
-  return NOTES.map((n) => {
-    const changes = R16_CHANGES.filter((c) => c.note === n.id);
-    if (!changes.length) return n;
+/**
+ * The labels R18 and R19 change, over R16's (the user, 2026-11-11: yes/no and fixed-choice fields take the model's
+ * reading; workers add rows through the write interface), old (R16) and new. Which tables take new rows is the test
+ * declaration's: Maintenance and Purchase_Order (graph-rag/src/sources.js TEST_SHAPES). Labels that name a new row
+ * elsewhere (z04's Equipment, au04's Employee) stay Proposed: those tables take no writes. aq07's Purchase_Order row
+ * stays Proposed: the table takes new rows now, but a purchase order is Operations', and bob is on the floor.
+ */
+export const R19_CHANGES = [
+  { note: "ux-t06", piece: 0, from: "held", to: "filed", accept: [], dropMustNot: null, why: "R18: Certs_Required is a yes/no column, so the model's reading of \"needs certs\" (true) stands" },
+  { note: "ux-z01", piece: 0, from: "held", to: "filed", accept: [], dropMustNot: null, why: "R18: Status is fixed-choice, so Complete for \"shipped\" stands; decided per field (I-50), an 800 the note doesn't give is held on its own and doesn't land" },
+  { note: "ux-aa03", piece: 0, from: "filed", to: "filed", accept: [], dropMustNot: null, why: "R19: Maintenance takes new rows, so the row can be added; Kept is no longer accepted in its place" },
+  { note: "ux-aa05", piece: 1, from: "filed", to: "filed", accept: [], dropMustNot: null, why: "R19: Maintenance takes new rows, so the row can be added; Kept is no longer accepted in its place" },
+];
+
+/** a label set's changes applied to the notes */
+function applying(notes, changes, tag) {
+  return notes.map((n) => {
+    const mine = changes.filter((c) => c.note === n.id);
+    if (!mine.length) return n;
     const pieces = n.pieces.map((p, i) => {
-      const c = changes.find((x) => x.piece === i);
-      return c ? { ...p, outcome: c.to, accept: c.accept, r16: c.why } : p;
+      const c = mine.find((x) => x.piece === i);
+      return c ? { ...p, outcome: c.to, accept: c.accept, [tag]: c.why } : p;
     });
-    const drop = new Set(changes.map((c) => c.dropMustNot).filter(Boolean));
+    const drop = new Set(mine.map((c) => c.dropMustNot).filter(Boolean));
     return { ...n, pieces, ...(n.mustNot ? { mustNot: n.mustNot.filter((m) => !drop.has(m.change)) } : {}) };
   });
+}
+
+/** the notes as labelled under "r12" (the labels as written), "r16" (R16_CHANGES applied) or "r19" (then R19_CHANGES) */
+export const LABEL_SETS = ["r12", "r16", "r19"];
+export function notesUnder(labels = "r19") {
+  if (!LABEL_SETS.includes(labels)) throw new Error(`labels: ${LABEL_SETS.join(", ")}, not ${labels}`);
+  if (labels === "r12") return NOTES;
+  const r16 = applying(NOTES, R16_CHANGES, "r16");
+  return labels === "r16" ? r16 : applying(r16, R19_CHANGES, "r19");
 }
 
 /** the notes with a stated change or a stated state (R12), listed apart in the report */

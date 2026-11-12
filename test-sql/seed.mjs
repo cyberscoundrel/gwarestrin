@@ -48,7 +48,8 @@ export function schemaSql(database = DATABASE) {
 
 /**
  * The logins (server-wide, made once), a user for each in `database`, the read login's SELECT on the dbo schema,
- * the write login's SELECT, INSERT and UPDATE on the chosen tables only (never DELETE), and the identity view
+ * the write login's SELECT, INSERT and UPDATE on the chosen tables only, DELETE only where a table takes new rows
+ * (to undo one graph-rag added, R19), and the identity view
  * the guard reads. The same for the synthetic database and a restored copy, so only names change.
  */
 export function accessSql(database = DATABASE, writable = WRITABLE) {
@@ -61,10 +62,11 @@ export function accessSql(database = DATABASE, writable = WRITABLE) {
     out.push(`IF USER_ID(N'${login}') IS NULL CREATE USER ${ident(login)} FOR LOGIN ${ident(login)} ELSE ALTER USER ${ident(login)} WITH LOGIN = ${ident(login)};`);
   }
   out.push(`GRANT SELECT ON SCHEMA::dbo TO ${ident(READ_LOGIN)};`);
-  const grants = { create: "INSERT", update: "UPDATE" };
+  const grants = { create: "INSERT", update: "UPDATE", delete: "DELETE" };
   for (const [table, actions] of Object.entries(writable)) {
     const bad = actions.filter((a) => !grants[a]);
-    if (bad.length) throw new Error(`${table}: a write login may only create and update, not ${bad.join(", ")}`);
+    if (bad.length) throw new Error(`${table}: a write login may only create, update and (where it creates) delete, not ${bad.join(", ")}`);
+    if (actions.includes("delete") && !actions.includes("create")) throw new Error(`${table}: delete only undoes a row the write login added, so it needs create`);
     out.push(`GRANT ${["SELECT", ...actions.map((a) => grants[a])].join(", ")} ON dbo.${ident(table)} TO ${ident(WRITE_LOGIN)};`);
   }
   out.push(

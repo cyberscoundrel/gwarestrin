@@ -52,9 +52,45 @@ is re-filed later points back with `refiled_from` (R11).
 **Request** (`filing.js normalizeRequest`): a worker asking the orchestrator instead of resolving (R10). Its kind
 is `class`, `conflict` or `other`.
 
-**Source declaration** (`sources.js normalizeSource`): `{ system, read: { via, url }, commit: { via, url, tables,
-actions } | { via: "none" } }`. A source with no commit is not writable, so a clear piece is Proposed (R2).
-`briefSource` is what a brief may say about a source: how it is committed to, never its URLs.
+**Source declaration** (`sources.js normalizeSource`): `{ system, read: { via, url, home }, commit: { via, url,
+tables, actions, guard } | { via: "none" } }`. A source with no commit is not writable, so a clear piece is Proposed
+(R2). `briefSource` is what a brief may say about a source: how it is committed to, never its URLs. Each entry of
+`commit.tables` is a table name or its shape, `{ name, adds, columns, required, defaults }` (`tableShape`):
+- `adds`: the table takes new rows (R19). Adding needs `create` among the actions; otherwise an add is Proposed.
+- `columns`: `{ Column: "boolean" | { values: [...] } }`. A yes/no column, or one with a fixed set of values, takes
+  the model's reading among the values it allows (R18). Anything not declared here is checked against the record's
+  words.
+- `required` and `defaults`: the columns a new row must be given, and those the source fills itself.
+- `delete` may be among the actions only beside a table that takes new rows, and is used for one thing: undoing a
+  row graph-rag added, while it still holds what was added.
+
+**The source interface** (R19; `data-entry.js sourceClient`, reached through `sourceConnection(decl, side)`). Every
+read and write graph-rag makes of a source goes through these calls and nothing else. The test's DAB connection is
+one implementation; a production middleman (an MCP server in front of a real system) is another, and the two are
+swapped behind the declaration's `via` without touching filing. `side` is `read` (the read endpoint) or `write` (the
+write endpoint, whose reads are made through the write connection).
+
+| call | takes | answers | used for |
+|---|---|---|---|
+| `tables()` | | the table names the endpoint exposes | which tables a class may come from; a search's table check |
+| `describe(table)` | | `{ pk: [{ name, type }] \| null, columns: { column: "number" \| "string" \| "unknown" } \| null }` | the key a record key names; column checks |
+| `find(table, { where, orderby, first })` | `where`: `[[column, op, value]]`, every one holding, `op` one of eq ne gt ge lt le; `orderby`: columns, ascending | rows. A value the column's type can't hold matches nothing | names resolved against the source (R3), searches, paging by key, the guard |
+| `read(table, key)` | the row's key value | `{ row, key_column, key_value }` or nothing; more than one row, or a row whose key isn't the one asked, is an error | the row before a write, and after a lost answer |
+| `update(table, hit, fields)` | the row as read, the columns to write | the source's answer | R16 writes. The key is never written |
+| `add(table, data)` | the new row's columns, never its key | the row the source made, its key included | R19 adds |
+| `remove(table, hit)` | the row as read | the source's answer | undoing an add, only |
+
+The contract around the calls:
+- An implementation throws with `transport: true` when the source couldn't be reached, so that nothing is known,
+  and throws a plain error when the source said no. A write call is never sent twice: a lost answer is settled by
+  reading the row back.
+- The checks stay in graph-rag, outside the interface: the declaration, the guard (`checkGuard`, a `find` on the
+  connection's identity view through the write side), the filing log (begun before each write and settled after),
+  `before` and `expect` (a row that has moved is never written over or removed), R16's conditions and R19's.
+- Where the DAB implementation differs from a middleman: `describe` learns the key from DAB's paging cursor (DAB
+  2.0.12 names no fields), and `find` writes DAB's OData filter.
+- What still goes around the interface: the test harness's own checks (`test-sql/check.mjs` calls DAB directly to
+  test it), and `mcpToolCall` itself, which is the DAB implementation's transport.
 
 **Brief** (`brief.js scopeBrief`, `assertBrief`): `{ audience, record, sections, classes, instances, sources }`.
 The audience is the home of the sections the brief is for. `splitByHome` gives one brief, and one worker, per home

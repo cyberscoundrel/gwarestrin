@@ -56,7 +56,7 @@ function fakeDab(rows, { failWrite = false, breakWrite = false, table = "dbo_Job
 
 /** the declaration the fakes answer for: the synthetic test database's guard names */
 const IDENTITY = { server_name: "gwsynth-sql", database_name: "GwSynthMfg", login_name: "gwsynth_write" };
-const DECL = { system: "mssql", read: { via: "dab-mcp", url: "http://fake/read" }, commit: { via: "dab-mcp", url: "http://fake/write", tables: ["dbo_Job", "dbo_Maintenance"], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } };
+const DECL = { system: "mssql", read: { via: "dab-mcp", url: "http://fake/read" }, commit: { via: "dab-mcp", url: "http://fake/write", tables: ["dbo_Job", { name: "dbo_Maintenance", adds: true }], guard: { server: "gwsynth-sql", database: "GwSynthMfg" } } };
 const declared = (over = {}) => ({ mssql: normalizeSource({ ...DECL, ...over, commit: over.commit === undefined ? DECL.commit : over.commit }) });
 /** a filing log in memory: every attempt begun, and how it was settled */
 function journal({ failBegin = false } = {}) {

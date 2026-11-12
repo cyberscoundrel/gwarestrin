@@ -86,7 +86,8 @@ function normalizeTarget(raw, outcome) {
   if (outcome === FILED && !key) throw new ShapeError("target.key", "a Filed piece names the row it wrote");
   const fields = raw.fields === undefined || raw.fields === null ? null : raw.fields;
   if (fields !== null && (typeof fields !== "object" || Array.isArray(fields))) throw new ShapeError("target.fields", "must map columns to values");
-  return { table, key, fields };
+  // R19: a piece that adds a row says so (its key, when Filed, is the one the source made)
+  return { table, key, fields, ...(raw.added === true ? { added: true } : {}) };
 }
 
 /**

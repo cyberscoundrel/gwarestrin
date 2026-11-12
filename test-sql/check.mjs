@@ -6,7 +6,7 @@
 //   node check.mjs parity                   the fake DAB (graph-rag/e2e/fake-dab-core.mjs) answers as the real one
 //   node check.mjs guard <database> <pass|refuse>
 //   node check.mjs write-copy <database>    a guarded write lands in <database> (the DABs point at it)
-import { TABLES, entityOf, keyColumn } from "./data.mjs";
+import { TABLES, WRITABLE, entityOf, keyColumn } from "./data.mjs";
 
 const REPO = process.env.REPO ?? "/repo";
 const de = await import(`${REPO}/graph-rag/src/data-entry.js`);
@@ -85,14 +85,18 @@ async function adapters() {
   const made = await de.createRow({ system: "mssql", table: "dbo_Maintenance", data: { Equipment: "FL-TOYOTA", Opened: "2026-11-09", Description: "Backup beeper not working; tagged out (ux-aa05)", Status: "Open" } }, opts({ journal: log }));
   check(made.status === "written" && /^mssql:dbo_Maintenance:\d+$/.test(made.key ?? ""), `a create returns the key the source made: ${made.key}`);
   const createJob = await de.createRow({ system: "mssql", table: "dbo_Job", data: { Job: 1, Customer: "TORO" } }, opts({ journal: log }));
-  check(createJob.status === "refused" && createJob.filing === "held", `the write login can't create where it may only update: ${createJob.status}`);
+  check(createJob.status === "not_writable" && createJob.filing === "proposed", `the declaration takes no new rows on Job (R19), so it is Proposed before the source is asked: ${createJob.status}`);
+  await de.mcpToolCall(WRITE, "create_record", { entity: "dbo_Job", data: { Job: 1, Customer: "TORO" } }).then(
+    () => check(false, "the write DAB created a Job row"),
+    (e) => check(e.errorType === "PermissionDenied", `and the write login can't create where it may only update: ${e.errorType}`),
+  );
   const unreachable = await de.getRow("mssql:dbo_Job:4471", { sources: { mssql: normalizeSource({ ...testDeclaration(), read: { via: "dab-mcp", url: "http://nowhere.invalid:5000/mcp" } }) } });
   check(unreachable.status === "unreachable" && unreachable.filing === "held", `an unreachable source points to Held: ${unreachable.status}`);
 }
 
 /** the fake DAB, loaded with data.mjs, against the real one: the same calls, the same answers */
 async function parity() {
-  const fakeTables = () => Object.fromEntries(Object.entries(TABLES).map(([t, v]) => [entityOf(t), { primaryKey: [keyColumn(t)], identity: v.columns.some((c) => c.identity), rows: v.rows.map((r) => ({ ...r })) }]));
+  const fakeTables = () => Object.fromEntries(Object.entries(TABLES).map(([t, v]) => [entityOf(t), { primaryKey: [keyColumn(t)], identity: v.columns.some((c) => c.identity), ...(WRITABLE[t]?.includes("delete") ? { deletes: true } : {}), rows: v.rows.map((r) => ({ ...r })) }]));
   const readTables = fakeTables();
   const writeTables = Object.fromEntries(["Job", "Maintenance"].map((t) => [entityOf(t), readTables[entityOf(t)]]));
   const parse = (r) => JSON.parse(r.content[0].text);
@@ -119,6 +123,8 @@ async function parity() {
     ["Job", true, "update_record", { entity: "dbo_Job", keys: { Job: 4471 }, fields: { Job: 4472 } }],
     ["Maintenance", true, "create_record", { entity: "dbo_Maintenance", data: { Maintenance: 99, Opened: "2026-11-09", Description: "x", Status: "Open" } }],
     ["Job", true, "delete_record", { entity: "dbo_Job", keys: { Job: 4471 } }],
+    ["Maintenance", true, "delete_record", { entity: "dbo_Maintenance", keys: { Maintenance: 99999 } }],
+    ["Maintenance", false, "delete_record", { entity: "dbo_Maintenance", keys: { Maintenance: 1 } }],
     ["Customer", true, "read_records", { entity: "dbo_Customer" }],
   ];
   for (const [table, write, name, args] of cases) {
